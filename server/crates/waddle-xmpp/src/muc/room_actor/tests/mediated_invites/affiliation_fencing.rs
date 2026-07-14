@@ -576,7 +576,9 @@ async fn refused_resolver_affiliation_writes_preserve_invite_rollback_authority(
             })
             .await
             .expect("resolver sync"),
-        ResolverAffiliationSyncOutcome::Applied,
+        ResolverAffiliationSyncOutcome::Applied {
+            admission_revision: current_admission_revision(&sync_actor).await,
+        },
     );
     assert_eq!(
         sync_actor

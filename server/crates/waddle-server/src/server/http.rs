@@ -755,6 +755,9 @@ async fn create_websocket_state(
                 remote_muc_memberships: Arc::new(
                     crate::server::routes::websocket::RemoteMucMemberships::default(),
                 ),
+                resolver_affiliation_syncs: Arc::new(
+                    crate::server::routes::websocket::ResolverAffiliationSyncScheduler::default(),
+                ),
                 dm_call_threads: Arc::new(dashmap::DashMap::new()),
                 dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
                 dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),

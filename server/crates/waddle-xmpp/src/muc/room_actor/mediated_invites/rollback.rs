@@ -117,7 +117,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
         .expect("invite rollback restores only a below-Member affiliation");
         let needs_rehydration = self
             .prune_durable_recipient_if_removed(&msg.grant.invitee, msg.grant.previous_affiliation);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_member_admission_revision(&msg.grant.invitee);
         if needs_rehydration {
             self.refresh_durable_recipients_from_source().await;
         }

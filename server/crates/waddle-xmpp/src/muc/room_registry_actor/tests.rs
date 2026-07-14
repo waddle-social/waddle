@@ -993,7 +993,10 @@ mod ownership_claims_tests {
     use crate::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use crate::muc::room_actor::{GetAffiliation, GetConfig};
+    use crate::muc::room_actor::{
+        GetAffiliation, GetConfig, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
+        ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpdateConfig,
+    };
     use crate::muc::subject::SubjectState;
     use crate::ownership::{
         ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore,
@@ -1001,7 +1004,7 @@ mod ownership_claims_tests {
     };
     use crate::types::Affiliation;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     fn foreign_identity() -> NodeIdentity {
@@ -1192,7 +1195,7 @@ mod ownership_claims_tests {
             .expect("wire");
 
         let jid = test_room_jid("deposed-evict");
-        registry
+        let stale_actor = registry
             .ask(GetOrCreateRoom {
                 room_jid: jid.clone(),
                 waddle_id: "w-1".to_string(),
@@ -1200,7 +1203,8 @@ mod ownership_claims_tests {
                 config: RoomConfig::default(),
             })
             .await
-            .expect("get_or_create_room");
+            .expect("get_or_create_room")
+            .actor_ref;
 
         for index in 0..MAX_PENDING_ROOM_RELEASES {
             let pending_jid = test_room_jid(&format!("deposed-backlog-{index}"));
@@ -1231,6 +1235,12 @@ mod ownership_claims_tests {
             "a deposed eviction must never delete the room's durable state"
         );
         assert_eq!(registry.ask(RoomCount).await.expect("room count"), 0);
+        stale_actor.wait_for_shutdown().await;
+        assert!(!stale_actor.is_alive());
+        assert!(
+            stale_actor.ask(crate::muc::room_actor::IsDormant).await.is_err(),
+            "a stale ActorRef must be unusable even if the best-effort Demote notification never arrives"
+        );
         assert!(
             claim_store
                 .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
@@ -1383,6 +1393,7 @@ mod ownership_claims_tests {
     struct DeadOwnerClaimStore {
         state: Mutex<Option<(NodeIdentity, ClaimEpoch)>>,
         steal_calls: AtomicUsize,
+        current_claim_failures: AtomicUsize,
         fence_calls: AtomicUsize,
         fence_fail_on_call: AtomicUsize,
         release_failures: AtomicUsize,
@@ -1391,6 +1402,8 @@ mod ownership_claims_tests {
         ensure_delay_ms: AtomicU64,
         ensure_post_commit_delay_ms: AtomicU64,
         steal_post_commit_delay_ms: AtomicU64,
+        force_next_steal_conflict: AtomicBool,
+        drop_claim_on_forced_steal_conflict: AtomicBool,
     }
 
     impl DeadOwnerClaimStore {
@@ -1398,6 +1411,7 @@ mod ownership_claims_tests {
             Self {
                 state: Mutex::new(Some((owner, epoch))),
                 steal_calls: AtomicUsize::new(0),
+                current_claim_failures: AtomicUsize::new(0),
                 fence_calls: AtomicUsize::new(0),
                 fence_fail_on_call: AtomicUsize::new(usize::MAX),
                 release_failures: AtomicUsize::new(0),
@@ -1406,6 +1420,8 @@ mod ownership_claims_tests {
                 ensure_delay_ms: AtomicU64::new(0),
                 ensure_post_commit_delay_ms: AtomicU64::new(0),
                 steal_post_commit_delay_ms: AtomicU64::new(0),
+                force_next_steal_conflict: AtomicBool::new(false),
+                drop_claim_on_forced_steal_conflict: AtomicBool::new(false),
             }
         }
 
@@ -1417,6 +1433,10 @@ mod ownership_claims_tests {
 
         fn fail_fence_on_call(&self, call: usize) {
             self.fence_fail_on_call.store(call, Ordering::SeqCst);
+        }
+
+        fn fail_next_current_claim(&self) {
+            self.current_claim_failures.store(1, Ordering::SeqCst);
         }
 
         fn fail_next_release(&self) {
@@ -1456,6 +1476,12 @@ mod ownership_claims_tests {
                 u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 Ordering::SeqCst,
             );
+        }
+
+        fn conflict_next_steal(&self, drop_claim: bool) {
+            self.drop_claim_on_forced_steal_conflict
+                .store(drop_claim, Ordering::SeqCst);
+            self.force_next_steal_conflict.store(true, Ordering::SeqCst);
         }
     }
 
@@ -1510,6 +1536,15 @@ mod ownership_claims_tests {
             me: &NodeIdentity,
         ) -> Result<ClaimEpoch, ClaimError> {
             self.steal_calls.fetch_add(1, Ordering::SeqCst);
+            if self.force_next_steal_conflict.swap(false, Ordering::SeqCst) {
+                if self
+                    .drop_claim_on_forced_steal_conflict
+                    .swap(false, Ordering::SeqCst)
+                {
+                    *self.state.lock().expect("lock") = None;
+                }
+                return Err(ClaimError::Conflict);
+            }
             let result = {
                 let mut state = self.state.lock().expect("lock");
                 match &*state {
@@ -1544,6 +1579,17 @@ mod ownership_claims_tests {
             &self,
             _entity: &Entity,
         ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            if self
+                .current_claim_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ClaimError::Backend(
+                    "test current-claim failure".to_string(),
+                ));
+            }
             Ok(self
                 .state
                 .lock()
@@ -1642,16 +1688,153 @@ mod ownership_claims_tests {
         }
     }
 
+    /// The first exact release starts a detached database-side delete and
+    /// then never completes its caller future. This models a driver/backend
+    /// operation that is not cancellation-safe: the registry times out, but
+    /// the original delete can still commit later.
+    struct NonCancelSafeReleaseStore {
+        inner: Arc<InProcessClaimStore>,
+        release_calls: AtomicUsize,
+        late_release_started: Arc<tokio::sync::Notify>,
+        allow_late_release: Arc<tokio::sync::Notify>,
+        late_release_completed: Arc<tokio::sync::Notify>,
+    }
+
+    impl NonCancelSafeReleaseStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(InProcessClaimStore::new()),
+                release_calls: AtomicUsize::new(0),
+                late_release_started: Arc::new(tokio::sync::Notify::new()),
+                allow_late_release: Arc::new(tokio::sync::Notify::new()),
+                late_release_completed: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ClaimStore for NonCancelSafeReleaseStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            Ok(())
+        }
+
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_exact(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
+            if self.release_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let inner = Arc::clone(&self.inner);
+                let entity = entity.clone();
+                let me = me.clone();
+                let started = Arc::clone(&self.late_release_started);
+                let allow = Arc::clone(&self.allow_late_release);
+                let completed = Arc::clone(&self.late_release_completed);
+                tokio::spawn(async move {
+                    started.notify_one();
+                    allow.notified().await;
+                    inner
+                        .release_exact(&entity, &me, mine)
+                        .await
+                        .expect("detached late release");
+                    completed.notify_one();
+                });
+                std::future::pending().await
+            } else {
+                self.inner.release_exact(entity, me, mine).await
+            }
+        }
+
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
     /// A [`MucDurableStore`] fake recording `notify_previous_owner_demoted`
     /// calls and returning a fixed `load_room_state` result.
     #[derive(Default)]
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
+        block_next_config_save: AtomicBool,
+        config_save_started: Option<Arc<tokio::sync::Notify>>,
+        allow_config_save: Option<Arc<tokio::sync::Notify>>,
+        stale_config_save_rejected: Arc<AtomicBool>,
+        fence_lost: AtomicBool,
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         fail_deletes: bool,
-        claim_fences: Mutex<HashMap<BareJid, RoomClaimFenceContext>>,
+        claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
     }
 
     impl MucDurableStore for RecordingDurableStore {
@@ -1670,12 +1853,47 @@ mod ownership_claims_tests {
 
         fn save_config<'a>(
             &'a self,
-            _room_jid: &'a BareJid,
+            room_jid: &'a BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a RoomConfig,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let block = self.block_next_config_save.swap(false, Ordering::SeqCst);
+            let config_save_started = self.config_save_started.clone();
+            let allow_config_save = self.allow_config_save.clone();
+            let starting_fence = self
+                .claim_fences
+                .lock()
+                .expect("lock")
+                .get(room_jid)
+                .cloned();
+            Box::pin(async move {
+                if block {
+                    let claim_fences = Arc::clone(&self.claim_fences);
+                    let stale_rejected = Arc::clone(&self.stale_config_save_rejected);
+                    let room_jid = room_jid.clone();
+                    tokio::spawn(async move {
+                        if let Some(started) = config_save_started {
+                            started.notify_one();
+                        }
+                        if let Some(allow) = allow_config_save {
+                            allow.notified().await;
+                        }
+                        let current_fence =
+                            claim_fences.lock().expect("lock").get(&room_jid).cloned();
+                        if current_fence != starting_fence {
+                            stale_rejected.store(true, Ordering::SeqCst);
+                        }
+                    });
+                    std::future::pending().await
+                }
+                Ok(())
+            })
+        }
+
+        fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+            let owned = !self.fence_lost.load(Ordering::SeqCst);
+            Box::pin(async move { Ok(owned) })
         }
 
         fn save_subject<'a>(
@@ -1742,6 +1960,137 @@ mod ownership_claims_tests {
                 .push((room_jid.to_string(), previous_owner_node_id.to_string()));
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn claim_lookup_failure_is_not_misclassified_as_a_remote_owner() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(
+            foreign_identity(),
+            ClaimEpoch(3),
+        ));
+        claim_store.fail_next_current_claim();
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("claim-lookup-error");
+
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(ref room)))
+                if *room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("room lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_disappearing_during_stale_owner_steal_is_reconciliation_pending() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(
+            foreign_identity(),
+            ClaimEpoch(3),
+        ));
+        claim_store.conflict_next_steal(true);
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("claim-gone-during-steal");
+
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(ref room)
+            )) if *room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid,
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("next attempt acquires the now-unclaimed room");
+    }
+
+    #[tokio::test]
+    async fn invalid_local_stealer_conflict_is_not_misclassified_as_a_remote_owner() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(
+            foreign_identity(),
+            ClaimEpoch(3),
+        ));
+        // Postgres returns the same catch-all Conflict when the stale-owner
+        // predicate matched but this node's own lease is missing, expired, or
+        // draining. Preserve the stale foreign claim to model that branch.
+        claim_store.conflict_next_steal(false);
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("local-stealer-invalid");
+
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(ref room)
+            )) if *room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("room lookup")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1828,11 +2177,7 @@ mod ownership_claims_tests {
                     Affiliation::Owner,
                 )],
             }),
-            fail_load: false,
-            demote_notifications: Mutex::new(Vec::new()),
-            deleted_rooms: Mutex::new(Vec::new()),
-            fail_deletes: false,
-            claim_fences: Mutex::new(HashMap::new()),
+            ..RecordingDurableStore::default()
         });
         registry
             .ask(WireClusteringClaims {
@@ -2250,6 +2595,67 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn identity_rotation_during_claim_acquisition_is_not_a_remote_owner() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let identity = SharedNodeIdentity::new(old_owner.clone());
+        let claim_store = Arc::new(DeadOwnerClaimStore::empty());
+        claim_store.set_ensure_post_commit_delay(std::time::Duration::from_millis(100));
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: identity.clone(),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("rotate-during-claim-acquire");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let create_registry = registry.clone();
+        let create_jid = jid.clone();
+        let create = tokio::spawn(async move {
+            create_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: create_jid,
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+
+        while claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+        identity.rotate(foreign_identity()).await;
+
+        assert!(matches!(
+            create.await.expect("create task"),
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(ref room)
+            )) if *room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("released old claim")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn queued_rotation_wins_before_the_final_publication_guard() {
         let registry = spawn_registry().await;
         let old_owner = this_identity();
@@ -2377,7 +2783,10 @@ mod ownership_claims_tests {
             .current_claim_fence(&jid)
             .expect("new fence cached");
         assert_eq!(new_fence.owner(), new_owner);
-        assert!(new_fence.epoch > old_epoch);
+        assert_ne!(
+            new_fence, old_fence,
+            "owner identity plus epoch identifies the exact generation even when a recreated in-memory claim resets its numeric epoch"
+        );
 
         assert_eq!(
             registry
@@ -2575,13 +2984,15 @@ mod ownership_claims_tests {
         let old_epoch = ClaimEpoch(30);
         let new_epoch = ClaimEpoch(31);
         let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), old_epoch));
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("clean retry snapshot")),
+            ..RecordingDurableStore::default()
+        });
         registry
             .ask(WireClusteringClaims {
                 claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
                 node_identity: SharedNodeIdentity::new(this_identity()),
-                durable_store: Some(
-                    Arc::new(RecordingDurableStore::default()) as Arc<dyn MucDurableStore>
-                ),
+                durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
                 rollout_backoff: None,
             })
             .await
@@ -2597,9 +3008,9 @@ mod ownership_claims_tests {
             .await
             .expect("spawn old-epoch actor");
         *claim_store.state.lock().expect("claim state") = Some((this_identity(), new_epoch));
-        // Let the initial authorization pass, then make the fence adjacent
-        // to the live-map epoch mutation uncertain.
-        claim_store.fail_fence_on_call(2);
+        // Make the initial exact proof uncertain. The old actor must remain
+        // untouched until a later retry proves the new generation.
+        claim_store.fail_fence_on_call(claim_store.fence_calls.load(Ordering::SeqCst) + 1);
 
         let uncertain = registry
             .ask(ReconcileReclaimedRoom {
@@ -2639,7 +3050,23 @@ mod ownership_claims_tests {
             })
             .await
             .expect("retry with exact proof");
-        assert_eq!(retried, ReclaimedRoomOutcome::AdoptedLocal);
+        assert_eq!(retried, ReclaimedRoomOutcome::Hydrated);
+        let replacement = registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("get replacement")
+            .expect("replacement actor");
+        assert_ne!(replacement.id(), original.actor_ref.id());
+        assert_eq!(
+            replacement
+                .ask(GetConfig)
+                .await
+                .expect("replacement config")
+                .name,
+            "clean retry snapshot"
+        );
         assert!(registry
             .ask(ListPendingReclaimedRooms { limit: 8 })
             .await
@@ -2804,91 +3231,6 @@ mod ownership_claims_tests {
             2,
             "A/41 and recreated B/0 are distinct exact release responsibilities"
         );
-    }
-
-    #[tokio::test]
-    async fn publishing_reacquired_exact_fence_cancels_matching_terminal_release() {
-        let registry = spawn_registry().await;
-        let claim_store = Arc::new(crate::ownership::InProcessClaimStore::new());
-        let identity = this_identity();
-        let jid = test_room_jid("reacquired-release-cancel");
-        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
-        let epoch = claim_store
-            .ensure_claimed(&entity, &identity)
-            .await
-            .expect("seed self-owned claim");
-        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
-        let aba_distinct_fence = RoomClaimFenceContext::new(
-            entity.clone(),
-            foreign_identity(),
-            ClaimEpoch(epoch.0.saturating_add(1)),
-        );
-        registry
-            .ask(WireClusteringClaims {
-                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
-                node_identity: SharedNodeIdentity::new(identity.clone()),
-                durable_store: None,
-                rollout_backoff: None,
-            })
-            .await
-            .expect("wire");
-        registry
-            .ask(RememberOrdinaryReleaseForTest {
-                room_jid: jid.clone(),
-                claim_fence: fence.clone(),
-            })
-            .await
-            .expect("remember ambiguous release");
-        registry
-            .ask(RememberOrdinaryReleaseForTest {
-                room_jid: jid.clone(),
-                claim_fence: aba_distinct_fence,
-            })
-            .await
-            .expect("remember ABA-distinct release");
-
-        registry
-            .ask(GetOrCreateRoom {
-                room_jid: jid.clone(),
-                waddle_id: "w".to_string(),
-                channel_id: "c".to_string(),
-                config: RoomConfig::default(),
-            })
-            .await
-            .expect("publish actor under reacquired fence");
-
-        assert_eq!(
-            registry
-                .ask(GetPendingRoomReleaseBacklog)
-                .await
-                .expect("pending release backlog")
-                .depth,
-            1,
-            "publishing cancels only the exact live fence, not another ABA generation"
-        );
-        assert!(!registry
-            .ask(IsCurrentRoomPendingRelease {
-                room_jid: jid.clone(),
-            })
-            .await
-            .expect("current-fence pending query"));
-        assert!(!registry
-            .ask(IsPendingRoomReleaseOnly {
-                room_jid: jid.clone(),
-            })
-            .await
-            .expect("pending-only query"));
-        assert_eq!(
-            registry
-                .ask(RetryPendingRoomReleases { limit: 8 })
-                .await
-                .expect("retry backlog"),
-            1
-        );
-        assert!(claim_store
-            .fence(&entity, &identity, epoch)
-            .await
-            .expect("live claim fence"));
     }
 
     #[tokio::test]
@@ -3784,6 +4126,337 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn late_non_cancel_safe_release_cannot_delete_a_new_live_claim() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("late-release-before-reacquire");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .expect("seed self-owned claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: fence,
+            })
+            .await
+            .expect("remember ambiguous release");
+
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 1 })
+                .await
+                .expect("time out first non-cancel-safe release"),
+            1,
+        );
+        claim_store.late_release_started.notified().await;
+
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("converge old release then publish fresh actor");
+        let live = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .expect("fresh claim exists");
+        assert!(
+            live.claim_epoch > epoch,
+            "demand must acquire a fresh epoch"
+        );
+
+        claim_store.allow_late_release.notify_one();
+        claim_store.late_release_completed.notified().await;
+        assert!(claim_store
+            .fence(&entity, &identity, live.claim_epoch)
+            .await
+            .expect("fresh claim survives late old delete"));
+        assert!(acquisition.actor_ref.is_alive());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reclaimed_reconcile_cannot_republish_a_fence_with_a_late_release_pending() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("reclaimed-publish-with-late-release");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .expect("seed self-owned claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("must-not-republish")),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity),
+                durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+            })
+            .await
+            .expect("remember ambiguous release");
+
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 1 })
+                .await
+                .expect("time out first non-cancel-safe release"),
+            1,
+        );
+        claim_store.late_release_started.notified().await;
+
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: fence,
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("reconcile while exact release is pending"),
+            ReclaimedRoomOutcome::PendingRetry,
+        );
+        assert!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("room lookup")
+                .is_none(),
+            "an exact fence with a non-cancel-safe delete in flight must never be republished"
+        );
+
+        claim_store.allow_late_release.notify_one();
+        claim_store.late_release_completed.notified().await;
+        registry
+            .ask(RetryPendingRoomReleases { limit: 1 })
+            .await
+            .expect("converge completed late release");
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, epoch),
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("reconcile released fence"),
+            ReclaimedRoomOutcome::LostRace,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_acquire_convergence_uses_one_short_budget_and_releases_the_mailbox() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("bounded-pre-acquire-convergence");
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        for epoch in 1..=6 {
+            registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: jid.clone(),
+                    claim_fence: RoomClaimFenceContext::new(
+                        Entity::new(EntityType::RoomActor, jid.to_string()),
+                        identity.clone(),
+                        ClaimEpoch(epoch),
+                    ),
+                })
+                .await
+                .expect("remember ambiguous release");
+        }
+
+        let create_registry = registry.clone();
+        let create_jid = jid.clone();
+        let create = tokio::spawn(async move {
+            create_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: create_jid,
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+        claim_store.late_release_started.notified().await;
+        let count_registry = registry.clone();
+        let unrelated = tokio::spawn(async move { count_registry.ask(RoomCount).await });
+
+        tokio::time::advance(PRE_ACQUIRE_CONVERGENCE_BUDGET).await;
+        assert!(matches!(
+            create.await.expect("create task"),
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(ref room)
+            ))
+                if *room == jid
+        ));
+        assert_eq!(
+            unrelated
+                .await
+                .expect("unrelated task")
+                .expect("registry count"),
+            0,
+            "unrelated mailbox work must resume after the short shared budget"
+        );
+        assert_eq!(
+            claim_store.release_calls.load(Ordering::SeqCst),
+            1,
+            "convergence must stop on the first exact fence that stays pending"
+        );
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("pending backlog")
+                .depth,
+            6,
+            "unattempted exact fences must remain for background retry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reclaimed_late_release_is_converged_before_demand_reacquires() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("late-reclaimed-release-before-reacquire");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .expect("seed reclaimed self-owned claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity.clone()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: fence,
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("first reclaimed release times out"),
+            ReclaimedRoomOutcome::PendingRetry,
+        );
+        claim_store.late_release_started.notified().await;
+
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("converge reclaimed release then publish fresh actor");
+        let live = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("current claim")
+            .expect("fresh claim exists");
+        assert!(
+            live.claim_epoch > epoch,
+            "demand must acquire a fresh epoch"
+        );
+
+        claim_store.allow_late_release.notify_one();
+        claim_store.late_release_completed.notified().await;
+        assert!(claim_store
+            .fence(&entity, &identity, live.claim_epoch)
+            .await
+            .expect("fresh claim survives late reclaimed delete"));
+        assert!(acquisition.actor_ref.is_alive());
+    }
+
+    #[tokio::test]
+    async fn bare_reclaimed_reservation_blocks_demand_claim_acquisition() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("reserved-reclaimed-blocks-demand");
+        assert!(registry
+            .ask(ReservePendingReclaimedRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("reserve reclaimed room"));
+
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "w".to_string(),
+                    channel_id: "c".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(blocked)
+            ))
+                if blocked == jid
+        ));
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn timed_out_release_is_cancelled_and_retried_without_wedging_registry() {
         let registry = spawn_registry().await;
         let epoch = ClaimEpoch(50);
@@ -3900,18 +4573,86 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
-    async fn locally_live_old_epoch_actor_is_adopted_without_state_loss() {
+    async fn lost_exact_reclaimed_fence_evicts_the_matching_live_actor() {
         let registry = spawn_registry().await;
-        let old_epoch = ClaimEpoch(20);
-        let new_epoch = ClaimEpoch(21);
-        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), old_epoch));
+        let owner = this_identity();
+        let epoch = ClaimEpoch(12);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(owner.clone(), epoch));
+        let durable_store = Arc::new(RecordingDurableStore::default());
         registry
             .ask(WireClusteringClaims {
                 claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
-                node_identity: SharedNodeIdentity::new(this_identity()),
-                durable_store: Some(
-                    Arc::new(RecordingDurableStore::default()) as Arc<dyn MucDurableStore>
-                ),
+                node_identity: SharedNodeIdentity::new(owner),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let jid = test_room_jid("lost-live-reclaimed-fence");
+        let live = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("publish exact live actor")
+            .actor_ref;
+        let fence = durable_store
+            .current_claim_fence(&jid)
+            .expect("published fence cache");
+
+        *claim_store.state.lock().expect("claim state") =
+            Some((foreign_identity(), ClaimEpoch(epoch.0 + 1)));
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: fence,
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("lost-race reconciliation"),
+            ReclaimedRoomOutcome::LostRace,
+        );
+        assert!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("registry lookup")
+                .is_none(),
+            "an unfenced live actor must not remain registered"
+        );
+        assert!(!live.is_alive(), "the stale ActorRef must be killed");
+        assert_eq!(durable_store.current_claim_fence(&jid), None);
+    }
+
+    #[tokio::test]
+    async fn in_flight_old_epoch_mutation_is_replaced_by_clean_fenced_hydration() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let new_owner = foreign_identity();
+        let old_epoch = ClaimEpoch(20);
+        let new_epoch = ClaimEpoch(21);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(old_owner.clone(), old_epoch));
+        let node_identity = SharedNodeIdentity::new(old_owner.clone());
+        let config_save_started = Arc::new(tokio::sync::Notify::new());
+        let allow_config_save = Arc::new(tokio::sync::Notify::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("authoritative rehydrated config")),
+            block_next_config_save: AtomicBool::new(false),
+            config_save_started: Some(Arc::clone(&config_save_started)),
+            allow_config_save: Some(Arc::clone(&allow_config_save)),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: node_identity.clone(),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
                 rollout_backoff: None,
             })
             .await
@@ -3927,27 +4668,169 @@ mod ownership_claims_tests {
             .await
             .expect("create local actor");
 
+        durable_store
+            .block_next_config_save
+            .store(true, Ordering::SeqCst);
+        let original_actor = original.actor_ref.clone();
+        let mutation = tokio::spawn(async move {
+            original_actor
+                .ask(UpdateConfig {
+                    config: RoomConfig {
+                        name: "old-epoch in-memory mutation".to_string(),
+                        ..RoomConfig::default()
+                    },
+                })
+                .await
+        });
+        config_save_started.notified().await;
+
         // Stand in for the dead-node reaper's exact CAS after this process
-        // refreshed its node identity while the local actor remained live.
-        *claim_store.state.lock().expect("claim state lock") = Some((this_identity(), new_epoch));
+        // refreshed its node identity while the old actor still has a
+        // mutation blocked in its mailbox handler.
+        node_identity.rotate(new_owner.clone()).await;
+        *claim_store.state.lock().expect("claim state lock") = Some((new_owner.clone(), new_epoch));
         let outcome = registry
             .ask(ReconcileReclaimedRoom {
                 room_jid: jid.clone(),
-                claim_fence: room_claim_fence(&jid, new_epoch),
-                previous_owner: this_identity(),
+                claim_fence: RoomClaimFenceContext::new(
+                    Entity::new(EntityType::RoomActor, jid.to_string()),
+                    new_owner,
+                    new_epoch,
+                ),
+                previous_owner: old_owner,
             })
             .await
-            .expect("adopt new epoch");
-        assert_eq!(outcome, ReclaimedRoomOutcome::AdoptedLocal);
-        let adopted = registry
+            .expect("replace old epoch");
+        assert_eq!(outcome, ReclaimedRoomOutcome::Hydrated);
+        let restored = registry
             .ask(GetRoom { room_jid: jid })
             .await
-            .expect("get adopted actor")
-            .expect("actor remains registered");
-        assert_eq!(
-            adopted.id(),
+            .expect("get replacement actor")
+            .expect("replacement remains registered");
+        assert_ne!(
+            restored.id(),
             original.actor_ref.id(),
-            "epoch adoption must preserve the locally live RoomActor"
+            "an actor with old-epoch work in flight must never be adopted in place"
+        );
+        assert_eq!(
+            restored.ask(GetConfig).await.expect("restored config").name,
+            "authoritative rehydrated config",
+            "only the newly fenced durable snapshot may seed replacement memory"
+        );
+        allow_config_save.notify_waiters();
+        let mutation = mutation.await.expect("mutation task");
+        assert!(
+            mutation.is_err(),
+            "the in-flight old-fence mutation must not report durable success"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !durable_store
+                .stale_config_save_rejected
+                .load(Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached old-fence save reached its fence check");
+        assert!(
+            durable_store
+                .stale_config_save_rejected
+                .load(Ordering::SeqCst),
+            "the durable fake must observe and reject the old generation after identity rotation"
+        );
+        assert_eq!(
+            restored.ask(GetConfig).await.expect("restored config").name,
+            "authoritative rehydrated config",
+            "the rejected old-fence write must not alter the replacement actor"
+        );
+    }
+
+    #[tokio::test]
+    async fn deposed_actor_ref_refuses_resolver_granted_join() {
+        let registry = spawn_registry().await;
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::new(InProcessClaimStore::new()),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: test_room_jid("deposed-resolver-join"),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        durable_store.fence_lost.store(true, Ordering::SeqCst);
+
+        let join = actor
+            .ask(JoinWithAffiliation {
+                sender_jid: "member@example.com/web".parse().expect("full JID"),
+                nick: "member".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await;
+        assert!(matches!(
+            join,
+            Err(SendError::HandlerError(
+                crate::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn deposed_actor_ref_refuses_resolver_affiliation_sync() {
+        let registry = spawn_registry().await;
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::new(InProcessClaimStore::new()),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: test_room_jid("deposed-resolver-sync"),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        durable_store.fence_lost.store(true, Ordering::SeqCst);
+        let jid: BareJid = "member@example.com".parse().expect("bare JID");
+
+        assert_eq!(
+            actor
+                .ask(SyncResolverAffiliation {
+                    jid: jid.clone(),
+                    affiliation: Affiliation::Member,
+                    expected_admission_revision: 0,
+                })
+                .await
+                .expect("sync reply"),
+            ResolverAffiliationSyncOutcome::RoomSealed,
+        );
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid })
+                .await
+                .expect("affiliation query"),
+            Affiliation::None,
         );
     }
 
@@ -4020,6 +4903,304 @@ mod ownership_claims_tests {
             "owner B durable config"
         );
     }
+
+    #[tokio::test]
+    async fn inactive_destroy_hard_kills_a_previously_deposed_actor() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering");
+
+        let room_jid = test_room_jid("deposed-before-inactive-destroy");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let claim = claim_store
+            .inner
+            .current_claim(&entity)
+            .await
+            .expect("read claim")
+            .expect("room is initially claimed");
+        assert_eq!(
+            claim_store
+                .inner
+                .release_exact(&entity, &claim.owner, claim.claim_epoch)
+                .await
+                .expect("remove claim"),
+            crate::ownership::ExactReleaseOutcome::Released,
+        );
+        durable_store.fence_lost.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            actor
+                .ask(JoinWithAffiliation {
+                    sender_jid: "alice@example.com/device".parse().expect("full JID"),
+                    nick: "alice".to_string(),
+                    affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+                    local_domain: "example.com".to_string(),
+                    admission_revision: 0,
+                })
+                .await,
+            Err(SendError::HandlerError(
+                crate::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+
+        assert!(registry
+            .ask(DestroyRoomIfInactive {
+                room_jid: room_jid.clone(),
+                expected_occupancy_revision: 0,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("typed inactive destroy"));
+        actor.wait_for_shutdown().await;
+        assert!(
+            !actor.is_alive(),
+            "the deposed ActorRef must be hard-killed"
+        );
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert_eq!(claim_store.release_calls.load(Ordering::SeqCst), 0);
+        assert!(durable_store.current_claim_fence(&room_jid).is_none());
+        assert!(durable_store.deleted_rooms.lock().expect("lock").is_empty());
+    }
+
+    /// A join fence can be the first component to prove that this actor's
+    /// durable ownership moved. That seal is materially different from an
+    /// inactivity seal: the deposed actor must leave the registry even when
+    /// the bounded exact-release inventory is already full, while the ordinary
+    /// seal must retain its capacity guard.
+    #[tokio::test]
+    async fn reap_sealed_room_forces_deposed_eviction_without_weakening_inactive_fence() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering");
+
+        let inactive_jid = test_room_jid("inactive-seal-full-backlog");
+        let inactive_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: inactive_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-inactive".to_string(),
+                config: RoomConfig {
+                    persistent: false,
+                    ..RoomConfig::default()
+                },
+            })
+            .await
+            .expect("create inactive target")
+            .actor_ref;
+        assert_eq!(
+            inactive_actor
+                .ask(crate::muc::room_actor::SealIfInactive {
+                    expected_occupancy_revision: 0,
+                    guard: crate::muc::room_actor::SealGuard::EmptyNonPersistent,
+                })
+                .await
+                .expect("seal inactive target"),
+            crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
+        );
+
+        let deposed_jid = test_room_jid("deposed-seal-full-backlog");
+        let deposed_actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: deposed_jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-deposed".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create deposed target")
+            .actor_ref;
+        let deposed_entity = Entity::new(EntityType::RoomActor, deposed_jid.to_string());
+        let deposed_claim = claim_store
+            .inner
+            .current_claim(&deposed_entity)
+            .await
+            .expect("read deposed claim")
+            .expect("deposed room is initially claimed");
+        assert_eq!(
+            claim_store
+                .inner
+                .release_exact(
+                    &deposed_entity,
+                    &deposed_claim.owner,
+                    deposed_claim.claim_epoch,
+                )
+                .await
+                .expect("remove claim before the actor fence observes loss"),
+            crate::ownership::ExactReleaseOutcome::Released,
+        );
+
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let pending_jid = test_room_jid(&format!("sealed-reap-backlog-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: pending_jid.clone(),
+                    claim_fence: room_claim_fence(&pending_jid, ClaimEpoch(index as i64)),
+                })
+                .await
+                .expect("fill exact-release backlog"));
+        }
+
+        assert!(!registry
+            .ask(ReapSealedRoom {
+                room_jid: inactive_jid.clone(),
+            })
+            .await
+            .expect("ordinary reaper remains fenced"));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: inactive_jid,
+            })
+            .await
+            .expect("get inactive target")
+            .is_some());
+
+        durable_store.fence_lost.store(true, Ordering::SeqCst);
+        let join = deposed_actor
+            .ask(JoinWithAffiliation {
+                sender_jid: "alice@example.com/device".parse().expect("full JID"),
+                nick: "alice".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await;
+        assert!(matches!(
+            join,
+            Err(SendError::HandlerError(
+                crate::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+
+        assert!(registry
+            .ask(ReapSealedRoom {
+                room_jid: deposed_jid.clone(),
+            })
+            .await
+            .expect("deposed reaper bypasses backlog"));
+        deposed_actor.wait_for_shutdown().await;
+        assert!(!deposed_actor.is_alive());
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: deposed_jid.clone(),
+            })
+            .await
+            .expect("get deposed target")
+            .is_none());
+        assert!(durable_store.deleted_rooms.lock().expect("lock").is_empty());
+        assert_eq!(
+            claim_store.release_calls.load(Ordering::SeqCst),
+            0,
+            "definitive ownership loss must not issue a redundant, potentially late release"
+        );
+        assert!(
+            durable_store.current_claim_fence(&deposed_jid).is_none(),
+            "deposed eviction forgets only the local cached fence"
+        );
+        assert_eq!(
+            registry
+                .ask(GetPendingRoomReleaseBacklog)
+                .await
+                .expect("bounded backlog")
+                .depth,
+            MAX_PENDING_ROOM_RELEASES,
+            "deposed eviction must not grow a saturated release inventory"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaping_an_identity_rotated_actor_releases_its_old_exact_claim() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        let identity = SharedNodeIdentity::new(this_identity());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: identity.clone(),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire clustering");
+        let room_jid = test_room_jid("identity-rotated-sealed-reap");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w".to_string(),
+                channel_id: "c".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+
+        identity.rotate(foreign_identity()).await;
+        durable_store.fence_lost.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            actor
+                .ask(JoinWithAffiliation {
+                    sender_jid: "alice@example.com/device".parse().expect("full JID"),
+                    nick: "alice".to_string(),
+                    affiliation_grant: JoinAffiliationGrant::Unaffiliated,
+                    local_domain: "example.com".to_string(),
+                    admission_revision: 0,
+                })
+                .await,
+            Err(SendError::HandlerError(
+                crate::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+
+        assert!(registry
+            .ask(ReapSealedRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("reap identity-rotated actor"));
+        actor.wait_for_shutdown().await;
+        assert!(!actor.is_alive());
+        assert!(claim_store
+            .current_claim(&entity)
+            .await
+            .expect("old exact claim lookup")
+            .is_none());
+        assert!(durable_store.current_claim_fence(&room_jid).is_none());
+    }
 }
 
 /// gpt-5.5 review follow-up to #1108: when the registry's seal ask
@@ -4052,7 +5233,11 @@ async fn reap_sealed_room_purges_a_sealed_but_registered_actor() {
         })
         .await
         .expect("seal");
-    assert!(sealed, "fresh empty instant room must seal");
+    assert_eq!(
+        sealed,
+        crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
+        "fresh empty instant room must seal"
+    );
 
     let reaped: bool = registry
         .ask(ReapSealedRoom {

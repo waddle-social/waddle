@@ -36,6 +36,711 @@ impl DmCallThreadKey {
     }
 }
 
+const MAX_RESOLVER_AFFILIATION_SYNC_WORKERS: usize = 128;
+const MAX_RECENT_RESOLVER_AFFILIATION_SYNC_COMPLETIONS: usize = 128;
+
+/// One resolver verdict captured from a rejected join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolverAffiliationSyncWork {
+    pub affiliation: waddle_xmpp::Affiliation,
+    pub expected_admission_revision: u64,
+}
+
+/// Logical worker identity. Every verdict for this actor incarnation and
+/// member is serialized through one latest-wins worker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolverAffiliationSyncWorkerKey {
+    room_jid: BareJid,
+    jid: BareJid,
+    actor_id: kameo::actor::ActorId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolverAffiliationSyncSlot {
+    latest: ResolverAffiliationSyncWork,
+    version: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolverAffiliationSyncCompletion {
+    key: ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+    resulting_admission_revision: u64,
+}
+
+#[derive(Debug)]
+struct ResolverAffiliationSyncState {
+    workers:
+        std::collections::HashMap<ResolverAffiliationSyncWorkerKey, ResolverAffiliationSyncSlot>,
+    recent_completions: std::collections::VecDeque<ResolverAffiliationSyncCompletion>,
+    max_workers: usize,
+}
+
+fn take_completion_revision(
+    state: &mut ResolverAffiliationSyncState,
+    key: &ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+) -> Option<u64> {
+    let position = state
+        .recent_completions
+        .iter()
+        .position(|completion| completion.key == *key)?;
+    let completion = &state.recent_completions[position];
+    if completion.source_admission_revision > source_admission_revision {
+        return None;
+    }
+    let completion = state
+        .recent_completions
+        .remove(position)
+        .expect("resolver sync completion position");
+    (completion.source_admission_revision == source_admission_revision)
+        .then_some(completion.resulting_admission_revision)
+}
+
+fn has_newer_completion(
+    state: &ResolverAffiliationSyncState,
+    key: &ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+) -> bool {
+    state.recent_completions.iter().any(|completion| {
+        completion.key == *key && completion.source_admission_revision > source_admission_revision
+    })
+}
+
+fn clear_completion_through(
+    state: &mut ResolverAffiliationSyncState,
+    key: &ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+) {
+    if let Some(position) = state.recent_completions.iter().position(|completion| {
+        completion.key == *key && completion.source_admission_revision <= source_admission_revision
+    }) {
+        state.recent_completions.remove(position);
+    }
+}
+
+fn retain_completion(
+    state: &mut ResolverAffiliationSyncState,
+    key: &ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+    resulting_admission_revision: u64,
+) {
+    if let Some(position) = state
+        .recent_completions
+        .iter()
+        .position(|completion| completion.key == *key)
+    {
+        if state.recent_completions[position].source_admission_revision > source_admission_revision
+        {
+            return;
+        }
+        state.recent_completions.remove(position);
+    }
+    if state.recent_completions.len() >= MAX_RECENT_RESOLVER_AFFILIATION_SYNC_COMPLETIONS {
+        state.recent_completions.pop_front();
+    }
+    state
+        .recent_completions
+        .push_back(ResolverAffiliationSyncCompletion {
+            key: key.clone(),
+            source_admission_revision,
+            resulting_admission_revision,
+        });
+}
+
+/// Result of offering a resolver verdict to the bounded scheduler.
+pub enum ResolverAffiliationSyncSchedule {
+    /// A new logical worker owns this key and must be spawned by the caller.
+    Started(Box<ResolverAffiliationSyncWorker>),
+    /// An existing worker atomically retained this newer verdict.
+    Updated,
+    /// The existing worker already owns an identical latest verdict.
+    Coalesced,
+    /// A newer source snapshot is already retained for this worker.
+    Stale,
+    /// All global worker slots are occupied by other logical keys.
+    AtCapacity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverAffiliationSyncTerminalDisposition {
+    /// No actor admission state changed, so pending same-source work retains
+    /// the effective revision already authorized for this worker.
+    NonMutatingExhaustion,
+    /// The actor outcome invalidated the current chain; pending work must
+    /// establish its own source revision or consume another retained chain.
+    InvalidatingOutcome,
+}
+
+/// Bounds detached resolver-affiliation repair to one latest-wins worker per
+/// `(actor incarnation, room, member)`. The worker table and close/update
+/// handshake share one mutex, so a verdict cannot land between a worker's
+/// final empty check and removal.
+#[derive(Debug)]
+pub struct ResolverAffiliationSyncScheduler {
+    state: std::sync::Mutex<ResolverAffiliationSyncState>,
+}
+
+pub struct ResolverAffiliationSyncWorker {
+    scheduler: Arc<ResolverAffiliationSyncScheduler>,
+    key: ResolverAffiliationSyncWorkerKey,
+    current: ResolverAffiliationSyncWork,
+    effective_admission_revision: u64,
+    version: u64,
+    closed: bool,
+}
+
+impl Default for ResolverAffiliationSyncScheduler {
+    fn default() -> Self {
+        Self::with_capacity(MAX_RESOLVER_AFFILIATION_SYNC_WORKERS)
+    }
+}
+
+impl ResolverAffiliationSyncScheduler {
+    pub(crate) fn with_capacity(max_workers: usize) -> Self {
+        Self {
+            state: std::sync::Mutex::new(ResolverAffiliationSyncState {
+                workers: std::collections::HashMap::new(),
+                recent_completions: std::collections::VecDeque::new(),
+                max_workers,
+            }),
+        }
+    }
+
+    pub fn schedule(
+        self: &Arc<Self>,
+        room_jid: &BareJid,
+        jid: &BareJid,
+        actor_id: kameo::actor::ActorId,
+        work: ResolverAffiliationSyncWork,
+    ) -> ResolverAffiliationSyncSchedule {
+        let key = ResolverAffiliationSyncWorkerKey {
+            room_jid: room_jid.clone(),
+            jid: jid.clone(),
+            actor_id,
+        };
+        let mut state = self.state.lock().expect("resolver sync scheduler lock");
+        if let Some(slot) = state.workers.get_mut(&key) {
+            if work.expected_admission_revision < slot.latest.expected_admission_revision {
+                return ResolverAffiliationSyncSchedule::Stale;
+            }
+            if slot.latest == work {
+                return ResolverAffiliationSyncSchedule::Coalesced;
+            }
+            slot.latest = work;
+            slot.version = slot
+                .version
+                .checked_add(1)
+                .expect("resolver sync worker version overflow");
+            return ResolverAffiliationSyncSchedule::Updated;
+        }
+        if has_newer_completion(&state, &key, work.expected_admission_revision) {
+            return ResolverAffiliationSyncSchedule::Stale;
+        }
+        if state.workers.len() >= state.max_workers {
+            waddle_xmpp::prometheus::increment_resolver_affiliation_sync_capacity_drop();
+            return ResolverAffiliationSyncSchedule::AtCapacity;
+        }
+        let effective_admission_revision =
+            take_completion_revision(&mut state, &key, work.expected_admission_revision)
+                .unwrap_or(work.expected_admission_revision);
+        let version = 0;
+        state.workers.insert(
+            key.clone(),
+            ResolverAffiliationSyncSlot {
+                latest: work,
+                version,
+            },
+        );
+        ResolverAffiliationSyncSchedule::Started(Box::new(ResolverAffiliationSyncWorker {
+            scheduler: Arc::clone(self),
+            key,
+            current: work,
+            effective_admission_revision,
+            version,
+            closed: false,
+        }))
+    }
+}
+
+impl ResolverAffiliationSyncWorker {
+    pub fn current(&self) -> ResolverAffiliationSyncWork {
+        self.current
+    }
+
+    pub fn effective_admission_revision(&self) -> u64 {
+        self.effective_admission_revision
+    }
+
+    /// Close all repair state for an actor incarnation that can no longer
+    /// accept mutations. Pending verdicts and retained revision chains are
+    /// obsolete once the actor is sealed, so release global capacity before
+    /// any potentially slow registry cleanup.
+    pub fn close_actor_terminal(&mut self) {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        state.workers.remove(&self.key);
+        state
+            .recent_completions
+            .retain(|completion| completion.key != self.key);
+        self.closed = true;
+    }
+
+    /// Adopt the most recent verdict when one arrived while the current
+    /// verdict was running. Leaves the worker registered when unchanged.
+    pub fn take_update(&mut self) -> Option<ResolverAffiliationSyncWork> {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        let slot = *state
+            .workers
+            .get(&self.key)
+            .expect("live resolver sync worker slot");
+        if slot.version == self.version {
+            return None;
+        }
+        let previous_source_admission_revision = self.current.expected_admission_revision;
+        self.version = slot.version;
+        self.current = slot.latest;
+        if self.current.expected_admission_revision != previous_source_admission_revision {
+            self.effective_admission_revision = take_completion_revision(
+                &mut state,
+                &self.key,
+                self.current.expected_admission_revision,
+            )
+            .unwrap_or(self.current.expected_admission_revision);
+        }
+        Some(self.current)
+    }
+
+    /// Atomically adopt an update or retain this applied repair's exact
+    /// revision chain for one later worker with the same source snapshot.
+    /// A concurrent `schedule` call must run before or after this lock, so it
+    /// can never publish into a slot after the worker decided to exit.
+    pub fn finish_applied_or_take_update(
+        &mut self,
+        resulting_admission_revision: u64,
+    ) -> Option<ResolverAffiliationSyncWork> {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        let slot = *state
+            .workers
+            .get(&self.key)
+            .expect("live resolver sync worker slot");
+        if slot.version != self.version {
+            let completed_source_admission_revision = self.current.expected_admission_revision;
+            self.version = slot.version;
+            self.current = slot.latest;
+            self.effective_admission_revision = if self.current.expected_admission_revision
+                == completed_source_admission_revision
+            {
+                resulting_admission_revision
+            } else {
+                take_completion_revision(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                )
+                .unwrap_or(self.current.expected_admission_revision)
+            };
+            return Some(self.current);
+        }
+        state.workers.remove(&self.key);
+        retain_completion(
+            &mut state,
+            &self.key,
+            self.current.expected_admission_revision,
+            resulting_admission_revision,
+        );
+        self.closed = true;
+        None
+    }
+
+    /// Atomically adopt a pending update or close with disposition-specific
+    /// revision handling. Non-mutating exhaustion retains only the exact
+    /// revision already authorized for this worker; invalidating outcomes
+    /// clear that chain.
+    pub fn finish_terminal_or_take_update(
+        &mut self,
+        disposition: ResolverAffiliationSyncTerminalDisposition,
+    ) -> Option<ResolverAffiliationSyncWork> {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        let slot = *state
+            .workers
+            .get(&self.key)
+            .expect("live resolver sync worker slot");
+        if slot.version != self.version {
+            let completed_source_admission_revision = self.current.expected_admission_revision;
+            let completed_effective_admission_revision = self.effective_admission_revision;
+            self.version = slot.version;
+            self.current = slot.latest;
+            self.effective_admission_revision = if disposition
+                == ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion
+                && self.current.expected_admission_revision == completed_source_admission_revision
+            {
+                completed_effective_admission_revision
+            } else {
+                take_completion_revision(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                )
+                .unwrap_or(self.current.expected_admission_revision)
+            };
+            return Some(self.current);
+        }
+        state.workers.remove(&self.key);
+        match disposition {
+            ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion => {
+                retain_completion(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                    self.effective_admission_revision,
+                );
+            }
+            ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome => {
+                clear_completion_through(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                );
+            }
+        }
+        self.closed = true;
+        None
+    }
+}
+
+impl Drop for ResolverAffiliationSyncWorker {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        state.workers.remove(&self.key);
+        clear_completion_through(
+            &mut state,
+            &self.key,
+            self.current.expected_admission_revision,
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolver_affiliation_sync_scheduler_tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_keeps_one_worker_and_replaces_its_pending_verdict() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::default());
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let alice: BareJid = "alice@example.com".parse().expect("member JID");
+        let bob: BareJid = "bob@example.com".parse().expect("member JID");
+        let actor_a = kameo::actor::ActorId::new(1);
+        let actor_b = kameo::actor::ActorId::new(2);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 7,
+        };
+        let newer = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 7,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut alice_worker) =
+            scheduler.schedule(&room, &alice, actor_a, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(
+            matches!(
+                scheduler.schedule(&room, &alice, actor_a, initial),
+                ResolverAffiliationSyncSchedule::Coalesced
+            ),
+            "identical latest work must coalesce"
+        );
+        assert!(
+            matches!(
+                scheduler.schedule(&room, &alice, actor_a, newer),
+                ResolverAffiliationSyncSchedule::Updated
+            ),
+            "a conflicting verdict updates the existing worker"
+        );
+        assert_eq!(alice_worker.take_update(), Some(newer));
+
+        assert!(matches!(
+            scheduler.schedule(&room, &alice, actor_b, initial),
+            ResolverAffiliationSyncSchedule::Started(_)
+        ));
+        assert!(matches!(
+            scheduler.schedule(&room, &bob, actor_a, initial),
+            ResolverAffiliationSyncSchedule::Started(_)
+        ));
+    }
+
+    #[test]
+    fn scheduler_rejects_a_stale_update_when_a_newer_revision_is_queued() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::default());
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+        let newer = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: 2,
+        };
+        let stale = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 1,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut worker) =
+            scheduler.schedule(&room, &member, actor_id, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, newer),
+            ResolverAffiliationSyncSchedule::Updated
+        ));
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, stale),
+            ResolverAffiliationSyncSchedule::Stale
+        ));
+        assert_eq!(
+            worker.take_update(),
+            Some(newer),
+            "out-of-order stale completion must not replace the newer queued verdict"
+        );
+    }
+
+    #[test]
+    fn scheduler_close_atomically_adopts_an_update_or_releases_capacity() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let alice: BareJid = "alice@example.com".parse().expect("member JID");
+        let bob: BareJid = "bob@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+        let newer = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 0,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut worker) =
+            scheduler.schedule(&room, &alice, actor_id, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &bob, actor_id, initial),
+            ResolverAffiliationSyncSchedule::AtCapacity
+        ));
+        assert!(matches!(
+            scheduler.schedule(&room, &alice, actor_id, newer),
+            ResolverAffiliationSyncSchedule::Updated
+        ));
+        assert_eq!(worker.finish_applied_or_take_update(1), Some(newer));
+        assert_eq!(worker.finish_applied_or_take_update(2), None);
+
+        let ResolverAffiliationSyncSchedule::Started(chained_worker) =
+            scheduler.schedule(&room, &alice, actor_id, initial)
+        else {
+            panic!("a later same-snapshot repair starts a worker");
+        };
+        assert_eq!(
+            chained_worker.effective_admission_revision(),
+            2,
+            "a completed repair carries its exact resulting revision across worker closure"
+        );
+        drop(chained_worker);
+
+        assert!(
+            matches!(
+                scheduler.schedule(&room, &bob, actor_id, initial),
+                ResolverAffiliationSyncSchedule::Started(_)
+            ),
+            "atomic close must release the global worker slot"
+        );
+    }
+
+    #[test]
+    fn scheduler_actor_terminal_close_discards_updates_and_releases_capacity() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let alice: BareJid = "alice@example.com".parse().expect("member JID");
+        let bob: BareJid = "bob@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+        let queued = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 1,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut worker) =
+            scheduler.schedule(&room, &alice, actor_id, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &alice, actor_id, queued),
+            ResolverAffiliationSyncSchedule::Updated
+        ));
+
+        worker.close_actor_terminal();
+
+        let ResolverAffiliationSyncSchedule::Started(_bob_worker) =
+            scheduler.schedule(&room, &bob, actor_id, initial)
+        else {
+            panic!("actor-terminal close releases capacity for Bob");
+        };
+        let state = scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        assert_eq!(state.workers.len(), 1, "only Bob's worker remains");
+        assert!(
+            state.workers.keys().all(|key| key.jid == bob),
+            "queued work for the sealed actor/member was discarded"
+        );
+        assert!(state.recent_completions.is_empty());
+    }
+
+    #[test]
+    fn scheduler_bounds_recent_completion_chains_independently() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let work = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: 0,
+        };
+
+        for index in 0..=MAX_RECENT_RESOLVER_AFFILIATION_SYNC_COMPLETIONS {
+            let member: BareJid = format!("member-{index}@example.com")
+                .parse()
+                .expect("member JID");
+            let ResolverAffiliationSyncSchedule::Started(mut worker) =
+                scheduler.schedule(&room, &member, actor_id, work)
+            else {
+                panic!("active capacity is reusable while completions accumulate");
+            };
+            assert_eq!(worker.finish_applied_or_take_update(1), None);
+        }
+
+        let state = scheduler
+            .state
+            .lock()
+            .expect("resolver sync scheduler lock");
+        assert!(state.workers.is_empty());
+        assert_eq!(
+            state.recent_completions.len(),
+            MAX_RECENT_RESOLVER_AFFILIATION_SYNC_COMPLETIONS,
+        );
+        assert!(state
+            .recent_completions
+            .iter()
+            .all(|completion| { completion.key.jid.as_str() != "member-0@example.com" }));
+    }
+
+    #[test]
+    fn scheduler_rejects_stale_work_without_consuming_a_newer_completion() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let newer = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 1,
+        };
+        let stale = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: 0,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut newer_worker) =
+            scheduler.schedule(&room, &member, actor_id, newer)
+        else {
+            panic!("newer repair starts a worker");
+        };
+        assert_eq!(newer_worker.finish_applied_or_take_update(2), None);
+
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, stale),
+            ResolverAffiliationSyncSchedule::Stale
+        ));
+
+        let ResolverAffiliationSyncSchedule::Started(chained_worker) =
+            scheduler.schedule(&room, &member, actor_id, newer)
+        else {
+            panic!("matching newer repair starts after the stale worker drops");
+        };
+        assert_eq!(
+            chained_worker.effective_admission_revision(),
+            2,
+            "rejecting stale work must preserve the newer source revision chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_capacity_drop_is_exported_as_a_counter() {
+        let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+        let before = waddle_xmpp::prometheus::resolver_affiliation_sync_capacity_drop_count();
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let alice: BareJid = "alice@example.com".parse().expect("member JID");
+        let bob: BareJid = "bob@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let work = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(_worker) =
+            scheduler.schedule(&room, &alice, actor_id, work)
+        else {
+            panic!("first repair occupies the only worker slot");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &bob, actor_id, work),
+            ResolverAffiliationSyncSchedule::AtCapacity
+        ));
+
+        assert!(
+            waddle_xmpp::prometheus::resolver_affiliation_sync_capacity_drop_count() > before,
+            "capacity rejection must increment the exported counter"
+        );
+        assert!(waddle_xmpp::prometheus::render_metrics()
+            .contains("waddle_resolver_affiliation_sync_capacity_drop_total "));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingDmCallOffer {
     pub media: waddle_xmpp::xep::CallThreadMedia,
@@ -650,6 +1355,9 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
+    /// At most one detached resolver-affiliation repair per room/member pair.
+    /// Rejected joins coalesce here instead of spawning unbounded retry tasks.
+    pub resolver_affiliation_syncs: Arc<ResolverAffiliationSyncScheduler>,
     /// Active 1:1 call-thread anchors keyed by the two bare peers plus
     /// JMI/Jingle sid. `proceed` creates the anchor; `finish` later
     /// consumes the entry to stamp the ended summary.

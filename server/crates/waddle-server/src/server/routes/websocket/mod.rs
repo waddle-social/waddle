@@ -103,7 +103,9 @@ pub(crate) use cleanup::redrive_remote_muc_cleanup;
 pub use connection::router;
 pub use state::{
     ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore, PendingDmCallOffer, ProtocolServices,
-    RemoteMucMemberships, TransportSecurity, WebSocketDeps, WebSocketState, XmppServiceDomains,
+    RemoteMucMemberships, ResolverAffiliationSyncSchedule, ResolverAffiliationSyncScheduler,
+    ResolverAffiliationSyncWork, TransportSecurity, WebSocketDeps, WebSocketState,
+    XmppServiceDomains,
 };
 
 pub(crate) use cleanup::{

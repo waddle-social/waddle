@@ -604,7 +604,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 needs_rehydration |=
                     self.prune_durable_recipient_if_removed(&target_jid, new_affiliation);
                 if target_current_affiliation != new_affiliation {
-                    self.admission_revision = self.admission_revision.saturating_add(1);
+                    self.advance_member_admission_revision(&target_jid);
                     if let Err(error) = self.persist_affiliation(&target_jid, new_affiliation).await
                     {
                         persist_failure.get_or_insert(error);
@@ -665,7 +665,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         )?;
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if previous_affiliation != msg.affiliation {
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&msg.jid);
             self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {
@@ -732,7 +732,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 .set_affiliation(jid.clone(), affiliation)
                 .is_some()
             {
-                self.admission_revision = self.admission_revision.saturating_add(1);
+                self.advance_member_admission_revision(&jid);
                 if let Err(error) = self.persist_affiliation(&jid, affiliation).await {
                     persist_failure.get_or_insert(error);
                 }

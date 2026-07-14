@@ -954,6 +954,42 @@ async fn stale_admission_revision_returns_retryable_error_without_joining() {
 }
 
 #[tokio::test]
+async fn channel_reconciliation_invalidates_pre_policy_change_repairs() {
+    let actor = spawn_room_actor().await;
+    let stale_revision = current_admission_revision(&actor).await;
+
+    actor
+        .ask(ReconcileChannelBackedRoom {
+            room_jid: "testroom@muc.example.com".parse().expect("room JID"),
+            waddle_id: "waddle-2".to_string(),
+            channel_id: "channel-2".to_string(),
+            desired_config: RoomConfig {
+                members_only: true,
+                ..RoomConfig::default()
+            },
+        })
+        .await
+        .expect("reconcile channel-backed room");
+
+    let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert!(snapshot.room.config.members_only);
+    assert_eq!(snapshot.config_revision, 1);
+    assert_eq!(snapshot.admission_revision, stale_revision + 1);
+    assert_eq!(
+        actor
+            .ask(SyncResolverAffiliation {
+                jid: "alice@example.com".parse().expect("bare JID"),
+                affiliation: Affiliation::None,
+                expected_admission_revision: stale_revision,
+            })
+            .await
+            .expect("pre-reconcile resolver repair"),
+        ResolverAffiliationSyncOutcome::StaleAdmissionRevision,
+        "room-wide policy changes must reject repairs from older snapshots"
+    );
+}
+
+#[tokio::test]
 async fn role_none_kick_notifies_same_nick_sibling_sessions() {
     let actor = spawn_room_actor().await;
     let alice_laptop = test_full_jid_resource("alice", "laptop");
@@ -3416,6 +3452,10 @@ impl FakeDurableStore {
     fn saved_affiliations(&self) -> Vec<(BareJid, BareJid, Affiliation)> {
         self.saved_affiliations.lock().expect("lock").clone()
     }
+
+    fn set_fenced(&self, fenced: Option<bool>) {
+        *self.fenced.lock().expect("lock") = fenced;
+    }
 }
 
 impl crate::muc::durable::MucDurableStore for FakeDurableStore {
@@ -3634,7 +3674,7 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
                     waddle_id: "waddle-1".to_string(),
                     channel_id: "channel-1".to_string(),
                     config: RoomConfig {
-                        members_only: false,
+                        members_only: true,
                         ..RoomConfig::default()
                     },
                     subject: None,
@@ -3712,12 +3752,30 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
     );
     assert_eq!(store.call_count(), 2);
 
-    // Second join attempt: the inline retry (call 2) succeeds — the join
-    // proceeds AND the ban restored from Postgres is genuinely in effect
-    // (not silently lost across the two earlier failures).
-    let banned_attempt = actor
+    // Second join attempt: the inline retry (call 2) succeeds. Applying the
+    // recovered state advances the room-wide fence, so the join must
+    // re-snapshot instead of proceeding with resolver input computed against
+    // the pre-restore config.
+    let recovering_attempt = actor
         .ask(test_join_msg("banned-nick", test_full_jid("banned")))
         .await;
+    assert!(
+        matches!(
+            recovering_attempt,
+            Err(SendError::HandlerError(
+                RoomActorError::StaleAdmissionRevision
+            ))
+        ),
+        "the join that recovered durable state must re-snapshot, got: \
+         {recovering_attempt:?}"
+    );
+    assert_eq!(store.call_count(), 3);
+
+    // The retry uses the recovered snapshot and enforces the restored ban.
+    let recovered_revision = current_admission_revision(&actor).await;
+    let mut banned_join = test_join_msg("banned-nick", test_full_jid("banned"));
+    banned_join.admission_revision = recovered_revision;
+    let banned_attempt = actor.ask(banned_join).await;
     assert!(
         matches!(
             banned_attempt,
@@ -3725,21 +3783,23 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
                 RoomActorError::JoinForbidden { .. }
             ))
         ),
-        "the restored ban must be enforced on the very join that recovered \
-         the restore, got: {banned_attempt:?}"
+        "the restored ban must be enforced after re-snapshot, got: {banned_attempt:?}"
     );
-    assert_eq!(store.call_count(), 3);
 
     // A different, never-banned sender can now join normally too.
+    let mut carol_join = test_join_msg("carol", test_full_jid("carol"));
+    carol_join.admission_revision = recovered_revision;
+    carol_join.affiliation_grant = JoinAffiliationGrant::Resolver(Affiliation::Member);
     actor
-        .ask(test_join_msg("carol", test_full_jid("carol")))
+        .ask(carol_join)
         .await
         .expect("a non-banned sender joins normally once restore has recovered");
 }
 
 #[tokio::test]
 async fn update_config_gate_blocks_the_mutation_when_deposed() {
-    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let store = FakeDurableStore::deposed();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
 
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
@@ -3757,6 +3817,22 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
     assert_eq!(
         after, original,
         "a gated-out mutation must never have applied in-memory"
+    );
+
+    store.set_fenced(None);
+    let mut retry_config = actor.ask(GetConfig).await.expect("retry config");
+    retry_config.members_only = !original;
+    let retry = actor
+        .ask(UpdateConfig {
+            config: retry_config,
+        })
+        .await;
+    assert!(
+        matches!(
+            retry,
+            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+        ),
+        "a definitive mutation-gate loss must remain terminal across later uncertainty"
     );
 }
 
@@ -3793,6 +3869,79 @@ async fn update_config_gate_fails_open_on_a_transient_fencing_error() {
     assert_ne!(
         after, original,
         "fail-open means the mutation still applies despite the transient error"
+    );
+}
+
+#[tokio::test]
+async fn inactive_seal_strengthens_to_ownership_lost_on_join() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("seal inactive room"),
+        SealIfInactiveOutcome::Inactive,
+    );
+
+    store.set_fenced(Some(false));
+    let join = actor
+        .ask(test_join_msg("alice", test_full_jid("alice")))
+        .await;
+    assert!(matches!(
+        join,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("typed seal state"),
+        RoomSealState::OwnershipLost,
+        "an inactivity seal must retain the stronger ownership-loss proof"
+    );
+}
+
+#[tokio::test]
+async fn ownership_lost_seal_blocks_a_later_fail_open_mutation() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
+    let original = actor.ask(GetConfig).await.expect("config");
+
+    store.set_fenced(Some(false));
+    let join = actor
+        .ask(test_join_msg("alice", test_full_jid("alice")))
+        .await;
+    assert!(matches!(
+        join,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    // The ordinary mutation gate intentionally fails open on a transient
+    // backend error, but a prior definitive loss must remain terminal for
+    // this actor incarnation.
+    store.set_fenced(None);
+    let mut changed = original.clone();
+    changed.members_only = !changed.members_only;
+    let update = actor.ask(UpdateConfig { config: changed }).await;
+    assert!(matches!(
+        update,
+        Err(SendError::HandlerError(RoomMutationError::NotOwner))
+    ));
+    assert_eq!(
+        actor
+            .ask(GetConfig)
+            .await
+            .expect("unchanged config")
+            .members_only,
+        original.members_only,
+        "a definitive ownership-loss seal must dominate later uncertainty"
+    );
+    assert_eq!(
+        store.save_call_count(),
+        0,
+        "the rejected mutation must not attempt a durable write"
     );
 }
 
@@ -4069,7 +4218,9 @@ async fn sync_resolver_affiliation_clears_stale_resolver_derived_member() {
         .expect("sync resolver affiliation");
     assert_eq!(
         outcome,
-        ResolverAffiliationSyncOutcome::Applied,
+        ResolverAffiliationSyncOutcome::Applied {
+            admission_revision: current_admission_revision(&actor).await,
+        },
         "a sync at the current admission revision must apply"
     );
 
@@ -4182,6 +4333,223 @@ async fn stale_sync_resolver_affiliation_does_not_clear_readmitted_member() {
     );
 }
 
+/// The re-granted affiliation can already be present in actor memory when
+/// join B arrives: rejection A has not delivered its delayed resolver sync
+/// yet. The successful resolver-backed admission must still advance the
+/// revision even though writing Member is a no-op, or A's stale None repair
+/// can demote the live occupant after admission.
+#[tokio::test]
+async fn stale_sync_does_not_clear_readmitted_member_when_resolver_grant_is_identical() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let alice_bare = alice.to_bare();
+
+    let seeded = actor
+        .ask(SyncResolverAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::Member,
+            expected_admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("seed resolver-derived member");
+    assert!(matches!(
+        seeded,
+        ResolverAffiliationSyncOutcome::Applied { .. }
+    ));
+    let stale_revision = current_admission_revision(&actor).await;
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: stale_revision,
+        })
+        .await
+        .expect("already-derived member rejoins successfully");
+    assert_eq!(
+        current_admission_revision(&actor).await,
+        stale_revision.saturating_add(1),
+        "successful resolver-backed admission must invalidate older rejection repairs even when the affiliation write is identical"
+    );
+
+    let outcome = actor
+        .ask(SyncResolverAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::None,
+            expected_admission_revision: stale_revision,
+        })
+        .await
+        .expect("deliver delayed rejection repair");
+    assert_eq!(
+        outcome,
+        ResolverAffiliationSyncOutcome::StaleAdmissionRevision,
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation {
+                jid: alice_bare.clone(),
+            })
+            .await
+            .expect("affiliation after stale repair"),
+        Affiliation::Member,
+    );
+    assert_eq!(
+        actor
+            .ask(GetOccupantByJid { jid: alice })
+            .await
+            .expect("live occupant lookup")
+            .expect("member remains admitted")
+            .affiliation,
+        Affiliation::Member,
+        "the delayed repair must not demote the live occupant",
+    );
+}
+
+/// A successful resolver-backed join must fence delayed repairs only for the
+/// joining bare JID. Bob's identical Member grant must not make Alice's
+/// already-queued revocation stale and leave her old Member entry behind.
+#[tokio::test]
+async fn resolver_join_does_not_invalidate_another_members_repair() {
+    let actor = spawn_room_actor_with_config(RoomConfig {
+        members_only: true,
+        ..RoomConfig::default()
+    })
+    .await;
+    let alice = test_full_jid("alice");
+    let alice_bare = alice.to_bare();
+    let bob = test_full_jid("bob");
+    let bob_bare = bob.to_bare();
+
+    for jid in [&alice_bare, &bob_bare] {
+        let outcome = actor
+            .ask(SyncResolverAffiliation {
+                jid: jid.clone(),
+                affiliation: Affiliation::Member,
+                expected_admission_revision: current_admission_revision(&actor).await,
+            })
+            .await
+            .expect("seed resolver-derived member");
+        assert!(matches!(
+            outcome,
+            ResolverAffiliationSyncOutcome::Applied { .. }
+        ));
+    }
+    let alice_repair_revision = current_admission_revision(&actor).await;
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: bob.clone(),
+            nick: "bob".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: alice_repair_revision,
+        })
+        .await
+        .expect("bob joins with an identical resolver grant");
+
+    let outcome = actor
+        .ask(SyncResolverAffiliation {
+            jid: alice_bare.clone(),
+            affiliation: Affiliation::None,
+            expected_admission_revision: alice_repair_revision,
+        })
+        .await
+        .expect("apply Alice's queued revocation");
+    assert!(matches!(
+        outcome,
+        ResolverAffiliationSyncOutcome::Applied { .. }
+    ));
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid: alice_bare })
+            .await
+            .expect("Alice affiliation after repair"),
+        Affiliation::None,
+    );
+    assert_eq!(
+        actor
+            .ask(GetAffiliation { jid: bob_bare })
+            .await
+            .expect("Bob affiliation after Alice repair"),
+        Affiliation::Member,
+    );
+    assert!(
+        actor
+            .ask(GetOccupantByJid { jid: bob })
+            .await
+            .expect("Bob occupant lookup")
+            .is_some(),
+        "Alice's repair must not disturb Bob's successful admission"
+    );
+}
+
+struct GetMemberAdmissionRevisionCount;
+
+impl kameo::message::Message<GetMemberAdmissionRevisionCount> for RoomActor {
+    type Reply = usize;
+
+    async fn handle(
+        &mut self,
+        _msg: GetMemberAdmissionRevisionCount,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.member_admission_revisions.len()
+    }
+}
+
+#[tokio::test]
+async fn member_admission_watermarks_compact_without_accepting_stale_work() {
+    let actor = spawn_room_actor().await;
+    let stale_revision = current_admission_revision(&actor).await;
+
+    for index in 0..=MAX_MEMBER_ADMISSION_REVISIONS {
+        let jid: BareJid = format!("historical-{index}@example.com")
+            .parse()
+            .expect("bare JID");
+        actor
+            .ask(ChangeAffiliation {
+                jid: jid.clone(),
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("add historical member");
+        actor
+            .ask(ChangeAffiliation {
+                jid,
+                affiliation: Affiliation::None,
+            })
+            .await
+            .expect("remove historical member");
+    }
+
+    assert!(
+        actor
+            .ask(GetMemberAdmissionRevisionCount)
+            .await
+            .expect("watermark count")
+            <= MAX_MEMBER_ADMISSION_REVISIONS,
+        "historical JIDs must not grow the per-room tracker without bound"
+    );
+    assert_eq!(
+        actor
+            .ask(SyncResolverAffiliation {
+                jid: "pending@example.com".parse().expect("bare JID"),
+                affiliation: Affiliation::None,
+                expected_admission_revision: stale_revision,
+            })
+            .await
+            .expect("stale post-compaction repair"),
+        ResolverAffiliationSyncOutcome::StaleAdmissionRevision,
+        "compaction must retain a conservative fence for discarded entries"
+    );
+}
+
 /// A sealed actor (#1108) is pending destruction; a delayed rejection
 /// sync must be refused instead of mutating state the registry already
 /// decided to drop.
@@ -4213,7 +4581,11 @@ async fn sync_resolver_affiliation_refuses_sealed_actor() {
         })
         .await
         .expect("seal");
-    assert!(sealed, "empty non-persistent room must seal");
+    assert_eq!(
+        sealed,
+        crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
+        "empty non-persistent room must seal"
+    );
 
     let outcome = actor
         .ask(SyncResolverAffiliation {
@@ -4293,7 +4665,11 @@ async fn sealed_room_reports_dormant_so_the_sweep_converges() {
         })
         .await
         .expect("seal");
-    assert!(sealed, "empty non-persistent room must seal");
+    assert_eq!(
+        sealed,
+        crate::muc::room_actor::SealIfInactiveOutcome::Inactive,
+        "empty non-persistent room must seal"
+    );
 
     let status = actor
         .ask(crate::muc::room_actor::IsDormant)

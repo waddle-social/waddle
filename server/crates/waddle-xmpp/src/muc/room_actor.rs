@@ -17,6 +17,16 @@ use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
 
+/// A join-path ownership proof is fail-closed, but it must not monopolize the
+/// room actor forever when the durable backend stops responding.
+pub(crate) const JOIN_OWNERSHIP_CHECK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(1);
+
+/// Maximum exact per-JID freshness watermarks retained by one room actor.
+/// Overflow compacts safely into the room-wide watermark, trading only
+/// cross-JID liveness for bounded memory while never accepting stale work.
+const MAX_MEMBER_ADMISSION_REVISIONS: usize = 128;
+
 mod admin_handlers;
 mod mediated_invites;
 mod occupancy_handlers;
@@ -308,7 +318,16 @@ impl OccupantInfo {
 pub struct RoomActor {
     room: MucRoom,
     config_revision: u64,
+    /// Monotonic sequence used to timestamp admission-relevant snapshots.
+    /// Scope-specific watermarks below decide whether a snapshot is stale;
+    /// an unrelated member mutation may advance this sequence without
+    /// invalidating another member's pending resolver repair.
     admission_revision: u64,
+    /// Latest admission revision that changed room-wide admission policy.
+    room_admission_revision: u64,
+    /// Latest admission revision that changed each bare JID's admission or
+    /// affiliation state.
+    member_admission_revisions: HashMap<BareJid, u64>,
     invite_operations: HashMap<MediatedInviteOperationId, MediatedInviteOperationRecord>,
     invite_operation_by_invitee: HashMap<BareJid, MediatedInviteOperationId>,
     /// Monotonically increasing counter bumped on every successful
@@ -319,12 +338,12 @@ pub struct RoomActor {
     /// makes the probe's revision stale, closing the probe→destroy
     /// TOCTOU that orphaned freshly-admitted occupants.
     occupancy_revision: u64,
-    /// Set by [`SealIfInactive`] immediately before the registry
-    /// removes this actor from its map (#1108). A sealed actor refuses
-    /// further admissions with [`RoomActorError::RoomSealed`] so a
-    /// caller holding a stale `ActorRef` retries through the registry
-    /// (which respawns the room) instead of joining a destroyed room.
-    sealed: bool,
+    /// Why this actor refuses further admissions. Keeping the reason typed
+    /// lets the registry distinguish an ordinary inactivity seal, whose
+    /// removal must retain exact-release backlog fencing, from a definitive
+    /// ownership-loss seal, whose deposed local actor must be evicted even
+    /// when that backlog is full.
+    seal_state: RoomSealState,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
     /// Durable membership hydrated from the deployment's membership
     /// source at spawn (#1135). Kept separate from
@@ -374,6 +393,24 @@ enum DurableRestoreState {
     #[default]
     Ready,
     Pending,
+}
+
+/// Why a room actor has stopped accepting admissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, kameo::Reply)]
+pub enum RoomSealState {
+    /// The actor is live and may accept admissions.
+    #[default]
+    Open,
+    /// The registry sealed an inactive actor before a terminal local removal.
+    Inactive,
+    /// The durable ownership gate proved this incarnation is deposed.
+    OwnershipLost,
+}
+
+impl RoomSealState {
+    fn is_sealed(self) -> bool {
+        self != Self::Open
+    }
 }
 
 /// Why a join was refused, so the presence-error mapping can pick the
@@ -446,6 +483,11 @@ pub enum RoomActorError {
     /// ownership-gap bounce.
     #[error("durable room-state restore has not yet completed; retry")]
     RestorePending,
+    /// An admission could not prove that this actor still owns the room.
+    /// The caller should return a wait-class error and retry via the registry
+    /// rather than admitting into an uncertain incarnation.
+    #[error("room ownership could not be confirmed; retry")]
+    OwnershipUnavailable,
 }
 
 impl RoomActor {
@@ -459,16 +501,50 @@ impl RoomActor {
             room,
             config_revision: 0,
             admission_revision: 0,
+            room_admission_revision: 0,
+            member_admission_revisions: HashMap::new(),
             invite_operations: HashMap::new(),
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
-            sealed: false,
+            seal_state: RoomSealState::Open,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
             membership_source: None,
             durable_store: None,
             restore_state: DurableRestoreState::Ready,
         }
+    }
+
+    fn advance_room_admission_revision(&mut self) {
+        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.room_admission_revision = self.admission_revision;
+        self.member_admission_revisions.clear();
+    }
+
+    fn advance_member_admission_revision(&mut self, jid: &BareJid) {
+        self.admission_revision = self.admission_revision.saturating_add(1);
+        if !self.member_admission_revisions.contains_key(jid)
+            && self.member_admission_revisions.len() >= MAX_MEMBER_ADMISSION_REVISIONS
+        {
+            // Promote the new sequence value to a conservative room-wide
+            // fence before discarding exact member watermarks. Every older
+            // snapshot remains stale; only unrelated pending work may retry.
+            self.room_admission_revision = self.admission_revision;
+            self.member_admission_revisions.clear();
+        }
+        self.member_admission_revisions
+            .insert(jid.clone(), self.admission_revision);
+    }
+
+    fn admission_revision_is_current(&self, jid: &BareJid, revision: u64) -> bool {
+        let member_revision = self
+            .member_admission_revisions
+            .get(jid)
+            .copied()
+            .unwrap_or(0);
+        revision <= self.admission_revision
+            && revision >= self.room_admission_revision
+            && revision >= member_revision
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
@@ -485,13 +561,21 @@ impl RoomActor {
     /// does" rule) — only a definitive fencing failure blocks the
     /// mutation; an unreachable Postgres must not itself wedge every
     /// mutating admin action.
-    async fn gate_mutation(&self) -> Result<(), RoomMutationError> {
+    async fn gate_mutation(&mut self) -> Result<(), RoomMutationError> {
+        // A definitive ownership-loss observation is monotonic for this
+        // actor incarnation. Do not let a later transient store failure
+        // override that proof through the ordinary fail-open path while the
+        // registry is still converging the deposed actor's removal.
+        if self.seal_state == RoomSealState::OwnershipLost {
+            return Err(RoomMutationError::NotOwner);
+        }
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
         };
         match store.check_fenced_fanout(&self.room.room_jid).await {
             Ok(true) => Ok(()),
             Ok(false) => {
+                self.seal_state = RoomSealState::OwnershipLost;
                 tracing::warn!(
                     room = %self.room.room_jid,
                     "mutation gate observed ownership loss; refusing to mutate"
@@ -516,8 +600,9 @@ impl RoomActor {
     /// overwhelmingly common case). When `Pending` (the initial
     /// [`RestoreDurableRoomState`] load failed), runs ONE bounded inline
     /// retry against the same store before deciding: success applies the
-    /// restored state (if any) and flips back to `Ready`, letting this
-    /// join proceed; a repeated failure returns
+    /// restored state (if any), flips back to `Ready`, and advances the
+    /// room-wide admission fence so this join re-snapshots the recovered
+    /// policy; a repeated failure returns
     /// `Err(RoomActorError::RestorePending)` and leaves the state
     /// `Pending` for the next join attempt to retry again. Never serves a
     /// join against defaulted config/affiliations/subject while a
@@ -542,6 +627,8 @@ impl RoomActor {
                 self.replace_config(state.config);
                 self.room.subject = state.subject;
                 self.room.restore_affiliations(state.affiliations);
+                self.config_revision = self.config_revision.saturating_add(1);
+                self.advance_room_admission_revision();
                 self.restore_state = DurableRestoreState::Ready;
                 Ok(())
             }
@@ -557,6 +644,62 @@ impl RoomActor {
                      join attempt (fail-closed, FIX 4)"
                 );
                 Err(RoomActorError::RestorePending)
+            }
+        }
+    }
+
+    /// A join does not naturally pass through the mutation fence before it
+    /// admits an occupant. Fail closed here to keep a deposed but
+    /// still-referenced actor from admitting either a returning occupant or
+    /// the creator whose registry acquisition raced an ownership change.
+    async fn gate_join_ownership(&mut self) -> Result<(), RoomActorError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(
+            JOIN_OWNERSHIP_CHECK_TIMEOUT,
+            store.check_fenced_fanout(&self.room.room_jid),
+        )
+        .await
+        {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => {
+                self.seal_state = RoomSealState::OwnershipLost;
+                Err(RoomActorError::RoomSealed)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "join ownership gate failed; refusing admission"
+                );
+                Err(RoomActorError::OwnershipUnavailable)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    timeout_ms = JOIN_OWNERSHIP_CHECK_TIMEOUT.as_millis(),
+                    "join ownership gate timed out; refusing admission"
+                );
+                Err(RoomActorError::OwnershipUnavailable)
+            }
+        }
+    }
+
+    /// Refuse admission through an already sealed actor while allowing an
+    /// inactivity seal to strengthen into a definitive ownership-loss seal.
+    ///
+    /// The ownership probe's result never makes an inactive actor joinable:
+    /// it only preserves the stronger cause for the registry's reaper. A
+    /// transient probe failure therefore still returns `RoomSealed` and
+    /// leaves the original inactivity seal intact.
+    async fn reject_sealed_join(&mut self) -> Result<(), RoomActorError> {
+        match self.seal_state {
+            RoomSealState::Open => Ok(()),
+            RoomSealState::OwnershipLost => Err(RoomActorError::RoomSealed),
+            RoomSealState::Inactive => {
+                let _ = self.gate_join_ownership().await;
+                Err(RoomActorError::RoomSealed)
             }
         }
     }
@@ -866,9 +1009,14 @@ impl kameo::message::Message<Join> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        if self.sealed {
-            return Err(RoomActorError::RoomSealed);
-        }
+        self.reject_sealed_join().await?;
+        // `Join` predates the resolver-aware admission message, but it is
+        // still reachable by internal callers holding an ActorRef. Apply the
+        // same fail-closed restore and ownership gates as
+        // `JoinWithAffiliation`; otherwise a stale reference could admit an
+        // occupant after this room's durable claim moved to another node.
+        self.ensure_restored_before_join().await?;
+        self.gate_join_ownership().await?;
         if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
             return Err(RoomActorError::InviteRollbackPending);
         }
@@ -995,7 +1143,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         self.gate_mutation().await?;
         self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(self.config_revision)
     }
@@ -1023,7 +1171,7 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         self.gate_mutation().await?;
         self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(true)
     }
@@ -1105,7 +1253,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         config.group_dm = true;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(RoomSnapshot {
             room: self.room.clone(),
@@ -1215,7 +1363,7 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
             .set_affiliation(msg.jid.clone(), msg.affiliation)
             .is_some()
         {
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&msg.jid);
             self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {
@@ -1362,7 +1510,7 @@ impl kameo::message::Message<IsDormant> for RoomActor {
             // compensation responsibility and must survive both lifecycle
             // guards (the Dormant guard is also protected by the explicit
             // Member affiliation itself).
-            dormant: self.sealed
+            dormant: self.seal_state.is_sealed()
                 || (self.room.is_dormant() && !self.has_lifecycle_fenced_invite_operation()),
             occupancy_revision: self.occupancy_revision,
         }
@@ -1382,7 +1530,25 @@ impl kameo::message::Message<IsSealed> for RoomActor {
         _msg: IsSealed,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.sealed
+        self.seal_state.is_sealed()
+    }
+}
+
+/// Return the typed admission seal state used by the registry's reaper.
+///
+/// Unlike [`IsSealed`], this preserves whether the actor was sealed by an
+/// inactivity transition or by a definitive ownership-loss fence.
+pub struct GetRoomSealState;
+
+impl kameo::message::Message<GetRoomSealState> for RoomActor {
+    type Reply = RoomSealState;
+
+    async fn handle(
+        &mut self,
+        _msg: GetRoomSealState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.seal_state
     }
 }
 
@@ -1415,19 +1581,34 @@ pub struct SealIfInactive {
     pub guard: SealGuard,
 }
 
+/// Typed result of an inactivity-seal attempt.
+///
+/// The registry must retain the distinction between ordinary inactivity and
+/// a prior ownership-loss seal: both refuse admission, but only the latter
+/// requires immediate deposed-actor teardown without releasing a claim this
+/// incarnation has already proven it does not own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum SealIfInactiveOutcome {
+    Refused,
+    Inactive,
+    OwnershipLost,
+}
+
 impl kameo::message::Message<SealIfInactive> for RoomActor {
-    type Reply = bool;
+    type Reply = SealIfInactiveOutcome;
 
     async fn handle(
         &mut self,
         msg: SealIfInactive,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.sealed {
-            return true;
+        match self.seal_state {
+            RoomSealState::OwnershipLost => return SealIfInactiveOutcome::OwnershipLost,
+            RoomSealState::Inactive => return SealIfInactiveOutcome::Inactive,
+            RoomSealState::Open => {}
         }
         if self.occupancy_revision != msg.expected_occupancy_revision {
-            return false;
+            return SealIfInactiveOutcome::Refused;
         }
         let inactive = !self.has_lifecycle_fenced_invite_operation()
             && match msg.guard {
@@ -1437,9 +1618,11 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
                 }
             };
         if inactive {
-            self.sealed = true;
+            self.seal_state = RoomSealState::Inactive;
+            SealIfInactiveOutcome::Inactive
+        } else {
+            SealIfInactiveOutcome::Refused
         }
-        inactive
     }
 }
 

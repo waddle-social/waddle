@@ -253,7 +253,7 @@ pub fn record_claims_abandoned_on_drain(count: u64) {
 
 /// Count bounded proactive `RoomActor` orphan-reconciliation outcomes.
 /// `outcome` is one of `hydrated`, `released`, `already_live`,
-/// `adopted_local`, `pending_retry`, `lost_race`, or `failed`; callers
+/// `pending_retry`, `lost_race`, or `failed`; callers
 /// aggregate a whole sweep before recording, avoiding per-room warning noise
 /// after a node loss.
 pub fn record_room_orphan_reconciliation(outcome: &'static str, count: u64) {

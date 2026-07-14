@@ -542,7 +542,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
 
     let probe = actor.ask(IsDormant).await.expect("dormancy probe");
     assert!(probe.dormant, "no-grant replay state must not pin the room");
-    assert!(
+    assert_eq!(
         actor
             .ask(SealIfInactive {
                 expected_occupancy_revision: probe.occupancy_revision,
@@ -550,6 +550,7 @@ async fn no_grant_operation_does_not_pin_an_otherwise_dormant_room() {
             })
             .await
             .expect("seal dormant room"),
+        SealIfInactiveOutcome::Inactive,
         "no-grant replay state must not block guarded sealing",
     );
 }
@@ -671,7 +672,8 @@ async fn capacity_never_evicts_live_grants_or_persists_an_overflow_grant() {
 async fn invite_grant_and_rollback_advance_the_admission_fence() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let before_grant = current_admission_revision(&actor).await;
-    let grant = authorize_invite_grant(&actor, inviter, invitee).await;
+    let grant = authorize_invite_grant(&actor, inviter, invitee.clone()).await;
+    let operation_id = grant.operation_id();
     assert_eq!(
         current_admission_revision(&actor).await,
         before_grant + 1,
@@ -679,17 +681,14 @@ async fn invite_grant_and_rollback_advance_the_admission_fence() {
     );
     assert!(matches!(
         actor
-            .ask(JoinWithAffiliation {
-                sender_jid: test_full_jid("stale"),
-                nick: "stale".to_string(),
-                affiliation_grant: JoinAffiliationGrant::Unaffiliated,
-                local_domain: "example.com".to_string(),
-                admission_revision: before_grant,
+            .ask(SyncResolverAffiliation {
+                jid: "unrelated@example.com".parse().expect("bare JID"),
+                affiliation: Affiliation::None,
+                expected_admission_revision: before_grant,
             })
-            .await,
-        Err(SendError::HandlerError(
-            RoomActorError::StaleAdmissionRevision
-        ))
+            .await
+            .expect("unrelated resolver repair"),
+        ResolverAffiliationSyncOutcome::Applied { .. }
     ));
 
     actor
@@ -702,9 +701,25 @@ async fn invite_grant_and_rollback_advance_the_admission_fence() {
         .ask(CommitMediatedInviteGrantRollback { grant })
         .await
         .expect("commit rollback");
+    actor
+        .ask(AcknowledgeMediatedInviteOperation { operation_id })
+        .await
+        .expect("acknowledge rollback");
     assert_eq!(
         current_admission_revision(&actor).await,
         before_grant + 2,
         "restoring the prior affiliation changes admission state again",
+    );
+    assert_eq!(
+        actor
+            .ask(SyncResolverAffiliation {
+                jid: invitee,
+                affiliation: Affiliation::None,
+                expected_admission_revision: before_grant,
+            })
+            .await
+            .expect("stale invitee repair"),
+        ResolverAffiliationSyncOutcome::StaleAdmissionRevision,
+        "grant and rollback must invalidate pre-grant work for the invitee",
     );
 }

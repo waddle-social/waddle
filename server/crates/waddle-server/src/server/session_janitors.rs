@@ -3406,7 +3406,6 @@ async fn run_orphan_reaper_sweep_with_workers(
     let mut room_hydrated = 0u64;
     let mut room_released = 0u64;
     let mut room_already_live = 0u64;
-    let mut room_adopted_local = 0u64;
     let mut room_pending_retry = 0u64;
     let mut room_lost_race = 0u64;
     let mut room_failed = 0u64;
@@ -3445,9 +3444,6 @@ async fn run_orphan_reaper_sweep_with_workers(
                     Ok(
                         waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
                     ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal,
-                    ) => room_adopted_local += 1,
                     Ok(
                         waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
                     ) => {
@@ -3629,8 +3625,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                 .await;
                 let notify_previous_owner = !matches!(
                     reconciliation,
-                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal)
-                        | Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
+                    Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
                         | Err(_)
                 );
                 if notify_previous_owner {
@@ -3662,9 +3657,6 @@ async fn run_orphan_reaper_sweep_with_workers(
                     Ok(
                         waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
                     ) => room_already_live += 1,
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AdoptedLocal,
-                    ) => room_adopted_local += 1,
                     Ok(
                         waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
                     ) => room_pending_retry += 1,
@@ -3721,7 +3713,6 @@ async fn run_orphan_reaper_sweep_with_workers(
         ("hydrated", room_hydrated),
         ("released", room_released),
         ("already_live", room_already_live),
-        ("adopted_local", room_adopted_local),
         ("pending_retry", room_pending_retry),
         ("lost_race", room_lost_race),
         ("failed", room_failed),
@@ -3730,13 +3721,12 @@ async fn run_orphan_reaper_sweep_with_workers(
             crate::clustering::metrics::record_room_orphan_reconciliation(outcome, count);
         }
     }
-    let room_reconciled = room_hydrated + room_released + room_already_live + room_adopted_local;
+    let room_reconciled = room_hydrated + room_released + room_already_live;
     if room_pending_retry > 0 || room_failed > 0 {
         warn!(
             hydrated = room_hydrated,
             released = room_released,
             already_live = room_already_live,
-            adopted_local = room_adopted_local,
             pending_retry = room_pending_retry,
             lost_race = room_lost_race,
             failed = room_failed,
@@ -3748,7 +3738,6 @@ async fn run_orphan_reaper_sweep_with_workers(
             hydrated = room_hydrated,
             released = room_released,
             already_live = room_already_live,
-            adopted_local = room_adopted_local,
             pending_retry = room_pending_retry,
             lost_race = room_lost_race,
             failed = room_failed,

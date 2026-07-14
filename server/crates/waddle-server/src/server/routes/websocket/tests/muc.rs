@@ -111,6 +111,53 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
     );
 }
 
+#[tokio::test]
+async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constraint() {
+    use waddle_xmpp::muc::room_registry_actor::ReservePendingReclaimedRoom;
+
+    let state = create_test_websocket_state().await;
+    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let room_jid: BareJid = "ownership-reconciling@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender JID");
+
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(ReservePendingReclaimedRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("reserve reclaimed-room reconciliation");
+
+    let responses = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "one retryable error presence");
+    let presence = Element::from_str(&responses[0]).expect("error presence XML");
+    assert_eq!(presence.attr("type"), Some("error"));
+    let error = presence
+        .get_child("error", waddle_xmpp::parser::ns::JABBER_CLIENT)
+        .expect("typed stanza error");
+    assert_eq!(error.attr("type"), Some("wait"));
+    assert!(
+        error
+            .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas",)
+            .is_some(),
+        "ownership reconciliation must remain retryable: {responses:?}"
+    );
+}
+
 /// #1107 / XEP-0045 §7.6: a full JID already in the room under nick A
 /// joining as nick B gets `<error type='cancel'><not-acceptable/>`
 /// on the wire (nicknames are locked to identity) and no second
@@ -894,7 +941,11 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
         .expect("seed stale resolver-derived member");
     assert_eq!(
         seeded,
-        waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied,
+        waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied {
+            admission_revision: snapshot_room(state.as_ref(), &room_jid)
+                .await
+                .admission_revision,
+        },
         "seeding the stale member must apply"
     );
 
@@ -915,7 +966,17 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
         "revoked user's members-only join must be refused: {denied:?}"
     );
 
-    let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+    let room = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+            if room.get_affiliation(&sender_jid.to_bare()) == waddle_xmpp::Affiliation::None {
+                break room;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached resolver repair must complete within the test deadline");
     assert_eq!(
         room.get_affiliation(&sender_jid.to_bare()),
         waddle_xmpp::Affiliation::None,

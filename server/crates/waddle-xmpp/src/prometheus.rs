@@ -39,6 +39,13 @@ static DELIVERY_TERMINAL_ERROR_DROP: AtomicU64 = AtomicU64::new(0);
 // occupant roster may be stale until their next rejoin/resync.
 static DELIVERY_RETRY_EXHAUSTED_DROP: AtomicU64 = AtomicU64::new(0);
 
+// Rejected-join resolver-affiliation repairs dropped because the bounded
+// process-wide scheduler already had its maximum number of active worker
+// keys. A non-zero value means the authoritative join decision was still
+// enforced, but a live RoomActor may retain a stale resolver-derived
+// affiliation until a later repair or eviction.
+static RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP: AtomicU64 = AtomicU64::new(0);
+
 // ADR-0017 Phase 1 Slice 2: empty `UserActor`s reaped by the periodic reaper
 // after `try_deliver`'s closed-channel eviction removed their last resource
 // without the explicit unregister-prune path running. A non-zero value is the
@@ -419,6 +426,15 @@ pub fn increment_delivery_retry_exhausted_drop() {
     DELIVERY_RETRY_EXHAUSTED_DROP.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn increment_resolver_affiliation_sync_capacity_drop() {
+    RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn resolver_affiliation_sync_capacity_drop_count() -> u64 {
+    RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP.load(Ordering::Relaxed)
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub fn delivery_retry_exhausted_drop_count() -> u64 {
     DELIVERY_RETRY_EXHAUSTED_DROP.load(Ordering::Relaxed)
@@ -620,6 +636,7 @@ pub fn reset_metrics_for_test() {
     BROADCAST_DROPPED_CLOSED.store(0, Ordering::Release);
     DELIVERY_TERMINAL_ERROR_DROP.store(0, Ordering::Release);
     DELIVERY_RETRY_EXHAUSTED_DROP.store(0, Ordering::Release);
+    RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP.store(0, Ordering::Release);
     USER_ACTOR_REAPED.store(0, Ordering::Release);
     SM_UNACKED_EVICTED.store(0, Ordering::Release);
     PENDING_DELIVERY_QUOTA_EXCEEDED.store(0, Ordering::Release);
@@ -664,6 +681,8 @@ pub fn render_metrics() -> String {
     let broadcast_dropped_closed = BROADCAST_DROPPED_CLOSED.load(Ordering::Relaxed);
     let delivery_terminal_error_drop = DELIVERY_TERMINAL_ERROR_DROP.load(Ordering::Relaxed);
     let delivery_retry_exhausted_drop = DELIVERY_RETRY_EXHAUSTED_DROP.load(Ordering::Relaxed);
+    let resolver_affiliation_sync_capacity_drop =
+        RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP.load(Ordering::Relaxed);
     let user_actor_reaped = USER_ACTOR_REAPED.load(Ordering::Relaxed);
     let sm_unacked_evicted = SM_UNACKED_EVICTED.load(Ordering::Relaxed);
     let pending_quota_exceeded = PENDING_DELIVERY_QUOTA_EXCEEDED.load(Ordering::Relaxed);
@@ -722,6 +741,9 @@ pub fn render_metrics() -> String {
             "# HELP waddle_delivery_retry_exhausted_drop_total Frames dropped because the recipient's outbound channel was STILL full after the bounded in-line DroppedFull retries (#1263) — groupchat reflections, MUC presence fan-out, and actor-path full-JID deliveries. A non-zero value means a live recipient missed a stanza under sustained backpressure.\n",
             "# TYPE waddle_delivery_retry_exhausted_drop_total counter\n",
             "waddle_delivery_retry_exhausted_drop_total {delivery_retry_exhausted_drop}\n",
+            "# HELP waddle_resolver_affiliation_sync_capacity_drop_total Rejected-join resolver-affiliation repairs dropped because the bounded scheduler had no free worker slot. The join decision remains authoritative, but the live room affiliation projection may stay stale until a later repair or eviction.\n",
+            "# TYPE waddle_resolver_affiliation_sync_capacity_drop_total counter\n",
+            "waddle_resolver_affiliation_sync_capacity_drop_total {resolver_affiliation_sync_capacity_drop}\n",
             "# HELP waddle_user_actor_reaped_total Empty UserActors reaped by the periodic reaper after delivery-path closed-channel eviction removed their last resource without the explicit unregister-prune path running.\n",
             "# TYPE waddle_user_actor_reaped_total counter\n",
             "waddle_user_actor_reaped_total {user_actor_reaped}\n",
@@ -806,6 +828,7 @@ pub fn render_metrics() -> String {
         broadcast_dropped_closed = broadcast_dropped_closed,
         delivery_terminal_error_drop = delivery_terminal_error_drop,
         delivery_retry_exhausted_drop = delivery_retry_exhausted_drop,
+        resolver_affiliation_sync_capacity_drop = resolver_affiliation_sync_capacity_drop,
         user_actor_reaped = user_actor_reaped,
         sm_unacked_evicted = sm_unacked_evicted,
         pending_quota_exceeded = pending_quota_exceeded,
