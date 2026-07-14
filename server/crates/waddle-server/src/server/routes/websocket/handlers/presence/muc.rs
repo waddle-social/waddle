@@ -193,6 +193,7 @@ async fn run_resolver_affiliation_sync_worker(
                 work = next;
                 effective_admission_revision = worker.effective_admission_revision();
                 attempt = 1;
+                continue;
             }
             Ok(
                 waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable,
@@ -690,6 +691,51 @@ mod resolver_sync_retry_tests {
                 .expect("both distinct repairs drain"),
             Affiliation::Outcast,
             "the newer same-snapshot verdict must supersede the first repair's own revision bump"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolver_sync_chained_update_receives_the_full_retry_budget() {
+        let store = SequencedOwnershipStore::hanging();
+        let member: BareJid = "chained-retry@example.com".parse().expect("member JID");
+        let (actor, room_jid) = spawn_sync_test_room_with_seed(
+            Arc::clone(&store),
+            Some((member.clone(), Affiliation::Member)),
+        )
+        .await;
+        let scheduler =
+            Arc::new(crate::server::routes::websocket::ResolverAffiliationSyncScheduler::default());
+
+        let worker = spawn_sync_worker_with_scheduler(
+            actor.clone(),
+            room_jid.clone(),
+            member.clone(),
+            Affiliation::None,
+            0,
+            Arc::clone(&scheduler),
+        );
+        store.check_started.notified().await;
+        sync_resolver_affiliation_on_rejection(
+            Some(&actor),
+            &scheduler,
+            &room_jid,
+            member,
+            Affiliation::Outcast,
+            0,
+        );
+        store.fail_next(RESOLVER_SYNC_MAX_ATTEMPTS);
+        store.release_blocked_check.notify_one();
+
+        for _ in 0..=RESOLVER_SYNC_MAX_ATTEMPTS {
+            tokio::task::yield_now().await;
+            tokio::time::advance(RESOLVER_SYNC_RETRY_BACKOFF).await;
+        }
+        worker.await.expect("bounded chained worker");
+
+        assert_eq!(
+            store.checks(),
+            1 + RESOLVER_SYNC_MAX_ATTEMPTS,
+            "queued work adopted after a successful repair must receive its own full retry budget"
         );
     }
 
