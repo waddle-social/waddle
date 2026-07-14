@@ -133,6 +133,14 @@ fn sync_resolver_affiliation_on_rejection(
             );
             return;
         }
+        crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Stale => {
+            debug!(
+                room = %room_jid,
+                %jid,
+                "Ignored a stale resolver affiliation repair because a newer revision is queued"
+            );
+            return;
+        }
         crate::server::routes::websocket::ResolverAffiliationSyncSchedule::AtCapacity => {
             debug!(
                 room = %room_jid,

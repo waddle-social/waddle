@@ -146,6 +146,8 @@ pub enum ResolverAffiliationSyncSchedule {
     Updated,
     /// The existing worker already owns an identical latest verdict.
     Coalesced,
+    /// A newer source snapshot is already retained for this worker.
+    Stale,
     /// All global worker slots are occupied by other logical keys.
     AtCapacity,
 }
@@ -209,6 +211,9 @@ impl ResolverAffiliationSyncScheduler {
         };
         let mut state = self.state.lock().expect("resolver sync scheduler lock");
         if let Some(slot) = state.workers.get_mut(&key) {
+            if work.expected_admission_revision < slot.latest.expected_admission_revision {
+                return ResolverAffiliationSyncSchedule::Stale;
+            }
             if slot.latest == work {
                 return ResolverAffiliationSyncSchedule::Coalesced;
             }
@@ -458,6 +463,45 @@ mod resolver_affiliation_sync_scheduler_tests {
             scheduler.schedule(&room, &bob, actor_a, initial),
             ResolverAffiliationSyncSchedule::Started(_)
         ));
+    }
+
+    #[test]
+    fn scheduler_rejects_a_stale_update_when_a_newer_revision_is_queued() {
+        let scheduler = Arc::new(ResolverAffiliationSyncScheduler::default());
+        let room: BareJid = "room@muc.example.com".parse().expect("room JID");
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let actor_id = kameo::actor::ActorId::new(1);
+        let initial = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::None,
+            expected_admission_revision: 0,
+        };
+        let newer = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Member,
+            expected_admission_revision: 2,
+        };
+        let stale = ResolverAffiliationSyncWork {
+            affiliation: waddle_xmpp::Affiliation::Outcast,
+            expected_admission_revision: 1,
+        };
+
+        let ResolverAffiliationSyncSchedule::Started(mut worker) =
+            scheduler.schedule(&room, &member, actor_id, initial)
+        else {
+            panic!("first repair starts a worker");
+        };
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, newer),
+            ResolverAffiliationSyncSchedule::Updated
+        ));
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, stale),
+            ResolverAffiliationSyncSchedule::Stale
+        ));
+        assert_eq!(
+            worker.take_update(),
+            Some(newer),
+            "out-of-order stale completion must not replace the newer queued verdict"
+        );
     }
 
     #[test]

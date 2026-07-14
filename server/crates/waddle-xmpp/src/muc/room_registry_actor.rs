@@ -77,11 +77,11 @@ pub struct RoomRegistryActor {
     /// Ordinary terminal removals whose exact claim release was uncertain.
     /// Multiple owner+epoch generations for one room are intentional. A
     /// timed-out release may have deleted the row, after which another owner
-    /// can recreate it with a reset epoch; numeric epoch ordering therefore
-    /// cannot identify a newest generation across delete/recreate ABA.
-    /// Retaining every exact fence lets out-of-order retries prove each
-    /// responsibility independently, while the global bound prevents churn
-    /// from growing this inventory without limit.
+    /// can recreate it with a fresh globally monotonic epoch. Retaining every
+    /// exact fence still matters because each timed-out delete can commit out
+    /// of order and must reach its own typed outcome before the registry drops
+    /// that release responsibility. The global bound prevents churn from
+    /// growing this inventory without limit.
     pending_room_releases:
         HashMap<(BareJid, super::RoomClaimFenceContext), PendingRoomReleaseState>,
     /// Claim CAS calls whose timeout/backend error left commit status
@@ -872,7 +872,9 @@ impl RoomRegistryActor {
             self.release_room_claim(&room_jid, &claim_fence).await;
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid));
         };
-        self.publish_room(room_jid, actor_ref.clone(), claim_fence);
+        if !self.publish_room(room_jid.clone(), actor_ref.clone(), claim_fence) {
+            return Err(RoomRegistryError::OwnershipReconciliationPending(room_jid));
+        }
         Ok(actor_ref)
     }
 
@@ -927,7 +929,14 @@ impl RoomRegistryActor {
         room_jid: BareJid,
         actor_ref: ActorRef<RoomActor>,
         claim_fence: super::RoomClaimFenceContext,
-    ) {
+    ) -> bool {
+        if self
+            .pending_room_releases
+            .contains_key(&(room_jid.clone(), claim_fence.clone()))
+        {
+            actor_ref.kill();
+            return false;
+        }
         self.clear_pending_room_acquisition(&room_jid, &claim_fence.owner());
         if let Some(store) = &self.durable_store {
             store.record_claim_fence(&room_jid, claim_fence.clone());
@@ -940,6 +949,7 @@ impl RoomRegistryActor {
             },
         );
         self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
+        true
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 3 (council-adjudicated): `async` (not
@@ -1774,6 +1784,28 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                 .await;
         }
 
+        // A delayed or duplicate reclaimed-room message can name an exact
+        // generation whose terminal release already timed out. Its database
+        // delete may still commit after the caller future was dropped, so
+        // never make that same generation live again. Retain both retry
+        // responsibilities until the exact release reaches a typed outcome.
+        if self
+            .pending_room_releases
+            .contains_key(&(msg.room_jid.clone(), claim_fence.clone()))
+        {
+            if self
+                .rooms
+                .get(&msg.room_jid)
+                .is_some_and(|entry| entry.claim_fence == claim_fence)
+            {
+                if let Some(entry) = self.rooms.remove(&msg.room_jid) {
+                    entry.actor_ref.kill();
+                }
+            }
+            self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
+            return ReclaimedRoomOutcome::PendingRetry;
+        }
+
         // Prove the reaper's exact epoch before touching any local actor.
         // A stale adoption message must never depose a newer demand-side
         // actor, and a backend error is uncertainty, not permission.
@@ -1937,7 +1969,10 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             return ReclaimedRoomOutcome::PendingRetry;
         };
         self.poisoned_rooms.remove(&msg.room_jid);
-        self.publish_room(msg.room_jid, actor_ref, claim_fence);
+        if !self.publish_room(msg.room_jid.clone(), actor_ref, claim_fence.clone()) {
+            self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
+            return ReclaimedRoomOutcome::PendingRetry;
+        }
         ReclaimedRoomOutcome::Hydrated
     }
 }

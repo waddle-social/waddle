@@ -4192,6 +4192,89 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn reclaimed_reconcile_cannot_republish_a_fence_with_a_late_release_pending() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
+        let identity = this_identity();
+        let jid = test_room_jid("reclaimed-publish-with-late-release");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &identity)
+            .await
+            .expect("seed self-owned claim");
+        let fence = RoomClaimFenceContext::new(entity.clone(), identity.clone(), epoch);
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("must-not-republish")),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(identity),
+                durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+            })
+            .await
+            .expect("remember ambiguous release");
+
+        assert_eq!(
+            registry
+                .ask(RetryPendingRoomReleases { limit: 1 })
+                .await
+                .expect("time out first non-cancel-safe release"),
+            1,
+        );
+        claim_store.late_release_started.notified().await;
+
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: fence,
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("reconcile while exact release is pending"),
+            ReclaimedRoomOutcome::PendingRetry,
+        );
+        assert!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("room lookup")
+                .is_none(),
+            "an exact fence with a non-cancel-safe delete in flight must never be republished"
+        );
+
+        claim_store.allow_late_release.notify_one();
+        claim_store.late_release_completed.notified().await;
+        registry
+            .ask(RetryPendingRoomReleases { limit: 1 })
+            .await
+            .expect("converge completed late release");
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, epoch),
+                    previous_owner: foreign_identity(),
+                })
+                .await
+                .expect("reconcile released fence"),
+            ReclaimedRoomOutcome::LostRace,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pre_acquire_convergence_uses_one_short_budget_and_releases_the_mailbox() {
         let registry = spawn_registry().await;
         let claim_store = Arc::new(NonCancelSafeReleaseStore::new());
