@@ -17,8 +17,9 @@ use tracing::{debug, info, warn};
 use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{
-    GetRoomSealState, HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState,
-    SealGuard, SealIfInactive, SealIfInactiveOutcome,
+    DurableRestoreReadiness, GetDurableRestoreReadiness, GetRoomSealState,
+    HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState, SealGuard,
+    SealIfInactive, SealIfInactiveOutcome,
 };
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
@@ -36,6 +37,39 @@ use crate::xep::xep0421::OccupantIdSecret;
 struct RoomEntry {
     actor_ref: ActorRef<RoomActor>,
     claim_fence: super::RoomClaimFenceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomPreparationError {
+    RestorePending,
+    ActorUnavailable,
+}
+
+/// Kills a freshly spawned room actor if preparation is cancelled before the
+/// actor is deliberately handed back to the registry. This also covers a
+/// reclaimed-room deadline cancelling the preparation future.
+struct RoomPreparationGuard(Option<ActorRef<RoomActor>>);
+
+impl RoomPreparationGuard {
+    fn new(actor_ref: ActorRef<RoomActor>) -> Self {
+        Self(Some(actor_ref))
+    }
+
+    fn actor_ref(&self) -> &ActorRef<RoomActor> {
+        self.0.as_ref().expect("prepared actor remains armed")
+    }
+
+    fn disarm(mut self) -> ActorRef<RoomActor> {
+        self.0.take().expect("prepared actor remains armed")
+    }
+}
+
+impl Drop for RoomPreparationGuard {
+    fn drop(&mut self) {
+        if let Some(actor_ref) = self.0.take() {
+            actor_ref.kill();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -849,9 +883,27 @@ impl RoomRegistryActor {
         config: RoomConfig,
         claim_fence: super::RoomClaimFenceContext,
     ) -> Result<ActorRef<RoomActor>, RoomRegistryError> {
-        let actor_ref = self
-            .prepare_room(room_jid.clone(), waddle_id, channel_id, config)
-            .await;
+        let actor_ref = match self
+            .prepare_room(
+                room_jid.clone(),
+                waddle_id,
+                channel_id,
+                config,
+                &claim_fence,
+            )
+            .await
+        {
+            Ok(actor_ref) => actor_ref,
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    ?error,
+                    "room actor preparation failed before publication"
+                );
+                self.release_room_claim(&room_jid, &claim_fence).await;
+                return Err(RoomRegistryError::OwnershipUnavailable(room_jid));
+            }
+        };
         let owner = claim_fence.owner();
         let still_owned = matches!(
             tokio::time::timeout(
@@ -888,9 +940,20 @@ impl RoomRegistryActor {
         waddle_id: String,
         channel_id: String,
         config: RoomConfig,
-    ) -> ActorRef<RoomActor> {
+        claim_fence: &super::RoomClaimFenceContext,
+    ) -> Result<ActorRef<RoomActor>, RoomPreparationError> {
+        // The restore message may run as soon as it is enqueued. Record the
+        // exact won fence before spawning so the store cannot fall back to a
+        // stale or absent ownership context.
+        if let Some(store) = &self.durable_store {
+            store.record_claim_fence(&room_jid, claim_fence.clone());
+        }
         let room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
-        let actor_ref = RoomActor::spawn(RoomActor::new(room, self.occupant_id_secret.clone()));
+        let actor_guard = RoomPreparationGuard::new(RoomActor::spawn(RoomActor::new(
+            room,
+            self.occupant_id_secret.clone(),
+        )));
+        let actor_ref = actor_guard.actor_ref();
         if let Some(store) = &self.durable_store {
             if let Err(error) = actor_ref
                 .tell(RestoreDurableRoomState {
@@ -904,6 +967,7 @@ impl RoomRegistryActor {
                     "failed to enqueue durable room-state restore for freshly \
                      spawned/re-claimed room actor"
                 );
+                return Err(RoomPreparationError::ActorUnavailable);
             }
         }
         if let Some(source) = &self.membership_source {
@@ -919,9 +983,29 @@ impl RoomRegistryActor {
                     "failed to enqueue durable-recipient hydration for \
                      freshly spawned room actor"
                 );
+                return Err(RoomPreparationError::ActorUnavailable);
             }
         }
-        actor_ref
+        // This ask is FIFO behind restore and membership hydration. Never
+        // publish constructor defaults after a failed durable read: ungated
+        // room operations could otherwise overwrite authoritative policy.
+        match actor_ref
+            .ask(GetDurableRestoreReadiness)
+            .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+            .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+            .await
+        {
+            Ok(DurableRestoreReadiness::Ready) => Ok(actor_guard.disarm()),
+            Ok(DurableRestoreReadiness::Pending) => Err(RoomPreparationError::RestorePending),
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    ?error,
+                    "durable room restore readiness barrier failed"
+                );
+                Err(RoomPreparationError::ActorUnavailable)
+            }
+        }
     }
 
     fn publish_room(
@@ -1930,14 +2014,27 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             return ReclaimedRoomOutcome::PendingRetry;
         }
 
-        let actor_ref = self
+        let actor_ref = match self
             .prepare_room(
                 msg.room_jid.clone(),
                 snapshot.waddle_id,
                 snapshot.channel_id,
                 snapshot.config,
+                &claim_fence,
             )
-            .await;
+            .await
+        {
+            Ok(actor_ref) => actor_ref,
+            Err(error) => {
+                debug!(
+                    room = %msg.room_jid,
+                    ?error,
+                    "reclaimed room restore did not become ready; retaining exact epoch"
+                );
+                self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
+                return ReclaimedRoomOutcome::PendingRetry;
+            }
+        };
         // `prepare_room` awaits both mailbox enqueues. Fence once more at
         // the actual publication boundary so neither an identity change nor
         // an epoch steal during those awaits can install a stale actor.

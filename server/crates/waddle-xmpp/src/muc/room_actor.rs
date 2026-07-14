@@ -515,6 +515,41 @@ impl RoomActor {
         }
     }
 
+    /// Install one authoritative durable snapshot and advance the room-wide
+    /// admission watermark when the restored policy differs from the
+    /// constructor/default state. Subject changes are deliberately excluded:
+    /// they do not affect whether or how an occupant may enter.
+    fn install_durable_room_state(&mut self, state: super::durable::DurableRoomState) {
+        let previous_admission_state = (
+            self.room.waddle_id.clone(),
+            self.room.channel_id.clone(),
+            serde_json::to_value(&self.room.config).ok(),
+            self.room
+                .get_all_affiliations()
+                .into_iter()
+                .map(|entry| (entry.jid, entry.affiliation))
+                .collect::<HashMap<_, _>>(),
+        );
+        self.room.waddle_id = state.waddle_id;
+        self.room.channel_id = state.channel_id;
+        self.replace_config(state.config);
+        self.room.subject = state.subject;
+        self.room.restore_affiliations(state.affiliations);
+        let installed_admission_state = (
+            self.room.waddle_id.clone(),
+            self.room.channel_id.clone(),
+            serde_json::to_value(&self.room.config).ok(),
+            self.room
+                .get_all_affiliations()
+                .into_iter()
+                .map(|entry| (entry.jid, entry.affiliation))
+                .collect::<HashMap<_, _>>(),
+        );
+        if installed_admission_state != previous_admission_state {
+            self.advance_room_admission_revision();
+        }
+    }
+
     fn advance_room_admission_revision(&mut self) {
         self.admission_revision = self.admission_revision.saturating_add(1);
         self.room_admission_revision = self.admission_revision;
@@ -620,15 +655,9 @@ impl RoomActor {
             self.restore_state = DurableRestoreState::Ready;
             return Ok(());
         };
-        match store.load_room_state(&self.room.room_jid).await {
+        match store.load_room_state_fenced(&self.room.room_jid).await {
             Ok(Some(state)) => {
-                self.room.waddle_id = state.waddle_id;
-                self.room.channel_id = state.channel_id;
-                self.replace_config(state.config);
-                self.room.subject = state.subject;
-                self.room.restore_affiliations(state.affiliations);
-                self.config_revision = self.config_revision.saturating_add(1);
-                self.advance_room_admission_revision();
+                self.install_durable_room_state(state);
                 self.restore_state = DurableRestoreState::Ready;
                 Ok(())
             }
@@ -937,13 +966,42 @@ impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
 /// guarantee [`HydrateDurableRecipients`]'s own doc comment already
 /// relies on for durable membership.
 ///
-/// Fail-open on load errors (mirrors [`HydrateDurableRecipients`]): a
-/// brand new room with no durable row yet simply keeps the
-/// caller-supplied initial config, matching today's pre-Slice-7 behavior
-/// exactly when no `MucDurableStore` is configured at all (single-node /
-/// non-clustering deployments never send this message).
+/// Load errors fail closed. A successful `None` still means a brand-new room
+/// and keeps the caller-supplied initial config. The ownership proof and
+/// repeatable-read snapshot are one storage transaction so a claim steal
+/// cannot interleave between them.
 pub struct RestoreDurableRoomState {
     pub store: std::sync::Arc<dyn super::durable::MucDurableStore>,
+}
+
+/// Whether this actor's initial durable restore completed successfully.
+///
+/// The room registry sends [`GetDurableRestoreReadiness`] behind
+/// [`RestoreDurableRoomState`] in the same mailbox. A `Ready` reply is
+/// therefore a publication barrier: every caller that can discover the actor
+/// observes the restored config, affiliations, and subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
+pub enum DurableRestoreReadiness {
+    Ready,
+    Pending,
+}
+
+/// FIFO publication barrier for a freshly prepared room actor.
+pub struct GetDurableRestoreReadiness;
+
+impl kameo::message::Message<GetDurableRestoreReadiness> for RoomActor {
+    type Reply = DurableRestoreReadiness;
+
+    async fn handle(
+        &mut self,
+        _msg: GetDurableRestoreReadiness,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        match self.restore_state {
+            DurableRestoreState::Ready => DurableRestoreReadiness::Ready,
+            DurableRestoreState::Pending => DurableRestoreReadiness::Pending,
+        }
+    }
 }
 
 impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
@@ -954,13 +1012,9 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
         msg: RestoreDurableRoomState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match msg.store.load_room_state(&self.room.room_jid).await {
+        match msg.store.load_room_state_fenced(&self.room.room_jid).await {
             Ok(Some(state)) => {
-                self.room.waddle_id = state.waddle_id;
-                self.room.channel_id = state.channel_id;
-                self.replace_config(state.config);
-                self.room.subject = state.subject;
-                self.room.restore_affiliations(state.affiliations);
+                self.install_durable_room_state(state);
                 self.restore_state = DurableRestoreState::Ready;
             }
             Ok(None) => {

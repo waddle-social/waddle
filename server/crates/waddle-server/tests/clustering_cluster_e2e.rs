@@ -1826,15 +1826,12 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
 /// the steal-intent veto path (Slice 3, element 4's "Unwedge" text) —
 /// proving the veto scan's health-check-fails branch reaches a real
 /// `RoomActor` through `RoomLocalClaims`, not just `self_fence.rs`'s own
-/// `FakeLocalClaims` unit tests. "Genuinely wedged" is produced by wiring
-/// a `MucDurableStore` whose `load_room_state` future never resolves: the
-/// room registry enqueues `RestoreDurableRoomState` as the very first
-/// message in the freshly spawned actor's FIFO mailbox (element 7's
-/// restore-before-join ordering), so the actor's mailbox loop is
-/// genuinely, durably stuck processing it — exactly the "wedged, not
-/// merely slow" precondition the veto scan's health-check-fails branch
-/// requires, reusing this slice's own restore mechanism as the wedge
-/// point rather than a synthetic one.
+/// `FakeLocalClaims` unit tests. "Genuinely wedged" is produced only after
+/// the room has completed durable restore and been published: its next
+/// config persist never resolves, so the actor's mailbox loop is genuinely,
+/// durably stuck processing a production mutation ahead of the health check.
+/// This preserves the "wedged, not merely slow" precondition without asking
+/// the registry to publish an actor whose initial restore never completed.
 ///
 /// No cross-node proxy/production steal-intent reporter exists this phase
 /// (Slice 3's `report_steal_intent` has no production caller until a
@@ -1861,7 +1858,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use waddle_server::clustering::ClusteringReadiness;
     use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
     use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
-    use waddle_xmpp::muc::room_actor::HealthCheck;
+    use waddle_xmpp::muc::room_actor::{HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -1882,15 +1879,22 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         .await
         .expect("clean steal intents");
 
-    // A `MucDurableStore` whose `load_room_state` never resolves — the
-    // wedge point, per this test's own doc comment.
+    // Initial restore succeeds so the room can be published. Its first
+    // durable config mutation is the deliberate post-publication wedge.
     struct HangingDurableStore;
     impl MucDurableStore for HangingDurableStore {
         fn load_room_state<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            Box::pin(pending()) as Pin<Box<_>>
+            Box::pin(async { Ok(None) })
+        }
+
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            self.load_room_state(room_jid)
         }
 
         fn save_config<'a>(
@@ -1900,7 +1904,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
             _channel_id: &'a str,
             _config: &'a RoomConfig,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            Box::pin(pending()) as Pin<Box<_>>
         }
 
         fn save_subject<'a>(
@@ -1963,10 +1967,15 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         .expect("get_or_create_room genuinely claims and spawns the room")
         .actor_ref;
 
-    // Confirm genuinely wedged before proceeding: a bounded health-ask
-    // must fail to complete (the actor's mailbox loop is stuck processing
-    // `RestoreDurableRoomState`, ahead of `HealthCheck` in its FIFO
-    // mailbox).
+    actor_ref
+        .tell(UpdateConfig {
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("enqueue post-publication mutation wedge");
+
+    // Confirm genuinely wedged before proceeding: the config update is FIFO
+    // ahead of this bounded health ask and cannot finish its durable persist.
     let health = actor_ref
         .ask(HealthCheck)
         .mailbox_timeout(Duration::from_millis(300))

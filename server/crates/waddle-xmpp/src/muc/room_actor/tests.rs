@@ -3467,6 +3467,14 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         Box::pin(async { Ok(None) })
     }
 
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
+    }
+
     fn save_config<'a>(
         &'a self,
         _room_jid: &'a BareJid,
@@ -3572,6 +3580,14 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         Box::pin(async { Ok(None) })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
     }
 
     fn save_config<'a>(
@@ -3685,6 +3701,14 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
                 }))
             }
         })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
     }
 
     fn save_config<'a>(

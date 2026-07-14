@@ -433,6 +433,13 @@ mod resolver_sync_retry_tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            self.load_room_state(room_jid)
+        }
+
         fn save_config<'a>(
             &'a self,
             _room_jid: &'a BareJid,

@@ -273,6 +273,81 @@ impl PostgresMucRoomStore {
             )))
         }
     }
+
+    async fn load_room_state_in_tx(
+        tx: &mut Transaction<'_>,
+        room_jid: &BareJid,
+    ) -> Result<Option<DurableRoomState>, XmppError> {
+        let mut room_rows = tx
+            .query(
+                "SELECT waddle_id, channel_id, config_json, subject_json FROM \
+                 clustering_muc_rooms WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        let Some(row) = room_rows.next().await.map_err(db_err)? else {
+            return Ok(None);
+        };
+        let waddle_id: String = row.get(0).map_err(db_err)?;
+        let channel_id: String = row.get(1).map_err(db_err)?;
+        let config_json: String = row.get(2).map_err(db_err)?;
+        let subject_json: Option<String> = row.get(3).map_err(db_err)?;
+        let config: RoomConfig = serde_json::from_str(&config_json).map_err(|error| {
+            XmppError::internal(format!("durable room config decode failed: {error}"))
+        })?;
+        let subject: Option<SubjectState> = subject_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| {
+                XmppError::internal(format!("durable room subject decode failed: {error}"))
+            })?;
+
+        let mut affiliation_rows = tx
+            .query(
+                "SELECT member_jid, affiliation, reason FROM \
+                 clustering_muc_room_affiliations WHERE room_jid = ?",
+                crate::db_params![room_jid.to_string()],
+            )
+            .await
+            .map_err(db_err)?;
+        let mut affiliations = Vec::new();
+        while let Some(row) = affiliation_rows.next().await.map_err(db_err)? {
+            let member_jid: String = row.get(0).map_err(db_err)?;
+            let affiliation_str: String = row.get(1).map_err(db_err)?;
+            let reason: Option<String> = row.get(2).map_err(db_err)?;
+            let Ok(jid) = member_jid.parse::<BareJid>() else {
+                tracing::warn!(
+                    room = %room_jid,
+                    member_jid,
+                    "durable affiliation row has an unparseable member JID; skipping"
+                );
+                continue;
+            };
+            let Some(affiliation) = affiliation_from_db_str(&affiliation_str) else {
+                tracing::warn!(
+                    room = %room_jid,
+                    affiliation = affiliation_str,
+                    "durable affiliation row has an unrecognized affiliation tag; skipping"
+                );
+                continue;
+            };
+            affiliations.push(AffiliationEntry {
+                jid,
+                affiliation,
+                granted_at: None,
+                reason,
+            });
+        }
+
+        Ok(Some(DurableRoomState {
+            waddle_id,
+            channel_id,
+            config,
+            subject,
+            affiliations,
+        }))
+    }
 }
 
 impl MucDurableStore for PostgresMucRoomStore {
@@ -281,76 +356,34 @@ impl MucDurableStore for PostgresMucRoomStore {
         room_jid: &'a BareJid,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
         Box::pin(async move {
-            let conn = self.db.guard().await.map_err(db_err)?;
-            let mut room_rows = conn
-                .query(
-                    "SELECT waddle_id, channel_id, config_json, subject_json FROM \
-                     clustering_muc_rooms WHERE room_jid = ?",
-                    crate::db_params![room_jid.to_string()],
-                )
+            let mut tx = self.db.begin().await.map_err(db_err)?;
+            tx.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+                (),
+            )
+            .await
+            .map_err(db_err)?;
+            let state = Self::load_room_state_in_tx(&mut tx, room_jid).await?;
+            tx.commit().await.map_err(db_err)?;
+            Ok(state)
+        })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+        Box::pin(async move {
+            let fence = self.fence_for(room_jid)?;
+            let _identity_guard = self.guard_fence_identity(room_jid, &fence).await?;
+            let mut tx = self.db.begin().await.map_err(db_err)?;
+            tx.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", ())
                 .await
                 .map_err(db_err)?;
-            let Some(row) = room_rows.next().await.map_err(db_err)? else {
-                return Ok(None);
-            };
-            let waddle_id: String = row.get(0).map_err(db_err)?;
-            let channel_id: String = row.get(1).map_err(db_err)?;
-            let config_json: String = row.get(2).map_err(db_err)?;
-            let subject_json: Option<String> = row.get(3).map_err(db_err)?;
-            let config: RoomConfig = serde_json::from_str(&config_json).map_err(|error| {
-                XmppError::internal(format!("durable room config decode failed: {error}"))
-            })?;
-            let subject: Option<SubjectState> = subject_json
-                .map(|json| serde_json::from_str(&json))
-                .transpose()
-                .map_err(|error| {
-                    XmppError::internal(format!("durable room subject decode failed: {error}"))
-                })?;
-
-            let mut affiliation_rows = conn
-                .query(
-                    "SELECT member_jid, affiliation, reason FROM \
-                     clustering_muc_room_affiliations WHERE room_jid = ?",
-                    crate::db_params![room_jid.to_string()],
-                )
-                .await
-                .map_err(db_err)?;
-            let mut affiliations = Vec::new();
-            while let Some(row) = affiliation_rows.next().await.map_err(db_err)? {
-                let member_jid: String = row.get(0).map_err(db_err)?;
-                let affiliation_str: String = row.get(1).map_err(db_err)?;
-                let reason: Option<String> = row.get(2).map_err(db_err)?;
-                let Ok(jid) = member_jid.parse::<BareJid>() else {
-                    tracing::warn!(
-                        room = %room_jid,
-                        member_jid,
-                        "durable affiliation row has an unparseable member JID; skipping"
-                    );
-                    continue;
-                };
-                let Some(affiliation) = affiliation_from_db_str(&affiliation_str) else {
-                    tracing::warn!(
-                        room = %room_jid,
-                        affiliation = affiliation_str,
-                        "durable affiliation row has an unrecognized affiliation tag; skipping"
-                    );
-                    continue;
-                };
-                affiliations.push(AffiliationEntry {
-                    jid,
-                    affiliation,
-                    granted_at: None,
-                    reason,
-                });
-            }
-
-            Ok(Some(DurableRoomState {
-                waddle_id,
-                channel_id,
-                config,
-                subject,
-                affiliations,
-            }))
+            self.assert_fenced(&mut tx, room_jid, &fence).await?;
+            let state = Self::load_room_state_in_tx(&mut tx, room_jid).await?;
+            tx.commit().await.map_err(db_err)?;
+            Ok(state)
         })
     }
 
