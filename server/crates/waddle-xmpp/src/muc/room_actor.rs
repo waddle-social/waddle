@@ -446,6 +446,11 @@ pub enum RoomActorError {
     /// ownership-gap bounce.
     #[error("durable room-state restore has not yet completed; retry")]
     RestorePending,
+    /// An admission could not prove that this actor still owns the room.
+    /// The caller should return a wait-class error and retry via the registry
+    /// rather than admitting into an uncertain incarnation.
+    #[error("room ownership could not be confirmed; retry")]
+    OwnershipUnavailable,
 }
 
 impl RoomActor {
@@ -557,6 +562,31 @@ impl RoomActor {
                      join attempt (fail-closed, FIX 4)"
                 );
                 Err(RoomActorError::RestorePending)
+            }
+        }
+    }
+
+    /// A join does not naturally pass through the mutation fence before it
+    /// admits an occupant. Fail closed here to keep a deposed but
+    /// still-referenced actor from admitting either a returning occupant or
+    /// the creator whose registry acquisition raced an ownership change.
+    async fn gate_join_ownership(&mut self) -> Result<(), RoomActorError> {
+        let Some(store) = self.durable_store.clone() else {
+            return Ok(());
+        };
+        match store.check_fenced_fanout(&self.room.room_jid).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.sealed = true;
+                Err(RoomActorError::RoomSealed)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %error,
+                    "join ownership gate failed; refusing admission"
+                );
+                Err(RoomActorError::OwnershipUnavailable)
             }
         }
     }

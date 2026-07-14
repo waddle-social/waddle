@@ -371,6 +371,58 @@ impl RoomRegistryActor {
         true
     }
 
+    /// Resolve every exact terminal-release responsibility for this room
+    /// before attempting a new demand claim. A timed-out release can commit
+    /// after its future is dropped; self-reacquiring that still-present exact
+    /// epoch would let the late delete remove a newly published actor's claim.
+    /// Only typed `Released`/`NotOwned` outcomes clear these entries.
+    async fn converge_pending_room_releases_before_acquire(&mut self, room_jid: &BareJid) -> bool {
+        let pending = self
+            .pending_room_releases
+            .keys()
+            .filter(|(pending_room, _)| pending_room == room_jid)
+            .map(|(_, claim_fence)| claim_fence.clone())
+            .collect::<Vec<_>>();
+        for claim_fence in pending {
+            self.release_room_claim(room_jid, &claim_fence).await;
+        }
+        !self
+            .pending_room_releases
+            .keys()
+            .any(|(pending_room, _)| pending_room == room_jid)
+    }
+
+    /// Reclaimed epochs use a separate bounded retry inventory because they
+    /// arrive from the dead-owner sweeper. They carry the same late-delete
+    /// hazard as ordinary releases, so demand must converge every exact
+    /// generation for this room before acquiring a fresh claim. A bare-JID
+    /// reservation has no exact epoch to fence and therefore blocks demand
+    /// until the reaper replaces it with typed state.
+    async fn converge_pending_reclaimed_before_acquire(&mut self, room_jid: &BareJid) -> bool {
+        if self.pending_reclaimed_reservations.contains(room_jid) {
+            return false;
+        }
+        let pending = self
+            .pending_reclaimed_rooms
+            .iter()
+            .filter(|((pending_room, _), _)| pending_room == room_jid)
+            .map(|((_, claim_fence), state)| (claim_fence.clone(), state.previous_owner.clone()))
+            .collect::<Vec<_>>();
+        for (claim_fence, previous_owner) in pending {
+            let outcome = self
+                .release_reclaimed_room_claim(room_jid, &claim_fence, &previous_owner)
+                .await;
+            if outcome == ReclaimedRoomOutcome::PendingRetry {
+                return false;
+            }
+        }
+        !self.pending_reclaimed_reservations.contains(room_jid)
+            && !self
+                .pending_reclaimed_rooms
+                .keys()
+                .any(|(pending_room, _)| pending_room == room_jid)
+    }
+
     async fn retry_pending_room_work(&mut self, limit: usize) -> usize {
         enum RetryWork {
             Acquisition(BareJid, NodeIdentity),
@@ -482,6 +534,16 @@ impl RoomRegistryActor {
         actor_ref: &ActorRef<Self>,
     ) -> Result<super::RoomClaimFenceContext, RoomRegistryError> {
         if self.terminal_claim_acquisition_disabled {
+            return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
+        }
+        if !self
+            .converge_pending_reclaimed_before_acquire(room_jid)
+            .await
+            || !self
+                .converge_pending_room_releases_before_acquire(room_jid)
+                .await
+        {
+            warn!(room = %room_jid, "room claim acquisition deferred until exact-release ambiguity converges");
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
         }
         // A newly acquired generation can require an exact terminal-release
@@ -739,13 +801,6 @@ impl RoomRegistryActor {
         claim_fence: super::RoomClaimFenceContext,
     ) {
         self.clear_pending_room_acquisition(&room_jid, &claim_fence.owner());
-        // A timed-out release may not have committed, so a later demand can
-        // self-reacquire and publish this identical owner+epoch fence. Once
-        // the fence backs a live actor it is no longer a terminal-release
-        // responsibility; leaving it queued would let a stale retry delete
-        // the live claim. Cancel only the exact match so ABA-distinct
-        // generations for this room remain independently retryable.
-        self.clear_pending_room_release(&room_jid, &claim_fence);
         if let Some(store) = &self.durable_store {
             store.record_claim_fence(&room_jid, claim_fence.clone());
         }
@@ -1170,9 +1225,6 @@ pub enum ReclaimedRoomOutcome {
     /// Demand-side creation already installed a live actor under this exact
     /// fenced epoch; no duplicate was spawned.
     AlreadyLive,
-    /// A live local actor from this process's prior node identity adopted
-    /// the newly fenced epoch in place, preserving its in-memory room state.
-    AdoptedLocal,
     /// No durable room state existed, so the otherwise-unusable orphan claim
     /// was released for ordinary demand-side recreation.
     Released,
@@ -1559,6 +1611,9 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             }
         };
         if !still_owned {
+            if let Some(store) = &self.durable_store {
+                store.forget_claim_fence(&msg.room_jid, &claim_fence);
+            }
             self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
             return ReclaimedRoomOutcome::LostRace;
         }
@@ -1569,64 +1624,12 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                     return ReclaimedRoomOutcome::AlreadyLive;
                 }
-                if entry.claim_fence.owner() == msg.previous_owner {
-                    // The actor is exactly the one whose claim the reaper
-                    // observed and replaced. It may safely adopt the new
-                    // epoch without discarding its in-memory state. Recheck
-                    // after the earlier fence await and immediately before
-                    // mutating the live map.
-                    if self.node_identity.current() != identity {
-                        self.remember_pending_reclaimed_room(
-                            msg.room_jid,
-                            claim_fence,
-                            msg.previous_owner,
-                        );
-                        return ReclaimedRoomOutcome::PendingRetry;
-                    }
-                    match tokio::time::timeout(
-                        RECLAIMED_ROOM_STORE_TIMEOUT,
-                        self.claim_store.fence(&entity, &identity, claim_epoch),
-                    )
-                    .await
-                    {
-                        Ok(Ok(true)) => {}
-                        Ok(Ok(false)) => {
-                            self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-                            return ReclaimedRoomOutcome::LostRace;
-                        }
-                        Ok(Err(_)) | Err(_) => {
-                            self.remember_pending_reclaimed_room(
-                                msg.room_jid,
-                                claim_fence,
-                                msg.previous_owner,
-                            );
-                            return ReclaimedRoomOutcome::PendingRetry;
-                        }
-                    }
-                    let identity_handle = self.node_identity.clone();
-                    let Some(_identity_guard) = identity_handle.guard_if_current(&identity).await
-                    else {
-                        self.remember_pending_reclaimed_room(
-                            msg.room_jid,
-                            claim_fence,
-                            msg.previous_owner,
-                        );
-                        return ReclaimedRoomOutcome::PendingRetry;
-                    };
-                    if let Some(current) = self.rooms.get_mut(&msg.room_jid) {
-                        current.claim_fence = claim_fence.clone();
-                    }
-                    if let Some(store) = &self.durable_store {
-                        store.record_claim_fence(&msg.room_jid, claim_fence.clone());
-                    }
-                    self.clear_pending_room_release(&msg.room_jid, &claim_fence);
-                    self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-                    return ReclaimedRoomOutcome::AdoptedLocal;
-                }
-
-                // Another owner intervened after this local actor was
-                // created. Its state is stale relative to the durable
-                // snapshot, so never transplant it onto the won epoch.
+                // Never transplant a live actor onto a new epoch. An earlier
+                // mailbox mutation may still be running under the old fence;
+                // changing only the registry/store fence would let that actor
+                // retain memory which was never durably authorized under the
+                // new owner. Replace it and hydrate a clean actor from a
+                // freshly fenced durable snapshot instead.
                 entry.actor_ref.kill();
             }
             self.rooms.remove(&msg.room_jid);
@@ -1680,6 +1683,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
         {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
+                store.forget_claim_fence(&msg.room_jid, &claim_fence);
                 self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                 return ReclaimedRoomOutcome::LostRace;
             }
@@ -1720,6 +1724,9 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
                 actor_ref.kill();
+                if let Some(store) = &self.durable_store {
+                    store.forget_claim_fence(&msg.room_jid, &claim_fence);
+                }
                 self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
                 return ReclaimedRoomOutcome::LostRace;
             }
@@ -1973,6 +1980,13 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         // lease is what it takes to look stale (bounded residual gap,
         // same class as FIX 6e's fail-open-detach gap).
         if let Some(entry) = removed_entry {
+            if msg.reason == DestroyRoomReason::DeposedEviction {
+                // Removal from the registry is not itself a terminal signal
+                // to a RoomActor. A caller may still hold an ActorRef and the
+                // best-effort Demote notification may never arrive, so kill
+                // the deposed incarnation before dropping our last entry.
+                entry.actor_ref.kill();
+            }
             self.release_room_claim(&msg.room_jid, &entry.claim_fence)
                 .await;
         }

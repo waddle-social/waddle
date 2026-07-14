@@ -969,6 +969,24 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
+                        waddle_xmpp::muc::room_actor::RoomActorError::OwnershipUnavailable
+                    )
+                ) {
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::ResourceConstraint,
+                            "en",
+                            "This room's ownership is being reconciled; please retry.",
+                        ),
+                    )];
+                }
+                if matches!(
+                    &error,
+                    kameo::error::SendError::HandlerError(
                         waddle_xmpp::muc::room_actor::RoomActorError::RoomFull
                     )
                 ) {

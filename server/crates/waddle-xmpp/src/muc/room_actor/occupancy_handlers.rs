@@ -57,6 +57,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         // unresolved (a genuine backend failure, not a legitimate brand
         // -new room) — see `RoomActor::ensure_restored_before_join`.
         self.ensure_restored_before_join().await?;
+        self.gate_join_ownership().await?;
         if self.invite_rollback_pending(&msg.sender_jid.to_bare()) {
             return Err(RoomActorError::InviteRollbackPending);
         }
@@ -626,6 +627,9 @@ pub enum ResolverAffiliationSyncOutcome {
     StaleAdmissionRevision,
     /// The actor is sealed pending destruction (#1108); nothing to sync.
     RoomSealed,
+    /// Exact room ownership could not be proven, so the resolver result was
+    /// not allowed to mutate this actor's affiliation memory.
+    OwnershipUnavailable,
     /// An invite compensation owns the invitee affiliation until its
     /// terminal result is acknowledged.
     InviteRollbackPending,
@@ -641,6 +645,13 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
     ) -> Self::Reply {
         if self.sealed {
             return ResolverAffiliationSyncOutcome::RoomSealed;
+        }
+        match self.gate_join_ownership().await {
+            Ok(()) => {}
+            Err(RoomActorError::RoomSealed) => {
+                return ResolverAffiliationSyncOutcome::RoomSealed;
+            }
+            Err(_) => return ResolverAffiliationSyncOutcome::OwnershipUnavailable,
         }
         if self.invite_rollback_pending(&msg.jid) {
             return ResolverAffiliationSyncOutcome::InviteRollbackPending;
