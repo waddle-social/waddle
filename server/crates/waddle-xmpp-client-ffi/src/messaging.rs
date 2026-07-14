@@ -32,8 +32,7 @@ impl WaddleClient {
         {
             Ok(page) => mam_page_to_ffi(page),
             Err(e) => {
-                self.listener
-                    .on_error(format!("fetch_room_history failed: {e}"));
+                self.emit_error(format!("fetch_room_history failed: {e}"));
                 empty_mam_page()
             }
         }
@@ -55,8 +54,7 @@ impl WaddleClient {
         {
             Ok(page) => mam_page_to_ffi(page),
             Err(e) => {
-                self.listener
-                    .on_error(format!("fetch_dm_history failed: {e}"));
+                self.emit_error(format!("fetch_dm_history failed: {e}"));
                 empty_mam_page()
             }
         }
@@ -71,7 +69,7 @@ impl WaddleClient {
         let room_jid = match room_jid.parse::<BareJid>() {
             Ok(jid) => jid,
             Err(e) => {
-                self.listener.on_error(format!(
+                self.emit_error(format!(
                     "send_groupchat_message failed: invalid room JID: {e}"
                 ));
                 return WaddleSendMessageOutcome::InvalidRecipient;
@@ -80,8 +78,7 @@ impl WaddleClient {
         let opts = match options.map(send_options_from_ffi).transpose() {
             Ok(o) => o.unwrap_or_default(),
             Err(e) => {
-                self.listener
-                    .on_error(format!("send_groupchat_message failed: {e}"));
+                self.emit_error(format!("send_groupchat_message failed: {e}"));
                 return WaddleSendMessageOutcome::InvalidOptions;
             }
         };
@@ -97,8 +94,7 @@ impl WaddleClient {
                 stanza_id: stanza_id.to_string(),
             },
             Err(e) => {
-                self.listener
-                    .on_error(format!("send_groupchat_message failed: {e}"));
+                self.emit_error(format!("send_groupchat_message failed: {e}"));
                 send_failure_outcome(&e)
             }
         }
@@ -113,16 +109,14 @@ impl WaddleClient {
         let peer_jid = match peer_jid.parse::<Jid>() {
             Ok(jid) => jid,
             Err(e) => {
-                self.listener
-                    .on_error(format!("send_chat_message failed: invalid peer JID: {e}"));
+                self.emit_error(format!("send_chat_message failed: invalid peer JID: {e}"));
                 return WaddleSendMessageOutcome::InvalidRecipient;
             }
         };
         let opts = match options.map(send_options_from_ffi).transpose() {
             Ok(o) => o.unwrap_or_default(),
             Err(e) => {
-                self.listener
-                    .on_error(format!("send_chat_message failed: {e}"));
+                self.emit_error(format!("send_chat_message failed: {e}"));
                 return WaddleSendMessageOutcome::InvalidOptions;
             }
         };
@@ -138,8 +132,7 @@ impl WaddleClient {
                 stanza_id: stanza_id.to_string(),
             },
             Err(e) => {
-                self.listener
-                    .on_error(format!("send_chat_message failed: {e}"));
+                self.emit_error(format!("send_chat_message failed: {e}"));
                 send_failure_outcome(&e)
             }
         }
@@ -151,7 +144,7 @@ impl WaddleClient {
         };
 
         if let Err(e) = handle.join_room(&room_jid, &nick).await {
-            self.listener.on_error(format!("join_room failed: {e}"));
+            self.emit_error(format!("join_room failed: {e}"));
         }
     }
 
@@ -161,7 +154,7 @@ impl WaddleClient {
         };
 
         if let Err(e) = handle.leave_room(&room_jid, &nick).await {
-            self.listener.on_error(format!("leave_room failed: {e}"));
+            self.emit_error(format!("leave_room failed: {e}"));
         }
     }
 
@@ -174,7 +167,7 @@ impl WaddleClient {
         match handle.discover_topology(server_domain).await {
             Ok(topology) => topology_to_ffi(topology),
             Err(e) => {
-                self.listener.on_error(format!(
+                self.emit_error(format!(
                     "discover_topology failed: server_domain={server_domain} error={e}"
                 ));
                 empty_topology()
@@ -196,7 +189,7 @@ impl WaddleClient {
             .send_presence(status.as_deref(), show.as_deref(), idle_since.as_deref())
             .await
         {
-            self.listener.on_error(format!("send_presence failed: {e}"));
+            self.emit_error(format!("send_presence failed: {e}"));
         }
     }
 
@@ -208,8 +201,7 @@ impl WaddleClient {
         let bare: BareJid = match jid.parse() {
             Ok(j) => j,
             Err(e) => {
-                self.listener
-                    .on_error(format!("Invalid JID for avatar fetch: {e}"));
+                self.emit_error(format!("Invalid JID for avatar fetch: {e}"));
                 return None;
             }
         };
@@ -225,8 +217,7 @@ impl WaddleClient {
             }),
             Ok(None) => None,
             Err(e) => {
-                self.listener
-                    .on_error(format!("request_avatar failed: {e}"));
+                self.emit_error(format!("request_avatar failed: {e}"));
                 None
             }
         }
@@ -241,8 +232,7 @@ impl WaddleClient {
         {
             Ok(service_jid) => service_jid,
             Err(e) => {
-                self.listener
-                    .on_error(format!("discover_upload_service failed: {e}"));
+                self.emit_error(format!("discover_upload_service failed: {e}"));
                 None
             }
         }
@@ -263,8 +253,7 @@ impl WaddleClient {
         {
             Ok(slot) => Some(upload_slot_to_ffi(slot)),
             Err(e) => {
-                self.listener
-                    .on_error(format!("request_upload_slot failed: {e}"));
+                self.emit_error(format!("request_upload_slot failed: {e}"));
                 None
             }
         }

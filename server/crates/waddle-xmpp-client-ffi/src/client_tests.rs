@@ -1,9 +1,8 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::{WaddleArchivedMessage, WaddleCallEvent, WaddleMessage, WaddlePresence};
 use crate::{
-    WaddleClient, WaddleConfig, WaddleEncryptedFile, WaddleEventListener, WaddleSendMessageOutcome,
-    WaddleSendOptions, WaddleSharedFile,
+    WaddleClient, WaddleClientEvent, WaddleConfig, WaddleEncryptedFile, WaddleEventListener,
+    WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile,
 };
 
 #[derive(Clone, Default)]
@@ -18,25 +17,11 @@ impl RecordingListener {
 }
 
 impl WaddleEventListener for RecordingListener {
-    fn on_message(&self, _message: WaddleMessage) {}
-
-    fn on_presence(&self, _presence: WaddlePresence) {}
-
-    fn on_mam_result(&self, _message: WaddleArchivedMessage) {}
-
-    fn on_message_delivery_acked(&self, _stanza_id: String) {}
-
-    fn on_message_delivery_failed(&self, _stanza_id: String) {}
-
-    fn on_connected(&self) {}
-
-    fn on_disconnected(&self) {}
-
-    fn on_error(&self, description: String) {
-        self.errors.lock().unwrap().push(description);
+    fn on_event(&self, event: WaddleClientEvent) {
+        if let WaddleClientEvent::Error { description } = event {
+            self.errors.lock().unwrap().push(description);
+        }
     }
-
-    fn on_call(&self, _event: WaddleCallEvent) {}
 }
 
 fn test_client(listener: RecordingListener) -> Arc<WaddleClient> {
@@ -46,6 +31,7 @@ fn test_client(listener: RecordingListener) -> Arc<WaddleClient> {
             jid: "alice@waddle.test".to_string(),
             access_token: "token".to_string(),
             resource: "test".to_string(),
+            resume_state: None,
         },
         listener: Arc::new(Box::new(listener) as Box<dyn WaddleEventListener>),
         handle: tokio::sync::Mutex::new(None),

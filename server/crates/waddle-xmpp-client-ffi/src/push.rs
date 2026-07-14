@@ -19,8 +19,7 @@ impl WaddleClient {
         {
             Ok(()) => true,
             Err(e) => {
-                self.listener
-                    .on_error(format!("enable_push_notifications failed: {e}"));
+                self.emit_error(format!("enable_push_notifications failed: {e}"));
                 false
             }
         }
@@ -42,8 +41,7 @@ impl WaddleClient {
         {
             Ok(()) => true,
             Err(e) => {
-                self.listener
-                    .on_error(format!("disable_push_notifications failed: {e}"));
+                self.emit_error(format!("disable_push_notifications failed: {e}"));
                 false
             }
         }
@@ -70,16 +68,14 @@ impl WaddleClient {
             match waddle_xmpp_client::push::PushServiceJid::new(&push_service_jid) {
                 Ok(value) => value,
                 Err(e) => {
-                    self.listener
-                        .on_error(format!("register_push_device failed: {e}"));
+                    self.emit_error(format!("register_push_device failed: {e}"));
                     return None;
                 }
             };
         let app_id = match waddle_xmpp_client::push::PushAppId::new(&app_id) {
             Ok(value) => value,
             Err(e) => {
-                self.listener
-                    .on_error(format!("register_push_device failed: {e}"));
+                self.emit_error(format!("register_push_device failed: {e}"));
                 return None;
             }
         };
@@ -97,8 +93,7 @@ impl WaddleClient {
                 device_id: outcome.device_id.into_string(),
             }),
             Err(e) => {
-                self.listener
-                    .on_error(format!("register_push_device failed: {e}"));
+                self.emit_error(format!("register_push_device failed: {e}"));
                 None
             }
         }
@@ -129,8 +124,7 @@ impl WaddleClient {
         match handle.send_iq(iq).await {
             Ok(_) => true,
             Err(e) => {
-                self.listener
-                    .on_error(format!("disable_push_device failed: {e}"));
+                self.emit_error(format!("disable_push_device failed: {e}"));
                 false
             }
         }
