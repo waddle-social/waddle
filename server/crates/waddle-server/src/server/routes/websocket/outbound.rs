@@ -170,8 +170,8 @@ where
             // frame just before its own write, follows every
             // `ack_threshold`th one with an `<r/>`, and drains
             // already-arrived inbound `<a/>` acks after each `<r/>` so
-            // a recipient-pass burst (carbons + receipts + archive
-            // side-effects) can't pin the unacked queue at capacity.
+            // a large outbound frame batch can't pin the unacked queue
+            // at capacity.
             match write_response_batch(
                 sender,
                 reader,

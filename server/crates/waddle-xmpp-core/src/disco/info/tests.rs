@@ -217,7 +217,7 @@ fn test_server_features_include_core_features() {
     // XEP-0184: ack generation is the receiving client's job; the
     // server no longer fabricates receipts (#1247) so it must not
     // advertise the feature.
-    assert!(!features.contains(&Feature::receipts()));
+    assert!(!features.contains(&Feature::new(xmpp_parsers::ns::RECEIPTS)));
     assert!(!features.contains(&Feature::mam()));
     assert!(!features.contains(&Feature::mam_extended()));
     assert!(!features.contains(&Feature::fulltext_mam()));

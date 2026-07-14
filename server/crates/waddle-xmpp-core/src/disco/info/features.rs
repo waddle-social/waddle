@@ -66,10 +66,6 @@ impl Feature {
         Self::new(NS_CHATSTATES)
     }
 
-    pub fn receipts() -> Self {
-        Self::new("urn:xmpp:receipts")
-    }
-
     pub fn message_retraction() -> Self {
         Self::new("urn:xmpp:message-retract:1")
     }

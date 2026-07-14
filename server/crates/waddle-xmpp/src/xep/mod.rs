@@ -15,8 +15,8 @@
 //!   conversational state (active, composing, paused, inactive, gone).
 //! - **XEP-0092**: Software Version - Name and package version reported via
 //!   `jabber:iq:version`, with the optional OS field omitted by default.
-//! - **XEP-0184**: Message Delivery Receipts - Request and acknowledge
-//!   message delivery with `<request/>` and `<received/>` elements.
+//! - **XEP-0184**: Message Delivery Receipts - Transparently route
+//!   client-generated `<request/>` and `<received/>` payloads.
 //! - **XEP-0106**: JID Escaping - Escape/unescape special characters
 //!   in JID local parts using `\HH` sequences.
 //! - **XEP-0172**: User Nickname - Display name via `<nick/>` element
@@ -148,7 +148,6 @@ pub mod xep0153;
 pub mod xep0166;
 pub mod xep0167;
 pub mod xep0172;
-pub mod xep0184;
 pub mod xep0191;
 pub mod xep0199;
 pub mod xep0202;
