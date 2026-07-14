@@ -23,8 +23,13 @@ fn frame_backstop_timeout_arm_records_the_production_metric_helper() {
         .and_then(|source| source.split("self.span.record").next())
         .expect("StanzaBackstop::on_timeout source before span recording");
 
-    assert!(timeout_arm
-        .contains("metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);"));
+    let executable_calls = timeout_arm
+        .lines()
+        .filter(|line| {
+            line.trim() == "metrics::record_stanza_handler_timeout(self.kind, &self.payload_ns);"
+        })
+        .count();
+    assert_eq!(executable_calls, 1, "timeout arm must record exactly once");
 }
 
 #[test]
