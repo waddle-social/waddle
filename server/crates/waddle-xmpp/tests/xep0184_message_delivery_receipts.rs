@@ -46,12 +46,12 @@ fn has_receipt_request(message: &Message) -> bool {
 }
 
 fn received_id(message: &Message) -> Option<String> {
-    message
-        .payloads
-        .iter()
-        .find_map(|payload| Received::try_from(payload.clone()).ok())
-        .map(|receipt| receipt.id)
-        .filter(|id| !id.is_empty())
+    message.payloads.iter().find_map(|payload| {
+        Received::try_from(payload.clone())
+            .ok()
+            .map(|receipt| receipt.id)
+            .filter(|id| !id.is_empty())
+    })
 }
 
 fn has_receipt_received(message: &Message) -> bool {
@@ -117,6 +117,15 @@ fn xep0184_empty_received_id_is_not_a_usable_receipt() {
 
     assert_eq!(received_id(&message), None);
     assert!(!has_receipt_received(&message));
+
+    message.payloads.push(
+        Received {
+            id: "msg-after-empty".to_string(),
+        }
+        .into(),
+    );
+    assert_eq!(received_id(&message), Some("msg-after-empty".to_string()));
+    assert!(has_receipt_received(&message));
 }
 
 #[test]
