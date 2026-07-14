@@ -2,12 +2,15 @@ use futures::future::BoxFuture;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
@@ -55,12 +58,16 @@ impl WebSocketTransportFactory for DefaultTransportFactory {
     ) -> BoxFuture<'a, ClientResult<Box<dyn WebSocketTransport>>> {
         Box::pin(async move {
             let request = websocket_request(config)?;
+            let connector = rustls_connector()?;
             let connect_timeout = config.transport.connect_timeout;
-            let (socket, _) = timeout(connect_timeout, connect_async(request))
-                .await
-                .map_err(|_| ClientError::WebSocketConnectTimeout {
-                    timeout: connect_timeout,
-                })??;
+            let (socket, _) = timeout(
+                connect_timeout,
+                connect_async_tls_with_config(request, None, false, Some(connector)),
+            )
+            .await
+            .map_err(|_| ClientError::WebSocketConnectTimeout {
+                timeout: connect_timeout,
+            })??;
 
             Ok(Box::new(ConnectedWebSocketTransport::new(socket)) as Box<dyn WebSocketTransport>)
         })
@@ -201,6 +208,28 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
             Ok(())
         })
     }
+}
+
+/// Builds the TLS connector for `wss://` endpoints (ignored for `ws://`).
+///
+/// The connector is always rustls with the bundled webpki (Mozilla) roots and
+/// the `ring` crypto provider. Passing it explicitly — instead of relying on
+/// tokio-tungstenite's auto-connector — is load-bearing: in whole-workspace
+/// builds cargo unions our rustls features with the `native-tls` feature other
+/// workspace members enable, and the auto-connector would then prefer
+/// native-tls, silently diverging from the Android/iOS builds.
+pub(super) fn rustls_connector() -> ClientResult<Connector> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(ClientError::WebSocketTlsConfig)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
