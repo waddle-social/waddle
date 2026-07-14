@@ -2,7 +2,7 @@ use futures::future::BoxFuture;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -218,18 +218,32 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
 /// builds cargo unions our rustls features with the `native-tls` feature other
 /// workspace members enable, and the auto-connector would then prefer
 /// native-tls, silently diverging from the Android/iOS builds.
+///
+/// The config is process-cached: parsing the ~150 webpki roots on every
+/// reconnect is wasted work on mobile, where reconnects are frequent. Two
+/// racing first callers may build it twice; `get_or_init` keeps one.
 pub(super) fn rustls_connector() -> ClientResult<Connector> {
+    static TLS_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+
+    if let Some(config) = TLS_CONFIG.get() {
+        return Ok(Connector::Rustls(Arc::clone(config)));
+    }
+
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(ClientError::WebSocketTlsConfig)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config = Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(ClientError::WebSocketTlsConfig)?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
 
-    Ok(Connector::Rustls(Arc::new(config)))
+    Ok(Connector::Rustls(Arc::clone(
+        TLS_CONFIG.get_or_init(|| config),
+    )))
 }
 
 fn websocket_request(config: &ClientConfig) -> ClientResult<Request<()>> {
