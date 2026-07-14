@@ -175,7 +175,7 @@ remaining unblocked frontier.
 8. ✅ **#1290 — implement XEP-0313 `with=self` intersection semantics. DONE (PR #1309, merged).**
 9. ✅ **#1286 — advertise XEP-0085 chat-state support in entity capabilities. DONE (PR #1307, merged).**
 10. ✅ **#1291 — reject duplicate `FORM_TYPE` values across capability forms. DONE (PR #1310, merged).**
-11. ✅ **#1284 — reconcile `RoomActor` claims left by dead nodes. DONE (PR #1335, merged; exact-ownership prerequisites PRs #1332–#1334 and restart follow-up PR #1340).**
+11. ✅ **#1284 — reconcile `RoomActor` claims left by dead nodes. DONE (PR #1335, merged; exact-ownership prerequisites PRs #1332–#1334, restart follow-up PR #1340, and admission-fencing follow-up PR #1344).**
 12. #1285 — send MUC status 332 on non-resumable service shutdown.
 
 _Shared completion work: #1136 proves the handler-timeout metric end to end; its completion
