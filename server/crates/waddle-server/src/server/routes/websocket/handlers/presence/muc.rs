@@ -819,16 +819,18 @@ mod resolver_sync_retry_tests {
         )
         .await
         .expect("newer-source worker records its completion chain");
-        spawn_sync_worker_with_scheduler(
-            actor.clone(),
-            room_jid.clone(),
-            member.clone(),
-            Affiliation::Member,
-            0,
-            Arc::clone(&scheduler),
-        )
-        .await
-        .expect("out-of-order stale worker terminates");
+        assert!(matches!(
+            scheduler.schedule(
+                &room_jid,
+                &member,
+                actor.id(),
+                crate::server::routes::websocket::ResolverAffiliationSyncWork {
+                    affiliation: Affiliation::Member,
+                    expected_admission_revision: 0,
+                },
+            ),
+            crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Stale
+        ));
         spawn_sync_worker_with_scheduler(
             actor.clone(),
             room_jid,
@@ -848,7 +850,11 @@ mod resolver_sync_retry_tests {
             Affiliation::Outcast,
             "stale-source work must not erase a newer completion chain"
         );
-        assert_eq!(store.checks(), 4);
+        assert_eq!(
+            store.checks(),
+            3,
+            "stale work must not consume ownership-check or worker capacity"
+        );
     }
 
     #[tokio::test(start_paused = true)]

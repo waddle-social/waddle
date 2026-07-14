@@ -97,6 +97,16 @@ fn take_completion_revision(
         .then_some(completion.resulting_admission_revision)
 }
 
+fn has_newer_completion(
+    state: &ResolverAffiliationSyncState,
+    key: &ResolverAffiliationSyncWorkerKey,
+    source_admission_revision: u64,
+) -> bool {
+    state.recent_completions.iter().any(|completion| {
+        completion.key == *key && completion.source_admission_revision > source_admission_revision
+    })
+}
+
 fn clear_completion_through(
     state: &mut ResolverAffiliationSyncState,
     key: &ResolverAffiliationSyncWorkerKey,
@@ -223,6 +233,9 @@ impl ResolverAffiliationSyncScheduler {
                 .checked_add(1)
                 .expect("resolver sync worker version overflow");
             return ResolverAffiliationSyncSchedule::Updated;
+        }
+        if has_newer_completion(&state, &key, work.expected_admission_revision) {
+            return ResolverAffiliationSyncSchedule::Stale;
         }
         if state.workers.len() >= state.max_workers {
             waddle_xmpp::prometheus::increment_resolver_affiliation_sync_capacity_drop();
@@ -595,7 +608,7 @@ mod resolver_affiliation_sync_scheduler_tests {
     }
 
     #[test]
-    fn scheduler_stale_worker_drop_preserves_a_newer_completion() {
+    fn scheduler_rejects_stale_work_without_consuming_a_newer_completion() {
         let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
         let room: BareJid = "room@muc.example.com".parse().expect("room JID");
         let member: BareJid = "member@example.com".parse().expect("member JID");
@@ -616,13 +629,10 @@ mod resolver_affiliation_sync_scheduler_tests {
         };
         assert_eq!(newer_worker.finish_applied_or_take_update(2), None);
 
-        let ResolverAffiliationSyncSchedule::Started(stale_worker) =
-            scheduler.schedule(&room, &member, actor_id, stale)
-        else {
-            panic!("out-of-order stale repair starts independently");
-        };
-        assert_eq!(stale_worker.effective_admission_revision(), 0);
-        drop(stale_worker);
+        assert!(matches!(
+            scheduler.schedule(&room, &member, actor_id, stale),
+            ResolverAffiliationSyncSchedule::Stale
+        ));
 
         let ResolverAffiliationSyncSchedule::Started(chained_worker) =
             scheduler.schedule(&room, &member, actor_id, newer)
@@ -632,7 +642,7 @@ mod resolver_affiliation_sync_scheduler_tests {
         assert_eq!(
             chained_worker.effective_admission_revision(),
             2,
-            "stale worker cleanup must preserve a newer source revision chain"
+            "rejecting stale work must preserve the newer source revision chain"
         );
     }
 
