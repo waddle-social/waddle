@@ -51,6 +51,7 @@ fn received_id(message: &Message) -> Option<String> {
         .iter()
         .find_map(|payload| Received::try_from(payload.clone()).ok())
         .map(|receipt| receipt.id)
+        .filter(|id| !id.is_empty())
 }
 
 fn has_receipt_received(message: &Message) -> bool {
@@ -107,6 +108,15 @@ fn xep0184_server_does_not_advertise_receipts() {
     // the receiving client's job, not the server's (#1247).
     let features = server_features();
     assert!(!features.contains(&Feature::new(xmpp_parsers::ns::RECEIPTS)));
+}
+
+#[test]
+fn xep0184_empty_received_id_is_not_a_usable_receipt() {
+    let mut message = Message::new(None);
+    message.payloads.push(Received { id: String::new() }.into());
+
+    assert_eq!(received_id(&message), None);
+    assert!(!has_receipt_received(&message));
 }
 
 #[test]
