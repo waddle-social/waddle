@@ -136,6 +136,47 @@ fn parses_message_stanza() {
 }
 
 #[test]
+fn nested_message_element_does_not_truncate_the_outer_stanza() {
+    const XML: &str = r#"<message type="chat" to="bob@waddle.social" id="outer">
+        <body>outer body</body>
+        <forwarded xmlns="urn:xmpp:forward:0">
+            <message xmlns="jabber:client" type="chat" id="inner">
+                <body>inner body</body>
+            </message>
+        </forwarded>
+    </message>"#;
+
+    let frame = parse_frame(XML).expect("outer message should parse as one complete frame");
+    let InboundFrame::Stanza(stanza) = frame else {
+        panic!("expected Stanza");
+    };
+    let Stanza::Message(message) = *stanza else {
+        panic!("expected Message stanza");
+    };
+
+    assert_eq!(
+        message.bodies.values().next().map(String::as_str),
+        Some("outer body")
+    );
+    let forwarded = message
+        .payloads
+        .iter()
+        .find(|payload| payload.is("forwarded", "urn:xmpp:forward:0"))
+        .expect("forwarded payload should survive typed parsing");
+    let nested = forwarded
+        .get_child("message", CLIENT_STANZA_NS)
+        .expect("nested message should remain inside the forwarded payload");
+    assert_eq!(nested.attr("id"), Some("inner"));
+    assert_eq!(
+        nested
+            .get_child("body", CLIENT_STANZA_NS)
+            .map(Element::text)
+            .as_deref(),
+        Some("inner body")
+    );
+}
+
+#[test]
 fn xep_0201_message_thread_parent_survives_inbound_parse() {
     // RFC 6121 / XEP-0201: `<thread parent='X'>id</thread>` is the
     // wire shape for nested threads. xmpp_parsers 0.21 silently drops
