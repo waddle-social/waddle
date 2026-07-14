@@ -94,7 +94,11 @@ pub async fn handle_muc_join_with_ordered_relay(
 /// change (e.g. the re-granted user's successful join) landed in
 /// between, so a delayed sync can never clear a live occupant's fresh
 /// affiliation.
-async fn sync_resolver_affiliation_on_rejection(
+const RESOLVER_SYNC_MAX_ATTEMPTS: usize = 3;
+const RESOLVER_SYNC_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const RESOLVER_SYNC_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn sync_resolver_affiliation_on_rejection(
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
     room_jid: &BareJid,
     jid: BareJid,
@@ -104,32 +108,312 @@ async fn sync_resolver_affiliation_on_rejection(
     let Some(actor) = existing_room_actor else {
         return;
     };
-    match actor
-        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
-            jid,
-            affiliation,
-            expected_admission_revision,
-        })
-        .await
-    {
-        Ok(waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied) => {}
-        Ok(outcome) => {
-            // Best-effort staleness repair only: a refused sync means the
-            // room's admission state already moved on (or the actor is
-            // sealed) — the newer state wins.
-            debug!(
-                room = %room_jid,
-                outcome = ?outcome,
-                "Skipped resolver affiliation sync on rejected join"
-            );
+    let actor = actor.clone();
+    let room_jid = room_jid.clone();
+    // This repair must not extend the rejected stanza path. The cloned
+    // ActorRef also guarantees retries target the same existing incarnation:
+    // they never consult the registry and therefore cannot create a room.
+    // Reusing the captured revision makes every delayed attempt harmless once
+    // a newer admission or affiliation mutation has landed.
+    tokio::spawn(run_resolver_affiliation_sync_retries(
+        actor,
+        room_jid,
+        jid,
+        affiliation,
+        expected_admission_revision,
+    ));
+}
+
+async fn run_resolver_affiliation_sync_retries(
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_jid: BareJid,
+    jid: BareJid,
+    affiliation: Affiliation,
+    expected_admission_revision: u64,
+) {
+    for attempt in 1..=RESOLVER_SYNC_MAX_ATTEMPTS {
+        let result = actor
+            .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+                jid: jid.clone(),
+                affiliation,
+                expected_admission_revision,
+            })
+            .mailbox_timeout(RESOLVER_SYNC_REPLY_TIMEOUT)
+            .reply_timeout(RESOLVER_SYNC_REPLY_TIMEOUT)
+            .await;
+        match result {
+            Ok(waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied) => return,
+            Ok(
+                waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable,
+            ) if attempt < RESOLVER_SYNC_MAX_ATTEMPTS => {}
+            Ok(outcome) => {
+                // Stale revision, sealing, and invite compensation are
+                // terminal for this captured rejection decision. A final
+                // OwnershipUnavailable is also bounded here rather than
+                // keeping a detached task alive indefinitely.
+                debug!(
+                    room = %room_jid,
+                    attempt,
+                    outcome = ?outcome,
+                    "Skipped resolver affiliation sync on rejected join"
+                );
+                return;
+            }
+            Err(
+                error @ (kameo::error::SendError::MailboxFull(_)
+                | kameo::error::SendError::Timeout(Some(_))),
+            ) if attempt < RESOLVER_SYNC_MAX_ATTEMPTS => {
+                debug!(
+                    room = %room_jid,
+                    attempt,
+                    error = ?error,
+                    "Resolver affiliation sync was not delivered; retrying"
+                );
+            }
+            Err(kameo::error::SendError::Timeout(None)) => {
+                // Reply timeout starts only after mailbox delivery. The
+                // handler can still complete, so another send would queue a
+                // duplicate behind the same slow ownership check.
+                debug!(
+                    room = %room_jid,
+                    attempt,
+                    "Resolver affiliation sync reply timed out after delivery; leaving the in-flight repair authoritative"
+                );
+                return;
+            }
+            Err(error) => {
+                warn!(
+                    room = %room_jid,
+                    attempt,
+                    error = ?error,
+                    "Resolver affiliation sync retries exhausted"
+                );
+                return;
+            }
         }
-        Err(error) => {
-            warn!(
-                room = %room_jid,
-                error = ?error,
-                "Failed to sync resolver affiliation into live room actor on rejected join"
-            );
+        tokio::time::sleep(RESOLVER_SYNC_RETRY_BACKOFF).await;
+    }
+}
+
+#[cfg(test)]
+mod resolver_sync_retry_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use kameo::actor::Spawn;
+    use waddle_xmpp::muc::affiliation::AffiliationEntry;
+    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::room_actor::{GetAffiliation, RestoreDurableRoomState, RoomActor};
+    use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
+    use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
+
+    use super::*;
+
+    struct SequencedOwnershipStore {
+        failures_remaining: AtomicUsize,
+        checks: AtomicUsize,
+        hang: bool,
+        blocked_check_started: tokio::sync::Notify,
+        release_blocked_check: tokio::sync::Notify,
+    }
+
+    impl SequencedOwnershipStore {
+        fn new(failures: usize) -> Arc<Self> {
+            Arc::new(Self {
+                failures_remaining: AtomicUsize::new(failures),
+                checks: AtomicUsize::new(0),
+                hang: false,
+                blocked_check_started: tokio::sync::Notify::new(),
+                release_blocked_check: tokio::sync::Notify::new(),
+            })
         }
+
+        fn hanging() -> Arc<Self> {
+            Arc::new(Self {
+                failures_remaining: AtomicUsize::new(0),
+                checks: AtomicUsize::new(0),
+                hang: true,
+                blocked_check_started: tokio::sync::Notify::new(),
+                release_blocked_check: tokio::sync::Notify::new(),
+            })
+        }
+
+        fn checks(&self) -> usize {
+            self.checks.load(Ordering::SeqCst)
+        }
+    }
+
+    impl MucDurableStore for SequencedOwnershipStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _subject: Option<&'a SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _entry: &'a AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            let hang = self.hang;
+            let should_fail = self
+                .failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            Box::pin(async move {
+                if hang {
+                    self.blocked_check_started.notify_one();
+                    self.release_blocked_check.notified().await;
+                }
+                if should_fail {
+                    Err(waddle_xmpp::XmppError::internal(
+                        "transient ownership check failure",
+                    ))
+                } else {
+                    Ok(true)
+                }
+            })
+        }
+    }
+
+    async fn spawn_sync_test_room(
+        store: Arc<SequencedOwnershipStore>,
+    ) -> (kameo::actor::ActorRef<RoomActor>, BareJid) {
+        let room_jid: BareJid = "resolver-sync@muc.example.com".parse().expect("room JID");
+        let room = MucRoom::new(
+            room_jid.clone(),
+            "waddle-1".to_string(),
+            "channel-1".to_string(),
+            RoomConfig::default(),
+        );
+        let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+            .expect("occupant-id secret");
+        let actor = RoomActor::spawn(RoomActor::new(room, secret));
+        actor
+            .ask(RestoreDurableRoomState {
+                store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+            })
+            .await
+            .expect("install durable store");
+        (actor, room_jid)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolver_sync_retries_transient_ownership_then_applies() {
+        let store = SequencedOwnershipStore::new(1);
+        let (actor, room_jid) = spawn_sync_test_room(Arc::clone(&store)).await;
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let retry = tokio::spawn(run_resolver_affiliation_sync_retries(
+            actor.clone(),
+            room_jid,
+            member.clone(),
+            Affiliation::Member,
+            0,
+        ));
+
+        tokio::task::yield_now().await;
+        assert_eq!(store.checks(), 1, "first ownership check must fail once");
+        tokio::time::advance(RESOLVER_SYNC_RETRY_BACKOFF).await;
+        retry.await.expect("bounded retry task");
+
+        assert_eq!(store.checks(), 2, "second ownership check must retry");
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid: member })
+                .await
+                .expect("affiliation"),
+            Affiliation::Member,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolver_sync_stops_after_bounded_persistent_ownership_errors() {
+        let store = SequencedOwnershipStore::new(RESOLVER_SYNC_MAX_ATTEMPTS);
+        let (actor, room_jid) = spawn_sync_test_room(Arc::clone(&store)).await;
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let retry = tokio::spawn(run_resolver_affiliation_sync_retries(
+            actor.clone(),
+            room_jid,
+            member.clone(),
+            Affiliation::Member,
+            0,
+        ));
+
+        for expected_checks in 1..=RESOLVER_SYNC_MAX_ATTEMPTS {
+            tokio::task::yield_now().await;
+            assert_eq!(store.checks(), expected_checks);
+            if expected_checks < RESOLVER_SYNC_MAX_ATTEMPTS {
+                tokio::time::advance(RESOLVER_SYNC_RETRY_BACKOFF).await;
+            }
+        }
+        retry.await.expect("bounded retry task");
+
+        assert_eq!(store.checks(), RESOLVER_SYNC_MAX_ATTEMPTS);
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid: member })
+                .await
+                .expect("affiliation"),
+            Affiliation::None,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolver_sync_does_not_duplicate_after_delivered_reply_timeout() {
+        let store = SequencedOwnershipStore::hanging();
+        let (actor, room_jid) = spawn_sync_test_room(Arc::clone(&store)).await;
+        let member: BareJid = "member@example.com".parse().expect("member JID");
+        let retry = tokio::spawn(run_resolver_affiliation_sync_retries(
+            actor.clone(),
+            room_jid,
+            member.clone(),
+            Affiliation::Member,
+            0,
+        ));
+
+        store.blocked_check_started.notified().await;
+        tokio::time::advance(RESOLVER_SYNC_REPLY_TIMEOUT).await;
+        retry.await.expect("reply timeout ends the retry task");
+        store.release_blocked_check.notify_one();
+
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid: member })
+                .await
+                .expect("affiliation after the delivered repair completes"),
+            Affiliation::Member,
+        );
+        assert_eq!(
+            store.checks(),
+            1,
+            "a reply timeout must not enqueue duplicate repair messages"
+        );
     }
 }
 
@@ -546,8 +830,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         sender_jid.to_bare(),
                         Affiliation::Outcast,
                         admission_revision,
-                    )
-                    .await;
+                    );
                     return vec![build_muc_presence_error_xml(
                         room_jid,
                         &nick,
@@ -576,8 +859,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             sender_jid.to_bare(),
                             Affiliation::None,
                             admission_revision,
-                        )
-                        .await;
+                        );
                         return vec![build_muc_presence_error_xml(
                             room_jid,
                             &nick,

@@ -899,6 +899,13 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.sealed {
             return Err(RoomActorError::RoomSealed);
         }
+        // `Join` predates the resolver-aware admission message, but it is
+        // still reachable by internal callers holding an ActorRef. Apply the
+        // same fail-closed restore and ownership gates as
+        // `JoinWithAffiliation`; otherwise a stale reference could admit an
+        // occupant after this room's durable claim moved to another node.
+        self.ensure_restored_before_join().await?;
+        self.gate_join_ownership().await?;
         if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
             return Err(RoomActorError::InviteRollbackPending);
         }

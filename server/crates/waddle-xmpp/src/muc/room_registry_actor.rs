@@ -376,7 +376,11 @@ impl RoomRegistryActor {
     /// after its future is dropped; self-reacquiring that still-present exact
     /// epoch would let the late delete remove a newly published actor's claim.
     /// Only typed `Released`/`NotOwned` outcomes clear these entries.
-    async fn converge_pending_room_releases_before_acquire(&mut self, room_jid: &BareJid) -> bool {
+    async fn converge_pending_room_releases_before_acquire(
+        &mut self,
+        room_jid: &BareJid,
+        deadline: tokio::time::Instant,
+    ) -> bool {
         let pending = self
             .pending_room_releases
             .keys()
@@ -384,7 +388,23 @@ impl RoomRegistryActor {
             .map(|(_, claim_fence)| claim_fence.clone())
             .collect::<Vec<_>>();
         for claim_fence in pending {
-            self.release_room_claim(room_jid, &claim_fence).await;
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return false;
+            };
+            self.release_room_claim_with_timeout(
+                room_jid,
+                &claim_fence,
+                remaining.min(ROOM_OWNERSHIP_CALL_TIMEOUT),
+                ClaimReleaseContext::PreAcquire,
+            )
+            .await;
+            if self
+                .pending_room_releases
+                .contains_key(&(room_jid.clone(), claim_fence))
+            {
+                return false;
+            }
         }
         !self
             .pending_room_releases
@@ -398,7 +418,11 @@ impl RoomRegistryActor {
     /// generation for this room before acquiring a fresh claim. A bare-JID
     /// reservation has no exact epoch to fence and therefore blocks demand
     /// until the reaper replaces it with typed state.
-    async fn converge_pending_reclaimed_before_acquire(&mut self, room_jid: &BareJid) -> bool {
+    async fn converge_pending_reclaimed_before_acquire(
+        &mut self,
+        room_jid: &BareJid,
+        deadline: tokio::time::Instant,
+    ) -> bool {
         if self.pending_reclaimed_reservations.contains(room_jid) {
             return false;
         }
@@ -409,8 +433,17 @@ impl RoomRegistryActor {
             .map(|((_, claim_fence), state)| (claim_fence.clone(), state.previous_owner.clone()))
             .collect::<Vec<_>>();
         for (claim_fence, previous_owner) in pending {
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return false;
+            };
             let outcome = self
-                .release_reclaimed_room_claim(room_jid, &claim_fence, &previous_owner)
+                .release_reclaimed_room_claim_with_timeout(
+                    room_jid,
+                    &claim_fence,
+                    &previous_owner,
+                    remaining.min(RECLAIMED_ROOM_RELEASE_TIMEOUT),
+                )
                 .await;
             if outcome == ReclaimedRoomOutcome::PendingRetry {
                 return false;
@@ -536,14 +569,15 @@ impl RoomRegistryActor {
         if self.terminal_claim_acquisition_disabled {
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
         }
+        let convergence_deadline = tokio::time::Instant::now() + PRE_ACQUIRE_CONVERGENCE_BUDGET;
         if !self
-            .converge_pending_reclaimed_before_acquire(room_jid)
+            .converge_pending_reclaimed_before_acquire(room_jid, convergence_deadline)
             .await
             || !self
-                .converge_pending_room_releases_before_acquire(room_jid)
+                .converge_pending_room_releases_before_acquire(room_jid, convergence_deadline)
                 .await
         {
-            warn!(room = %room_jid, "room claim acquisition deferred until exact-release ambiguity converges");
+            debug!(room = %room_jid, "room claim acquisition deferred until exact-release ambiguity converges");
             return Err(RoomRegistryError::OwnershipUnavailable(room_jid.clone()));
         }
         // A newly acquired generation can require an exact terminal-release
@@ -879,9 +913,25 @@ impl RoomRegistryActor {
         room_jid: &BareJid,
         claim_fence: &super::RoomClaimFenceContext,
     ) {
+        self.release_room_claim_with_timeout(
+            room_jid,
+            claim_fence,
+            ROOM_OWNERSHIP_CALL_TIMEOUT,
+            ClaimReleaseContext::Operational,
+        )
+        .await;
+    }
+
+    async fn release_room_claim_with_timeout(
+        &mut self,
+        room_jid: &BareJid,
+        claim_fence: &super::RoomClaimFenceContext,
+        timeout: std::time::Duration,
+        context: ClaimReleaseContext,
+    ) {
         let owner = claim_fence.owner();
         match tokio::time::timeout(
-            ROOM_OWNERSHIP_CALL_TIMEOUT,
+            timeout,
             self.claim_store
                 .release_exact(&claim_fence.entity, &owner, claim_fence.epoch),
         )
@@ -894,13 +944,27 @@ impl RoomRegistryActor {
                 }
             }
             Ok(Err(error)) => {
-                warn!(room = %room_jid, %error, "failed to release room ownership claim");
+                match context {
+                    ClaimReleaseContext::Operational => {
+                        warn!(room = %room_jid, %error, "failed to release room ownership claim");
+                    }
+                    ClaimReleaseContext::PreAcquire => {
+                        debug!(room = %room_jid, %error, "room claim release remains pending before acquisition");
+                    }
+                }
                 if !self.remember_pending_room_release(room_jid.clone(), claim_fence.clone()) {
                     tracing::error!(room = %room_jid, "exact-release retry backlog saturated despite pre-admission guard; claim remains fenced for node-expiry recovery");
                 }
             }
             Err(_) => {
-                warn!(room = %room_jid, "timed out releasing room ownership claim; retaining exact fence for a later retry");
+                match context {
+                    ClaimReleaseContext::Operational => {
+                        warn!(room = %room_jid, "timed out releasing room ownership claim; retaining exact fence for a later retry");
+                    }
+                    ClaimReleaseContext::PreAcquire => {
+                        debug!(room = %room_jid, "room claim release timed out before acquisition; retaining exact fence for background retry");
+                    }
+                }
                 if !self.remember_pending_room_release(room_jid.clone(), claim_fence.clone()) {
                     tracing::error!(room = %room_jid, "exact-release retry backlog saturated despite pre-admission guard; claim remains fenced for node-expiry recovery");
                 }
@@ -918,9 +982,25 @@ impl RoomRegistryActor {
         claim_fence: &super::RoomClaimFenceContext,
         previous_owner: &NodeIdentity,
     ) -> ReclaimedRoomOutcome {
+        self.release_reclaimed_room_claim_with_timeout(
+            room_jid,
+            claim_fence,
+            previous_owner,
+            RECLAIMED_ROOM_RELEASE_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn release_reclaimed_room_claim_with_timeout(
+        &mut self,
+        room_jid: &BareJid,
+        claim_fence: &super::RoomClaimFenceContext,
+        previous_owner: &NodeIdentity,
+        timeout: std::time::Duration,
+    ) -> ReclaimedRoomOutcome {
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
         match tokio::time::timeout(
-            RECLAIMED_ROOM_RELEASE_TIMEOUT,
+            timeout,
             self.claim_store
                 .release_exact(&entity, &claim_fence.owner(), claim_fence.epoch),
         )
@@ -1253,6 +1333,17 @@ pub struct ReconcileReclaimedRoom {
 const RECLAIMED_ROOM_STORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const RECLAIMED_ROOM_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const ROOM_OWNERSHIP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Demand-side convergence gets one shared mailbox budget across reclaimed
+/// and ordinary exact fences. Background retries keep the full per-call
+/// timeout; admission returns retryably well before the five-second public
+/// registry ask timeout.
+const PRE_ACQUIRE_CONVERGENCE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Clone, Copy)]
+enum ClaimReleaseContext {
+    Operational,
+    PreAcquire,
+}
 
 /// One typed pending entry returned to the reaper for retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1611,6 +1702,15 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             }
         };
         if !still_owned {
+            if self
+                .rooms
+                .get(&msg.room_jid)
+                .is_some_and(|entry| entry.claim_fence == claim_fence)
+            {
+                if let Some(entry) = self.rooms.remove(&msg.room_jid) {
+                    entry.actor_ref.kill();
+                }
+            }
             if let Some(store) = &self.durable_store {
                 store.forget_claim_fence(&msg.room_jid, &claim_fence);
             }

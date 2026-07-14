@@ -13,13 +13,13 @@ use kameo::error::SendError;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
 use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
 use waddle_xmpp::muc::room_actor::{
-    GetAffiliation, JoinAffiliationGrant, JoinWithAffiliation, OccupantCount,
+    GetAffiliation, Join, JoinAffiliationGrant, JoinWithAffiliation, OccupantCount,
     ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor, RoomActorError,
     SyncResolverAffiliation,
 };
 use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
-use waddle_xmpp::{Affiliation, XmppError};
+use waddle_xmpp::{Affiliation, Role, XmppError};
 
 const OWNED: u8 = 0;
 const DEPOSED: u8 = 1;
@@ -129,6 +129,15 @@ fn creator_join() -> JoinWithAffiliation {
     }
 }
 
+fn legacy_join() -> Join {
+    Join {
+        real_jid: "legacy@example.com/web".parse().expect("full JID"),
+        nick: "legacy".to_string(),
+        role: Role::Participant,
+        affiliation: Affiliation::Member,
+    }
+}
+
 #[tokio::test]
 async fn deposed_room_refuses_xep0045_resolver_join() {
     let (actor, store) = spawn_fenced_room().await;
@@ -177,6 +186,32 @@ async fn uncertain_room_refuses_xep0045_creator_join() {
             RoomActorError::OwnershipUnavailable
         ))
     ));
+}
+
+#[tokio::test]
+async fn deposed_room_refuses_legacy_xep0045_join() {
+    let (actor, store) = spawn_fenced_room().await;
+    store.set(DEPOSED);
+
+    assert!(matches!(
+        actor.ask(legacy_join()).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+}
+
+#[tokio::test]
+async fn uncertain_room_refuses_legacy_xep0045_join() {
+    let (actor, store) = spawn_fenced_room().await;
+    store.set(UNCERTAIN);
+
+    assert!(matches!(
+        actor.ask(legacy_join()).await,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
 }
 
 #[tokio::test]
