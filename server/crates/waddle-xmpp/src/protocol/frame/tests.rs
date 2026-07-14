@@ -137,7 +137,7 @@ fn parses_message_stanza() {
 
 #[test]
 fn nested_message_element_does_not_truncate_the_outer_stanza() {
-    let xml = r#"<message type="chat" to="bob@waddle.social" id="outer">
+    const XML: &str = r#"<message type="chat" to="bob@waddle.social" id="outer">
         <body>outer body</body>
         <forwarded xmlns="urn:xmpp:forward:0">
             <message xmlns="jabber:client" type="chat" id="inner">
@@ -146,7 +146,7 @@ fn nested_message_element_does_not_truncate_the_outer_stanza() {
         </forwarded>
     </message>"#;
 
-    let frame = parse_frame(xml).expect("outer message should parse as one complete frame");
+    let frame = parse_frame(XML).expect("outer message should parse as one complete frame");
     let InboundFrame::Stanza(stanza) = frame else {
         panic!("expected Stanza");
     };
