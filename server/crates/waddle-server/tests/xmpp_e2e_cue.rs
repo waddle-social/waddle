@@ -277,6 +277,10 @@ const ADVERTISED_FEATURE_EXEMPTIONS: &[FeatureCoverageExemption] = &[
 
 const CUE_ONLY_XEP_TAGS: &[XepCoverageExemption] = &[
     XepCoverageExemption {
+        xep: "XEP-0184",
+        reason: "Receipt payloads are routed transparently and exercised by CUE; the server neither advertises nor generates receipts.",
+    },
+    XepCoverageExemption {
         xep: "XEP-0103",
         reason: "URL address payload is exercised through the FileShare CUE DSL; no standalone module exists.",
     },
