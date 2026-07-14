@@ -59,7 +59,8 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         if self.invite_rollback_pending(&msg.sender_jid.to_bare()) {
             return Err(RoomActorError::InviteRollbackPending);
         }
-        if msg.admission_revision != self.admission_revision {
+        let joining_bare_jid = msg.sender_jid.to_bare();
+        if !self.admission_revision_is_current(&joining_bare_jid, msg.admission_revision) {
             return Err(RoomActorError::StaleAdmissionRevision);
         }
 
@@ -88,7 +89,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     .is_some()
                 {
                     self.invalidate_invite_grant(&msg.sender_jid.to_bare());
-                    self.admission_revision = self.admission_revision.saturating_add(1);
+                    self.advance_member_admission_revision(&joining_bare_jid);
                     resolver_join_advanced_admission_revision = true;
                 }
             }
@@ -197,7 +198,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             // boundary, even when the affiliation was already identical. A
             // delayed rejection repair captured before this join must not
             // retain the same revision and demote the occupant just admitted.
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&joining_bare_jid);
         }
         // #1108: every successful admission bumps the occupancy
         // revision so a dormancy probe taken before this join can no
@@ -599,6 +600,8 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
         self.room.waddle_id = msg.waddle_id;
         self.room.channel_id = msg.channel_id;
         self.replace_config(desired_config);
+        self.config_revision = self.config_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(())
     }
@@ -619,11 +622,10 @@ pub struct SyncResolverAffiliation {
     pub affiliation: Affiliation,
     /// The `admission_revision` the caller's rejection decision was
     /// computed against (the room snapshot of that same join attempt).
-    /// The sync applies only while the room is still at that revision:
-    /// any interleaved admission/affiliation change — including a later
-    /// successful join of the re-granted user — invalidates this
-    /// delayed sync instead of letting it clear a live occupant's
-    /// freshly re-derived affiliation.
+    /// The sync applies only while neither room-wide admission policy nor
+    /// this JID's admission/affiliation state has changed. A later successful
+    /// join of the re-granted user therefore invalidates this delayed sync,
+    /// while an unrelated occupant's join does not strand the repair.
     pub expected_admission_revision: u64,
 }
 
@@ -634,8 +636,8 @@ pub enum ResolverAffiliationSyncOutcome {
     Applied {
         /// Exact actor revision after this repair. A single ordered worker
         /// may use it for a newer verdict computed from the same original
-        /// snapshot; any unrelated mutation changes the actor revision again
-        /// and keeps the follow-up fail-closed.
+        /// snapshot. Scope-aware actor watermarks decide whether a follow-up
+        /// remains fresh when another member mutates in between.
         admission_revision: u64,
     },
     /// The room's admission state changed since the caller snapshotted
@@ -672,7 +674,7 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
         if self.invite_rollback_pending(&msg.jid) {
             return ResolverAffiliationSyncOutcome::InviteRollbackPending;
         }
-        if msg.expected_admission_revision != self.admission_revision {
+        if !self.admission_revision_is_current(&msg.jid, msg.expected_admission_revision) {
             return ResolverAffiliationSyncOutcome::StaleAdmissionRevision;
         }
         // An applied change is itself an admission-relevant affiliation
@@ -684,7 +686,7 @@ impl kameo::message::Message<SyncResolverAffiliation> for RoomActor {
             .is_some()
         {
             self.invalidate_invite_grant(&msg.jid);
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&msg.jid);
         }
         ResolverAffiliationSyncOutcome::Applied {
             admission_revision: self.admission_revision,

@@ -784,7 +784,7 @@ mod resolver_sync_retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn resolver_sync_unrelated_mutation_invalidates_post_close_chain() {
+    async fn resolver_sync_unrelated_mutation_preserves_post_close_chain() {
         let store = SequencedOwnershipStore::new(0);
         let member: BareJid = "stale-chain@example.com".parse().expect("member JID");
         let unrelated: BareJid = "unrelated@example.com".parse().expect("member JID");
@@ -829,8 +829,8 @@ mod resolver_sync_retry_tests {
                 .ask(GetAffiliation { jid: member })
                 .await
                 .expect("affiliation after stale chained repair"),
-            Affiliation::None,
-            "an unrelated admission mutation must invalidate the carried revision"
+            Affiliation::Outcast,
+            "an unrelated member mutation must not invalidate the carried revision"
         );
         assert_eq!(store.checks(), 3);
     }

@@ -22,6 +22,11 @@ use crate::types::{Affiliation, Role};
 pub(crate) const JOIN_OWNERSHIP_CHECK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(1);
 
+/// Maximum exact per-JID freshness watermarks retained by one room actor.
+/// Overflow compacts safely into the room-wide watermark, trading only
+/// cross-JID liveness for bounded memory while never accepting stale work.
+const MAX_MEMBER_ADMISSION_REVISIONS: usize = 128;
+
 mod admin_handlers;
 mod mediated_invites;
 mod occupancy_handlers;
@@ -313,7 +318,16 @@ impl OccupantInfo {
 pub struct RoomActor {
     room: MucRoom,
     config_revision: u64,
+    /// Monotonic sequence used to timestamp admission-relevant snapshots.
+    /// Scope-specific watermarks below decide whether a snapshot is stale;
+    /// an unrelated member mutation may advance this sequence without
+    /// invalidating another member's pending resolver repair.
     admission_revision: u64,
+    /// Latest admission revision that changed room-wide admission policy.
+    room_admission_revision: u64,
+    /// Latest admission revision that changed each bare JID's admission or
+    /// affiliation state.
+    member_admission_revisions: HashMap<BareJid, u64>,
     invite_operations: HashMap<MediatedInviteOperationId, MediatedInviteOperationRecord>,
     invite_operation_by_invitee: HashMap<BareJid, MediatedInviteOperationId>,
     /// Monotonically increasing counter bumped on every successful
@@ -487,6 +501,8 @@ impl RoomActor {
             room,
             config_revision: 0,
             admission_revision: 0,
+            room_admission_revision: 0,
+            member_admission_revisions: HashMap::new(),
             invite_operations: HashMap::new(),
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
@@ -497,6 +513,38 @@ impl RoomActor {
             durable_store: None,
             restore_state: DurableRestoreState::Ready,
         }
+    }
+
+    fn advance_room_admission_revision(&mut self) {
+        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.room_admission_revision = self.admission_revision;
+        self.member_admission_revisions.clear();
+    }
+
+    fn advance_member_admission_revision(&mut self, jid: &BareJid) {
+        self.admission_revision = self.admission_revision.saturating_add(1);
+        if !self.member_admission_revisions.contains_key(jid)
+            && self.member_admission_revisions.len() >= MAX_MEMBER_ADMISSION_REVISIONS
+        {
+            // Promote the new sequence value to a conservative room-wide
+            // fence before discarding exact member watermarks. Every older
+            // snapshot remains stale; only unrelated pending work may retry.
+            self.room_admission_revision = self.admission_revision;
+            self.member_admission_revisions.clear();
+        }
+        self.member_admission_revisions
+            .insert(jid.clone(), self.admission_revision);
+    }
+
+    fn admission_revision_is_current(&self, jid: &BareJid, revision: u64) -> bool {
+        let member_revision = self
+            .member_admission_revisions
+            .get(jid)
+            .copied()
+            .unwrap_or(0);
+        revision <= self.admission_revision
+            && revision >= self.room_admission_revision
+            && revision >= member_revision
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
@@ -552,8 +600,9 @@ impl RoomActor {
     /// overwhelmingly common case). When `Pending` (the initial
     /// [`RestoreDurableRoomState`] load failed), runs ONE bounded inline
     /// retry against the same store before deciding: success applies the
-    /// restored state (if any) and flips back to `Ready`, letting this
-    /// join proceed; a repeated failure returns
+    /// restored state (if any), flips back to `Ready`, and advances the
+    /// room-wide admission fence so this join re-snapshots the recovered
+    /// policy; a repeated failure returns
     /// `Err(RoomActorError::RestorePending)` and leaves the state
     /// `Pending` for the next join attempt to retry again. Never serves a
     /// join against defaulted config/affiliations/subject while a
@@ -578,6 +627,8 @@ impl RoomActor {
                 self.replace_config(state.config);
                 self.room.subject = state.subject;
                 self.room.restore_affiliations(state.affiliations);
+                self.config_revision = self.config_revision.saturating_add(1);
+                self.advance_room_admission_revision();
                 self.restore_state = DurableRestoreState::Ready;
                 Ok(())
             }
@@ -1092,7 +1143,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         self.gate_mutation().await?;
         self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(self.config_revision)
     }
@@ -1120,7 +1171,7 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
         self.gate_mutation().await?;
         self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(true)
     }
@@ -1202,7 +1253,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
         config.group_dm = true;
         self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
-        self.admission_revision = self.admission_revision.saturating_add(1);
+        self.advance_room_admission_revision();
         self.persist_config().await?;
         Ok(RoomSnapshot {
             room: self.room.clone(),
@@ -1312,7 +1363,7 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
             .set_affiliation(msg.jid.clone(), msg.affiliation)
             .is_some()
         {
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&msg.jid);
             self.persist_affiliation(&msg.jid, msg.affiliation).await?;
         }
         if needs_rehydration {

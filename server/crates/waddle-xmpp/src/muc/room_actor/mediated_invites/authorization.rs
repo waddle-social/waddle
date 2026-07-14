@@ -81,7 +81,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
                 .room
                 .set_affiliation(msg.invitee.clone(), Affiliation::Member);
             debug_assert!(changed.is_some(), "a below-Member affiliation must change");
-            self.admission_revision = self.admission_revision.saturating_add(1);
+            self.advance_member_admission_revision(&msg.invitee);
             MediatedInviteAuthorized {
                 grant: Some(InviteMembershipGrant {
                     operation_id: msg.operation_id,
