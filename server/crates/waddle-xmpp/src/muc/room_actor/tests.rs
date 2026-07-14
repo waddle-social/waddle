@@ -6,6 +6,8 @@ use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
+mod mediated_invites;
+
 fn test_secret() -> OccupantIdSecret {
     OccupantIdSecret::for_testing(b"test-secret".to_vec())
 }
@@ -3373,6 +3375,7 @@ struct FakeDurableStore {
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
     save_calls: std::sync::atomic::AtomicUsize,
+    saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
 }
 
 impl FakeDurableStore {
@@ -3402,11 +3405,16 @@ impl FakeDurableStore {
             fenced: std::sync::Mutex::new(Some(true)),
             fail_persist: true,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
+            saved_affiliations: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     fn save_call_count(&self) -> usize {
         self.save_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn saved_affiliations(&self) -> Vec<(BareJid, BareJid, Affiliation)> {
+        self.saved_affiliations.lock().expect("lock").clone()
     }
 }
 
@@ -3461,11 +3469,16 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
 
     fn save_affiliation<'a>(
         &'a self,
-        _room_jid: &'a BareJid,
-        _entry: &'a crate::muc::affiliation::AffiliationEntry,
+        room_jid: &'a BareJid,
+        entry: &'a crate::muc::affiliation::AffiliationEntry,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.saved_affiliations.lock().expect("lock").push((
+            room_jid.clone(),
+            entry.jid.clone(),
+            entry.affiliation,
+        ));
         let fail = self.fail_persist;
         Box::pin(async move {
             if fail {
@@ -3489,6 +3502,73 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
                 None => Err(crate::XmppError::internal(
                     "simulated transient fencing failure",
                 )),
+            }
+        })
+    }
+}
+
+struct FailNthAffiliationSaveStore {
+    fail_on_call: usize,
+    save_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FailNthAffiliationSaveStore {
+    fn new(fail_on_call: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fail_on_call,
+            save_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn save_call_count(&self) -> usize {
+        self.save_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
+    fn load_room_state<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn save_config<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _waddle_id: &'a str,
+        _channel_id: &'a str,
+        _config: &'a RoomConfig,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_subject<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _subject: Option<&'a SubjectState>,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save_affiliation<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _entry: &'a crate::muc::affiliation::AffiliationEntry,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        let call = self
+            .save_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let fail = call == self.fail_on_call;
+        Box::pin(async move {
+            if fail {
+                Err(crate::XmppError::internal(
+                    "simulated affiliation persist failure",
+                ))
+            } else {
+                Ok(())
             }
         })
     }
@@ -3755,7 +3835,7 @@ async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(RoomMutationError::NotOwner))
+            Err(SendError::HandlerError(AffiliationMutationError::NotOwner))
         ),
         "expected NotOwner, got: {result:?}"
     );

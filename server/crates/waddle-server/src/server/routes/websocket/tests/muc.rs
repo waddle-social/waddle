@@ -5972,6 +5972,16 @@ async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
     crate::admin::channels::persist_group_dm_member_tuple(
         &state.deps.app_state,
         "destroy-gdm",
+        &owner_session
+            .user_jid
+            .parse()
+            .expect("owner-session permission principal"),
+    )
+    .await
+    .expect("seed alice member tuple");
+    crate::admin::channels::persist_group_dm_member_tuple(
+        &state.deps.app_state,
+        "destroy-gdm",
         &bob,
     )
     .await

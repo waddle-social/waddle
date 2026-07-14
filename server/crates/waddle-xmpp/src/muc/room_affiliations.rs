@@ -93,9 +93,11 @@ impl MucRoom {
 
     /// Check if a user can join this room based on affiliation.
     ///
-    /// For members-only rooms, users need at least Member affiliation.
+    /// For members-only rooms and group DMs, users need at least Member
+    /// affiliation. The group-DM check is intentionally redundant with
+    /// config normalization so malformed restored state fails closed.
     pub fn can_user_join(&self, jid: &BareJid) -> bool {
-        if !self.config.members_only {
+        if !self.config.requires_membership() {
             self.get_affiliation(jid) != Affiliation::Outcast
         } else {
             self.has_affiliation_at_least(jid, Affiliation::Member)

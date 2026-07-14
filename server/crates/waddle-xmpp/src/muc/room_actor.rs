@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
-use std::convert::Infallible;
+use std::{collections::HashMap, convert::Infallible};
 use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
@@ -18,14 +18,24 @@ use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
 
 mod admin_handlers;
+mod mediated_invites;
 mod occupancy_handlers;
 mod snapshot_handlers;
 #[cfg(test)]
 mod tests;
 
 pub use admin_handlers::{
-    ApplyAdminItems, ApplyAffiliationChange, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
-    GetAdminContext, IsOwner,
+    AdminItemsApplied, ApplyAdminItems, ApplyAffiliationChange, EnforceMembersOnly,
+    EnforceMembersOnlyAffiliations, GetAdminContext, IsOwner,
+};
+use mediated_invites::MediatedInviteOperationRecord;
+pub use mediated_invites::{
+    AbortMediatedInviteGrantRollback, AcknowledgeMediatedInviteOperation, AuthorizeMediatedInvite,
+    CommitMediatedInviteGrantRollback, FinalizeMediatedInviteGrant, InviteMembershipGrant,
+    MediatedInviteAuthorized, MediatedInviteGrantError, MediatedInviteGrantFinalization,
+    MediatedInviteOperationAcknowledgement, MediatedInviteOperationId, MediatedInviteRollbackAbort,
+    MediatedInviteRollbackCommit, MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
+    PrepareMediatedInviteGrantRollback,
 };
 pub use occupancy_handlers::{
     ClearMujiPresence, InCallPresenceUpdateOutcome, JoinAffiliationGrant, JoinWithAffiliation,
@@ -150,6 +160,8 @@ pub enum AdminApplyError {
     CannotAdminModifyOwner,
     #[error("admins and moderators cannot change an owner or admin role")]
     CannotModifyPrivilegedRole,
+    #[error("invitee affiliation is fenced pending invite rollback acknowledgement")]
+    InviteRollbackPending,
     #[error("{0}")]
     PermissionDenied(String),
     /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
@@ -223,6 +235,35 @@ pub enum RoomMutationError {
     PersistFailed(String),
 }
 
+/// Failure from an affiliation mutation that can collide with an
+/// in-progress mediated-invite compensation.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum AffiliationMutationError {
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    #[error("durable persist failed after the in-memory mutation committed: {0}")]
+    PersistFailed(String),
+    #[error("invitee affiliation is fenced pending invite rollback acknowledgement")]
+    InviteRollbackPending,
+}
+
+impl From<RoomMutationError> for AffiliationMutationError {
+    fn from(error: RoomMutationError) -> Self {
+        match error {
+            RoomMutationError::NotOwner => Self::NotOwner,
+            RoomMutationError::PersistFailed(detail) => Self::PersistFailed(detail),
+        }
+    }
+}
+
+impl From<DurablePersistError> for AffiliationMutationError {
+    fn from(error: DurablePersistError) -> Self {
+        match error {
+            DurablePersistError::Failed(detail) => Self::PersistFailed(detail),
+        }
+    }
+}
+
 /// FIX 2: typed outcome of a best-effort durable `save_*` call inside
 /// [`RoomActor::persist_config`]/[`RoomActor::persist_subject`]/
 /// [`RoomActor::persist_affiliation`]. Wraps the underlying
@@ -268,6 +309,8 @@ pub struct RoomActor {
     room: MucRoom,
     config_revision: u64,
     admission_revision: u64,
+    invite_operations: HashMap<MediatedInviteOperationId, MediatedInviteOperationRecord>,
+    invite_operation_by_invitee: HashMap<BareJid, MediatedInviteOperationId>,
     /// Monotonically increasing counter bumped on every successful
     /// admission (#1108). The dormancy probe ([`IsDormant`]) returns
     /// it and the registry's guarded destroy
@@ -357,6 +400,8 @@ pub enum RoomActorError {
     JoinForbidden { reason: JoinDenialReason },
     #[error("join admission snapshot is stale")]
     StaleAdmissionRevision,
+    #[error("join is blocked pending invite membership rollback acknowledgement")]
+    InviteRollbackPending,
     /// #1108: this room actor was sealed by the registry's guarded
     /// destroy and is about to be dropped. Retryable — the caller must
     /// re-run the registry lookup, which respawns the room.
@@ -405,11 +450,17 @@ pub enum RoomActorError {
 
 impl RoomActor {
     /// Create a new `RoomActor` wrapping the given room.
-    pub fn new(room: MucRoom, occupant_id_secret: crate::xep::xep0421::OccupantIdSecret) -> Self {
+    pub fn new(
+        mut room: MucRoom,
+        occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
+    ) -> Self {
+        room.config = room.config.normalized();
         Self {
             room,
             config_revision: 0,
             admission_revision: 0,
+            invite_operations: HashMap::new(),
+            invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
             sealed: false,
             occupant_id_secret,
@@ -488,7 +539,7 @@ impl RoomActor {
             Ok(Some(state)) => {
                 self.room.waddle_id = state.waddle_id;
                 self.room.channel_id = state.channel_id;
-                self.room.config = state.config;
+                self.replace_config(state.config);
                 self.room.subject = state.subject;
                 self.room.restore_affiliations(state.affiliations);
                 self.restore_state = DurableRestoreState::Ready;
@@ -538,6 +589,11 @@ impl RoomActor {
                 );
                 DurablePersistError::Failed(error.to_string())
             })
+    }
+
+    /// Replace config only after restoring cross-field privacy invariants.
+    fn replace_config(&mut self, config: RoomConfig) {
+        self.room.config = config.normalized();
     }
 
     /// Best-effort durable persist of the current subject. See
@@ -759,7 +815,7 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
             Ok(Some(state)) => {
                 self.room.waddle_id = state.waddle_id;
                 self.room.channel_id = state.channel_id;
-                self.room.config = state.config;
+                self.replace_config(state.config);
                 self.room.subject = state.subject;
                 self.room.restore_affiliations(state.affiliations);
                 self.restore_state = DurableRestoreState::Ready;
@@ -812,6 +868,9 @@ impl kameo::message::Message<Join> for RoomActor {
     async fn handle(&mut self, msg: Join, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if self.sealed {
             return Err(RoomActorError::RoomSealed);
+        }
+        if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
+            return Err(RoomActorError::InviteRollbackPending);
         }
         if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
             return Err(RoomActorError::RoomFull);
@@ -934,7 +993,7 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.gate_mutation().await?;
-        self.room.config = msg.config;
+        self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
         self.persist_config().await?;
@@ -962,7 +1021,7 @@ impl kameo::message::Message<RollbackConfigIfRevision> for RoomActor {
             return Ok(false);
         }
         self.gate_mutation().await?;
-        self.room.config = msg.config;
+        self.replace_config(msg.config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
         self.persist_config().await?;
@@ -1042,7 +1101,9 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
             return Err(UpdateGroupDmConfigByMemberError::NotOccupant);
         }
         self.gate_mutation().await?;
-        self.room.config = msg.config;
+        let mut config = msg.config;
+        config.group_dm = true;
+        self.replace_config(config);
         self.config_revision = self.config_revision.saturating_add(1);
         self.admission_revision = self.admission_revision.saturating_add(1);
         self.persist_config().await?;
@@ -1136,7 +1197,7 @@ pub struct ChangeAffiliation {
 }
 
 impl kameo::message::Message<ChangeAffiliation> for RoomActor {
-    type Reply = Result<(), RoomMutationError>;
+    type Reply = Result<(), AffiliationMutationError>;
 
     async fn handle(
         &mut self,
@@ -1144,6 +1205,10 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.gate_mutation().await?;
+        if self.invite_rollback_pending(&msg.jid) {
+            return Err(AffiliationMutationError::InviteRollbackPending);
+        }
+        self.invalidate_invite_grant(&msg.jid);
         let needs_rehydration = self.prune_durable_recipient_if_removed(&msg.jid, msg.affiliation);
         if self
             .room
@@ -1292,7 +1357,13 @@ impl kameo::message::Message<IsDormant> for RoomActor {
             // reply timed out (explicit creator-Owner grant keeps
             // `is_dormant()` false) would never be re-confirmed by the
             // janitor — a permanently unjoinable registered room.
-            dormant: self.sealed || self.room.is_dormant(),
+            // Completed and no-grant operation records are replay metadata,
+            // not live room state. An unresolved temporary grant still owns
+            // compensation responsibility and must survive both lifecycle
+            // guards (the Dormant guard is also protected by the explicit
+            // Member affiliation itself).
+            dormant: self.sealed
+                || (self.room.is_dormant() && !self.has_lifecycle_fenced_invite_operation()),
             occupancy_revision: self.occupancy_revision,
         }
     }
@@ -1358,12 +1429,13 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
         if self.occupancy_revision != msg.expected_occupancy_revision {
             return false;
         }
-        let inactive = match msg.guard {
-            SealGuard::Dormant => self.room.is_dormant(),
-            SealGuard::EmptyNonPersistent => {
-                self.room.occupants.is_empty() && !self.room.config.persistent
-            }
-        };
+        let inactive = !self.has_lifecycle_fenced_invite_operation()
+            && match msg.guard {
+                SealGuard::Dormant => self.room.is_dormant(),
+                SealGuard::EmptyNonPersistent => {
+                    self.room.occupants.is_empty() && !self.room.config.persistent
+                }
+            };
         if inactive {
             self.sealed = true;
         }
