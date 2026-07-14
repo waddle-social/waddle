@@ -967,6 +967,73 @@ mod resolver_sync_retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn resolver_sync_exhausted_worker_retains_chain_for_later_same_source_work() {
+        let store = SequencedOwnershipStore::new(0);
+        let member: BareJid = "closed-exhaustion@example.com".parse().expect("member JID");
+        let (actor, room_jid) = spawn_sync_test_room_with_seed(
+            Arc::clone(&store),
+            Some((member.clone(), Affiliation::Member)),
+        )
+        .await;
+        let scheduler =
+            Arc::new(crate::server::routes::websocket::ResolverAffiliationSyncScheduler::default());
+
+        spawn_sync_worker_with_scheduler(
+            actor.clone(),
+            room_jid.clone(),
+            member.clone(),
+            Affiliation::None,
+            0,
+            Arc::clone(&scheduler),
+        )
+        .await
+        .expect("first worker records source-zero to revision-one chain");
+        store.check_started.notified().await;
+        store.fail_next(RESOLVER_SYNC_MAX_ATTEMPTS);
+
+        let exhausted = spawn_sync_worker_with_scheduler(
+            actor.clone(),
+            room_jid.clone(),
+            member.clone(),
+            Affiliation::Member,
+            0,
+            Arc::clone(&scheduler),
+        );
+        for expected_check in 2..=4 {
+            store.check_started.notified().await;
+            assert_eq!(store.checks(), expected_check);
+            if expected_check < 4 {
+                tokio::task::yield_now().await;
+                tokio::time::advance(RESOLVER_SYNC_RETRY_BACKOFF).await;
+            }
+        }
+        exhausted
+            .await
+            .expect("exhausted worker closes without pending work");
+
+        spawn_sync_worker_with_scheduler(
+            actor.clone(),
+            room_jid,
+            member.clone(),
+            Affiliation::Outcast,
+            0,
+            scheduler,
+        )
+        .await
+        .expect("later same-source work consumes the retained chain");
+
+        assert_eq!(
+            actor
+                .ask(GetAffiliation { jid: member })
+                .await
+                .expect("affiliation after exhausted worker closure"),
+            Affiliation::Outcast,
+            "non-mutating exhaustion must retain authorization after the worker closes"
+        );
+        assert_eq!(store.checks(), 5);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn resolver_sync_intrinsic_timeout_releases_global_worker_capacity() {
         let blocked_store = SequencedOwnershipStore::always_hanging();
         let (blocked_actor, blocked_room_jid) =

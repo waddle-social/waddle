@@ -365,11 +365,23 @@ impl ResolverAffiliationSyncWorker {
             return Some(self.current);
         }
         state.workers.remove(&self.key);
-        clear_completion_through(
-            &mut state,
-            &self.key,
-            self.current.expected_admission_revision,
-        );
+        match disposition {
+            ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion => {
+                retain_completion(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                    self.effective_admission_revision,
+                );
+            }
+            ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome => {
+                clear_completion_through(
+                    &mut state,
+                    &self.key,
+                    self.current.expected_admission_revision,
+                );
+            }
+        }
         self.closed = true;
         None
     }
