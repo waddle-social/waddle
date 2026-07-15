@@ -34,6 +34,7 @@ open class ConversationViewModel(
     private val pending = MutableStateFlow<List<PendingMessage>>(emptyList())
     private val history = MutableStateFlow(HistoryState())
     private var nextLocalId = 0L
+    private val ackedIds = mutableSetOf<String>()
 
     val uiState: StateFlow<ConversationUiState> =
         combine(timeline, pending, history) { items, unconfirmed, load ->
@@ -67,9 +68,12 @@ open class ConversationViewModel(
             events.collect { event ->
                 when (event) {
                     // The 0198 ack carries the client-generated id the
-                    // send returned; the acked pending row can go — the
-                    // stored echo (or history) is authoritative from here.
-                    is XmppEvent.DeliveryAcked -> pruneAcked(event.stanzaId)
+                    // send returned. The row is only MARKED acked, never
+                    // removed: a DM has no reflection back to the sending
+                    // resource, so deleting here would vanish the message
+                    // until the next MAM refetch. MUC rows disappear when
+                    // the stored echo matches an identity id.
+                    is XmppEvent.DeliveryAcked -> markAcked(event.stanzaId)
                     is XmppEvent.DeliveryFailed -> markFailed(event.stanzaId)
                     // Reconnect catch-up: refetch the newest page.
                     XmppEvent.SessionReady -> refreshHistory()
@@ -116,7 +120,13 @@ open class ConversationViewModel(
         viewModelScope.launch {
             when (val outcome = io.send(text)) {
                 is WaddleSendMessageOutcome.Sent ->
-                    updatePending(message.localId) { it.copy(stanzaId = outcome.stanzaId) }
+                    updatePending(message.localId) {
+                        it.copy(
+                            stanzaId = outcome.stanzaId,
+                            // The ack can beat this continuation.
+                            acked = outcome.stanzaId in ackedIds,
+                        )
+                    }
                 else ->
                     updatePending(message.localId) { it.copy(failed = true) }
             }
@@ -147,8 +157,11 @@ open class ConversationViewModel(
         loadOlder()
     }
 
-    private fun pruneAcked(stanzaId: String) {
-        pending.update { list -> list.filterNot { it.stanzaId == stanzaId } }
+    private fun markAcked(stanzaId: String) {
+        ackedIds += stanzaId
+        pending.update { list ->
+            list.map { if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false) else it }
+        }
     }
 
     private fun markFailed(stanzaId: String) {

@@ -193,7 +193,7 @@ class ConversationViewModelTest {
     }
 
     @Test
-    fun `delivery ack prunes the pending row even before the echo arrives`() = runTest {
+    fun `delivery ack marks the pending row without hiding it`() = runTest {
         io.sendOutcome = WaddleSendMessageOutcome.Sent("client-origin-id")
         val viewModel = createViewModel()
         runCurrent()
@@ -205,7 +205,49 @@ class ConversationViewModelTest {
         events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
         runCurrent()
 
-        assertEquals("acked pending row is gone", 0, viewModel.uiState.value.rows.size)
+        // Deleting on ack would vanish DM sends (no reflection to the
+        // sending resource) — the row stays, flagged delivered.
+        val row = viewModel.uiState.value.rows.single()
+        assertTrue(row is ConversationRow.Unconfirmed)
+        assertTrue((row as ConversationRow.Unconfirmed).message.acked)
+        assertFalse(row.message.failed)
+
+        // The MUC echo (matching identity) is what finally replaces it.
+        store.onLiveMessage(
+            testMessage(
+                stanzaId = "room-assigned-id",
+                originId = "client-origin-id",
+                from = "$ROOM_JID/icepuma",
+                to = OWN_JID,
+                body = "hello room",
+                messageType = "groupchat",
+                isMuc = true,
+            ),
+        )
+        runCurrent()
+        val rows = viewModel.uiState.value.rows
+        assertEquals(1, rows.size)
+        assertTrue(rows.single() is ConversationRow.Stored)
+    }
+
+    @Test
+    fun `acked dm send stays visible with no reflection`() = runTest {
+        io.sendOutcome = WaddleSendMessageOutcome.Sent("dm-origin-id")
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.send("hi there")
+        runCurrent()
+        events.emit(XmppEvent.DeliveryAcked("dm-origin-id"))
+        runCurrent()
+
+        // 1:1 chats are never reflected back to the sending resource:
+        // the acked optimistic row is the message's only representation
+        // until the next MAM fetch and must not disappear.
+        val row = viewModel.uiState.value.rows.single()
+        assertTrue(row is ConversationRow.Unconfirmed)
+        assertTrue((row as ConversationRow.Unconfirmed).message.acked)
+        assertEquals("hi there", row.message.body)
     }
 
     @Test

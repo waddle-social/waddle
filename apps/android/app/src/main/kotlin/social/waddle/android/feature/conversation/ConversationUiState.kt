@@ -10,6 +10,8 @@ data class PendingMessage(
     val body: String,
     val timestampMillis: Long,
     val failed: Boolean,
+    /** XEP-0198-acked: delivered, but (DMs) never reflected back. */
+    val acked: Boolean = false,
 )
 
 /** One timeline row: a store-backed message or an optimistic pending one. */

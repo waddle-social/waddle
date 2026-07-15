@@ -87,6 +87,7 @@ class AppGraph(context: Context) {
     fun start() {
         serviceController.start()
         messageNotifier.start(applicationScope)
+        startSignedOutCleanup()
         bootstrap.restore()
     }
 
@@ -94,6 +95,22 @@ class AppGraph(context: Context) {
     suspend fun signIn(session: WaddleSessionInfo) {
         _currentSession.value = session
         sessionManager.login(session)
+    }
+
+    /**
+     * Terminal server-side auth failures flip appState to SignedOut from
+     * inside :core:client, which has no notifier handle — without this
+     * observer, stale MessagingStyle notifications (and their live reply
+     * intents) survive into the next account's session.
+     */
+    fun startSignedOutCleanup() {
+        applicationScope.launch {
+            sessionManager.appState.collect { state ->
+                if (state == WaddleAppState.SignedOut) {
+                    messageNotifier.clearAll()
+                }
+            }
+        }
     }
 
     /** Local-first sign-out; the server logout is best-effort async. */
