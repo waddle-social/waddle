@@ -681,6 +681,119 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendPresence(status: String?, show: String?, idleSince: String?) async
 
     /**
+     * XEP-0490 §3.1 catch-up: retrieve every item from the user's own
+     * `urn:xmpp:mds:displayed:0` PEP node. An `item-not-found` reply
+     * (no node published yet) is the normal first-run state and
+     * returns an empty list rather than an error.
+     */
+    func fetchMdsDisplayed() async throws  -> [WaddleMdsDisplayedEntry]
+
+    /**
+     * `urn:waddle:pin:0`: fetch the current pinned-messages list for
+     * a MUC room. Empty when the room has no pins. The server gates
+     * on room occupancy; a non-occupant caller receives a
+     * `forbidden` stanza error.
+     */
+    func fetchRoomPins(roomJid: String) async throws  -> [WaddlePinEntry]
+
+    /**
+     * `urn:waddle:pin:0`: pin a message in a 1:1 DM conversation.
+     */
+    func pinDirectMessage(peerJid: String, targetStanzaId: String) async  -> Bool
+
+    /**
+     * `urn:waddle:pin:0`: pin the room message identified by the
+     * XEP-0359 `by=room` stanza-id. The server gates on Owner/Admin
+     * affiliation; a non-admin sender receives a `forbidden` error
+     * via the inbound message stream.
+     */
+    func pinMessage(roomJid: String, targetStanzaId: String) async  -> Bool
+
+    /**
+     * XEP-0490 §3: publish the latest displayed marker for `chat_jid`
+     * to the user's own MDS PEP node. `chat_jid` (the PEP item id) is
+     * the chat's JID — bare DM contact, bare MUC room, or full MUC
+     * occupant for a private message. `stanza_id` is the XEP-0359 id
+     * of the displayed message and `stanza_id_by` its resource-less
+     * assigning authority. Carries the spec-mandated publish-options
+     * as preconditions.
+     */
+    func publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String) async  -> Bool
+
+    /**
+     * XEP-0085: send a standalone chat state notification
+     * (typing indicator) to a DM peer or room.
+     */
+    func sendChatState(peerJid: String, state: WaddleChatState, isMuc: Bool) async  -> Bool
+
+    /**
+     * XEP-0308: replace the body of the message identified by
+     * `target_id` with `new_body`. Returns the outcome of the fresh
+     * send; on success `stanza_id` is the id of the *correction*
+     * message (the wasm client's `send_correction` return value).
+     */
+    func sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Bool, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
+
+    /**
+     * XEP-0333: send a `<displayed id='…'/>` marker acknowledging
+     * the message identified by `stanza_id` as read.
+     */
+    func sendDisplayed(peerJid: String, stanzaId: String, isMuc: Bool) async  -> Bool
+
+    /**
+     * XEP-0425: ask the room to moderate (retract) the message
+     * identified by `target_stanza_id`. Sent as an IQ to the room;
+     * the server gates on moderator privileges and answers
+     * `<forbidden/>` otherwise, which surfaces here as `false` plus
+     * an `Error` event.
+     */
+    func sendModeration(roomJid: String, targetStanzaId: String, reason: String?) async  -> Bool
+
+    /**
+     * XEP-0444: react to the message identified by
+     * `target_stanza_id` with the full desired emoji set. Per §3 the
+     * stanza carries the *complete* reaction state of this user for
+     * that message — send an empty `emojis` to clear all reactions.
+     */
+    func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], isMuc: Bool) async  -> Bool
+
+    /**
+     * XEP-0424: retract the sender's own message identified by
+     * `target_stanza_id`. The stanza carries the §4.2 fallback body
+     * marked with a XEP-0428 `<fallback/>` so supporting receivers
+     * never render it.
+     */
+    func sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Bool) async  -> Bool
+
+    /**
+     * XEP-0060 explicit subscribe to the user's own MDS node — the
+     * fallback path for receiving `+notify` events when this client's
+     * presence does not yet carry XEP-0115 caps. The subscriber JID
+     * is the bare account JID.
+     */
+    func subscribeMdsDisplayed() async  -> Bool
+
+    /**
+     * XEP-0490 §3 precondition probe: whether the account server
+     * advertises `http://jabber.org/protocol/pubsub#publish-options`
+     * on disco#info. Publishing MDS markers without it risks a node
+     * with wrong access-model defaults; callers should check once per
+     * session before the first publish (wasm client parity).
+     */
+    func supportsMdsPublishOptions() async  -> Bool
+
+    /**
+     * `urn:waddle:pin:0`: unpin a message in a 1:1 DM conversation.
+     */
+    func unpinDirectMessage(peerJid: String, targetStanzaId: String) async  -> Bool
+
+    /**
+     * `urn:waddle:pin:0`: unpin a room message. Same authorization
+     * rules as [`Self::pin_message`].
+     */
+    func unpinMessage(roomJid: String, targetStanzaId: String) async  -> Bool
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -1257,6 +1370,357 @@ open func sendPresence(status: String?, show: String?, idleSince: String?)async 
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0490 §3.1 catch-up: retrieve every item from the user's own
+     * `urn:xmpp:mds:displayed:0` PEP node. An `item-not-found` reply
+     * (no node published yet) is the normal first-run state and
+     * returns an empty list rather than an error.
+     */
+open func fetchMdsDisplayed()async throws  -> [WaddleMdsDisplayedEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_mds_displayed(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleMdsDisplayedEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:pin:0`: fetch the current pinned-messages list for
+     * a MUC room. Empty when the room has no pins. The server gates
+     * on room occupancy; a non-occupant caller receives a
+     * `forbidden` stanza error.
+     */
+open func fetchRoomPins(roomJid: String)async throws  -> [WaddlePinEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_pins(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddlePinEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:pin:0`: pin a message in a 1:1 DM conversation.
+     */
+open func pinDirectMessage(peerJid: String, targetStanzaId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_pin_direct_message(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetStanzaId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * `urn:waddle:pin:0`: pin the room message identified by the
+     * XEP-0359 `by=room` stanza-id. The server gates on Owner/Admin
+     * affiliation; a non-admin sender receives a `forbidden` error
+     * via the inbound message stream.
+     */
+open func pinMessage(roomJid: String, targetStanzaId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_pin_message(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(targetStanzaId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0490 §3: publish the latest displayed marker for `chat_jid`
+     * to the user's own MDS PEP node. `chat_jid` (the PEP item id) is
+     * the chat's JID — bare DM contact, bare MUC room, or full MUC
+     * occupant for a private message. `stanza_id` is the XEP-0359 id
+     * of the displayed message and `stanza_id_by` its resource-less
+     * assigning authority. Carries the spec-mandated publish-options
+     * as preconditions.
+     */
+open func publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_mds_displayed(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(chatJid),FfiConverterString.lower(stanzaId),FfiConverterString.lower(stanzaIdBy)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0085: send a standalone chat state notification
+     * (typing indicator) to a DM peer or room.
+     */
+open func sendChatState(peerJid: String, state: WaddleChatState, isMuc: Bool)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_state(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterTypeWaddleChatState_lower(state),FfiConverterBool.lower(isMuc)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0308: replace the body of the message identified by
+     * `target_id` with `new_body`. Returns the outcome of the fresh
+     * send; on success `stanza_id` is the id of the *correction*
+     * message (the wasm client's `send_correction` return value).
+     */
+open func sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Bool, options: WaddleSendOptions?)async  -> WaddleSendMessageOutcome  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_correction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetId),FfiConverterString.lower(newBody),FfiConverterBool.lower(isMuc),FfiConverterOptionTypeWaddleSendOptions.lower(options)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleSendMessageOutcome_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0333: send a `<displayed id='…'/>` marker acknowledging
+     * the message identified by `stanza_id` as read.
+     */
+open func sendDisplayed(peerJid: String, stanzaId: String, isMuc: Bool)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_displayed(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(stanzaId),FfiConverterBool.lower(isMuc)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0425: ask the room to moderate (retract) the message
+     * identified by `target_stanza_id`. Sent as an IQ to the room;
+     * the server gates on moderator privileges and answers
+     * `<forbidden/>` otherwise, which surfaces here as `false` plus
+     * an `Error` event.
+     */
+open func sendModeration(roomJid: String, targetStanzaId: String, reason: String?)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_moderation(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(targetStanzaId),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0444: react to the message identified by
+     * `target_stanza_id` with the full desired emoji set. Per §3 the
+     * stanza carries the *complete* reaction state of this user for
+     * that message — send an empty `emojis` to clear all reactions.
+     */
+open func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], isMuc: Bool)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_reaction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(targetJid),FfiConverterString.lower(targetStanzaId),FfiConverterSequenceString.lower(emojis),FfiConverterBool.lower(isMuc)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0424: retract the sender's own message identified by
+     * `target_stanza_id`. The stanza carries the §4.2 fallback body
+     * marked with a XEP-0428 `<fallback/>` so supporting receivers
+     * never render it.
+     */
+open func sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Bool)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_retraction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetStanzaId),FfiConverterBool.lower(isMuc)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0060 explicit subscribe to the user's own MDS node — the
+     * fallback path for receiving `+notify` events when this client's
+     * presence does not yet carry XEP-0115 caps. The subscriber JID
+     * is the bare account JID.
+     */
+open func subscribeMdsDisplayed()async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_subscribe_mds_displayed(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * XEP-0490 §3 precondition probe: whether the account server
+     * advertises `http://jabber.org/protocol/pubsub#publish-options`
+     * on disco#info. Publishing MDS markers without it risks a node
+     * with wrong access-model defaults; callers should check once per
+     * session before the first publish (wasm client parity).
+     */
+open func supportsMdsPublishOptions()async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_supports_mds_publish_options(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * `urn:waddle:pin:0`: unpin a message in a 1:1 DM conversation.
+     */
+open func unpinDirectMessage(peerJid: String, targetStanzaId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_direct_message(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetStanzaId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * `urn:waddle:pin:0`: unpin a room message. Same authorization
+     * rules as [`Self::pin_message`].
+     */
+open func unpinMessage(roomJid: String, targetStanzaId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_message(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(targetStanzaId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
         )
@@ -3649,6 +4113,96 @@ public func FfiConverterTypeWaddleMujiPresence_lower(_ value: WaddleMujiPresence
 
 
 /**
+ * One `urn:waddle:pin:0` pinned-message entry returned by
+ * `fetch_room_pins`. Mirrors `waddle_xmpp_client::pin::PinEntry` 1:1.
+ */
+public struct WaddlePinEntry: Equatable, Hashable {
+    /**
+     * XEP-0359 stanza-id of the pinned message in the room archive.
+     */
+    public var targetStanzaId: String
+    /**
+     * Bare JID of the user who pinned the message.
+     */
+    public var pinnerJid: String
+    /**
+     * When the pin was applied (RFC 3339, server-stamped).
+     */
+    public var pinnedAt: String
+    /**
+     * Frozen preview snapshot taken at pin time.
+     */
+    public var preview: WaddlePinPreview
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * XEP-0359 stanza-id of the pinned message in the room archive.
+         */targetStanzaId: String,
+        /**
+         * Bare JID of the user who pinned the message.
+         */pinnerJid: String,
+        /**
+         * When the pin was applied (RFC 3339, server-stamped).
+         */pinnedAt: String,
+        /**
+         * Frozen preview snapshot taken at pin time.
+         */preview: WaddlePinPreview) {
+        self.targetStanzaId = targetStanzaId
+        self.pinnerJid = pinnerJid
+        self.pinnedAt = pinnedAt
+        self.preview = preview
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePinEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePinEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePinEntry {
+        return
+            try WaddlePinEntry(
+                targetStanzaId: FfiConverterString.read(from: &buf),
+                pinnerJid: FfiConverterString.read(from: &buf),
+                pinnedAt: FfiConverterString.read(from: &buf),
+                preview: FfiConverterTypeWaddlePinPreview.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePinEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.targetStanzaId, into: &buf)
+        FfiConverterString.write(value.pinnerJid, into: &buf)
+        FfiConverterString.write(value.pinnedAt, into: &buf)
+        FfiConverterTypeWaddlePinPreview.write(value.preview, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinEntry_lift(_ buf: RustBuffer) throws -> WaddlePinEntry {
+    return try FfiConverterTypeWaddlePinEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinEntry_lower(_ value: WaddlePinEntry) -> RustBuffer {
+    return FfiConverterTypeWaddlePinEntry.lower(value)
+}
+
+
+/**
  * urn:waddle:pin:0 `<pin-event/>` room broadcast. Mirrors
  * `waddle_xmpp_client::pin::PinEvent`.
  */
@@ -5528,6 +6082,130 @@ public func FfiConverterTypeWaddleClientEvent_lower(_ value: WaddleClientEvent) 
     return FfiConverterTypeWaddleClientEvent.lower(value)
 }
 
+
+
+/**
+ * Typed FFI error thrown by the fetch-style methods
+ * (`fetch_mds_displayed`, `fetch_room_pins`). Send-style methods keep
+ * their `bool` / [`crate::WaddleSendMessageOutcome`] shapes so the
+ * existing Swift call sites stay untouched; only new `Result`-returning
+ * surfaces use this enum.
+ */
+public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    /**
+     * No live session — connect first.
+     */
+    case NotConnected
+    /**
+     * A caller-supplied JID failed to parse.
+     */
+    case InvalidJid
+    /**
+     * The server answered with an RFC 6120 §8.3 stanza error.
+     * `condition` is the defined-condition element name (e.g.
+     * `forbidden`); `text` is the optional human-readable `<text/>`.
+     */
+    case Stanza(condition: String, text: String?
+    )
+    /**
+     * The websocket transport failed or closed mid-request.
+     */
+    case Transport
+    /**
+     * The request timed out before the server replied.
+     */
+    case Timeout
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension WaddleError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .NotConnected
+        case 2: return .InvalidJid
+        case 3: return .Stanza(
+            condition: try FfiConverterString.read(from: &buf),
+            text: try FfiConverterOptionString.read(from: &buf)
+            )
+        case 4: return .Transport
+        case 5: return .Timeout
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .NotConnected:
+            writeInt(&buf, Int32(1))
+
+
+        case .InvalidJid:
+            writeInt(&buf, Int32(2))
+
+
+        case let .Stanza(condition,text):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(condition, into: &buf)
+            FfiConverterOptionString.write(text, into: &buf)
+
+
+        case .Transport:
+            writeInt(&buf, Int32(4))
+
+
+        case .Timeout:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleError_lift(_ buf: RustBuffer) throws -> WaddleError {
+    return try FfiConverterTypeWaddleError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleError_lower(_ value: WaddleError) -> RustBuffer {
+    return FfiConverterTypeWaddleError.lower(value)
+}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -7781,6 +8459,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddlePinEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddlePinEntry]
+
+    public static func write(_ value: [WaddlePinEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddlePinEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddlePinEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddlePinEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddlePinEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddlePresenceHat: FfiConverterRustBuffer {
     typealias SwiftType = [WaddlePresenceHat]
 
@@ -8074,6 +8777,51 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence() != 49649) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed() != 62684) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins() != 59200) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message() != 55354) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_message() != 45405) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed() != 38895) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state() != 32445) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction() != 59489) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed() != 54513) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation() != 18691) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction() != 34917) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction() != 65449) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed() != 23876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_supports_mds_publish_options() != 54950) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_direct_message() != 8719) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {

@@ -24,6 +24,7 @@ uniffi = { version = "0.31", features = ["tokio"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 jid = { workspace = true }
 minidom = { workspace = true }
+thiserror = { workspace = true }
 url = { workspace = true }
 # Native FFI build: take `v4` only and drop the workspace-wide `js`
 # feature. The workspace pins `uuid` with `js` because the wasm crate
