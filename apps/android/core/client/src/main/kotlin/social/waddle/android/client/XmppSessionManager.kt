@@ -745,6 +745,10 @@ class XmppSessionManager(
 
     private fun nowRfc3339(): String = java.time.OffsetDateTime.now().toString()
 
+    private fun parseInstantOrNull(value: String): java.time.Instant? =
+        runCatching { java.time.Instant.parse(value) }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(value).toInstant() }.getOrNull()
+
     /**
      * Passthroughs document a never-throw contract, but DataStore writes
      * can raise IOException (disk-full, corruption). Persistence best-
@@ -768,7 +772,10 @@ class XmppSessionManager(
             sessionPrefs.lastSeen.first()
                 .filterKeys { it !in joinedRooms }
                 .entries
-                .sortedBy { it.value }
+                // Parsed comparison: the markers mix server offsets
+                // (+00:00) with local ones (+02:00), and a raw string
+                // sort would misorder them across timezones.
+                .sortedBy { entry -> parseInstantOrNull(entry.value) }
                 .map { it.key },
         )
     }

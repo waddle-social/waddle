@@ -35,14 +35,16 @@ class MainActivity : ComponentActivity() {
             // (the in-app Loading composable covers that).
             graph.bootstrap.splashHold.value
         }
-        // Fresh starts only: removeExtra() mutates the in-process intent
-        // (covers rotation/theme recreation) but never reaches the
-        // ActivityRecord in system_server — after a process-death restore
-        // from Recents the ORIGINAL launch intent returns with the extra
-        // intact and a non-null savedInstanceState. Reading it again
-        // would yank the user back into a conversation they already left.
-        if (savedInstanceState == null) {
-            pendingConversationJid.value = intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        // Fresh starts read the launch extra; recreations restore the
+        // still-unconsumed value from the saved state instead. Gating on
+        // savedInstanceState alone conflated two cases: a process-death
+        // restore (already navigated — must NOT replay the stale extra)
+        // and a config change during the post-tap Loading window (must
+        // keep the pending target or the tap silently lands on Home).
+        pendingConversationJid.value = if (savedInstanceState == null) {
+            intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        } else {
+            savedInstanceState.getString(STATE_PENDING_JID)
         }
         intent.removeExtra(EXTRA_NAVIGATE_JID)
         setContent {
@@ -74,6 +76,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_PENDING_JID, pendingConversationJid.value)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_NAVIGATE_JID)?.let { pendingConversationJid.value = it }
@@ -84,5 +91,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** Notification taps carry the conversation bare JID to open. */
         const val EXTRA_NAVIGATE_JID = "waddle.navigate.jid"
+        private const val STATE_PENDING_JID = "waddle.state.pending-jid"
     }
 }
