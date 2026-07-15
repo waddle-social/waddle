@@ -2,12 +2,13 @@ use jid::Jid;
 use minidom::Element;
 
 use waddle_xmpp_client::{
+    mds::MdsCatchupEntry,
     messaging::{
         self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
         JingleReason, LinkPreviewData, LiveKitJoin, MarkupSpan, MarkupSpanData, MarkupSpanType,
         MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
     },
-    pin::{PinEvent, PinEventAction, PinPreview},
+    pin::{PinEntry, PinEvent, PinEventAction, PinPreview},
     request::StanzaId,
     xep::{
         call_thread::CallThreadEnded,
@@ -25,10 +26,10 @@ use crate::{
     WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
     WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEvent, WaddlePinPreview,
-    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
-    WaddleStanzaId,
+    WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
+    WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
+    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState,
+    WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -204,6 +205,17 @@ fn muji_presence_to_ffi(muji: MujiPresence) -> WaddleMujiPresence {
 }
 
 fn mds_entry_to_ffi(entry: MdsDisplayedEntry) -> WaddleMdsDisplayedEntry {
+    WaddleMdsDisplayedEntry {
+        chat_id: entry.chat_id.to_string(),
+        stanza_id: entry.stanza_id.as_str().to_string(),
+        stanza_id_by: entry.stanza_id_by.to_string(),
+    }
+}
+
+/// XEP-0490 §3.1 catch-up entry → FFI record. Same field mapping as
+/// [`mds_entry_to_ffi`] but sourced from the IQ retrieve parser
+/// (`mds::MdsCatchupEntry`) instead of the inbound PEP event type.
+pub(crate) fn mds_catchup_entry_to_ffi(entry: MdsCatchupEntry) -> WaddleMdsDisplayedEntry {
     WaddleMdsDisplayedEntry {
         chat_id: entry.chat_id.to_string(),
         stanza_id: entry.stanza_id.as_str().to_string(),
@@ -406,6 +418,17 @@ fn pin_preview_to_ffi(preview: PinPreview) -> WaddlePinPreview {
         author_nick: preview.author_nick,
         text: preview.text,
         message_timestamp: preview.message_timestamp.to_rfc3339(),
+    }
+}
+
+/// `urn:waddle:pin:0` pin-list entry → FFI record. Timestamps are
+/// stringified to RFC 3339 only here, at the boundary.
+pub(crate) fn pin_entry_to_ffi(entry: PinEntry) -> WaddlePinEntry {
+    WaddlePinEntry {
+        target_stanza_id: entry.target_stanza_id,
+        pinner_jid: entry.pinner_jid,
+        pinned_at: entry.pinned_at.to_rfc3339(),
+        preview: pin_preview_to_ffi(entry.preview),
     }
 }
 

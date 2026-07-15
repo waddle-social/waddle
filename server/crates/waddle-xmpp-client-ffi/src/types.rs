@@ -312,7 +312,7 @@ pub enum WaddlePinAction {
 }
 
 /// Frozen preview snapshot of a pinned message, taken at pin time.
-#[derive(uniffi::Record, Clone)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddlePinPreview {
     /// Bare JID of the message author at pin time.
     pub author_jid: String,
@@ -340,6 +340,20 @@ pub struct WaddlePinEvent {
     pub preview: Option<WaddlePinPreview>,
 }
 
+/// One `urn:waddle:pin:0` pinned-message entry returned by
+/// `fetch_room_pins`. Mirrors `waddle_xmpp_client::pin::PinEntry` 1:1.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddlePinEntry {
+    /// XEP-0359 stanza-id of the pinned message in the room archive.
+    pub target_stanza_id: String,
+    /// Bare JID of the user who pinned the message.
+    pub pinner_jid: String,
+    /// When the pin was applied (RFC 3339, server-stamped).
+    pub pinned_at: String,
+    /// Frozen preview snapshot taken at pin time.
+    pub preview: WaddlePinPreview,
+}
+
 /// XEP-0280 carbon direction of an unwrapped forwarded copy. Always
 /// §11-verified by the runtime before it reaches this boundary.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,7 +370,7 @@ pub enum WaddleCarbonDirection {
 /// FFI does not collapse or rename fields so the Swift consumer
 /// can correlate `chat_id` (PEP item id = the exact chat JID)
 /// with its locally-tracked conversation list directly.
-#[derive(uniffi::Record, Clone)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleMdsDisplayedEntry {
     /// PEP item id = bare for DMs/rooms, full occupant for MUC PMs.
     pub chat_id: String,

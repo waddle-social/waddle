@@ -12,8 +12,10 @@ use url::Url;
 mod boundary_convert;
 mod calls;
 mod convert;
+mod error;
 mod jid_parts;
 mod messaging;
+mod messaging_verbs;
 mod push;
 mod send_outcome;
 mod stanza;
@@ -21,7 +23,10 @@ mod types;
 
 #[cfg(test)]
 mod client_tests;
+#[cfg(test)]
+mod messaging_verbs_tests;
 
+pub use error::WaddleError;
 pub use types::*;
 
 use convert::{dispatch_event, resume_state_from_ffi};
@@ -227,7 +232,10 @@ impl WaddleClient {
         let Some(handle) = self.clone_handle().await else {
             return false;
         };
-        match handle.send_iq(stanza).await {
+        // Bounded like the fetch-style methods: `send_iq` itself never
+        // times out, so a server that accepts but never answers would
+        // otherwise suspend the caller's `await` forever.
+        match crate::messaging_verbs::send_iq_with_timeout(&handle, stanza).await {
             Ok(_) => true,
             Err(e) => {
                 self.emit_error(format!("{op} failed: {e}"));
@@ -269,6 +277,16 @@ impl WaddleClient {
             Ok(j) => Some(j),
             Err(e) => {
                 self.emit_error(format!("{op} failed: invalid bare JID '{value}': {e}"));
+                None
+            }
+        }
+    }
+
+    fn parse_jid(&self, value: &str, op: &'static str) -> Option<jid::Jid> {
+        match value.parse::<jid::Jid>() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                self.emit_error(format!("{op} failed: invalid JID '{value}': {e}"));
                 None
             }
         }
