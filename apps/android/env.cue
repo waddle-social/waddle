@@ -115,14 +115,14 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: contents: "write"
-			"tasks": [tasks.checkBindingsDrift, tasks.publishDebugApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.test, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
 			}
 			provider: github: permissions: contents: "read"
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.test, tasks.build]
 		}
 		// Manual probe: verifies /dev/kvm on the Namespace runner and runs
 		// the Gradle-managed-device instrumented smoke suite on a headless

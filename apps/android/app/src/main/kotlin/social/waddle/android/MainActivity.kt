@@ -31,6 +31,10 @@ class MainActivity : ComponentActivity() {
             graph.appState.value is WaddleAppState.Loading
         }
         pendingConversationJid.value = intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        // Consume-once: without this, every recreation (rotation, theme
+        // change) replays the notification navigation from the sticky
+        // launch intent.
+        intent.removeExtra(EXTRA_NAVIGATE_JID)
         setContent {
             val themeMode by graph.userPrefs.theme
                 .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
@@ -48,6 +52,8 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_NAVIGATE_JID)?.let { pendingConversationJid.value = it }
+        intent.removeExtra(EXTRA_NAVIGATE_JID)
+        setIntent(intent)
     }
 
     companion object {

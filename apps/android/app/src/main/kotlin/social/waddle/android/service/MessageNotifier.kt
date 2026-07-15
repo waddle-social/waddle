@@ -75,8 +75,25 @@ class MessageNotifier(
      * explicit failure note so the loss is visible instead of silent.
      */
     fun notifyReplyFailed(conversationJid: String, isGroupchat: Boolean) {
-        val messages = synchronized(historyLock) { history[conversationJid]?.toList() } ?: return
+        // Process death wipes the in-memory history while SystemUI still
+        // owns the notification (stuck in the RemoteInput spinner). The
+        // failure must be surfaced even then, so seed a minimal entry
+        // instead of bailing on an empty cache.
+        val messages = synchronized(historyLock) { history[conversationJid]?.toList() }
+            ?: listOf(
+                NotificationCompat.MessagingStyle.Message(
+                    context.getString(R.string.notification_reply_failed),
+                    System.currentTimeMillis(),
+                    selfPerson(),
+                ),
+            )
         postNotification(conversationJid, isGroupchat, messages, silent = false, replyFailed = true)
+    }
+
+    /** Sign-out: drop every message notification and the cached history. */
+    fun clearAll() {
+        synchronized(historyLock) { history.clear() }
+        NotificationManagerCompat.from(context).cancelAll()
     }
 
     /** Notification dismissed: forget the conversation's history. */

@@ -97,6 +97,7 @@ class AppGraph(context: Context) {
 
     /** Server-side logout (best effort) plus full local sign-out. */
     suspend fun signOut() {
+        messageNotifier.clearAll()
         authApi.logout(sessionPrefs.sessionId.first())
         _currentSession.value = null
         sessionManager.logout()

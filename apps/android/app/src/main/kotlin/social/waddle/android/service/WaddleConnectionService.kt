@@ -53,11 +53,22 @@ class WaddleConnectionService : Service() {
      * POST_NOTIFICATIONS runtime permission.
      */
     private fun promoteToForeground(state: ConnectionState) {
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(state),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-        )
+        try {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(state),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } catch (denied: IllegalStateException) {
+            // START_STICKY restarts re-enter here with the process in a
+            // background state; when the system denies the promotion
+            // (ForegroundServiceStartNotAllowedException), degrade to a
+            // stop instead of crashing — the app-state collector re-arms
+            // the service the next time the app is eligible.
+            stopSelf()
+        } catch (denied: SecurityException) {
+            stopSelf()
+        }
     }
 
     private fun buildNotification(state: ConnectionState): Notification {
