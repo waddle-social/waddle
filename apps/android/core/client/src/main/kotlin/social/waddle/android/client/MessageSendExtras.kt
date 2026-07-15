@@ -70,7 +70,10 @@ internal fun preparedSend(
             authorJid = checkNotNull(extras.replyToAuthorJid),
             messageId = checkNotNull(extras.replyToId),
         )
-        extras.replyParentBody?.let { parent ->
+        // Web parity: an empty parent (attachment-only message) gets
+        // no fallback quote — "> \n\n" on the wire would render as a
+        // stray quote line on non-XEP-0428 clients.
+        extras.replyParentBody?.takeIf { it.isNotEmpty() }?.let { parent ->
             val prefix = buildReplyFallbackPrefix(parent)
             finalBody = prefix + body
             fallback = WaddleFallbackRange(

@@ -274,7 +274,7 @@ class TimelineStore(
         }
         synchronized(lock) {
             val list = entries[conversation]
-            val index = list?.let { resolveTargetIndex(it, mutation.targetId) } ?: -1
+            val index = list?.let { resolveTargetIndex(it, mutation.targetId, mutation, isGroupchat) } ?: -1
             if (list != null && index >= 0) {
                 val updated = list[index].applying(ranked)
                 if (updated != list[index]) {
@@ -293,14 +293,27 @@ class TimelineStore(
      * Collision-safe target resolution (web `findMessageIndexById`
      * parity): the primary id always wins; a XEP-0359 alias resolves
      * only when exactly one row claims it — destructive mutations must
-     * never land on an ambiguous alias.
+     * never land on an ambiguous alias. Sender-authorized mutations
+     * (corrections/retractions) pre-filter candidates to the mutating
+     * sender's own rows (web sender-predicate parity): another sender's
+     * colliding row must neither receive the mutation nor make the
+     * author's legitimate target ambiguous.
      */
-    private fun resolveTargetIndex(list: List<Entry>, targetId: String): Int {
+    private fun resolveTargetIndex(
+        list: List<Entry>,
+        targetId: String,
+        mutation: MessageMutation,
+        isGroupchat: Boolean,
+    ): Int {
+        val senderScoped = mutation is MessageMutation.Correction ||
+            mutation is MessageMutation.Retraction
+        fun eligible(entry: Entry): Boolean =
+            !senderScoped || sameSender(mutation.from, entry.item.from, isGroupchat)
         // Cross-sender collisions can leave several rows sharing a
         // primary id; a mutation may only land when exactly one claims it.
         var primary = -1
         list.forEachIndexed { index, entry ->
-            if (entry.item.id == targetId) {
+            if (entry.item.id == targetId && eligible(entry)) {
                 if (primary >= 0) return -1
                 primary = index
             }
@@ -308,7 +321,7 @@ class TimelineStore(
         if (primary >= 0) return primary
         var found = -1
         list.forEachIndexed { index, entry ->
-            if (targetId in entry.item.identityIds) {
+            if (targetId in entry.item.identityIds && eligible(entry)) {
                 if (found >= 0) return -1
                 found = index
             }

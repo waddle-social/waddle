@@ -437,10 +437,10 @@ class TimelineMutationTest {
     // --- identity resolution ---
 
     @Test
-    fun `mutation targeting an ambiguous alias is dropped`() {
+    fun `sender-scoped retraction resolves its own row despite a cross-sender collision`() {
         // Two rows from DIFFERENT senders claiming the same origin id
-        // (cross-sender collision — never merged): a mutation addressed
-        // to that alias must not pick either.
+        // (cross-sender collision — never merged). Alice's retraction is
+        // sender-scoped (web parity): it lands on HER row only.
         store.onLiveMessage(testMessage(id = "a", stanzaId = "s1", originId = "dup", body = "one"))
         store.onLiveMessage(
             testMessage(
@@ -454,8 +454,32 @@ class TimelineMutationTest {
         )
         store.onLiveMessage(testMessage(id = "r1", body = null, retractsId = "dup"))
 
-        assertEquals(2, dmTimeline().size)
-        assertTrue(dmTimeline().none { it.tombstone != null })
+        val items = dmTimeline()
+        assertEquals(2, items.size)
+        assertEquals(MessageTombstone.Retracted, items.first { it.id == "s1" }.tombstone)
+        assertNull(items.first { it.id == "s2" }.tombstone)
+    }
+
+    @Test
+    fun `reaction targeting an ambiguous cross-sender alias is dropped`() {
+        // Reactions are NOT sender-scoped: an alias claimed by two rows
+        // stays unresolvable and the reaction applies to neither.
+        store.onLiveMessage(testMessage(id = "a", stanzaId = "s1", originId = "dup", body = "one"))
+        store.onLiveMessage(
+            testMessage(
+                id = "b",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                stanzaId = "s2",
+                originId = "dup",
+                body = "two",
+            ),
+        )
+        store.onLiveMessage(
+            testMessage(id = "r1", body = null, reactionTargetId = "dup", reactionEmojis = listOf("👍")),
+        )
+
+        assertTrue(dmTimeline().all { it.reactions.isEmpty() })
     }
 
     @Test

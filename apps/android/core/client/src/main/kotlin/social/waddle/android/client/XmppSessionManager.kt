@@ -1114,9 +1114,13 @@ class XmppSessionManager(
                 // they are not new DM activity and must not reorder or
                 // re-persist recency.
                 val isMutation = event.message.isTimelineMutation()
-                if (!isMutation) persistDmRecency(event)
+                // Bodyless protocol stanzas (chat states, displayed
+                // markers) are not DM activity either — a typing burst
+                // must not reorder or create DM-list entries.
+                val hasContent = event.message.body != null
+                if (!isMutation && hasContent) persistDmRecency(event)
                 val newlyInserted = timelineStore.onLiveMessage(event.message)
-                if (!isMutation) dmStore.onChatMessage(ownBareJid, event.message)
+                if (!isMutation && hasContent) dmStore.onChatMessage(ownBareJid, event.message)
                 val message = event.message
                 conversationKeyOf(
                     ownBareJid = ownBareJid,

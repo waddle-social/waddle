@@ -48,6 +48,8 @@ data class ThreadSummary(
     val threadId: String,
     val rootAuthor: String?,
     val rootPreview: String,
+    /** The preview source was retracted/moderated; render a placeholder. */
+    val rootTombstoned: Boolean,
     val replyCount: Int,
     val lastTimestamp: String?,
 )

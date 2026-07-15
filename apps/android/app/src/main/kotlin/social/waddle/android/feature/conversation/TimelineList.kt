@@ -119,7 +119,11 @@ fun TimelineList(
 }
 
 private fun rowKey(row: ConversationRow): String = when (row) {
-    is ConversationRow.Stored -> "s:${row.item.id}"
+    // id + sender: the store deliberately keeps cross-sender id
+    // collisions as distinct rows (suppressing them would be an
+    // injection vector), and same-sender same-id always merges — so
+    // the pair is unique where the id alone would crash the LazyColumn.
+    is ConversationRow.Stored -> "s:${row.item.id}:${row.item.from.orEmpty()}"
     is ConversationRow.Unconfirmed -> "p:${row.message.localId}"
 }
 

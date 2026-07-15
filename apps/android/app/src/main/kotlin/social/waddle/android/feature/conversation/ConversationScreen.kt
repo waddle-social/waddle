@@ -168,7 +168,15 @@ fun ConversationScreen(
                     items(state.threads, key = { it.threadId }) { thread ->
                         ListItem(
                             headlineContent = {
-                                Text(text = thread.rootPreview, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    text = if (thread.rootTombstoned) {
+                                        stringResource(R.string.message_deleted)
+                                    } else {
+                                        thread.rootPreview
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             },
                             supportingContent = {
                                 Text(

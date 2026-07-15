@@ -487,10 +487,14 @@ open class ConversationViewModel(
         // resolve them by identity so previews show the root body.
         return byThread.map { (thread, members) ->
             val root = items.firstOrNull { thread in it.identityIds }
+            val previewSource = root ?: members.first()
             ThreadSummary(
                 threadId = thread,
-                rootAuthor = (root ?: members.first()).let(::authorNameOf),
-                rootPreview = (root ?: members.first()).body,
+                rootAuthor = previewSource.let(::authorNameOf),
+                // Tombstoned content must never leak through previews
+                // (XEP-0424/0425); the UI substitutes the placeholder.
+                rootPreview = if (previewSource.tombstone != null) "" else previewSource.body,
+                rootTombstoned = previewSource.tombstone != null,
                 replyCount = members.count { thread !in it.identityIds },
                 lastTimestamp = members.last().timestamp,
             )
