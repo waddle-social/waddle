@@ -430,7 +430,16 @@
               pkgs.oras
               pkgs.fluxcd
               pkgs.yq-go
+              # Android app (apps/android): JDK for sdkmanager/Gradle,
+              # cargo-ndk for the jniLibs cross-build, gh for the release
+              # APK upload task. The Android SDK itself is provisioned by
+              # scripts/setup-android-sdk.sh, not nix.
+              pkgs.temurin-bin-21
+              pkgs.cargo-ndk
+              pkgs.gh
             ];
+
+            env.JAVA_HOME = "${pkgs.temurin-bin-21}";
 
             shellHook = ''
               echo "waddle dev shell"

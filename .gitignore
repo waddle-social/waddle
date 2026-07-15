@@ -55,6 +55,14 @@ server/certs/
 gateway/schemas/
 gateway/supergraph.graphql
 
+# Android (apps/android)
+apps/android/.gradle/
+apps/android/.kotlin/
+apps/android/local.properties
+apps/android/core/client/src/main/jniLibs/
+apps/android/keystore.properties
+*.jks
+
 # BEGIN cuenv vcs
 .agents/skills/
 .cuenv/vcs/cache/

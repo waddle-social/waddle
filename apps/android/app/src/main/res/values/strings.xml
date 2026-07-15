@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Waddle</string>
+
+    <!-- Shared actions -->
+    <string name="action_back">Back</string>
+    <string name="action_retry">Try again</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_logout">Log out</string>
+
+    <!-- Cold-start restore -->
+    <string name="restore_error_title">Couldn\'t restore your session</string>
+
+    <!-- Login -->
+    <string name="login_subtitle">Sign in to your Waddle server</string>
+    <string name="login_continue_with">Continue with %1$s</string>
+    <string name="login_no_providers">No sign-in providers are configured on this server.</string>
+    <string name="login_verification_instructions">Finish signing in with your browser. Your code:</string>
+    <string name="login_completing">Finishing sign-in…</string>
+    <string name="login_error_providers">Couldn\'t load the sign-in providers.</string>
+    <string name="login_error_start">Couldn\'t start the sign-in.</string>
+    <string name="login_error_poll">Sign-in failed while waiting for approval.</string>
+    <string name="login_error_expired">The sign-in request expired.</string>
+    <string name="login_error_session">Couldn\'t fetch your session.</string>
+
+    <!-- Home -->
+    <string name="home_open_menu">Open navigation menu</string>
+    <string name="home_direct_messages">Direct messages</string>
+    <string name="home_settings">Settings</string>
+    <string name="home_section_channels">Channels</string>
+    <string name="home_channel_label">#%1$s</string>
+    <string name="home_empty">No channels yet. They appear here once the server topology loads.</string>
+
+    <!-- Connection states -->
+    <string name="connection_connecting">Connecting…</string>
+    <string name="connection_reconnecting">Reconnecting (attempt %1$d)…</string>
+    <string name="connection_offline">Offline — waiting for network</string>
+    <string name="connection_auth_failed">Session expired — sign in again</string>
+    <string name="connection_failed">Connection failed</string>
+    <string name="connection_status_connected">Connected</string>
+    <string name="connection_status_idle">Not connected</string>
+
+    <!-- Conversation -->
+    <string name="composer_placeholder">Message</string>
+    <string name="composer_send">Send</string>
+    <string name="message_unknown_sender">Unknown</string>
+    <string name="message_author_me">You</string>
+    <string name="message_sending">Sending…</string>
+    <string name="message_queued">Queued — sends when connected</string>
+    <string name="message_delivery_failed">Not delivered</string>
+    <string name="message_retry">Retry</string>
+    <string name="message_sticker">Sticker</string>
+    <string name="message_attachment">Attachment</string>
+
+    <!-- DMs -->
+    <string name="dm_list_title">Direct messages</string>
+    <string name="dm_list_empty">No direct messages yet.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_account">Account</string>
+    <string name="settings_avatar">Avatar</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_system">System</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_notifications">Notifications</string>
+    <string name="settings_notifications_enabled">Show message notifications</string>
+    <string name="settings_message_sounds">Message sounds</string>
+    <string name="settings_battery">Battery</string>
+    <string name="settings_battery_row_title">Battery optimization</string>
+    <string name="settings_battery_exempt">Waddle is exempt from battery optimization.</string>
+    <string name="settings_battery_not_exempt">Allow Waddle to run unrestricted so messages arrive reliably.</string>
+    <string name="settings_battery_request">Allow</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_connection">Connection</string>
+    <string name="notification_channel_connection_description">Persistent status of the chat connection.</string>
+    <string name="notification_channel_messages">Messages</string>
+    <string name="notification_channel_messages_description">New chat messages.</string>
+    <string name="notification_reply_label">Reply</string>
+    <string name="notification_reply_failed">Reply not sent — open Waddle to retry</string>
+    <string name="connection_retry">Retry</string>
+    <string name="notification_self_fallback">You</string>
+</resources>

@@ -14,8 +14,8 @@ use waddle_xmpp_client::{
         reply::{FallbackRange, ReplyMarker},
         thread::ThreadRef,
     },
-    ClientEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent, MessagingEvent,
-    SmResumeState,
+    ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
+    MessagingEvent, SmResumeState,
 };
 
 use crate::{
@@ -26,8 +26,9 @@ use crate::{
     WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEvent, WaddlePinPreview,
-    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSendOptions,
-    WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
+    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
+    WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
+    WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -76,6 +77,11 @@ pub(super) fn dispatch_event(
         ClientEvent::ResumeStateChanged(state) => {
             listener.on_event(WaddleClientEvent::ResumeStateChanged {
                 state: state.map(resume_state_to_ffi),
+            });
+        }
+        ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure)) => {
+            listener.on_event(WaddleClientEvent::AuthenticationFailed {
+                condition: sasl_condition_to_ffi(failure.condition),
             });
         }
         _ => {}
@@ -321,6 +327,26 @@ fn reference_to_ffi(reference: ReferenceData) -> WaddleReference {
         begin: reference.begin,
         end: reference.end,
         anchor: reference.anchor,
+    }
+}
+
+fn sasl_condition_to_ffi(
+    condition: waddle_xmpp_client::SaslFailureCondition,
+) -> WaddleSaslCondition {
+    use waddle_xmpp_client::SaslFailureCondition as C;
+    match condition {
+        C::Aborted => WaddleSaslCondition::Aborted,
+        C::AccountDisabled => WaddleSaslCondition::AccountDisabled,
+        C::CredentialsExpired => WaddleSaslCondition::CredentialsExpired,
+        C::EncryptionRequired => WaddleSaslCondition::EncryptionRequired,
+        C::IncorrectEncoding => WaddleSaslCondition::IncorrectEncoding,
+        C::InvalidAuthzid => WaddleSaslCondition::InvalidAuthzid,
+        C::InvalidMechanism => WaddleSaslCondition::InvalidMechanism,
+        C::MalformedRequest => WaddleSaslCondition::MalformedRequest,
+        C::MechanismTooWeak => WaddleSaslCondition::MechanismTooWeak,
+        C::NotAuthorized => WaddleSaslCondition::NotAuthorized,
+        C::TemporaryAuthFailure => WaddleSaslCondition::TemporaryAuthFailure,
+        C::Unknown => WaddleSaslCondition::Unknown,
     }
 }
 
@@ -2051,6 +2077,27 @@ mod tests {
         match &events[7] {
             WaddleClientEvent::ResumeStateChanged { state } => assert!(state.is_none()),
             _ => panic!("expected ResumeStateChanged(None) variant"),
+        }
+    }
+
+    #[test]
+    fn dispatch_event_maps_sasl_failure_to_authentication_failed() {
+        use waddle_xmpp_client::{ConnectionEvent, SaslFailure, SaslFailureCondition};
+        let listener = CapturingListener::default();
+        dispatch_event(
+            ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(SaslFailure {
+                condition: SaslFailureCondition::NotAuthorized,
+            })),
+            "icepuma@waddle.test",
+            &listener,
+        );
+        let events = listener.events.lock().expect("listener lock");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            WaddleClientEvent::AuthenticationFailed { condition } => {
+                assert_eq!(*condition, WaddleSaslCondition::NotAuthorized);
+            }
+            _ => panic!("expected AuthenticationFailed"),
         }
     }
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose draws everything; this is only the pre-Compose window. -->
+    <style name="Theme.Waddle" parent="android:Theme.Material.NoActionBar" />
+
+    <!-- core-splashscreen theme; MainActivity holds the splash until the
+         app state leaves Loading, then swaps to Theme.Waddle. -->
+    <style name="Theme.Waddle.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.Waddle</item>
+    </style>
+</resources>

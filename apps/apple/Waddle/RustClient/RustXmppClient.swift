@@ -352,6 +352,10 @@ private final class _EventListener: WaddleEventListener {
             continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
         case let .call(callEvent):
             onCall(event: callEvent)
+        case let .authenticationFailed(condition):
+            // Terminal for the presented token — surfaced through the
+            // existing error path; AppModel classifies and re-authenticates.
+            onError(description: "SASL authentication failed: \(condition)")
         case let .resumeStateChanged(state):
             // The Apple client does not persist XEP-0198 resume state yet;
             // it reconnects with a fresh stream (`WaddleConfig.resumeState`

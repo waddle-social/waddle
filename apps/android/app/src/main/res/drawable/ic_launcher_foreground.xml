@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder penguin silhouette until the shared brand-asset pipeline
+     (apps/apple sync_brand_assets analog) lands. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:translateX="27" android:translateY="24">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M27,0C15,0 9,9 9,21C9,30 6,36 3,42C0,48 3,57 12,58.5C15,59 18,60 27,60C36,60 39,59 42,58.5C51,57 54,48 51,42C48,36 45,30 45,21C45,9 39,0 27,0ZM19.5,15A3,3 0 0 1 22.5,18A3,3 0 0 1 19.5,21A3,3 0 0 1 16.5,18A3,3 0 0 1 19.5,15ZM34.5,15A3,3 0 0 1 37.5,18A3,3 0 0 1 34.5,21A3,3 0 0 1 31.5,18A3,3 0 0 1 34.5,15ZM27,22.5L31.5,27L27,31.5L22.5,27Z" />
+    </group>
+</vector>
