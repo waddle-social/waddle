@@ -63,6 +63,9 @@ pub enum ClientError {
     #[error("websocket transport failed")]
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
+    #[error("websocket TLS configuration could not be built")]
+    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    WebSocketTlsConfig(#[source] rustls::Error),
     #[error("websocket transport received an empty XMPP frame")]
     EmptyTransportFrame,
     #[error("websocket transport frame exceeds the maximum size of {max} bytes")]

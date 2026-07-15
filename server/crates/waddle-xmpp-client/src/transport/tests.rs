@@ -249,3 +249,62 @@ async fn concrete_transport_connects_and_emits_typed_frames() {
 
     server.await.unwrap();
 }
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[test]
+fn transport_pins_the_rustls_connector() {
+    use tokio_tungstenite::Connector;
+
+    // Guards against regressing to tokio-tungstenite's auto-connector: with
+    // whole-workspace feature unification the auto-connector would prefer
+    // `native-tls` (OpenSSL on Android) whenever another workspace member
+    // enables it.
+    let connector = super::native::rustls_connector().unwrap();
+    assert!(matches!(connector, Connector::Rustls(_)));
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn concrete_transport_rejects_self_signed_tls_certificates() {
+    use std::sync::Arc;
+    use tokio_rustls::TlsAcceptor;
+
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls::pki_types::PrivateKeyDer::from(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()),
+    );
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        // The TLS handshake must fail: the client rejects the untrusted
+        // self-signed certificate against its bundled webpki roots.
+        assert!(acceptor.accept(stream).await.is_err());
+    });
+
+    let mut live_config = config();
+    live_config.transport = WebSocketConfig::new(
+        Url::parse(&format!("wss://localhost:{}/xmpp", address.port())).unwrap(),
+    )
+    .unwrap();
+
+    let error = match DefaultTransportFactory.connect(&live_config).await {
+        Err(error) => error,
+        Ok(_) => panic!("expected certificate verification to fail"),
+    };
+    assert!(matches!(error, ClientError::WebSocket(_)));
+
+    server.await.unwrap();
+}

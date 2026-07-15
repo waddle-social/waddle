@@ -257,12 +257,13 @@ async fn pagination_cursor_round_trips() {
 /// enough for the test surface; if the response shape ever changes
 /// this will break loudly.
 fn extract_cursor(frame: &str) -> Option<String> {
-    let needle = if let Some(idx) = frame.find(r#"var='next_cursor'"#) {
-        idx + r#"var='next_cursor'"#.len()
-    } else if let Some(idx) = frame.find(r#"var='next_cursor'"#) {
-        idx + r#"var='next_cursor'"#.len()
+    const DOUBLE_QUOTED: &str = r#"var="next_cursor""#;
+    const SINGLE_QUOTED: &str = r#"var='next_cursor'"#;
+    let needle = if let Some(idx) = frame.find(DOUBLE_QUOTED) {
+        idx + DOUBLE_QUOTED.len()
     } else {
-        return None;
+        let idx = frame.find(SINGLE_QUOTED)?;
+        idx + SINGLE_QUOTED.len()
     };
     let rest = &frame[needle..];
     let open = rest.find("<value>")?;

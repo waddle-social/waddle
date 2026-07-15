@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "social.waddle.client.ffi"
+android = true
+android_cleaner = true
