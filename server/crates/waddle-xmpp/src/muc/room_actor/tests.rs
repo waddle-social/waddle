@@ -22,6 +22,17 @@ fn test_room() -> MucRoom {
     )
 }
 
+fn test_claim_fence(room_jid: &BareJid) -> crate::muc::RoomClaimFenceContext {
+    crate::muc::RoomClaimFenceContext::new(
+        crate::ownership::Entity::new(
+            crate::ownership::EntityType::RoomActor,
+            room_jid.to_string(),
+        ),
+        crate::ownership::NodeIdentity::new("test-node", "test-node-epoch"),
+        crate::ownership::ClaimEpoch(1),
+    )
+}
+
 fn test_full_jid(user: &str) -> FullJid {
     format!("{}@example.com/res", user)
         .parse()
@@ -3495,28 +3506,22 @@ impl FakeDurableStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FakeDurableStore {
-    fn load_room_state<'a>(
+    fn load_room_state_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         Box::pin(async { Ok(None) })
     }
 
-    fn load_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
-    {
-        self.load_room_state(room_jid)
-    }
-
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _waddle_id: &'a str,
         _channel_id: &'a str,
         _config: &'a RoomConfig,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3532,10 +3537,11 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         })
     }
 
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _subject: Option<&'a SubjectState>,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3551,10 +3557,11 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         })
     }
 
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         entry: &'a crate::muc::affiliation::AffiliationEntry,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         self.save_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3575,9 +3582,18 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         })
     }
 
-    fn check_fenced_fanout<'a>(
+    fn delete_room_state_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, bool> {
         let fenced = *self.fenced.lock().expect("lock");
         Box::pin(async move {
@@ -3610,44 +3626,40 @@ impl FailNthAffiliationSaveStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
-    fn load_room_state<'a>(
+    fn load_room_state_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         Box::pin(async { Ok(None) })
     }
 
-    fn load_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
-    {
-        self.load_room_state(room_jid)
-    }
-
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _waddle_id: &'a str,
         _channel_id: &'a str,
         _config: &'a RoomConfig,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _subject: Option<&'a SubjectState>,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _entry: &'a crate::muc::affiliation::AffiliationEntry,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         let call = self
             .save_calls
@@ -3664,6 +3676,22 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
             }
         })
     }
+
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
+    ) -> crate::muc::durable::MucDurableFuture<'a, bool> {
+        Box::pin(async { Ok(true) })
+    }
 }
 
 async fn spawn_room_actor_with_store(
@@ -3671,7 +3699,10 @@ async fn spawn_room_actor_with_store(
 ) -> ActorRef<RoomActor> {
     let actor = spawn_room_actor().await;
     actor
-        .ask(RestoreDurableRoomState { store })
+        .ask(RestoreDurableRoomState {
+            store,
+            claim_fence: test_claim_fence(&test_room().room_jid),
+        })
         .await
         .expect("restore");
     actor
@@ -3708,9 +3739,10 @@ impl FlakyThenRecoveringStore {
 }
 
 impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
-    fn load_room_state<'a>(
+    fn load_room_state_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3739,38 +3771,49 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
         })
     }
 
-    fn load_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
-    {
-        self.load_room_state(room_jid)
-    }
-
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _waddle_id: &'a str,
         _channel_id: &'a str,
         _config: &'a RoomConfig,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _subject: Option<&'a SubjectState>,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _entry: &'a crate::muc::affiliation::AffiliationEntry,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
     ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
+    ) -> crate::muc::durable::MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a crate::muc::RoomClaimFenceContext,
+    ) -> crate::muc::durable::MucDurableFuture<'a, bool> {
+        Box::pin(async { Ok(true) })
     }
 }
 
@@ -3794,6 +3837,7 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("restore ask itself always replies, even on a load failure");
@@ -3914,21 +3958,27 @@ async fn update_config_gate_allows_the_mutation_when_owned() {
 }
 
 #[tokio::test]
-async fn update_config_gate_fails_open_on_a_transient_fencing_error() {
+async fn update_config_gate_fails_closed_on_a_transient_fencing_error() {
     let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
     let original = actor.ask(GetConfig).await.expect("ask").members_only;
 
     let mut new_config = actor.ask(GetConfig).await.expect("ask");
     new_config.members_only = !original;
-    actor
-        .ask(UpdateConfig { config: new_config })
-        .await
-        .expect("a transient fencing failure must fail OPEN, not block the mutation");
+    let result = actor.ask(UpdateConfig { config: new_config }).await;
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(
+                RoomMutationError::OwnershipUnavailable
+            ))
+        ),
+        "an unprovable exact fence must fail closed with a typed retryable error: {result:?}"
+    );
 
     let after = actor.ask(GetConfig).await.expect("ask").members_only;
-    assert_ne!(
+    assert_eq!(
         after, original,
-        "fail-open means the mutation still applies despite the transient error"
+        "ownership uncertainty must prevent the in-memory mutation"
     );
 }
 
@@ -3978,9 +4028,8 @@ async fn ownership_lost_seal_blocks_a_later_fail_open_mutation() {
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
 
-    // The ordinary mutation gate intentionally fails open on a transient
-    // backend error, but a prior definitive loss must remain terminal for
-    // this actor incarnation.
+    // A prior definitive loss remains terminal for this actor incarnation,
+    // even if the next database probe is merely uncertain.
     store.set_fenced(None);
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;

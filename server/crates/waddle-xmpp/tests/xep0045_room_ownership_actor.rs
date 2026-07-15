@@ -11,7 +11,9 @@ use jid::BareJid;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use waddle_xmpp::muc::affiliation::AffiliationEntry;
-use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+use waddle_xmpp::muc::durable::{
+    DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+};
 use waddle_xmpp::muc::room_actor::{
     GetAffiliation, Join, JoinAffiliationGrant, JoinWithAffiliation, OccupantCount,
     ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor, RoomActorError,
@@ -22,7 +24,10 @@ use waddle_xmpp::muc::room_registry_actor::{
     WireClusteringClaims,
 };
 use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
-use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::ownership::{
+    ClaimEpoch, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
+    SharedNodeIdentity,
+};
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
 use waddle_xmpp::{Affiliation, Role, XmppError};
 
@@ -56,48 +61,57 @@ impl OwnershipStore {
 }
 
 impl MucDurableStore for OwnershipStore {
-    fn load_room_state<'a>(
+    fn load_room_state_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
+        _fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
         let restore = self.restore.clone();
         Box::pin(async move { Ok(restore) })
     }
 
-    fn load_room_state_fenced<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-        self.load_room_state(room_jid)
-    }
-
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _waddle_id: &'a str,
         _channel_id: &'a str,
         _config: &'a RoomConfig,
+        _fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _subject: Option<&'a SubjectState>,
+        _fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         _room_jid: &'a BareJid,
         _entry: &'a AffiliationEntry,
+        _fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 
-    fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+        _fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, bool> {
         let state = self.state.load(Ordering::SeqCst);
         Box::pin(async move {
             match state {
@@ -111,9 +125,9 @@ impl MucDurableStore for OwnershipStore {
 }
 
 async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
-    let room_jid = "ownership@muc.example.com".parse().expect("valid room JID");
+    let room_jid: BareJid = "ownership@muc.example.com".parse().expect("valid room JID");
     let room = MucRoom::new(
-        room_jid,
+        room_jid.clone(),
         "waddle-1".to_string(),
         "channel-1".to_string(),
         RoomConfig::default(),
@@ -125,6 +139,11 @@ async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
     actor
         .ask(RestoreDurableRoomState {
             store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+            claim_fence: RoomClaimFenceContext::new(
+                Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                NodeIdentity::new("test-node", "test-node-epoch"),
+                ClaimEpoch(1),
+            ),
         })
         .await
         .expect("install durable ownership store");

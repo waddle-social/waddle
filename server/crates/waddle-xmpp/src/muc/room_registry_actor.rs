@@ -54,6 +54,13 @@ enum RoomPublicationError {
     ReconciliationPending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmbiguousDurableDelete {
+    StateRetained,
+    StateDeleted,
+    Uncertain,
+}
+
 /// Kills a freshly spawned room actor if preparation is cancelled before the
 /// actor is deliberately handed back to the registry. This also covers a
 /// reclaimed-room deadline cancelling the preparation future.
@@ -1287,6 +1294,7 @@ impl RoomRegistryActor {
             if let Err(error) = actor_ref
                 .tell(RestoreDurableRoomState {
                     store: Arc::clone(store),
+                    claim_fence: claim_fence.clone(),
                 })
                 .await
             {
@@ -1496,7 +1504,10 @@ impl RoomRegistryActor {
                 Ok(DurableRestoreReadiness::Pending) => match durable_store {
                     Some(store) => {
                         if actor_ref
-                            .tell(RestoreDurableRoomState { store })
+                            .tell(RestoreDurableRoomState {
+                                store,
+                                claim_fence: publication_fence.clone(),
+                            })
                             .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                             .await
                             .is_ok()
@@ -3057,9 +3068,12 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     .await,
             );
         };
+        // The reaper won this claim outside the demand-side acquisition
+        // path. Retain the exact generation before the first fenced read.
+        store.record_claim_fence(&msg.room_jid, claim_fence.clone());
         let snapshot = match tokio::time::timeout(
             RECLAIMED_ROOM_STORE_TIMEOUT,
-            store.load_room_state(&msg.room_jid),
+            store.load_room_state_fenced(&msg.room_jid, &claim_fence),
         )
         .await
         {
@@ -3426,9 +3440,9 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 return DestroyRoomOutcome::ReleaseBacklogFull;
             }
         }
-        let removed_entry = self.rooms.remove(&msg.room_jid);
+        let mut removed_entry = self.rooms.remove(&msg.room_jid);
         let removed_room = removed_entry.is_some();
-        let removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
+        let mut removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
         let removed_pending_room = removed_preparation.is_some();
         let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
         // XEP-0045 §10.9 (#1261): destroy removes the room "even if it
@@ -3447,16 +3461,19 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
             && msg.reason == DestroyRoomReason::Destroy
         {
             if let Some(store) = &self.durable_store {
-                if let Err(error) = store.delete_room_state(&msg.room_jid).await {
+                let Some(fence) = removed_entry
+                    .as_ref()
+                    .map(|entry| &entry.claim_fence)
+                    .or_else(|| {
+                        removed_preparation
+                            .as_ref()
+                            .map(|preparation| &preparation.claim_fence)
+                    })
+                else {
                     warn!(
                         room = %msg.room_jid,
-                        %error,
-                        "Failed to delete durable room state; refusing the destroy so it \
-                         can be retried instead of resurrecting from storage"
+                        "Refusing durable room deletion without the registry entry's exact fence"
                     );
-                    if let Some(entry) = removed_entry {
-                        self.rooms.insert(msg.room_jid.clone(), entry);
-                    }
                     if let Some(pending) = removed_preparation {
                         self.pending_room_preparations
                             .insert(msg.room_jid.clone(), pending);
@@ -3465,6 +3482,104 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                         self.poisoned_rooms.insert(msg.room_jid.clone());
                     }
                     return DestroyRoomOutcome::DurableWipeFailed;
+                };
+                let delete_classification = match tokio::time::timeout(
+                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                    store.delete_room_state_fenced(&msg.room_jid, fence),
+                )
+                .await
+                {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => {
+                        warn!(
+                            room = %msg.room_jid,
+                            %error,
+                            "Durable room deletion returned an error; classifying the result with \
+                             an exact-fenced reload"
+                        );
+                        Some(
+                            match tokio::time::timeout(
+                                ROOM_OWNERSHIP_CALL_TIMEOUT,
+                                store.load_room_state_fenced(&msg.room_jid, fence),
+                            )
+                            .await
+                            {
+                                Ok(Ok(Some(_))) => AmbiguousDurableDelete::StateRetained,
+                                Ok(Ok(None)) => AmbiguousDurableDelete::StateDeleted,
+                                Ok(Err(reload_error)) => {
+                                    warn!(
+                                        room = %msg.room_jid,
+                                        %reload_error,
+                                        "Exact-fenced reload failed while classifying durable deletion"
+                                    );
+                                    AmbiguousDurableDelete::Uncertain
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        room = %msg.room_jid,
+                                        "Exact-fenced reload timed out while classifying durable deletion"
+                                    );
+                                    AmbiguousDurableDelete::Uncertain
+                                }
+                            },
+                        )
+                    }
+                    Err(_) => {
+                        warn!(
+                            room = %msg.room_jid,
+                            "Durable room deletion timed out; the still-running database operation \
+                             makes the outcome uncertain"
+                        );
+                        Some(AmbiguousDurableDelete::Uncertain)
+                    }
+                };
+                if let Some(classification) = delete_classification {
+                    match classification {
+                        AmbiguousDurableDelete::StateRetained => {
+                            if let Some(entry) = removed_entry.take() {
+                                self.rooms.insert(msg.room_jid.clone(), entry);
+                            }
+                            if let Some(pending) = removed_preparation.take() {
+                                self.pending_room_preparations
+                                    .insert(msg.room_jid.clone(), pending);
+                            }
+                            if removed_poison {
+                                self.poisoned_rooms.insert(msg.room_jid.clone());
+                            }
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                        AmbiguousDurableDelete::StateDeleted => {
+                            warn!(
+                                room = %msg.room_jid,
+                                "Exact-fenced reload proved durable state absent after an \
+                                 ambiguous delete; completing destruction"
+                            );
+                        }
+                        AmbiguousDurableDelete::Uncertain => {
+                            warn!(
+                                room = %msg.room_jid,
+                                "Durable deletion remains uncertain; killing the removed actor \
+                                 and releasing its exact claim"
+                            );
+                            if let Some(entry) = removed_entry.take() {
+                                entry.actor_ref.kill();
+                                self.release_room_claim(&msg.room_jid, &entry.claim_fence)
+                                    .await;
+                            }
+                            if let Some(pending) = removed_preparation.take() {
+                                let claim_fence = pending.claim_fence.clone();
+                                Self::reply_preparation_failure(
+                                    &msg.room_jid,
+                                    pending.waiters,
+                                    ReclaimedRoomOutcome::PendingRetry,
+                                );
+                                drop(pending.guard);
+                                self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
+                                self.release_room_claim(&msg.room_jid, &claim_fence).await;
+                            }
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                    }
                 }
             }
         }

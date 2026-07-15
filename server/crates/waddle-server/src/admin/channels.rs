@@ -2712,6 +2712,9 @@ async fn group_dm_rename_update_error(
                 state.clustering_claims.demote_room_actor(room_jid).await;
                 unavailable("This room's ownership recently moved to another node; please retry.")
             }
+            UpdateGroupDmConfigByMemberError::OwnershipUnavailable => {
+                unavailable("This room's ownership cannot be verified right now; please retry.")
+            }
             UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
                 "group-DM rename applied but durable persist failed: {detail}"
             )),

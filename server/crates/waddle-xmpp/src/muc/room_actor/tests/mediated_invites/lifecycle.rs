@@ -7,6 +7,7 @@ async fn mediated_invite_operation_replays_exact_authorization_without_a_second_
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach durable store");
@@ -184,6 +185,7 @@ async fn mediated_invite_rollback_commit_replays_exact_outcome_until_acknowledge
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach recording durable store");
@@ -562,6 +564,7 @@ async fn capacity_never_evicts_live_grants_or_persists_an_overflow_grant() {
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach durable store");
