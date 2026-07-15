@@ -1,10 +1,12 @@
 package social.waddle.android.feature.home
 
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -17,7 +19,11 @@ import social.waddle.android.client.ConnectionState
 
 /** Persistent surface while the connection is not ready. */
 @Composable
-fun ConnectionBanner(state: ConnectionState, modifier: Modifier = Modifier) {
+fun ConnectionBanner(
+    state: ConnectionState,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val text = when (state) {
         ConnectionState.Connecting -> stringResource(R.string.connection_connecting)
         is ConnectionState.Reconnecting ->
@@ -29,14 +35,23 @@ fun ConnectionBanner(state: ConnectionState, modifier: Modifier = Modifier) {
     } ?: return
 
     Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = modifier) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onTertiaryContainer,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-                .semantics { liveRegion = LiveRegionMode.Polite },
-        )
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 4.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            // Server-side outages never produce an offline->online edge,
+            // so the parked loop needs a manual trigger.
+            if (state == ConnectionState.Failed) {
+                TextButton(onClick = onRetry) {
+                    Text(text = stringResource(R.string.connection_retry))
+                }
+            }
+        }
     }
 }

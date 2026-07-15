@@ -40,6 +40,11 @@ class HomeViewModel(
     private val sessionManager: XmppSessionManager,
     private val nick: String,
 ) : ViewModel() {
+    /** Failed-banner action: restart the parked loop with a fresh budget. */
+    fun retryConnection() {
+        sessionManager.requestReconnect()
+    }
+
     val uiState: StateFlow<HomeUiState> = combine(
         sessionManager.roomStore.topology,
         sessionManager.unreadStore.counts,

@@ -116,6 +116,45 @@ class XmppSessionManagerTest {
         assertEquals(ConnectionState.Failed, harness.manager.connectionState.value)
         assertEquals("app stays signed in on transport failure", WaddleAppState.Ready, harness.manager.appState.value)
 
+        // Failed is parked, not terminal: a manual retry restarts the
+        // loop with a fresh budget (web connectWithFreshBudget parity).
+        val clientsBefore = harness.factory.clients.size
+        harness.manager.requestReconnect()
+        runCurrent()
+        assertTrue(
+            "retry restarts the connection loop",
+            harness.factory.clients.size > clientsBefore,
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `budget exhaustion recovers on an offline-online edge`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        repeat(ReconnectPolicy.MAX_ATTEMPTS + 1) {
+            harness.factory.emit(WaddleClientEvent.Disconnected)
+            runCurrent()
+            (harness.manager.connectionState.value as? ConnectionState.Reconnecting)?.let {
+                advanceTimeBy(it.nextDelayMs)
+                runCurrent()
+            }
+        }
+        assertEquals(ConnectionState.Failed, harness.manager.connectionState.value)
+
+        val clientsBefore = harness.factory.clients.size
+        harness.network.state.value = false
+        runCurrent()
+        harness.network.state.value = true
+        runCurrent()
+        assertTrue(
+            "connectivity return restarts the loop",
+            harness.factory.clients.size > clientsBefore,
+        )
+
         harness.manager.logout()
     }
 

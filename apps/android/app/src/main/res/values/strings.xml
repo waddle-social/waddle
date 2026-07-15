@@ -79,5 +79,6 @@
     <string name="notification_channel_messages_description">New chat messages.</string>
     <string name="notification_reply_label">Reply</string>
     <string name="notification_reply_failed">Reply not sent — open Waddle to retry</string>
+    <string name="connection_retry">Retry</string>
     <string name="notification_self_fallback">You</string>
 </resources>

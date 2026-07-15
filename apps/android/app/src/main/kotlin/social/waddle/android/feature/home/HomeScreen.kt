@@ -101,7 +101,7 @@ fun HomeScreen(
                     .padding(padding)
                     .fillMaxSize(),
             ) {
-                ConnectionBanner(state = state.connectionState)
+                ConnectionBanner(state = state.connectionState, onRetry = viewModel::retryConnection)
                 ChannelListBody(sections = state.sections, onChannelClick = ::openChannel)
             }
         }

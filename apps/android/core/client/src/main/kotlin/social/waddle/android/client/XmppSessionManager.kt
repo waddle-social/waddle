@@ -19,7 +19,13 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
@@ -97,6 +103,8 @@ class XmppSessionManager(
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
 
+    private val retryRequests = Channel<Unit>(Channel.CONFLATED)
+
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) {
         cancelSessionScope()
@@ -139,8 +147,14 @@ class XmppSessionManager(
             }
             val delayMillis = reconnectPolicy.delayMillisFor(attempt)
             if (delayMillis == null) {
+                // Budget spent: park instead of abandoning the session.
+                // Web parity (armOnlineRecovery/connectWithFreshBudget):
+                // a genuine offline->online transition or an explicit user
+                // retry restarts the loop with a fresh attempt budget.
                 _connectionState.value = ConnectionState.Failed
-                return
+                awaitRecoveryTrigger()
+                attempt = 0
+                continue
             }
             attempt += 1
             _connectionState.value = ConnectionState.Reconnecting(attempt, delayMillis)
@@ -396,10 +410,34 @@ class XmppSessionManager(
         }
     }
 
+    /** Manual retry from the Failed banner: fresh budget immediately. */
+    fun requestReconnect() {
+        retryRequests.trySend(Unit)
+    }
+
+    /**
+     * Parks the exhausted loop until either a real offline->online edge
+     * (`drop(1)` skips the replayed current value of the StateFlow-shaped
+     * signal) or an explicit retry request. Covers both failure shapes:
+     * connectivity loss recovers on the edge, server-side outages recover
+     * via user retry (the device never went offline).
+     */
+    private suspend fun awaitRecoveryTrigger() {
+        merge(
+            retryRequests.receiveAsFlow(),
+            networkSignal.online.drop(1).filter { it }.map { },
+        ).first()
+    }
+
     private suspend fun onTerminalAuthFailure() {
         _connectionState.value = ConnectionState.AuthFailed
         _appState.value = WaddleAppState.SignedOut
         sessionPrefs.clear()
+        // Last statement on purpose: cancelling the session scope kills
+        // this coroutine too, but also the parked snapshot persister that
+        // would otherwise leak until the next login.
+        sessionScope?.cancel()
+        sessionScope = null
     }
 
     /** UI hook: the DM conversation is on screen — persist recency. */
