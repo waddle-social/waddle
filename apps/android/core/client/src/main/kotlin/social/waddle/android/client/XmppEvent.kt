@@ -51,7 +51,12 @@ sealed interface XmppEvent {
      * into the event stream so the seed serializes with live pin-event
      * broadcasts instead of clobbering them.
      */
-    data class RoomPins(val roomJid: String, val entries: List<WaddlePinEntry>) : XmppEvent
+    data class RoomPins(
+        val roomJid: String,
+        val entries: List<WaddlePinEntry>,
+        /** PinStore event version captured before the fetch started. */
+        val fetchedAtVersion: Long,
+    ) : XmppEvent
 
     /**
      * RFC 6120 §6.5 SASL failure: terminal for the presented token —

@@ -242,8 +242,19 @@ open class ConversationViewModel(
                     // Corrections are never queued (a replayed edit could
                     // outrank a newer one) — restore edit mode with the
                     // attempted text instead of silently discarding it.
-                    _composerMode.value =
-                        ComposerMode.Editing(mode.targetId, originalBody = text, threadId = mode.threadId)
+                    // CAS: only when the composer is still Normal — the
+                    // user may have started another edit or a reply while
+                    // this send was in flight, and clobbering that state
+                    // would destroy their newer intent.
+                    _composerMode.compareAndSet(
+                        ComposerMode.Normal,
+                        ComposerMode.Editing(
+                            mode.targetId,
+                            originalBody = text,
+                            threadId = mode.threadId,
+                            attempt = mode.attempt + 1,
+                        ),
+                    )
                 }
             }
             return

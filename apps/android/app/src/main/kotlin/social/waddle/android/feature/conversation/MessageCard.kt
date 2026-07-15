@@ -196,8 +196,10 @@ private fun QuotedReply(
         modifier = Modifier.padding(bottom = 2.dp),
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            // Web parity: a MUC occupant JID's display name is its
+            // resource (nick) — the localpart is the channel's name.
             val author = quoted?.let { authorOf(it) }
-                ?: fallbackSender?.let { localpartOf(it) }
+                ?: fallbackSender?.let { resourcepartOf(it) ?: localpartOf(it) }
             author?.let {
                 Text(
                     text = it,

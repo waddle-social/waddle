@@ -63,7 +63,7 @@ fun MessageComposer(
     // transition within one composition.
     var initialComposition by remember { mutableStateOf(true) }
 
-    val editKey = editing?.let { "${it.targetId} ${it.originalBody}" }
+    val editKey = editing?.let { "${it.attempt}:${it.targetId} ${it.originalBody}" }
     LaunchedEffect(editKey) {
         val initial = initialComposition
         initialComposition = false

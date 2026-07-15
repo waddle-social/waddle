@@ -4,6 +4,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -160,26 +162,30 @@ fun ConversationScreen(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
-                state.threads.forEach { thread ->
-                    ListItem(
-                        headlineContent = {
-                            Text(text = thread.rootPreview, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        },
-                        supportingContent = {
-                            Text(
-                                text = stringResource(
-                                    R.string.thread_replies_count,
-                                    thread.replyCount,
-                                    thread.rootAuthor ?: "",
-                                ),
-                            )
-                        },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable {
-                            threadsOverviewOpen = false
-                            onOpenThread(thread.threadId)
-                        },
-                    )
+                // Scrollable: long histories can hold more threads than
+                // the sheet's height.
+                LazyColumn {
+                    items(state.threads, key = { it.threadId }) { thread ->
+                        ListItem(
+                            headlineContent = {
+                                Text(text = thread.rootPreview, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = {
+                                Text(
+                                    text = stringResource(
+                                        R.string.thread_replies_count,
+                                        thread.replyCount,
+                                        thread.rootAuthor ?: "",
+                                    ),
+                                )
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickable {
+                                threadsOverviewOpen = false
+                                onOpenThread(thread.threadId)
+                            },
+                        )
+                    }
                 }
             }
         }

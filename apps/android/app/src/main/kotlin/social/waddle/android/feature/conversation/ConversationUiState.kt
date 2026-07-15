@@ -75,6 +75,12 @@ sealed interface ComposerMode {
         val originalBody: String,
         /** XEP-0201: the corrected message's thread, repeated on the edit. */
         val threadId: String? = null,
+        /**
+         * Bumped on each failed-send restore so the composer's
+         * transition detection re-runs the prefill even when the
+         * attempted text equals the original body.
+         */
+        val attempt: Int = 0,
     ) : ComposerMode
 
     data class Replying(

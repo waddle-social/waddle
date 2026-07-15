@@ -22,18 +22,32 @@ class PinStore {
     /** room bare JID → pinned XEP-0359 stanza ids. */
     val pinned: StateFlow<Map<String, Set<String>>> = _pinned.asStateFlow()
 
+    /** Per-room live-event counter; snapshot seeds check staleness. */
+    private val eventVersions = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     fun pinnedIds(roomJid: String): Flow<Set<String>> {
         val room = bareJid(roomJid)
         return _pinned.map { it[room].orEmpty() }
     }
 
-    fun seed(roomJid: String, entries: List<WaddlePinEntry>) {
+    /** The room's current live-event version (capture before a fetch). */
+    fun eventVersion(roomJid: String): Long = eventVersions[bareJid(roomJid)] ?: 0L
+
+    /**
+     * Replace the room's pin set with a fetched snapshot — but only
+     * when no live pin event landed since [fetchedAtVersion] was
+     * captured: a snapshot raced by a broadcast is stale and would
+     * clobber the newer wire state (the next room open re-fetches).
+     */
+    fun seed(roomJid: String, entries: List<WaddlePinEntry>, fetchedAtVersion: Long) {
         val room = bareJid(roomJid)
+        if ((eventVersions[room] ?: 0L) != fetchedAtVersion) return
         _pinned.update { it + (room to entries.map { entry -> entry.targetStanzaId }.toSet()) }
     }
 
     fun onPinEvent(roomJid: String, event: WaddlePinEvent) {
         val room = bareJid(roomJid)
+        eventVersions.merge(room, 1L, Long::plus)
         // CAS: pin fetches and live pin events race across coroutines.
         _pinned.update { pinned ->
             val next = when (event.action) {
@@ -46,5 +60,6 @@ class PinStore {
 
     fun clear() {
         _pinned.value = emptyMap()
+        eventVersions.clear()
     }
 }

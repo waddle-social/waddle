@@ -112,7 +112,10 @@ class XmppSessionManagerReadStateTest {
         harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
 
         assertTrue(harness.client.displayedCalls.isEmpty())
-        assertEquals(1, harness.client.mdsPublishCalls.size)
+        // XEP-0490 group chats require the MUC-ASSIGNED id: an
+        // occupant-injected foreign-authority stanza-id must not become
+        // a published room read cursor either.
+        assertTrue(harness.client.mdsPublishCalls.isEmpty())
         harness.manager.logout()
     }
 

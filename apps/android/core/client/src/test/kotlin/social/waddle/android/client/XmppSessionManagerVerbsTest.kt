@@ -102,7 +102,7 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
-    fun `retraction tombstones the own row locally on success`() = runTest {
+    fun `muc retraction waits for the room reflection instead of tombstoning locally`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         // Own MUC echo: nick == account localpart.
@@ -113,9 +113,39 @@ class XmppSessionManagerVerbsTest {
 
         assertTrue(sent)
         assertEquals(listOf(room to "s1"), harness.client.retractionCalls)
+        // Stream-accept is not room-accept: the room may still reject,
+        // so the tombstone waits for the reflected retraction.
+        assertNull(harness.manager.timelineStore.timeline(room).value.single().tombstone)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `dm retraction tombstones locally on success (no reflection exists)`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(
+            WaddleClientEvent.Message(
+                testMessage(
+                    id = "orig-1",
+                    stanzaId = "s1",
+                    from = "icepuma@waddle.test/phone",
+                    to = "alice@waddle.test",
+                    body = "oops",
+                ),
+            ),
+        )
+        runCurrent()
+
+        val sent = harness.manager.sendRetraction(
+            "alice@waddle.test",
+            isGroupchat = false,
+            targetStanzaId = "orig-1",
+        )
+
+        assertTrue(sent)
         assertEquals(
             MessageTombstone.Retracted,
-            harness.manager.timelineStore.timeline(room).value.single().tombstone,
+            harness.manager.timelineStore.timeline("alice@waddle.test").value.single().tombstone,
         )
         harness.manager.logout()
     }

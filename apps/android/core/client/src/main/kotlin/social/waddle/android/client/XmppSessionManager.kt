@@ -421,11 +421,16 @@ class XmppSessionManager(
             return false
         }
         if (outcome !is WaddleSendMessageOutcome.Sent) return false
-        timelineStore.applyLocalMutation(
-            conversationJid,
-            MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
-            isGroupchat,
-        )
+        // DM only: `Sent` means stream-accepted, and a room can still
+        // reject the correction — MUC state waits for the reflection
+        // (web parity). A DM has no reflection to wait for.
+        if (!isGroupchat) {
+            timelineStore.applyLocalMutation(
+                conversationJid,
+                MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
+                isGroupchat,
+            )
+        }
         return true
     }
 
@@ -439,7 +444,10 @@ class XmppSessionManager(
         val sent = clientCall {
             it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
         }
-        if (sent) {
+        // DM only (see sendCorrection): a room rejection after stream
+        // accept would leave an irreversible local tombstone; the MUC
+        // reflection drives room state instead.
+        if (sent && !isGroupchat) {
             timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
@@ -471,14 +479,16 @@ class XmppSessionManager(
      */
     suspend fun refreshRoomPins(roomJid: String) {
         val client = activeClient ?: return
+        val room = bareJid(roomJid)
+        val fetchedAtVersion = pinStore.eventVersion(room)
         val entries = try {
-            client.fetchRoomPins(bareJid(roomJid))
+            client.fetchRoomPins(room)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             return
         }
-        currentBridge?.submit(XmppEvent.RoomPins(bareJid(roomJid), entries))
+        currentBridge?.submit(XmppEvent.RoomPins(room, entries, fetchedAtVersion))
     }
 
     private fun applyOwnReaction(
@@ -585,7 +595,13 @@ class XmppSessionManager(
             }.getOrDefault(false)
             failed = failed || !sent
         }
-        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
+        // XEP-0490 for group chats requires the MUC-ASSIGNED stanza id;
+        // an occupant-injected foreign-authority stanza-id (which the
+        // room only strips when it claims the room's own by-JID) must
+        // not be published as a room read cursor (web parity: the
+        // channel path skips both marker and publish).
+        val mdsIdTrusted = !isGroupchat || ids.stanzaIdBy == conversation
+        if (ids.stanzaId != null && ids.stanzaIdBy != null && mdsIdTrusted && supportsMdsPublish(client)) {
             val published = runCatching {
                 client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy)
             }.getOrDefault(false)
@@ -594,12 +610,21 @@ class XmppSessionManager(
         if (!failed) readCursorStore.advance(conversation, ids.markerId)
     }
 
-    /** Replay reads parked while no session was live (see above). */
+    /**
+     * Replay reads parked while no session was live (see above).
+     * Atomic per-key removal — a snapshot-then-clear would drop a
+     * dispatch parked concurrently (notification receiver) between the
+     * snapshot and the clear.
+     */
     private suspend fun drainPendingDisplayed() {
-        val parked = pendingDisplayed.toMap()
-        pendingDisplayed.clear()
-        parked.forEach { (conversation, pending) ->
-            markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
+        while (pendingDisplayed.isNotEmpty()) {
+            // A dispatch below re-parks when the session dropped mid-
+            // drain; bail instead of spinning on it.
+            if (activeClient == null) return
+            for (conversation in pendingDisplayed.keys) {
+                val pending = pendingDisplayed.remove(conversation) ?: continue
+                markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
+            }
         }
     }
 
@@ -824,7 +849,12 @@ class XmppSessionManager(
         } catch (_: Throwable) {
             return null
         }
-        page.messages.forEach(timelineStore::onArchivedMessage)
+        // Per-message guard: one malformed archived stanza must not kill
+        // the caller's paging coroutine (and crash-loop on every reopen
+        // of the conversation, since the archive re-serves it).
+        page.messages.forEach { message ->
+            runCatching { timelineStore.onArchivedMessage(message) }
+        }
         return page
     }
 
@@ -1048,7 +1078,8 @@ class XmppSessionManager(
                 }
             }
             is XmppEvent.MdsEntries -> event.entries.forEach(::applyMdsEntry)
-            is XmppEvent.RoomPins -> pinStore.seed(event.roomJid, event.entries)
+            is XmppEvent.RoomPins ->
+                pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
             is XmppEvent.MamResult -> {
                 timelineStore.onArchivedMessage(event.message)

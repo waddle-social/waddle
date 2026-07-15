@@ -112,13 +112,18 @@ fun dispositionFor(mediaType: String?): String {
 /**
  * Inbound twin of the fallback marking: drop the code-point range
  * `[start, end)` from a body so the quoted prefix never renders twice.
- * Out-of-bounds or inverted ranges return the body untouched.
+ * Out-of-bounds or inverted ranges return the body untouched — the
+ * attributes are attacker-controlled raw u32, so validation happens in
+ * the Long domain (a `toInt()` of a value ≥ 2^31 flips negative, would
+ * slip past an Int-domain bound check, and crash offsetByCodePoints).
  */
 fun stripReplyFallback(body: String, start: UInt?, end: UInt?): String {
-    if (start == null || end == null || end <= start) return body
-    val total = body.codePointCount(0, body.length)
-    if (end.toInt() > total) return body
-    val startIndex = body.offsetByCodePoints(0, start.toInt())
-    val endIndex = body.offsetByCodePoints(0, end.toInt())
+    if (start == null || end == null) return body
+    val startCp = start.toLong()
+    val endCp = end.toLong()
+    val total = body.codePointCount(0, body.length).toLong()
+    if (endCp <= startCp || endCp > total) return body
+    val startIndex = body.offsetByCodePoints(0, startCp.toInt())
+    val endIndex = body.offsetByCodePoints(0, endCp.toInt())
     return body.removeRange(startIndex, endIndex)
 }
