@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.auth.WaddleAuthApi
@@ -42,23 +43,38 @@ class SessionBootstrap(
             }
         }.stateIn(scope, SharingStarted.Eagerly, WaddleAppState.Loading)
 
-    /** (Re-)run the restore; safe to call again from the error screen. */
+    private val restoreInFlight = AtomicBoolean(false)
+
+    /**
+     * (Re-)run the restore; single-flight so a double-tapped retry (or a
+     * retry racing the cold-start run) cannot start two concurrent
+     * sign-ins and leak a second connection loop.
+     */
     fun restore() {
+        if (!restoreInFlight.compareAndSet(false, true)) return
         scope.launch {
-            restoreFailure.value = null
-            val sessionId = sessionPrefs.sessionId.first()
-            if (sessionId == null) {
-                signOutLocally()
-                return@launch
+            try {
+                runRestore()
+            } finally {
+                restoreInFlight.set(false)
             }
-            authApi.session(sessionId).fold(
-                onSuccess = { session ->
-                    if (session == null || session.isExpired) signOutLocally() else signIn(session)
-                },
-                onFailure = { failure ->
-                    restoreFailure.value = failure.message ?: failure.javaClass.simpleName
-                },
-            )
         }
+    }
+
+    private suspend fun runRestore() {
+        restoreFailure.value = null
+        val sessionId = sessionPrefs.sessionId.first()
+        if (sessionId == null) {
+            signOutLocally()
+            return
+        }
+        authApi.session(sessionId).fold(
+            onSuccess = { session ->
+                if (session == null || session.isExpired) signOutLocally() else signIn(session)
+            },
+            onFailure = { failure ->
+                restoreFailure.value = failure.message ?: failure.javaClass.simpleName
+            },
+        )
     }
 }

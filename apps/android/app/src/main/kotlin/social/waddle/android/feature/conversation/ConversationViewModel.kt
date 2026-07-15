@@ -35,6 +35,7 @@ open class ConversationViewModel(
     private val history = MutableStateFlow(HistoryState())
     private var nextLocalId = 0L
     private val ackedIds = mutableSetOf<String>()
+    private val failedIds = mutableSetOf<String>()
 
     val uiState: StateFlow<ConversationUiState> =
         combine(timeline, pending, history) { items, unconfirmed, load ->
@@ -123,8 +124,11 @@ open class ConversationViewModel(
                     updatePending(message.localId) {
                         it.copy(
                             stanzaId = outcome.stanzaId,
-                            // The ack can beat this continuation.
-                            acked = outcome.stanzaId in ackedIds,
+                            // Both the ack AND the failure event can beat
+                            // this continuation; failure wins.
+                            acked = outcome.stanzaId in ackedIds &&
+                                outcome.stanzaId !in failedIds,
+                            failed = outcome.stanzaId in failedIds,
                         )
                     }
                 else ->
@@ -165,6 +169,7 @@ open class ConversationViewModel(
     }
 
     private fun markFailed(stanzaId: String) {
+        failedIds += stanzaId
         pending.update { list ->
             list.map { if (it.stanzaId == stanzaId) it.copy(failed = true) else it }
         }

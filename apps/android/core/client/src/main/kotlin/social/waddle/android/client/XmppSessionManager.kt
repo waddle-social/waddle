@@ -30,6 +30,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
@@ -105,8 +107,10 @@ class XmppSessionManager(
 
     private val retryRequests = Channel<Unit>(Channel.CONFLATED)
 
+    private val lifecycleMutex = Mutex()
+
     /** Persist the session and start the connection loop. */
-    suspend fun login(session: WaddleSessionInfo) {
+    suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
         clearStores()
         ownBareJid = bareJid(session.jid)
@@ -123,7 +127,7 @@ class XmppSessionManager(
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
-    suspend fun logout() {
+    suspend fun logout() = lifecycleMutex.withLock {
         cancelSessionScope()
         ownBareJid = null
         clearStores()
