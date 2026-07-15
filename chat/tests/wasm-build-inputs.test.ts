@@ -262,6 +262,18 @@ describe("canonical WASM build identity", () => {
 		expect(() => buildId(literalRoot)).not.toThrow();
 	});
 
+	test("rejects aliased compile-time include macros", () => {
+		const aliasRoot = fixtureRoot();
+		write(
+			aliasRoot,
+			`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+			'use std::{include as items, include_bytes as bytes, include_str as text};\nitems!("generated.rs");\nconst BYTES: &[u8] = bytes!("data.bin");\nconst TEXT: &str = text!("data.txt");\n',
+		);
+		expect(() => buildId(aliasRoot)).toThrow(
+			"unsupported compile-time include macro",
+		);
+	});
+
 	test("allows only canonical in-closure Rust path overrides", () => {
 		const inClosureRoot = fixtureRoot();
 		write(

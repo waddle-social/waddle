@@ -1,6 +1,6 @@
 import { canonicalRelativePath } from "./wasm-build-input-digest.mjs";
 
-const COMPILE_TIME_INCLUDE = /\binclude(?:_bytes|_str)?\s*!\s*[\(\{\[]/u;
+const COMPILE_TIME_INCLUDE = /\binclude(?:_bytes|_str)?\b/u;
 const CONDITIONAL_PATH_ATTRIBUTE = /#\s*\[\s*cfg_attr\b[^\]]*\bpath\s*=/u;
 const DIRECT_PATH_ATTRIBUTE = /#\s*\[\s*path\s*=/gu;
 const LITERAL_PATH_ATTRIBUTE = /^#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]$/u;
