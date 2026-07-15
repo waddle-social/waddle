@@ -26,6 +26,7 @@ import social.waddle.android.R
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
@@ -156,6 +157,9 @@ class MessageNotifier(
 
     private suspend fun onMessage(message: WaddleMessage) {
         val body = message.body ?: return
+        // A correction carries a body but only rewrites an existing row —
+        // notifying would re-announce old content as a new message.
+        if (message.isTimelineMutation()) return
         if (isAppVisible()) return
         if (!userPrefs.notificationsEnabled.first()) return
         val session = currentSession.value ?: return

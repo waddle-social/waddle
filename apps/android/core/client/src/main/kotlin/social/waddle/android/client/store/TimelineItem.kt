@@ -3,9 +3,26 @@ package social.waddle.android.client.store
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 
+/** One emoji's aggregated reaction state on a timeline row. */
+data class ReactionGroup(
+    val emoji: String,
+    val count: Int,
+    /** The signed-in account is among the reactors (toggle-off target). */
+    val mine: Boolean,
+)
+
+/** A row whose content was removed; the UI renders a placeholder. */
+sealed interface MessageTombstone {
+    /** XEP-0424: retracted by its own sender. */
+    data object Retracted : MessageTombstone
+
+    /** XEP-0425: removed by a room moderator. */
+    data class Moderated(val moderatedBy: String?, val reason: String?) : MessageTombstone
+}
+
 /**
  * Normalized timeline row: the fields the list UI renders, plus the raw
- * FFI record for everything else (reactions, replies, files, …).
+ * FFI record for everything else (replies, files, threads, …).
  */
 data class TimelineItem(
     /** Dedupe identity: stanza id, else origin id, else message id. */
@@ -17,6 +34,12 @@ data class TimelineItem(
     val timestamp: String?,
     val isMine: Boolean,
     val source: TimelineSource,
+    /** XEP-0444 aggregation, first-reacted emoji order. */
+    val reactions: List<ReactionGroup> = emptyList(),
+    /** XEP-0308: [body] is a correction of the original send. */
+    val edited: Boolean = false,
+    /** Set when retracted/moderated; UI must not render [body]. */
+    val tombstone: MessageTombstone? = null,
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

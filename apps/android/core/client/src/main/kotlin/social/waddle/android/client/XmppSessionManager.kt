@@ -45,6 +45,7 @@ import social.waddle.android.client.store.PresenceStore
 import social.waddle.android.client.store.RoomStore
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
+import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleMamPage
@@ -559,9 +560,14 @@ class XmppSessionManager(
     private fun fanOut(event: XmppEvent) {
         when (event) {
             is XmppEvent.Message -> {
-                persistDmRecency(event)
+                // Mutation stanzas (reactions/corrections/retractions/
+                // moderation) alter existing rows via the timeline store;
+                // they are not new DM activity and must not reorder or
+                // re-persist recency.
+                val isMutation = event.message.isTimelineMutation()
+                if (!isMutation) persistDmRecency(event)
                 val newlyInserted = timelineStore.onLiveMessage(event.message)
-                dmStore.onChatMessage(ownBareJid, event.message)
+                if (!isMutation) dmStore.onChatMessage(ownBareJid, event.message)
                 val message = event.message
                 conversationKeyOf(
                     ownBareJid = ownBareJid,
