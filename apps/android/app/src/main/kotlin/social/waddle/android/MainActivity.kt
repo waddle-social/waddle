@@ -30,10 +30,15 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition {
             graph.appState.value is WaddleAppState.Loading
         }
-        pendingConversationJid.value = intent.getStringExtra(EXTRA_NAVIGATE_JID)
-        // Consume-once: without this, every recreation (rotation, theme
-        // change) replays the notification navigation from the sticky
-        // launch intent.
+        // Fresh starts only: removeExtra() mutates the in-process intent
+        // (covers rotation/theme recreation) but never reaches the
+        // ActivityRecord in system_server — after a process-death restore
+        // from Recents the ORIGINAL launch intent returns with the extra
+        // intact and a non-null savedInstanceState. Reading it again
+        // would yank the user back into a conversation they already left.
+        if (savedInstanceState == null) {
+            pendingConversationJid.value = intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        }
         intent.removeExtra(EXTRA_NAVIGATE_JID)
         setContent {
             val themeMode by graph.userPrefs.theme
