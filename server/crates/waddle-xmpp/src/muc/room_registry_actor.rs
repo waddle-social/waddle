@@ -1472,6 +1472,7 @@ impl RoomRegistryActor {
         let generation = self.next_preparation_generation();
         let actor_ref = guard.actor_ref().clone();
         let claim_store = Arc::clone(&self.claim_store);
+        let durable_store = self.durable_store.clone();
         let publication_fence = claim_fence.clone();
         let waiters = waiter.into_iter().collect();
         let replaced = self.pending_room_preparations.insert(
@@ -1486,13 +1487,37 @@ impl RoomRegistryActor {
         );
         debug_assert!(replaced.is_none(), "same-room preparation must coalesce");
         tokio::spawn(async move {
-            let readiness = match actor_ref
+            let first_readiness = actor_ref
                 .ask(GetDurableRestoreReadiness)
                 .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                 .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
-                .await
-            {
-                Ok(DurableRestoreReadiness::Ready(durable_origin)) => {
+                .await;
+            let readiness = match first_readiness {
+                Ok(DurableRestoreReadiness::Pending) => match durable_store {
+                    Some(store) => {
+                        if actor_ref
+                            .tell(RestoreDurableRoomState { store })
+                            .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                            .await
+                            .is_ok()
+                        {
+                            Some(
+                                actor_ref
+                                    .ask(GetDurableRestoreReadiness)
+                                    .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                                    .reply_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
+                                    .await,
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                },
+                other => Some(other),
+            };
+            let readiness = match readiness {
+                Some(Ok(DurableRestoreReadiness::Ready(durable_origin))) => {
                     let owner = publication_fence.owner();
                     let publication_fence = match tokio::time::timeout(
                         ROOM_OWNERSHIP_CALL_TIMEOUT,
@@ -1513,8 +1538,8 @@ impl RoomRegistryActor {
                         publication_fence,
                     }
                 }
-                Ok(DurableRestoreReadiness::Pending) => RoomPreparationReadiness::Pending,
-                Err(_) => RoomPreparationReadiness::Unavailable,
+                Some(Ok(DurableRestoreReadiness::Pending)) => RoomPreparationReadiness::Pending,
+                Some(Err(_)) | None => RoomPreparationReadiness::Unavailable,
             };
             let _ = registry_ref
                 .tell(CompleteRoomPreparation {

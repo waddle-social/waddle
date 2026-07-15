@@ -2015,6 +2015,7 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
+        fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
         block_load_for: Option<BareJid>,
         load_started: Option<Arc<tokio::sync::Notify>>,
@@ -2060,6 +2061,19 @@ mod ownership_claims_tests {
                 return Box::pin(async {
                     Err(crate::XmppError::internal(
                         "fenced load attempted before exact claim fence was recorded",
+                    ))
+                });
+            }
+            if self
+                .fail_fenced_loads_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Box::pin(async {
+                    Err(crate::XmppError::internal(
+                        "transient fenced load failure from test store",
                     ))
                 });
             }
@@ -3721,6 +3735,59 @@ mod ownership_claims_tests {
             durable_store.current_claim_fence(&jid).is_none(),
             "a definitively released demand claim must clear its exact durable fence",
         );
+        assert_eq!(
+            durable_store.load_calls.load(Ordering::SeqCst),
+            2,
+            "a demand restore gets one bounded retry before the claim is released",
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_initial_demand_restore_recovers_before_publication() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("restored-after-retry")),
+            fail_fenced_loads_remaining: AtomicUsize::new(1),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("transient-demand-restore");
+        let acquisition = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "caller-waddle".to_string(),
+                channel_id: "caller-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("transient restore recovers");
+
+        assert_eq!(acquisition.creation, RoomCreation::Existing);
+        assert_eq!(
+            acquisition
+                .actor_ref
+                .ask(GetConfig)
+                .await
+                .expect("restored config")
+                .name,
+            "restored-after-retry",
+        );
+        assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 2);
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_some());
     }
 
     fn reclaimed_snapshot(name: &str) -> DurableRoomState {
