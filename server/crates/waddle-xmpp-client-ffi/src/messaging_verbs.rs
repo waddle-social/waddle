@@ -34,7 +34,10 @@ use waddle_xmpp_client::{ClientError, ClientHandle, ClientResult};
 /// would otherwise suspend the caller's `await` forever.
 const IQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-async fn send_iq_with_timeout(handle: &ClientHandle, iq: Element) -> Result<Element, ClientError> {
+pub(crate) async fn send_iq_with_timeout(
+    handle: &ClientHandle,
+    iq: Element,
+) -> Result<Element, ClientError> {
     match tokio::time::timeout(IQ_TIMEOUT, handle.send_iq(iq)).await {
         Ok(result) => result,
         Err(_) => Err(ClientError::IqTimeout {

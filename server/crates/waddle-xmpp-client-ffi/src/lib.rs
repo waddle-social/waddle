@@ -232,7 +232,10 @@ impl WaddleClient {
         let Some(handle) = self.clone_handle().await else {
             return false;
         };
-        match handle.send_iq(stanza).await {
+        // Bounded like the fetch-style methods: `send_iq` itself never
+        // times out, so a server that accepts but never answers would
+        // otherwise suspend the caller's `await` forever.
+        match crate::messaging_verbs::send_iq_with_timeout(&handle, stanza).await {
             Ok(_) => true,
             Err(e) => {
                 self.emit_error(format!("{op} failed: {e}"));
