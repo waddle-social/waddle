@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand accent (the chat `primary` token); replaced by the generated
+         token target in scripts/generate-design-tokens.mjs during M1. -->
+    <color name="ic_launcher_background">#14B8A6</color>
+</resources>

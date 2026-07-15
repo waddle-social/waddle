@@ -58,4 +58,12 @@ ignore: git: [
 	"# Gateway generated schemas",
 	"gateway/schemas/",
 	"gateway/supergraph.graphql",
+	"",
+	"# Android (apps/android)",
+	"apps/android/.gradle/",
+	"apps/android/.kotlin/",
+	"apps/android/local.properties",
+	"apps/android/core/client/src/main/jniLibs/",
+	"apps/android/keystore.properties",
+	"*.jks",
 ]

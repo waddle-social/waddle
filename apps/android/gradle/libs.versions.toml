@@ -1,0 +1,35 @@
+# Version pins for the waddle Android app. AGP 9.x ships built-in Kotlin
+# (currently 2.3.21) — do NOT add org.jetbrains.kotlin.android; the compose
+# compiler plugin version below must track the AGP-bundled Kotlin.
+[versions]
+agp = "9.3.0"
+kotlinCompose = "2.3.21"
+composeBom = "2026.06.01"
+activityCompose = "1.11.0"
+coreKtx = "1.17.0"
+lifecycle = "2.11.0"
+coroutines = "1.11.0"
+# @aar mandatory on Android (ships the JNA dispatcher .so); the catalog
+# cannot express the @aar classifier, so :core:client declares the
+# dependency literally with this version.
+jna = "5.19.0"
+annotation = "1.10.0"
+junit = "4.13.2"
+
+[libraries]
+androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlinCompose" }
