@@ -198,24 +198,144 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(acked).toEqual(["dm-fast"]);
   });
 
+  test("a synchronous room ack inside send clears persistence before the promise resolves", async () => {
+    let queue!: OfflineSendQueue;
+    const created = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        queue.handleAck(opts.id);
+        return opts.id;
+      },
+    });
+    queue = created.queue;
+
+    queue.queueRoomMessage("general@muc.example.com", "fast ack", { id: "room-fast" });
+    await queue.flushRoom("general@muc.example.com");
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
   test("a rejected attempt rolls back so the persisted message can retry", async () => {
     let attempt = 0;
-    const { queue } = createQueue({
+    const { queue, events } = createQueue({
       sendDirect: async (_peer, _body, opts) => {
         attempt += 1;
         if (attempt === 1) throw new Error("socket unavailable");
         return opts.id;
       },
     });
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
     queue.queueDirectMessage("bob@example.com", "retry me", { id: "dm-retry" });
 
     await expect(queue.flushDirect()).rejects.toThrow("socket unavailable");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["dm-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-retry", status: "queued" });
 
     await queue.flushDirect();
     queue.handleAck("dm-retry");
     expect(attempt).toBe(2);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+
+  test("null and mismatched queued DM attempts roll back before a later acked retry", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) return null;
+        if (attempt === 2) return "wrong-dm-id";
+        return opts.id;
+      },
+    });
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    const queuedIds = () => listQueuedMessages(SCOPE).map((message) => message.id);
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueDirectMessage("bob@example.com", "retry DM", { id: "dm-null-mismatch" });
+
+    await queue.flushDirect();
+    expect(queuedIds()).toEqual(["dm-null-mismatch"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
+
+    await expect(queue.flushDirect())
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(queuedIds()).toEqual(["dm-null-mismatch"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
+
+    await queue.flushDirect();
+    queue.handleAck("dm-null-mismatch");
+    expect(attempt).toBe(3);
+    expect(queuedIds()).toEqual([]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+
+  test("a rejected queued room attempt stays retryable before a later acked retry", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("room socket unavailable");
+        return opts.id;
+      },
+    });
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-rejected" });
+
+    await expect(queue.flushRoom("general@muc.example.com"))
+      .rejects.toThrow("room socket unavailable");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-rejected"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-rejected", status: "queued" });
+
+    await queue.flushRoom("general@muc.example.com");
+    queue.handleAck("room-rejected");
+    expect(attempt).toBe(2);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+
+  test("null and mismatched queued room attempts roll back and the coalescer later retries", async () => {
+    let attempt = 0;
+    const { queue, events } = createQueue({
+      sendRoom: async (_room, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) return null;
+        if (attempt === 2) return "wrong-room-id";
+        return opts.id;
+      },
+    });
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
+    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-retry" });
+
+    await queue.flushRoom("general@muc.example.com");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
+
+    await expect(queue.flushRoom("general@muc.example.com"))
+      .rejects.toThrow("XMPP send returned a different stanza id");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
+    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
+
+    await queue.flushRoom("general@muc.example.com");
+    queue.handleAck("room-retry");
+    expect(attempt).toBe(3);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
 
   test("an ack after reload deletes persistence without ephemeral inflight state", () => {

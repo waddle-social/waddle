@@ -1199,14 +1199,41 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
             && element.get_child("delay", "urn:xmpp:delay").is_none()
     )));
 
-    runtime
-        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            Element::builder("message", crate::NS_CLIENT)
-                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unhandled")
-                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
-                .build(),
-        )))
+    let replay_sent_events = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unhandled")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )),
+            1_001,
+        )
         .unwrap();
+
+    let ack_requests: Vec<&Element> = replay_sent_events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if SmState::is_request_ack(element) => Some(element),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ack_requests.len(),
+        1,
+        "the first transport-confirmed replay must request an ack immediately"
+    );
+    assert!(replay_sent_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent {
+                attempt: 1,
+                unacked: 1,
+            }
+        ))
+    )));
 
     let too_high_ack_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(

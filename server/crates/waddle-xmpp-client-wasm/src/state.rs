@@ -2,6 +2,16 @@ use super::*;
 
 pub(crate) type DriverResult<T> = Result<T, ClientError>;
 
+pub(crate) trait WasmDriverWire {
+    fn events(&mut self) -> &mut mpsc::Receiver<WasmTransportEvent>;
+    fn send_frame(&mut self, frame: &str) -> DriverResult<()>;
+    fn close(&mut self) -> DriverResult<()>;
+}
+
+pub(crate) trait SmTimerBackend {
+    fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()>;
+}
+
 #[wasm_bindgen]
 pub struct WaddleResumeState {
     pub(crate) inner: waddle_xmpp_client::SmResumeState,
@@ -303,7 +313,8 @@ pub(crate) struct PendingInboxQuery {
 
 pub(crate) struct WasmDriverTask {
     pub(crate) runtime: XmppRuntime,
-    pub(crate) ws: WasmWebSocket,
+    pub(crate) ws: Box<dyn WasmDriverWire>,
+    pub(crate) sm_timer: Rc<dyn SmTimerBackend>,
     pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,

@@ -1,4 +1,114 @@
 use super::*;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+
+impl WasmDriverWire for WasmWebSocket {
+    fn events(&mut self) -> &mut mpsc::Receiver<WasmTransportEvent> {
+        &mut self.rx
+    }
+
+    fn send_frame(&mut self, frame: &str) -> DriverResult<()> {
+        self.send(frame).map_err(|_| ClientError::TransportClosed)
+    }
+
+    fn close(&mut self) -> DriverResult<()> {
+        WasmWebSocket::close(self).map_err(|_| ClientError::TransportClosed)
+    }
+}
+
+#[derive(Default)]
+struct WindowSmTimerBackend;
+
+impl SmTimerBackend for WindowSmTimerBackend {
+    fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()> {
+        let Some(delay_ms) = delay_ms else {
+            return Box::pin(std::future::pending());
+        };
+        match WindowTimeout::new(delay_ms) {
+            Some(timeout) => Box::pin(timeout),
+            None => Box::pin(std::future::pending()),
+        }
+    }
+}
+
+struct WindowTimeout {
+    window: web_sys::Window,
+    timeout_id: i32,
+    receiver: oneshot::Receiver<()>,
+    _callback: Closure<dyn FnMut()>,
+}
+
+impl WindowTimeout {
+    fn new(delay_ms: u64) -> Option<Self> {
+        let window = web_sys::window()?;
+        let (sender, receiver) = oneshot::channel();
+        let mut sender = Some(sender);
+        let callback = Closure::wrap(Box::new(move || {
+            if let Some(sender) = sender.take() {
+                let _ = sender.send(());
+            }
+        }) as Box<dyn FnMut()>);
+        let timeout_ms = i32::try_from(delay_ms).unwrap_or(i32::MAX);
+        let timeout_id = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                timeout_ms,
+            )
+            .ok()?;
+        Some(Self {
+            window,
+            timeout_id,
+            receiver,
+            _callback: callback,
+        })
+    }
+}
+
+impl Future for WindowTimeout {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver).poll(context).map(|_| ())
+    }
+}
+
+impl Drop for WindowTimeout {
+    fn drop(&mut self) {
+        self.window.clear_timeout_with_handle(self.timeout_id);
+    }
+}
+
+enum DriverInput {
+    Wire(Option<WasmTransportEvent>),
+    Command(Option<WasmCommand>),
+    StreamManagementTimer,
+}
+
+async fn select_driver_input<WireFuture, CommandFuture, TimerFuture>(
+    wire_future: WireFuture,
+    command_future: CommandFuture,
+    timer_future: TimerFuture,
+) -> DriverInput
+where
+    WireFuture: Future<Output = Option<WasmTransportEvent>>,
+    CommandFuture: Future<Output = Option<WasmCommand>>,
+    TimerFuture: Future<Output = ()>,
+{
+    let wire_future = wire_future.fuse();
+    let command_future = command_future.fuse();
+    let timer_future = timer_future.fuse();
+    pin_mut!(wire_future, command_future, timer_future);
+
+    select! {
+        event = wire_future => DriverInput::Wire(event),
+        command = command_future => DriverInput::Command(command),
+        _ = timer_future => DriverInput::StreamManagementTimer,
+    }
+}
 
 pub(crate) async fn driver_loop(
     config: ClientConfig,
@@ -27,9 +137,28 @@ impl WasmDriverTask {
         event_tx: mpsc::Sender<DriverEvent>,
         inner: Rc<RefCell<WaddleClientInner>>,
     ) -> DriverResult<Self> {
+        Self::new_with_dependencies(
+            config,
+            Box::new(ws),
+            Rc::new(WindowSmTimerBackend),
+            cmd_rx,
+            event_tx,
+            inner,
+        )
+    }
+
+    fn new_with_dependencies(
+        config: ClientConfig,
+        ws: Box<dyn WasmDriverWire>,
+        sm_timer: Rc<dyn SmTimerBackend>,
+        cmd_rx: mpsc::Receiver<WasmCommand>,
+        event_tx: mpsc::Sender<DriverEvent>,
+        inner: Rc<RefCell<WaddleClientInner>>,
+    ) -> DriverResult<Self> {
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
+            sm_timer,
             cmd_rx,
             event_tx,
             inner,
@@ -62,15 +191,17 @@ impl WasmDriverTask {
         loop {
             let now_ms = waddle_xmpp_client::runtime::monotonic_now_ms();
             let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
-            let ws_event_fut = self.ws.rx.next().fuse();
-            let cmd_fut = self.cmd_rx.next().fuse();
-            let sm_timer_fut = wait_for_stream_management_wakeup(sm_wakeup_ms).fuse();
-            pin_mut!(ws_event_fut, cmd_fut, sm_timer_fut);
+            let input = select_driver_input(
+                self.ws.events().next(),
+                self.cmd_rx.next(),
+                self.sm_timer.wait(sm_wakeup_ms),
+            )
+            .await;
 
-            let keep_running = select! {
-                ws_event = ws_event_fut => self.handle_wasm_transport_event(ws_event).await,
-                cmd = cmd_fut => self.handle_command(cmd).await,
-                _ = sm_timer_fut => self.handle_stream_management_timer().await,
+            let keep_running = match input {
+                DriverInput::Wire(event) => self.handle_wasm_transport_event(event).await,
+                DriverInput::Command(command) => self.handle_command(command).await,
+                DriverInput::StreamManagementTimer => self.handle_stream_management_timer().await,
             };
 
             if !keep_running {
@@ -82,9 +213,12 @@ impl WasmDriverTask {
     }
 
     async fn handle_stream_management_timer(&mut self) -> bool {
-        let events = self
-            .runtime
-            .poll_stream_management_at(waddle_xmpp_client::runtime::monotonic_now_ms());
+        self.handle_stream_management_timer_at(waddle_xmpp_client::runtime::monotonic_now_ms())
+            .await
+    }
+
+    async fn handle_stream_management_timer_at(&mut self, now_ms: u64) -> bool {
+        let events = self.runtime.poll_stream_management_at(now_ms);
         let progress_stalled = events.iter().any(|event| {
             matches!(
                 event,
@@ -446,17 +580,6 @@ impl WasmDriverTask {
         true
     }
 
-    async fn apply_sent_event(&mut self, event: TransportEvent) -> DriverResult<()> {
-        let events = self.runtime.apply_transport_event(event)?;
-        self.publish_resume_state_snapshot();
-        for event in events {
-            if self.dispatch_client_event(event).await.is_some() {
-                return Err(ClientError::Disconnected);
-            }
-        }
-        Ok(())
-    }
-
     async fn dispatch_client_event(&mut self, event: ClientEvent) -> Option<TransportMessage> {
         match event {
             ClientEvent::Connection(ConnectionEvent::OutboundMessage(message)) => {
@@ -578,17 +701,36 @@ impl WasmDriverTask {
     }
 
     async fn send_transport_message(&mut self, message: TransportMessage) -> DriverResult<()> {
-        let sent_event = TransportEvent::MessageSent(message.clone());
-        let frame = waddle_xmpp_client::encode_message(&message)?;
-        self.ws
-            .send(&frame)
-            .map_err(|_| ClientError::TransportClosed)?;
-
-        if matches!(message, TransportMessage::Close(_)) {
-            let _ = self.ws.close();
+        enum PumpItem {
+            Message(TransportMessage),
+            Event(ClientEvent),
         }
 
-        self.apply_sent_event(sent_event).await?;
+        let mut pending = VecDeque::from([PumpItem::Message(message)]);
+        while let Some(item) = pending.pop_front() {
+            match item {
+                PumpItem::Message(message) => {
+                    let frame = waddle_xmpp_client::encode_message(&message)?;
+                    self.ws.send_frame(&frame)?;
+                    if matches!(message, TransportMessage::Close(_)) {
+                        self.ws.close()?;
+                    }
+
+                    let events = self
+                        .runtime
+                        .apply_transport_event(TransportEvent::MessageSent(message))?;
+                    self.publish_resume_state_snapshot();
+                    for event in events.into_iter().rev() {
+                        pending.push_front(PumpItem::Event(event));
+                    }
+                }
+                PumpItem::Event(event) => {
+                    if let Some(follow_up) = self.dispatch_client_event(event).await {
+                        pending.push_front(PumpItem::Message(follow_up));
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -651,22 +793,6 @@ impl WasmDriverTask {
 
         let _ = self.event_tx.clone().send(DriverEvent::Disconnected).await;
     }
-}
-
-async fn wait_for_stream_management_wakeup(delay_ms: Option<u64>) {
-    let Some(delay_ms) = delay_ms else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    let Some(window) = web_sys::window() else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    let timeout_ms = i32::try_from(delay_ms).unwrap_or(i32::MAX);
-    let promise = Promise::new(&mut |resolve, _reject| {
-        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, timeout_ms);
-    });
-    let _ = JsFuture::from(promise).await;
 }
 
 fn publish_resume_state_snapshot(
@@ -747,8 +873,137 @@ fn resolve_pending_mam_query(pending: PendingMamQuery, element: &Element) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::collections::HashSet;
+    use std::str::FromStr;
+
     use futures::executor::block_on;
+    use futures::future;
     use waddle_xmpp_client::discovery::DISCO_INFO_NS;
+
+    #[derive(Clone, Default)]
+    struct FakeWireState {
+        frames: Rc<RefCell<Vec<String>>>,
+        close_count: Rc<Cell<usize>>,
+    }
+
+    impl FakeWireState {
+        fn take_messages(&self) -> Vec<TransportMessage> {
+            self.frames
+                .borrow_mut()
+                .drain(..)
+                .map(|frame| waddle_xmpp_client::decode_message(&frame).expect("typed frame"))
+                .collect()
+        }
+    }
+
+    struct FakeWire {
+        events: mpsc::Receiver<WasmTransportEvent>,
+        state: FakeWireState,
+    }
+
+    impl FakeWire {
+        fn new() -> (Self, FakeWireState) {
+            let (_sender, events) = mpsc::channel(16);
+            let state = FakeWireState::default();
+            (
+                Self {
+                    events,
+                    state: state.clone(),
+                },
+                state,
+            )
+        }
+    }
+
+    impl WasmDriverWire for FakeWire {
+        fn events(&mut self) -> &mut mpsc::Receiver<WasmTransportEvent> {
+            &mut self.events
+        }
+
+        fn send_frame(&mut self, frame: &str) -> DriverResult<()> {
+            self.state.frames.borrow_mut().push(frame.to_string());
+            Ok(())
+        }
+
+        fn close(&mut self) -> DriverResult<()> {
+            self.state.close_count.set(self.state.close_count.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ManualTimerState {
+        next_id: u64,
+        active: HashSet<u64>,
+        cancelled: HashSet<u64>,
+        max_active: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct ManualTimerBackend {
+        state: Rc<RefCell<ManualTimerState>>,
+    }
+
+    impl ManualTimerBackend {
+        fn active_count(&self) -> usize {
+            self.state.borrow().active.len()
+        }
+
+        fn max_active(&self) -> usize {
+            self.state.borrow().max_active
+        }
+
+        fn last_id(&self) -> u64 {
+            self.state.borrow().next_id
+        }
+
+        fn callback_can_act(&self, id: u64) -> bool {
+            let state = self.state.borrow();
+            state.active.contains(&id) && !state.cancelled.contains(&id)
+        }
+    }
+
+    struct ManualTimerWait {
+        id: u64,
+        state: Rc<RefCell<ManualTimerState>>,
+    }
+
+    impl Future for ManualTimerWait {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for ManualTimerWait {
+        fn drop(&mut self) {
+            let mut state = self.state.borrow_mut();
+            state.active.remove(&self.id);
+            state.cancelled.insert(self.id);
+        }
+    }
+
+    impl SmTimerBackend for ManualTimerBackend {
+        fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()> {
+            if delay_ms.is_none() {
+                return Box::pin(future::pending());
+            }
+            let id = {
+                let mut state = self.state.borrow_mut();
+                state.next_id += 1;
+                let id = state.next_id;
+                state.active.insert(id);
+                state.max_active = state.max_active.max(state.active.len());
+                id
+            };
+            Box::pin(ManualTimerWait {
+                id,
+                state: self.state.clone(),
+            })
+        }
+    }
 
     fn test_inner() -> Rc<RefCell<WaddleClientInner>> {
         Rc::new(RefCell::new(WaddleClientInner {
@@ -774,6 +1029,146 @@ mod tests {
             on_call: None,
             resume_state: None,
         }))
+    }
+
+    fn test_config(resume_state: Option<waddle_xmpp_client::SmResumeState>) -> ClientConfig {
+        build_client_config(&StoredConfig {
+            server_url: "wss://xmpp.example.test/ws".to_string(),
+            jid: "alice@example.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "web".to_string(),
+            resume_state,
+        })
+        .expect("test config")
+    }
+
+    fn test_driver(
+        config: ClientConfig,
+    ) -> (
+        WasmDriverTask,
+        FakeWireState,
+        mpsc::Receiver<DriverEvent>,
+        Rc<RefCell<WaddleClientInner>>,
+    ) {
+        let (wire, wire_state) = FakeWire::new();
+        let (_command_sender, command_receiver) = mpsc::channel(16);
+        let (event_sender, event_receiver) = mpsc::channel(256);
+        let inner = test_inner();
+        let task = WasmDriverTask::new_with_dependencies(
+            config,
+            Box::new(wire),
+            Rc::new(ManualTimerBackend::default()),
+            command_receiver,
+            event_sender,
+            inner.clone(),
+        )
+        .expect("driver task");
+        (task, wire_state, event_receiver, inner)
+    }
+
+    fn pre_auth_features() -> Element {
+        Element::builder("features", waddle_xmpp_client::NS_STREAMS)
+            .append(
+                Element::builder("mechanisms", waddle_xmpp_client::NS_SASL)
+                    .append(
+                        Element::builder("mechanism", waddle_xmpp_client::NS_SASL)
+                            .append("OAUTHBEARER")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+
+    fn post_auth_features_with_sm() -> Element {
+        Element::builder("features", waddle_xmpp_client::NS_STREAMS)
+            .append(Element::builder("bind", waddle_xmpp_client::NS_BIND).build())
+            .append(
+                Element::builder("sm", waddle_xmpp_client::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .build(),
+            )
+            .build()
+    }
+
+    fn bind_result(stanza_id: &str) -> Element {
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("bind", waddle_xmpp_client::NS_BIND)
+                    .append(
+                        Element::builder("jid", waddle_xmpp_client::NS_BIND)
+                            .append("alice@example.test/web")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+
+    async fn drive_to_post_auth_sm_features(task: &mut WasmDriverTask) {
+        task.runtime
+            .queue_request(ClientRequest::Connect)
+            .expect("connect request");
+        assert!(
+            task.apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+                waddle_xmpp_client::transport::StreamOpen::from_server(
+                    BareJid::from_str("example.test").expect("server jid"),
+                )
+            ),))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                pre_auth_features()
+            ),))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("success", waddle_xmpp_client::NS_SASL).build(),
+            ),))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+                waddle_xmpp_client::transport::StreamOpen::from_server(
+                    BareJid::from_str("example.test").expect("server jid"),
+                )
+            ),))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                post_auth_features_with_sm()
+            ),))
+                .await
+        );
+    }
+
+    async fn drive_to_fresh_sm_enabled(task: &mut WasmDriverTask) {
+        drive_to_post_auth_sm_features(task).await;
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                bind_result("bind-1")
+            ),))
+                .await
+        );
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("enabled", waddle_xmpp_client::stream_management::NS_SM,)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "stream-1")
+                    .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                    .build(),
+            ),))
+                .await
+        );
+        assert!(task.runtime.can_send_app_stanza());
     }
 
     fn build_archived(mam_id: &str, query_id: &str, body: &str) -> ArchivedMessage {
@@ -1058,6 +1453,238 @@ mod tests {
         publish_resume_state_snapshot(&inner, &runtime, true);
 
         assert!(inner.borrow().resume_state.is_none());
+    }
+
+    #[test]
+    fn fresh_send_command_pumps_stanza_then_exactly_one_typed_ack_request() {
+        block_on(async {
+            let (mut task, wire, _events, _inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+
+            let stanza = Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fresh-1")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .build();
+            let (responder, response) = oneshot::channel();
+
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza { stanza, responder }))
+                    .await
+            );
+            assert!(response.await.expect("command response").is_ok());
+
+            let messages = wire.take_messages();
+            assert_eq!(messages.len(), 2);
+            assert!(matches!(
+                &messages[0],
+                TransportMessage::Element(element)
+                    if element.name() == "message" && element.attr("id") == Some("fresh-1")
+            ));
+            assert!(matches!(
+                &messages[1],
+                TransportMessage::Element(element)
+                    if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
+            ));
+        });
+    }
+
+    #[test]
+    fn successful_resume_pumps_replay_then_exactly_one_immediate_ack_request() {
+        block_on(async {
+            let replay = Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replay-1")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .build();
+            let resume_state = waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
+                "previous-stream",
+                0,
+                1,
+                [replay],
+            )
+            .expect("resume state");
+            let (mut task, wire, _events, _inner) = test_driver(test_config(Some(resume_state)));
+            drive_to_post_auth_sm_features(&mut task).await;
+            wire.take_messages();
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Element(
+                        Element::builder("resumed", waddle_xmpp_client::stream_management::NS_SM,)
+                            .attr(
+                                minidom::rxml::xml_ncname!("previd").to_owned(),
+                                "previous-stream",
+                            )
+                            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                            .build(),
+                    ),
+                ))
+                .await
+            );
+
+            let messages = wire.take_messages();
+            assert_eq!(messages.len(), 2);
+            assert!(matches!(
+                &messages[0],
+                TransportMessage::Element(element)
+                    if element.name() == "message" && element.attr("id") == Some("replay-1")
+            ));
+            assert!(matches!(
+                &messages[1],
+                TransportMessage::Element(element)
+                    if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
+            ));
+            assert_eq!(
+                task.runtime
+                    .resume_state()
+                    .expect("live resume state")
+                    .outbound_h(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn typed_pagehide_command_pumps_ack_request_before_resolving() {
+        block_on(async {
+            let (mut task, wire, _events, _inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+
+            let stanza = Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "pagehide-1")
+                .build();
+            let (send_responder, send_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza,
+                    responder: send_responder,
+                }))
+                .await
+            );
+            assert!(send_response.await.expect("send response").is_ok());
+            wire.take_messages();
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Element(
+                        Element::builder("a", waddle_xmpp_client::stream_management::NS_SM)
+                            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                            .build(),
+                    ),
+                ))
+                .await
+            );
+            let (ack_responder, ack_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::RequestStreamManagementAck {
+                    responder: ack_responder,
+                }))
+                .await
+            );
+            assert!(ack_response.await.expect("ack command response").is_ok());
+
+            let messages = wire.take_messages();
+            assert_eq!(messages.len(), 1);
+            assert!(matches!(
+                &messages[0],
+                TransportMessage::Element(element)
+                    if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
+            ));
+        });
+    }
+
+    #[test]
+    fn canceled_sm_timers_cannot_survive_socket_command_or_shutdown_wins() {
+        block_on(async {
+            let backend = ManualTimerBackend::default();
+            for index in 0..12 {
+                let input = if index % 2 == 0 {
+                    select_driver_input(
+                        future::ready(Some(WasmTransportEvent::Open)),
+                        future::pending::<Option<WasmCommand>>(),
+                        backend.wait(Some(5_000)),
+                    )
+                    .await
+                } else {
+                    let (responder, _response) = oneshot::channel();
+                    select_driver_input(
+                        future::pending::<Option<WasmTransportEvent>>(),
+                        future::ready(Some(WasmCommand::RequestStreamManagementAck { responder })),
+                        backend.wait(Some(5_000)),
+                    )
+                    .await
+                };
+                assert!(matches!(
+                    input,
+                    DriverInput::Wire(_) | DriverInput::Command(_)
+                ));
+                assert_eq!(backend.active_count(), 0);
+                assert!(backend.max_active() <= 1);
+            }
+
+            let old_timer = backend.wait(Some(5_000));
+            let old_id = backend.last_id();
+            assert!(backend.callback_can_act(old_id));
+            drop(old_timer);
+            let replacement = backend.wait(Some(5_000));
+            let replacement_id = backend.last_id();
+            assert!(!backend.callback_can_act(old_id));
+            assert!(backend.callback_can_act(replacement_id));
+            drop(replacement);
+            assert!(!backend.callback_can_act(replacement_id));
+            assert_eq!(backend.active_count(), 0);
+        });
+    }
+
+    #[test]
+    fn wasm_stall_preserves_resume_state_and_emits_stall_then_disconnect() {
+        block_on(async {
+            let (mut task, wire, mut events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+
+            let stanza = Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "stalled-1")
+                .build();
+            let (responder, response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza { stanza, responder }))
+                    .await
+            );
+            assert!(response.await.expect("send response").is_ok());
+            let resume_before = inner.borrow().resume_state.clone();
+            assert!(resume_before.is_some());
+
+            assert!(!task.handle_stream_management_timer_at(u64::MAX).await);
+            task.finish().await;
+
+            assert_eq!(wire.close_count.get(), 1);
+            assert_eq!(inner.borrow().resume_state, resume_before);
+            let mut saw_stall = false;
+            let mut saw_disconnected = false;
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    DriverEvent::Client(event)
+                        if matches!(
+                            *event,
+                            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                                StreamManagementEvent::AckProgressStalled { .. }
+                            ))
+                        ) =>
+                    {
+                        saw_stall = true;
+                    }
+                    DriverEvent::Disconnected => saw_disconnected = true,
+                    _ => {}
+                }
+            }
+            assert!(saw_stall, "browser telemetry needs the reconnect signal");
+            assert!(
+                saw_disconnected,
+                "browser lifecycle needs the disconnect signal"
+            );
+        });
     }
 
     fn iq(id: &str) -> Element {

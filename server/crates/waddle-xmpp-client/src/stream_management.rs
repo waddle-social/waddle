@@ -455,6 +455,27 @@ impl SmState {
         self.outbound_count.wrapping_sub(self.server_h)
     }
 
+    /// Prepare the surviving outbound queue for XEP-0198 retransmission after
+    /// applying a successful `<resumed h='…'/>` response.
+    ///
+    /// Treating `<resumed/>` exactly like a normal `<a/>` first is important:
+    /// it trims handled stanzas and establishes the no-progress deadline.
+    /// Unlike an ordinary ack, however, the protocol requires the remaining
+    /// queue to be retransmitted immediately. Clear the delayed retry/request
+    /// latch so the first replay's transport-confirmed `MessageSent` arms an
+    /// immediate `<r/>` without resetting counters or recounting the stanza.
+    pub fn begin_replay_transition_at(&mut self, now_ms: u64) {
+        if self.outbound_queue.is_empty() {
+            self.ack_cadence = AckCadence::default();
+            return;
+        }
+
+        let progress_started_at_ms = self.ack_cadence.progress_started_at_ms.unwrap_or(now_ms);
+        self.ack_cadence.request_sent_at_ms = None;
+        self.ack_cadence.next_request_at_ms = None;
+        self.ack_cadence.progress_started_at_ms = Some(progress_started_at_ms);
+    }
+
     /// Mark currently unhandled outbound stanzas for replay and return them.
     pub fn mark_unhandled_for_replay(&mut self) -> Vec<Element> {
         let replay: Vec<Element> = self
@@ -1065,6 +1086,38 @@ mod tests {
     }
 
     #[test]
+    fn non_progress_retry_schedule_reaches_and_repeats_five_second_cap() {
+        let mut state = enabled_state();
+        state.record_sent_stanza_at(&message("one"), 0);
+        let mut now_ms = 0;
+
+        for (expected_delay_ms, expected_attempt) in [
+            (250, 2),
+            (500, 3),
+            (1_000, 4),
+            (2_000, 5),
+            (5_000, 6),
+            (5_000, 7),
+        ] {
+            let observation = state.process_ack_at(0, now_ms);
+            assert!(!observation.observation.progressed);
+            assert_eq!(state.next_ack_wakeup_in_ms(now_ms), Some(expected_delay_ms));
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms + expected_delay_ms - 1),
+                AckTimerPoll::default()
+            );
+            now_ms += expected_delay_ms;
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms).request,
+                Some(AckRequest {
+                    attempt: expected_attempt,
+                    unacked: 1,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn missing_ack_response_times_out_and_reissues_request() {
         let mut state = enabled_state();
         state.record_sent_stanza_at(&message("one"), 1_000);
@@ -1109,6 +1162,56 @@ mod tests {
         assert_eq!(sent.kind, SentStanzaKind::Replay);
         assert_eq!(sent.request.map(|request| request.unacked), Some(1));
         assert_eq!(state.outbound_count, 1);
+    }
+
+    #[test]
+    fn resumed_replay_transition_supersedes_delayed_retry_but_keeps_progress_deadline() {
+        let replay = message("replay");
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [replay.clone()])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        state.process_ack_at(0, 10_000);
+        assert_eq!(state.next_ack_wakeup_in_ms(10_000), Some(250));
+
+        state.begin_replay_transition_at(10_000);
+        assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
+        let sent = state.record_sent_stanza_at(&replay, 10_001);
+
+        assert_eq!(sent.kind, SentStanzaKind::Replay);
+        assert_eq!(
+            sent.request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        assert_eq!(state.outbound_count, 1);
+        assert_eq!(
+            state.poll_ack_timer_at(40_000).progress_stalled_ms,
+            Some(30_000)
+        );
+    }
+
+    #[test]
+    fn resumed_replay_transition_cancels_cadence_when_ack_handles_everything() {
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [message("one")])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        let processed = state.process_ack_at(1, 500);
+        assert_eq!(processed.observation.unacked, 0);
+        state.begin_replay_transition_at(500);
+
+        assert!(state.mark_unhandled_for_replay().is_empty());
+        assert_eq!(state.next_ack_wakeup_in_ms(500), None);
+        assert_eq!(state.poll_ack_timer_at(u64::MAX), AckTimerPoll::default());
     }
 
     #[test]

@@ -108,6 +108,7 @@ describe("DM call activity hydration", () => {
   test("pagehide persists real SM state with resource, including reconnect fallback state", () => {
     let sm: ReturnType<ResumePersistence["loadSm"]> = null;
     const savedStates: NonNullable<typeof sm>[] = [];
+    const pagehideOrder: string[] = [];
     const persistence: ResumePersistence = {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
@@ -119,29 +120,43 @@ describe("DM call activity hydration", () => {
         return current;
       },
       saveSm: (state) => {
+        pagehideOrder.push("save-sm");
         savedStates.push(state);
         sm = state;
       },
       clearSm: () => {
         sm = null;
       },
-      preparePagehideHandoff: () => undefined,
+      preparePagehideHandoff: () => {
+        pagehideOrder.push("prepare-handoff");
+      },
       loadJoinedRooms: () => [],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,
     };
     const client = new BrowserXmppClient(session(), persistence);
     const resource = client.fullJid.split("/")[1];
-    const requestStreamManagementAck = mock(async () => undefined);
+    const requestStreamManagementAck = mock(async () => {
+      pagehideOrder.push("request-ack");
+    });
     const xmpp = {
       get_resume_state_handle: () => ({ free: () => undefined }),
-      get_resume_state: () => ({ previd: "prev-live", inboundH: 7, outboundH: 9 }),
+      get_resume_state: () => {
+        pagehideOrder.push("snapshot-sm");
+        return { previd: "prev-live", inboundH: 7, outboundH: 9 };
+      },
       request_stream_management_ack: requestStreamManagementAck,
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
 
     client.prepareForPageHide();
+    expect(pagehideOrder).toEqual([
+      "request-ack",
+      "snapshot-sm",
+      "prepare-handoff",
+      "save-sm",
+    ]);
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
     client.persistResumeStateForPageHide();

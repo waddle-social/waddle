@@ -63,7 +63,7 @@ use waddle_xmpp_client::{
     WasmTransportEvent, WasmWebSocket, WebSocketConfig, XmppRuntime,
 };
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{future_to_promise, spawn_local, JsFuture};
+use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 mod client_account;
 mod client_admin;

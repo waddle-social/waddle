@@ -17,6 +17,8 @@ use crate::transport::{
     WebSocketTransportFactory,
 };
 
+const UNCLEAN_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Async control plane for a live XMPP session.
 ///
 /// Cheaply cloneable — all clones share the same underlying session.
@@ -297,16 +299,14 @@ impl DriverTask {
         for event in events {
             if let Some(message) = self.dispatch_client_event(event) {
                 if self.send_transport_message(message).await.is_err() {
+                    self.terminate_uncleanly().await;
                     return false;
                 }
             }
         }
 
         if progress_stalled {
-            let _ = self.transport.abort().await;
-            for event in self.transport.drain_events() {
-                let _ = self.apply_transport_event(event).await;
-            }
+            self.terminate_uncleanly().await;
             return false;
         }
         true
@@ -420,7 +420,7 @@ impl DriverTask {
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
                 if self.send_transport_message(msg).await.is_err() {
-                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    self.terminate_uncleanly().await;
                     return false;
                 }
             }
@@ -430,6 +430,50 @@ impl DriverTask {
 
         *self.state.write().unwrap() = self.runtime.snapshot().clone();
         !is_terminal
+    }
+
+    /// End an unfinished XEP-0198 stream without ever sending RFC 7395
+    /// `<close/>`. Transport abort is best effort and bounded; runtime
+    /// observers still receive explicit Failed and Closed transitions when
+    /// the sink errors, hangs, or neglects to queue terminal events.
+    async fn terminate_uncleanly(&mut self) {
+        self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+            .await;
+
+        let _ = tokio::time::timeout(UNCLEAN_ABORT_TIMEOUT, self.transport.abort()).await;
+        let queued = self.transport.drain_events();
+        let mut saw_closed_state = false;
+        let mut saw_closed = false;
+        for event in queued {
+            if matches!(event, TransportEvent::StateChanged(TransportState::Failed)) {
+                continue;
+            }
+            saw_closed_state |=
+                matches!(event, TransportEvent::StateChanged(TransportState::Closed));
+            saw_closed |= matches!(event, TransportEvent::Closed);
+            self.apply_terminal_transport_event(event).await;
+        }
+        if !saw_closed_state {
+            self.apply_terminal_transport_event(TransportEvent::StateChanged(
+                TransportState::Closed,
+            ))
+            .await;
+        }
+        if !saw_closed {
+            self.apply_terminal_transport_event(TransportEvent::Closed)
+                .await;
+        }
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
+    }
+
+    async fn apply_terminal_transport_event(&mut self, event: TransportEvent) {
+        let Ok(events) = self.runtime.apply_transport_event(event) else {
+            return;
+        };
+        self.publish_resume_state_snapshot();
+        for event in events {
+            let _ = self.dispatch_client_event(event);
+        }
     }
 
     /// Dispatch one client event.

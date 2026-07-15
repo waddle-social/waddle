@@ -165,6 +165,7 @@ impl XmppRuntime {
             events.extend(processed.acked.into_iter().map(|stanza_id| {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
+            self.sm_state.begin_replay_transition_at(now_ms);
             for replay in self.sm_state.mark_unhandled_for_replay() {
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                     TransportMessage::Element(replay),

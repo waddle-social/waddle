@@ -220,9 +220,12 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                 return Ok(());
             }
             self.queue_state_change(TransportState::Closing);
-            self.sink.close().await?;
+            let result: ClientResult<()> = self.sink.close().await.map_err(Into::into);
+            if result.is_err() {
+                self.queue_state_change(TransportState::Failed);
+            }
             self.queue_closed();
-            Ok(())
+            result
         })
     }
 }
