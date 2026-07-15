@@ -135,6 +135,60 @@ class XmppSessionManagerTest {
     }
 
     @Test
+    fun `auth shaped error after session ready reconnects instead of signing out`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertEquals(ConnectionState.Ready, harness.manager.connectionState.value)
+
+        // Post-ready, the same "forbidden"/"not-authorized" shaped text
+        // arrives on per-operation stanza errors — it must never wipe the
+        // session (only pre-ready classification is terminal).
+        harness.factory.emit(WaddleClientEvent.Error("stanza error: forbidden"))
+        runCurrent()
+
+        assertEquals(WaddleAppState.Ready, harness.manager.appState.value)
+        assertNotNull(harness.prefs.sessionId.first())
+
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        assertTrue(
+            "drops back to reconnect, not sign-out",
+            harness.manager.connectionState.value is ConnectionState.Reconnecting ||
+                harness.manager.connectionState.value is ConnectionState.Connecting,
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `persisted rooms are rejoined on every fresh session`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.setJoinedRooms(setOf("general@muc.waddle.test", "dev@muc.waddle.test"))
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.last()
+        assertEquals(
+            setOf("general@muc.waddle.test", "dev@muc.waddle.test"),
+            client.joinRoomCalls.map { it.first }.toSet(),
+        )
+        assertEquals(
+            "nick is the session localpart",
+            testSessionInfo().xmppLocalpart,
+            client.joinRoomCalls.first().second,
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
     fun `offline network parks the loop until connectivity returns`() = runTest {
         val harness = Harness(this)
         harness.network.state.value = false

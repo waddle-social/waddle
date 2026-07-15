@@ -6,6 +6,7 @@ import android.content.Intent
 import androidx.core.app.RemoteInput
 import kotlinx.coroutines.launch
 import social.waddle.android.WaddleApplication
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
  * Direct-reply action: sends the RemoteInput text through the session
@@ -25,12 +26,22 @@ class ReplyReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
-                if (isGroupchat) {
+                val outcome = if (isGroupchat) {
                     graph.sessionManager.sendGroupchatMessage(conversationJid, text)
                 } else {
                     graph.sessionManager.sendChatMessage(conversationJid, text)
                 }
-                graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
+                // Only a server-acked send may echo into the shade as
+                // delivered; anything else (NotConnected during a
+                // reconnect window or process restart, transport/stanza
+                // errors) must surface as a visible failure — silently
+                // swallowing the reply while showing it as sent loses
+                // the message.
+                if (outcome is WaddleSendMessageOutcome.Sent) {
+                    graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
+                } else {
+                    graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
+                }
             } finally {
                 pendingResult.finish()
             }

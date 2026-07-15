@@ -168,7 +168,7 @@ class XmppSessionManager(
                         failure
                     }
                 }
-                val consumer = async { consumeEvents(bridge.events, client, this) }
+                val consumer = async { consumeEvents(bridge.events, client, session, this) }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
                     connector.onAwait { failure ->
@@ -266,6 +266,7 @@ class XmppSessionManager(
     private suspend fun consumeEvents(
         events: ReceiveChannel<XmppEvent>,
         client: WaddleClientInterface,
+        session: WaddleSessionInfo,
         attemptScope: CoroutineScope,
     ): AttemptEnd {
         val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
@@ -277,15 +278,39 @@ class XmppSessionManager(
         activeClient = client
         _connectionState.value = ConnectionState.Ready
         attemptScope.launch { refreshTopology(client) }
+        attemptScope.launch { rejoinPersistedRooms(client, session) }
+        // Auth classification is deliberately confined to the pre-ready
+        // phase: after the session is bound, "not-authorized"/"forbidden"
+        // shaped text also arrives on per-operation stanza errors, and
+        // treating those as terminal would sign the user out mid-session.
         for (event in events) {
             fanOut(event)
-            when {
-                event is XmppEvent.Error && isAuthShapedError(event.description) ->
-                    return AttemptEnd.AUTH_FAILED
-                event is XmppEvent.Disconnected -> return AttemptEnd.DROPPED_AFTER_READY
-            }
+            if (event is XmppEvent.Disconnected) return AttemptEnd.DROPPED_AFTER_READY
         }
         return AttemptEnd.DROPPED_AFTER_READY
+    }
+
+    /**
+     * Re-issues MUC join presence for every persisted room on each fresh
+     * session. Room join state does not survive a non-resumed stream, so
+     * without this a reconnect silently stops live channel traffic. The
+     * duplicate join presence on a resumed stream is benign (XEP-0045
+     * treats re-joining an occupied nick from the same full JID as a
+     * presence update).
+     */
+    private suspend fun rejoinPersistedRooms(
+        client: WaddleClientInterface,
+        session: WaddleSessionInfo,
+    ) {
+        for (roomJid in sessionPrefs.joinedRooms.first()) {
+            try {
+                client.joinRoom(roomJid, session.xmppLocalpart)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Keep going: one unjoinable room must not block the rest.
+            }
+        }
     }
 
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {

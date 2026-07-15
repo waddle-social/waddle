@@ -69,6 +69,16 @@ class MessageNotifier(
         postNotification(conversationJid, isGroupchat, messages, silent = true)
     }
 
+    /**
+     * Direct-reply send failed (not connected / transport error): re-post
+     * the conversation WITHOUT echoing the reply, audibly, with an
+     * explicit failure note so the loss is visible instead of silent.
+     */
+    fun notifyReplyFailed(conversationJid: String, isGroupchat: Boolean) {
+        val messages = synchronized(historyLock) { history[conversationJid]?.toList() } ?: return
+        postNotification(conversationJid, isGroupchat, messages, silent = false, replyFailed = true)
+    }
+
     /** Notification dismissed: forget the conversation's history. */
     fun clearConversation(conversationJid: String) {
         synchronized(historyLock) { history.remove(conversationJid) }
@@ -117,6 +127,7 @@ class MessageNotifier(
         isGroupchat: Boolean,
         messages: List<NotificationCompat.MessagingStyle.Message>,
         silent: Boolean,
+        replyFailed: Boolean = false,
     ) {
         val granted = ContextCompat.checkSelfPermission(
             context,
@@ -131,7 +142,7 @@ class MessageNotifier(
         }
         messages.forEach(style::addMessage)
 
-        val notification = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+        val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setStyle(style)
             .setGroup(conversationJid)
@@ -141,8 +152,14 @@ class MessageNotifier(
             .setContentIntent(contentIntent(conversationJid))
             .addAction(replyAction(conversationJid, isGroupchat))
             .setDeleteIntent(dismissIntent(conversationJid))
-            .build()
-        NotificationManagerCompat.from(context).notify(notificationId(conversationJid), notification)
+        if (replyFailed) {
+            builder.setSubText(context.getString(R.string.notification_reply_failed))
+        }
+        // Tag = JID, fixed id: String.hashCode() collides across arbitrary
+        // remote-chosen JIDs (and with the foreground-service id), which
+        // would overwrite other conversations' notifications.
+        NotificationManagerCompat.from(context)
+            .notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
     }
 
     private fun selfPerson(): Person = Person.Builder()
@@ -156,12 +173,22 @@ class MessageNotifier(
     private fun contentIntent(conversationJid: String): PendingIntent =
         PendingIntent.getActivity(
             context,
-            notificationId(conversationJid),
+            0,
             Intent(context, MainActivity::class.java)
+                .setData(conversationUri("open", conversationJid))
                 .putExtra(MainActivity.EXTRA_NAVIGATE_JID, conversationJid)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
+    /**
+     * Per-conversation identity for PendingIntents: `Intent.filterEquals`
+     * includes the data URI, so distinct JIDs can never share (and thus
+     * FLAG_UPDATE_CURRENT-overwrite) each other's intents — extras alone
+     * do not participate in intent identity.
+     */
+    private fun conversationUri(kind: String, conversationJid: String): android.net.Uri =
+        android.net.Uri.fromParts("waddle-notify", kind, conversationJid)
 
     private fun replyAction(
         conversationJid: String,
@@ -172,12 +199,13 @@ class MessageNotifier(
             .build()
         val intent = Intent(context, ReplyReceiver::class.java)
             .setAction(ReplyReceiver.ACTION_REPLY)
+            .setData(conversationUri("reply", conversationJid))
             .putExtra(ReplyReceiver.EXTRA_CONVERSATION_JID, conversationJid)
             .putExtra(ReplyReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
         // FLAG_MUTABLE: the system fills in the RemoteInput result.
         val pendingIntent = PendingIntent.getBroadcast(
             context,
-            notificationId(conversationJid),
+            0,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
         )
@@ -194,9 +222,10 @@ class MessageNotifier(
     private fun dismissIntent(conversationJid: String): PendingIntent =
         PendingIntent.getBroadcast(
             context,
-            notificationId(conversationJid),
+            0,
             Intent(context, NotificationDismissReceiver::class.java)
                 .setAction(NotificationDismissReceiver.ACTION_DISMISS)
+                .setData(conversationUri("dismiss", conversationJid))
                 .putExtra(NotificationDismissReceiver.EXTRA_CONVERSATION_JID, conversationJid),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -209,9 +238,12 @@ class MessageNotifier(
         }
     }
 
-    private fun notificationId(conversationJid: String): Int = conversationJid.hashCode()
-
     private companion object {
+        /**
+         * Fixed id; the conversation identity lives in the notify() tag.
+         * Distinct from WaddleConnectionService.NOTIFICATION_ID.
+         */
+        const val MESSAGE_NOTIFICATION_ID = 2
         const val MAX_HISTORY = 25
         const val SELF_PERSON_KEY = "me"
         const val MESSAGE_TYPE_GROUPCHAT = "groupchat"
