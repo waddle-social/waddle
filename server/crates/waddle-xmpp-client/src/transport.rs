@@ -12,7 +12,10 @@ mod tests;
 
 pub use codec::{decode_message, encode_message};
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-pub use native::{DefaultTransportFactory, WebSocketTransport, WebSocketTransportFactory};
+pub use native::{
+    DefaultTransportFactory, TransportWriteFailure, TransportWriteResponsibility,
+    TransportWriteResult, WebSocketTransport, WebSocketTransportFactory,
+};
 
 /// Transport kind supported by the native client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1171,6 +1171,39 @@ mod tests {
         assert!(task.runtime.can_send_app_stanza());
     }
 
+    async fn apply_test_transport_event_at(
+        task: &mut WasmDriverTask,
+        event: TransportEvent,
+        now_ms: u64,
+    ) -> bool {
+        let events = task
+            .runtime
+            .apply_transport_event_at(event, now_ms)
+            .expect("test transport event");
+        task.publish_resume_state_snapshot();
+        for event in events {
+            if !task.handle_client_event(event).await {
+                return false;
+            }
+        }
+        task.flush_deferred_commands().await
+    }
+
+    fn take_ack_request_attempts(events: &mut mpsc::Receiver<DriverEvent>) -> Vec<(u32, u32)> {
+        let mut attempts = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let DriverEvent::Client(event) = event {
+                if let ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::AckRequestSent { attempt, unacked },
+                )) = *event
+                {
+                    attempts.push((attempt, unacked));
+                }
+            }
+        }
+        attempts
+    }
+
     fn build_archived(mam_id: &str, query_id: &str, body: &str) -> ArchivedMessage {
         let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
             mam_id,
@@ -1538,6 +1571,117 @@ mod tests {
                 task.runtime
                     .resume_state()
                     .expect("live resume state")
+                    .outbound_h(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn successful_resume_drives_full_wire_retry_ladder_and_original_stall_deadline() {
+        block_on(async {
+            let replay = Element::builder("message", NS_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retry-replay")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .build();
+            let resume_state = waddle_xmpp_client::SmResumeState::from_unhandled_outbound_stanzas(
+                "previous-stream",
+                0,
+                1,
+                [replay],
+            )
+            .expect("resume state");
+            let (mut task, wire, mut events, _inner) = test_driver(test_config(Some(resume_state)));
+            drive_to_post_auth_sm_features(&mut task).await;
+            wire.take_messages();
+            take_ack_request_attempts(&mut events);
+
+            assert!(
+                apply_test_transport_event_at(
+                    &mut task,
+                    TransportEvent::MessageReceived(TransportMessage::Element(
+                        Element::builder("resumed", waddle_xmpp_client::stream_management::NS_SM)
+                            .attr(
+                                minidom::rxml::xml_ncname!("previd").to_owned(),
+                                "previous-stream",
+                            )
+                            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                            .build(),
+                    )),
+                    10_000,
+                )
+                .await
+            );
+            let resume_writes = wire.take_messages();
+            assert_eq!(resume_writes.len(), 2, "replay then immediate <r/>");
+            assert!(matches!(
+                &resume_writes[0],
+                TransportMessage::Element(element)
+                    if element.name() == "message" && element.attr("id") == Some("retry-replay")
+            ));
+            assert!(matches!(
+                &resume_writes[1],
+                TransportMessage::Element(element)
+                    if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
+            ));
+            assert_eq!(take_ack_request_attempts(&mut events), vec![(1, 1)]);
+            assert_eq!(
+                task.runtime
+                    .resume_state()
+                    .expect("resume snapshot")
+                    .outbound_h(),
+                1,
+                "replay must not increment outbound h"
+            );
+
+            let mut ack_at_ms = 10_010;
+            for (delay_ms, expected_attempt) in [
+                (250, 2),
+                (500, 3),
+                (1_000, 4),
+                (2_000, 5),
+                (5_000, 6),
+                (5_000, 7),
+            ] {
+                assert!(
+                    apply_test_transport_event_at(
+                        &mut task,
+                        TransportEvent::MessageReceived(TransportMessage::Element(
+                            Element::builder("a", waddle_xmpp_client::stream_management::NS_SM,)
+                                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                                .build(),
+                        )),
+                        ack_at_ms,
+                    )
+                    .await
+                );
+                assert!(wire.take_messages().is_empty());
+
+                let request_at_ms = ack_at_ms + delay_ms;
+                assert!(task.handle_stream_management_timer_at(request_at_ms).await);
+                let retry_writes = wire.take_messages();
+                assert_eq!(retry_writes.len(), 1);
+                assert!(matches!(
+                    &retry_writes[0],
+                    TransportMessage::Element(element)
+                        if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
+                ));
+                assert_eq!(
+                    take_ack_request_attempts(&mut events),
+                    vec![(expected_attempt, 1)]
+                );
+                ack_at_ms = request_at_ms + 1;
+            }
+
+            assert!(
+                !task.handle_stream_management_timer_at(40_000).await,
+                "30s without h progress must terminate from the original 10s epoch"
+            );
+            assert_eq!(wire.close_count.get(), 1);
+            assert_eq!(
+                task.runtime
+                    .resume_state()
+                    .expect("stalled resume snapshot")
                     .outbound_h(),
                 1
             );

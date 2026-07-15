@@ -1225,7 +1225,23 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
         1,
         "the first transport-confirmed replay must request an ack immediately"
     );
-    assert!(replay_sent_events.iter().any(|event| matches!(
+    assert!(
+        !replay_sent_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestSent { .. }
+            ))
+        )),
+        "AckRequestSent must wait for transport confirmation of <r/>"
+    );
+
+    let request_confirmed_events = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Element(SmState::build_request_ack())),
+            1_002,
+        )
+        .unwrap();
+    assert!(request_confirmed_events.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
             StreamManagementEvent::AckRequestSent {
@@ -1251,6 +1267,132 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
             && element
                 .get_child("handled-count-too-high", crate::stream_management::NS_SM)
                 .is_some()
+    )));
+}
+
+#[test]
+fn terminal_transport_failure_clears_pending_ack_request_telemetry() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.pending_ack_request = Some(crate::stream_management::AckRequest {
+        attempt: 77,
+        unacked: 88,
+    });
+
+    runtime
+        .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+        .unwrap();
+    assert_no_ack_request_sent_after_late_confirmation(&mut runtime);
+}
+
+#[test]
+fn fresh_sm_enable_clears_pending_ack_request_telemetry() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.pending_ack_request = Some(crate::stream_management::AckRequest {
+        attempt: 77,
+        unacked: 88,
+    });
+
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "fresh-sm-id")
+                .build(),
+        )))
+        .unwrap();
+    assert_no_ack_request_sent_after_late_confirmation(&mut runtime);
+}
+
+#[test]
+fn failed_resume_fallback_clears_pending_ack_request_telemetry() {
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state =
+        Some(resume_state_with_sent_messages(["fallback"]));
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    runtime.pending_ack_request = Some(crate::stream_management::AckRequest {
+        attempt: 77,
+        unacked: 88,
+    });
+
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )))
+        .unwrap();
+    assert_no_ack_request_sent_after_late_confirmation(&mut runtime);
+}
+
+#[test]
+fn replay_transition_replaces_stale_pending_ack_request_metadata() {
+    let resume_state = resume_state_with_sent_messages(["replay"]);
+    let mut resume_config = config();
+    resume_config.session.stream_management.resume_state = Some(resume_state);
+    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    runtime.pending_ack_request = Some(crate::stream_management::AckRequest {
+        attempt: 77,
+        unacked: 88,
+    });
+
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Element(
+                Element::builder("resumed", crate::stream_management::NS_SM)
+                    .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                    .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                    .build(),
+            )),
+            10_000,
+        )
+        .unwrap();
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Element(
+                Element::builder("message", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "replay")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                    .build(),
+            )),
+            10_001,
+        )
+        .unwrap();
+    let confirmed = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Element(SmState::build_request_ack())),
+            10_002,
+        )
+        .unwrap();
+
+    assert!(confirmed.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent {
+                attempt: 1,
+                unacked: 1,
+            }
+        ))
+    )));
+    assert!(!confirmed.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent {
+                attempt: 77,
+                unacked: 88,
+            }
+        ))
     )));
 }
 
@@ -2039,6 +2181,24 @@ fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeSt
             .unwrap();
     }
     runtime.resume_state().expect("resume state")
+}
+
+fn assert_no_ack_request_sent_after_late_confirmation(runtime: &mut XmppRuntime) {
+    assert!(runtime.pending_ack_request.is_none());
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            SmState::build_request_ack(),
+        )))
+        .unwrap();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestSent { .. }
+            ))
+        )),
+        "a late unrelated <r/> confirmation must not emit stale telemetry"
+    );
 }
 
 fn handled_count_too_high_stream_error(h: u32, send_count: u32) -> Element {

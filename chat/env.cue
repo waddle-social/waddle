@@ -93,7 +93,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
+			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck, tasks.checkWasmDrift]
 		}
 	}
 
@@ -117,6 +117,7 @@ schema.#Project & {
 		buildWasm: schema.#Task & {
 			command: "bash"
 			args: ["-c", "REBUILD_WASM=1 bun run wasm:build"]
+			dependsOn: [checkWasmDrift]
 			inputs: [
 				"../server/Cargo.toml",
 				"../server/Cargo.lock",
@@ -126,6 +127,24 @@ schema.#Project & {
 			]
 			outputs: [
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
+			]
+		}
+
+		// Rebuilds into an isolated temporary directory and compares only the
+		// tracked bindings. It never repairs drift or mutates generated outputs.
+		checkWasmDrift: schema.#Task & {
+			command: "bun"
+			args: ["run", "scripts/build-xmpp-wasm.mjs", "--check"]
+			inputs: [
+				"../server/Cargo.toml",
+				"../server/Cargo.lock",
+				"../server/crates/waddle-xmpp-core/**",
+				"../server/crates/waddle-xmpp-client/**",
+				"../server/crates/waddle-xmpp-client-wasm/**",
+				"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
+				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
+				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
+				"scripts/build-xmpp-wasm.mjs",
 			]
 		}
 

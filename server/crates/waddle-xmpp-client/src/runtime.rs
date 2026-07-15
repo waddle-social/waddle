@@ -9,7 +9,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::event::{ClientEvent, ConnectionEvent, LifecycleEvent};
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-use crate::stream_management::{SmResumeState, SmState};
+use crate::stream_management::{AckRequest, SmResumeState, SmState};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::AuthenticationConfig;
 use minidom::Element;
@@ -56,6 +56,10 @@ pub struct XmppRuntime {
     pending_fallback_retries: VecDeque<Element>,
     fallback_resume_state: Option<SmResumeState>,
     fallback_retry_writes_in_flight: VecDeque<Element>,
+    /// Ack-request metadata waiting for transport confirmation of the exact
+    /// generated `<r/>`. Keeping this inside the typed runtime prevents a
+    /// driver from publishing `AckRequestSent` before the write succeeds.
+    pending_ack_request: Option<AckRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +96,7 @@ impl XmppRuntime {
             pending_fallback_retries: VecDeque::new(),
             fallback_resume_state: None,
             fallback_retry_writes_in_flight: VecDeque::new(),
+            pending_ack_request: None,
         })
     }
 
@@ -287,6 +292,7 @@ impl XmppRuntime {
             TransportEvent::MessageReceived(TransportMessage::Close(_))
             | TransportEvent::StateChanged(TransportState::Closed)
             | TransportEvent::Closed => {
+                self.pending_ack_request = None;
                 self.snapshot.binding = None;
                 self.bootstrap = BootstrapState::Idle;
                 self.sm_state.stop();
@@ -295,9 +301,11 @@ impl XmppRuntime {
             TransportEvent::StateChanged(TransportState::Closing) => {
                 self.set_phase(SessionPhase::Disconnecting)?;
             }
-            TransportEvent::StateChanged(TransportState::Idle)
-            | TransportEvent::MessageSent(_)
-            | TransportEvent::StateChanged(TransportState::Failed) => {}
+            TransportEvent::StateChanged(TransportState::Failed) => {
+                self.pending_ack_request = None;
+            }
+            TransportEvent::StateChanged(TransportState::Idle) | TransportEvent::MessageSent(_) => {
+            }
         }
 
         Ok(())
@@ -311,6 +319,18 @@ impl XmppRuntime {
     ) {
         if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
             self.sm_state.start_outbound();
+            return;
+        }
+
+        if SmState::is_request_ack(element) {
+            if let Some(request) = self.pending_ack_request.take() {
+                events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    crate::event::StreamManagementEvent::AckRequestSent {
+                        attempt: request.attempt,
+                        unacked: request.unacked,
+                    },
+                )));
+            }
             return;
         }
 
@@ -386,18 +406,17 @@ impl XmppRuntime {
     }
 
     fn push_ack_request(
-        &self,
+        &mut self,
         request: crate::stream_management::AckRequest,
         events: &mut Vec<ClientEvent>,
     ) {
+        debug_assert!(
+            self.pending_ack_request.is_none(),
+            "SM permits only one generated ack request awaiting a write"
+        );
+        self.pending_ack_request = Some(request);
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(SmState::build_request_ack()),
-        )));
-        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-            crate::event::StreamManagementEvent::AckRequestSent {
-                attempt: request.attempt,
-                unacked: request.unacked,
-            },
         )));
     }
 

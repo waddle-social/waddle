@@ -103,6 +103,7 @@ impl XmppRuntime {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
         } else if element.name() == "enabled" {
+            self.pending_ack_request = None;
             // <enabled/> is only legal as the answer to <enable/>. A
             // duplicate on a live SM session is a protocol violation
             // (mirroring unexpected <resumed/>): silently re-running the
@@ -127,6 +128,7 @@ impl XmppRuntime {
             )));
             self.flush_pending_fallback_retries(events);
         } else if element.name() == "resumed" {
+            self.pending_ack_request = None;
             let Some(h) = element.attr("h").and_then(|v| v.parse().ok()) else {
                 self.handle_sm_protocol_violation(events);
                 return Ok(());
@@ -172,6 +174,7 @@ impl XmppRuntime {
                 )));
             }
         } else if element.name() == "failed" {
+            self.pending_ack_request = None;
             let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
             if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
                 if self.sm_state.handled_count_too_high(h) {

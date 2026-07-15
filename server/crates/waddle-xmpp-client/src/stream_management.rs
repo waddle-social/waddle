@@ -474,6 +474,12 @@ impl SmState {
         self.ack_cadence.request_sent_at_ms = None;
         self.ack_cadence.next_request_at_ms = None;
         self.ack_cadence.progress_started_at_ms = Some(progress_started_at_ms);
+        // A successful resume starts a new request ladder for the replayed
+        // queue. Preserve the original no-progress epoch, but make the
+        // immediate replay request attempt 1 and its first unchanged-ack retry
+        // use the 250 ms rung.
+        self.ack_cadence.retry_index = 0;
+        self.ack_cadence.request_attempt = 0;
     }
 
     /// Mark currently unhandled outbound stanzas for replay and return them.
@@ -1193,6 +1199,78 @@ mod tests {
         assert_eq!(
             state.poll_ack_timer_at(40_000).progress_stalled_ms,
             Some(30_000)
+        );
+    }
+
+    #[test]
+    fn successful_resume_restarts_full_retry_ladder_without_moving_progress_epoch() {
+        let replay = message("replay");
+        let resume =
+            SmResumeState::from_unhandled_outbound_stanzas("previous", 0, 1, [replay.clone()])
+                .expect("resume state");
+        let mut state = SmState::from_resume_state(&resume);
+        state.enabled = true;
+        state.outbound_enabled = true;
+
+        // Establish a no-progress epoch and consume earlier cadence state so
+        // the resume transition has stale attempts/backoff to reset.
+        state.process_ack_at(0, 10_000);
+        assert_eq!(
+            state.poll_ack_timer_at(10_250).request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        state.process_ack_at(0, 10_260);
+        assert_eq!(
+            state.poll_ack_timer_at(10_760).request,
+            Some(AckRequest {
+                attempt: 2,
+                unacked: 1,
+            })
+        );
+
+        state.begin_replay_transition_at(11_000);
+        assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
+        let replay_sent = state.record_sent_stanza_at(&replay, 11_001);
+        assert_eq!(replay_sent.kind, SentStanzaKind::Replay);
+        assert_eq!(
+            replay_sent.request,
+            Some(AckRequest {
+                attempt: 1,
+                unacked: 1,
+            })
+        );
+        assert_eq!(state.outbound_count, 1, "replay must not be recounted");
+
+        let mut now_ms = 11_010;
+        for (delay_ms, attempt) in [
+            (250, 2),
+            (500, 3),
+            (1_000, 4),
+            (2_000, 5),
+            (5_000, 6),
+            (5_000, 7),
+        ] {
+            let ack = state.process_ack_at(0, now_ms);
+            assert!(!ack.observation.progressed);
+            assert_eq!(state.next_ack_wakeup_in_ms(now_ms), Some(delay_ms));
+            now_ms += delay_ms;
+            assert_eq!(
+                state.poll_ack_timer_at(now_ms).request,
+                Some(AckRequest {
+                    attempt,
+                    unacked: 1,
+                })
+            );
+            now_ms += 1;
+        }
+
+        assert_eq!(
+            state.poll_ack_timer_at(40_000).progress_stalled_ms,
+            Some(30_000),
+            "the 30s reconnect deadline remains anchored to the original no-progress epoch"
         );
     }
 

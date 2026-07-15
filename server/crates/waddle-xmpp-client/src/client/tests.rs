@@ -17,7 +17,9 @@ use crate::error::ClientError;
 use crate::event::{ClientEvent, LifecycleEvent, MessageDeliveryEvent};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
 use crate::stream_management::{SmResumeState, NS_SM};
-use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
+use crate::transport::{
+    StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState, TransportWriteResult,
+};
 use crate::ConnectionConfig;
 
 fn config() -> ClientConfig {
@@ -493,27 +495,17 @@ async fn driver_aborts_uncleanly_after_thirty_seconds_without_ack_progress() {
 #[tokio::test(flavor = "current_thread")]
 async fn generated_ack_request_write_failure_forces_terminal_unclean_state() {
     let shared = MockTransportShared::default();
-    shared.set_fail_ack_request_send(true);
+    shared.fail_ack_request_write(TransportWriteResponsibility::PossiblyWritten);
     let (mut task, _cmd_tx, mut events) =
         make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
     drive_task_to_sm_enabled(&mut task).await;
 
-    task.handle_command(XmppCommand::SendStanza(message_stanza("message-1")))
-        .await;
-    let sent_event = task
-        .transport
-        .drain_events()
-        .into_iter()
-        .find(|event| {
-            matches!(
-                event,
-                TransportEvent::MessageSent(TransportMessage::Element(element))
-                    if element.attr("id") == Some("message-1")
-            )
-        })
-        .expect("application stanza MessageSent event");
-
-    assert!(!task.apply_transport_event(sent_event).await);
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza("message-1")))
+            .await,
+        "the failed generated write must terminate the driver"
+    );
 
     assert_eq!(task.runtime.snapshot().phase, SessionPhase::Disconnected);
     let resume = task
@@ -534,7 +526,201 @@ async fn generated_ack_request_write_failure_forces_terminal_unclean_state() {
         .sent_messages()
         .iter()
         .any(|message| matches!(message, TransportMessage::Close(_))));
-    assert_terminal_transport_events(&mut events);
+    assert_terminal_transport_events_without_ack_request(&mut events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_message_possibly_written_failure_is_retained_once_and_terminal() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    shared.fail_stanza_write(
+        StanzaId::new("uncertain-message").unwrap(),
+        TransportWriteResponsibility::PossiblyWritten,
+    );
+    let stanza = message_stanza("uncertain-message");
+
+    assert!(!task.handle_command(XmppCommand::SendStanza(stanza)).await);
+
+    assert_eq!(
+        resume_stanza_ids(&task),
+        vec!["uncertain-message"],
+        "uncertain transport responsibility must enter the SM queue exactly once"
+    );
+    assert_eq!(
+        attempted_stanza_count(&shared, "uncertain-message"),
+        1,
+        "the failed frame must be attempted exactly once"
+    );
+    let observed = drain_client_events(&mut events);
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "uncertain-message"
+    )));
+    assert_terminal_transport_event_slice(&observed);
+    assert_eq!(shared.abort_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_iq_possibly_written_failure_is_retained_once_and_terminal() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    shared.fail_stanza_write(
+        StanzaId::new("uncertain-iq").unwrap(),
+        TransportWriteResponsibility::PossiblyWritten,
+    );
+    let (responder, response) = oneshot::channel();
+
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendIq {
+                stanza: iq_stanza("uncertain-iq"),
+                responder,
+            })
+            .await
+    );
+
+    assert!(matches!(
+        response.await.expect("IQ responder must resolve"),
+        Err(ClientError::Disconnected)
+    ));
+    assert_eq!(resume_stanza_ids(&task), vec!["uncertain-iq"]);
+    assert_eq!(attempted_stanza_count(&shared, "uncertain-iq"), 1);
+    assert_terminal_transport_event_slice(&drain_client_events(&mut events));
+    assert_eq!(shared.abort_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn definitely_not_written_message_fails_without_entering_resume_queue() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    shared.fail_next_write(TransportWriteResponsibility::DefinitelyNotWritten);
+
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza("not-written")))
+            .await
+    );
+
+    assert!(resume_stanza_ids(&task).is_empty());
+    let observed = drain_client_events(&mut events);
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+                    if stanza_id.as_str() == "not-written"
+            ))
+            .count(),
+        1
+    );
+    assert_terminal_transport_event_slice(&observed);
+    assert_eq!(shared.abort_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn confirmed_write_before_later_uncertain_failure_is_reconciled_once() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+
+    assert!(
+        task.handle_command(XmppCommand::SendStanza(message_stanza("confirmed-first")))
+            .await
+    );
+    shared.fail_stanza_write(
+        StanzaId::new("uncertain-second").unwrap(),
+        TransportWriteResponsibility::PossiblyWritten,
+    );
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza("uncertain-second")))
+            .await
+    );
+
+    assert_eq!(
+        resume_stanza_ids(&task),
+        vec!["confirmed-first", "uncertain-second"]
+    );
+    assert_eq!(attempted_stanza_count(&shared, "confirmed-first"), 1);
+    assert_eq!(attempted_stanza_count(&shared, "uncertain-second"), 1);
+    assert_terminal_transport_event_slice(&drain_client_events(&mut events));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deferred_failure_stops_later_writes_and_retains_only_responsible_stanzas() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) = make_driver_task_with_config(
+        config_with_resume_state(),
+        MockTransport::new(vec![], vec![], shared.clone()),
+    );
+    drive_task_to_resume_attempt(&mut task).await;
+
+    for id in ["deferred-first", "deferred-fails", "deferred-never"] {
+        assert!(
+            task.handle_command(XmppCommand::SendStanza(message_stanza(id)))
+                .await
+        );
+    }
+    shared.fail_stanza_write(
+        StanzaId::new("deferred-fails").unwrap(),
+        TransportWriteResponsibility::PossiblyWritten,
+    );
+
+    assert!(
+        !task
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                resumed("prev-stream", 0),
+            )))
+            .await
+    );
+
+    assert_eq!(
+        resume_stanza_ids(&task),
+        vec!["deferred-first", "deferred-fails"]
+    );
+    assert_eq!(attempted_stanza_count(&shared, "deferred-first"), 1);
+    assert_eq!(attempted_stanza_count(&shared, "deferred-fails"), 1);
+    assert_eq!(attempted_stanza_count(&shared, "deferred-never"), 0);
+    assert_terminal_transport_event_slice(&drain_client_events(&mut events));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn permanently_pending_abort_returns_after_one_second_with_resume_snapshot() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    shared.fail_stanza_write(
+        StanzaId::new("abort-timeout").unwrap(),
+        TransportWriteResponsibility::PossiblyWritten,
+    );
+    shared.set_abort_pending(true);
+    let started = std::time::Instant::now();
+
+    let keep_running = tokio::time::timeout(
+        std::time::Duration::from_millis(1_500),
+        task.handle_command(XmppCommand::SendStanza(message_stanza("abort-timeout"))),
+    )
+    .await
+    .expect("the bounded abort must return");
+
+    assert!(!keep_running);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "the permanently pending abort should be bounded by the one-second deadline"
+    );
+    assert_eq!(resume_stanza_ids(&task), vec!["abort-timeout"]);
+    assert_eq!(shared.abort_count(), 1);
+    assert_terminal_transport_event_slice(&drain_client_events(&mut events));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -745,16 +931,35 @@ async fn driver_cleans_up_failed_connects() {
 
 #[derive(Clone, Default)]
 struct MockTransportShared {
+    attempted_messages: Arc<Mutex<Vec<TransportMessage>>>,
     sent_messages: Arc<Mutex<Vec<TransportMessage>>>,
     close_count: Arc<Mutex<usize>>,
     abort_count: Arc<Mutex<usize>>,
-    fail_ack_request_send: Arc<Mutex<bool>>,
+    write_failures: Arc<Mutex<VecDeque<MockWriteFailure>>>,
     abort_failure: Arc<Mutex<bool>>,
+    abort_pending: Arc<Mutex<bool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MockWriteTarget {
+    Any,
+    AckRequest,
+    Stanza(StanzaId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MockWriteFailure {
+    target: MockWriteTarget,
+    responsibility: TransportWriteResponsibility,
 }
 
 impl MockTransportShared {
     fn sent_messages(&self) -> Vec<TransportMessage> {
         self.sent_messages.lock().unwrap().clone()
+    }
+
+    fn attempted_messages(&self) -> Vec<TransportMessage> {
+        self.attempted_messages.lock().unwrap().clone()
     }
 
     fn close_count(&self) -> usize {
@@ -765,12 +970,42 @@ impl MockTransportShared {
         *self.abort_count.lock().unwrap()
     }
 
-    fn set_fail_ack_request_send(&self, fail: bool) {
-        *self.fail_ack_request_send.lock().unwrap() = fail;
+    fn fail_next_write(&self, responsibility: TransportWriteResponsibility) {
+        self.write_failures
+            .lock()
+            .unwrap()
+            .push_back(MockWriteFailure {
+                target: MockWriteTarget::Any,
+                responsibility,
+            });
+    }
+
+    fn fail_ack_request_write(&self, responsibility: TransportWriteResponsibility) {
+        self.write_failures
+            .lock()
+            .unwrap()
+            .push_back(MockWriteFailure {
+                target: MockWriteTarget::AckRequest,
+                responsibility,
+            });
+    }
+
+    fn fail_stanza_write(&self, stanza_id: StanzaId, responsibility: TransportWriteResponsibility) {
+        self.write_failures
+            .lock()
+            .unwrap()
+            .push_back(MockWriteFailure {
+                target: MockWriteTarget::Stanza(stanza_id),
+                responsibility,
+            });
     }
 
     fn set_abort_failure(&self, fail: bool) {
         *self.abort_failure.lock().unwrap() = fail;
+    }
+
+    fn set_abort_pending(&self, pending: bool) {
+        *self.abort_pending.lock().unwrap() = pending;
     }
 }
 
@@ -828,24 +1063,38 @@ impl WebSocketTransport for MockTransport {
         self.pending_events.drain(..).collect()
     }
 
-    fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>> {
+    fn send<'a>(
+        &'a mut self,
+        message: TransportMessage,
+    ) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
-            if *self.shared.fail_ack_request_send.lock().unwrap()
-                && matches!(
-                    &message,
-                    TransportMessage::Element(element)
-                        if element.name() == "r" && element.ns() == NS_SM
-                )
-            {
-                return Err(ClientError::TransportClosed);
+            self.shared
+                .attempted_messages
+                .lock()
+                .unwrap()
+                .push(message.clone());
+            let failure = {
+                let mut failures = self.shared.write_failures.lock().unwrap();
+                let matches = failures
+                    .front()
+                    .is_some_and(|failure| mock_write_target_matches(&failure.target, &message));
+                matches.then(|| failures.pop_front().expect("front exists"))
+            };
+            if let Some(failure) = failure {
+                return Err(match failure.responsibility {
+                    TransportWriteResponsibility::DefinitelyNotWritten => {
+                        TransportWriteFailure::definitely_not_written(ClientError::TransportClosed)
+                    }
+                    TransportWriteResponsibility::PossiblyWritten => {
+                        TransportWriteFailure::possibly_written(ClientError::TransportClosed)
+                    }
+                });
             }
             self.shared
                 .sent_messages
                 .lock()
                 .unwrap()
                 .push(message.clone());
-            self.pending_events
-                .push_back(TransportEvent::MessageSent(message));
             Ok(())
         })
     }
@@ -863,9 +1112,14 @@ impl WebSocketTransport for MockTransport {
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
             *self.shared.close_count.lock().unwrap() += 1;
+            self.shared
+                .attempted_messages
+                .lock()
+                .unwrap()
+                .push(TransportMessage::Close(StreamClose));
             self.shared
                 .sent_messages
                 .lock()
@@ -873,7 +1127,6 @@ impl WebSocketTransport for MockTransport {
                 .push(TransportMessage::Close(StreamClose));
             self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closing),
-                TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
                 TransportEvent::StateChanged(TransportState::Closed),
                 TransportEvent::Closed,
             ]);
@@ -884,6 +1137,9 @@ impl WebSocketTransport for MockTransport {
     fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
         Box::pin(async move {
             *self.shared.abort_count.lock().unwrap() += 1;
+            if *self.shared.abort_pending.lock().unwrap() {
+                return std::future::pending::<ClientResult<()>>().await;
+            }
             if *self.shared.abort_failure.lock().unwrap() {
                 return Err(ClientError::TransportClosed);
             }
@@ -894,6 +1150,22 @@ impl WebSocketTransport for MockTransport {
             ]);
             Ok(())
         })
+    }
+}
+
+fn mock_write_target_matches(target: &MockWriteTarget, message: &TransportMessage) -> bool {
+    match target {
+        MockWriteTarget::Any => true,
+        MockWriteTarget::AckRequest => matches!(
+            message,
+            TransportMessage::Element(element)
+                if element.name() == "r" && element.ns() == NS_SM
+        ),
+        MockWriteTarget::Stanza(stanza_id) => matches!(
+            message,
+            TransportMessage::Element(element)
+                if element.attr("id") == Some(stanza_id.as_str())
+        ),
     }
 }
 
@@ -955,6 +1227,13 @@ fn message_stanza(stanza_id: &str) -> Element {
                 .append("queued")
                 .build(),
         )
+        .build()
+}
+
+fn iq_stanza(stanza_id: &str) -> Element {
+    Element::builder("iq", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), stanza_id)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
         .build()
 }
 
@@ -1086,4 +1365,78 @@ fn assert_terminal_transport_events(events: &mut broadcast::Receiver<ClientEvent
         "closed transport state must be observable"
     );
     assert!(saw_closed, "terminal Closed event must be observable");
+}
+
+fn resume_stanza_ids(task: &DriverTask) -> Vec<String> {
+    task.runtime
+        .resume_state()
+        .map(|state| {
+            state
+                .unhandled_outbound_stanzas()
+                .filter_map(|element| element.attr("id"))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn attempted_stanza_count(shared: &MockTransportShared, stanza_id: &str) -> usize {
+    shared
+        .attempted_messages()
+        .iter()
+        .filter(|message| transport_message_id(message) == Some(stanza_id))
+        .count()
+}
+
+fn drain_client_events(events: &mut broadcast::Receiver<ClientEvent>) -> Vec<ClientEvent> {
+    let mut observed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        observed.push(event);
+    }
+    observed
+}
+
+fn assert_terminal_transport_event_slice(events: &[ClientEvent]) {
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Transport(TransportEvent::StateChanged(TransportState::Failed))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Transport(TransportEvent::StateChanged(TransportState::Closed))
+    )));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::Transport(TransportEvent::Closed))));
+}
+
+fn assert_terminal_transport_events_without_ack_request(
+    events: &mut broadcast::Receiver<ClientEvent>,
+) {
+    let mut saw_failed = false;
+    let mut saw_closed_state = false;
+    let mut saw_closed = false;
+    let mut saw_ack_request = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            ClientEvent::Transport(TransportEvent::StateChanged(TransportState::Failed)) => {
+                saw_failed = true;
+            }
+            ClientEvent::Transport(TransportEvent::StateChanged(TransportState::Closed)) => {
+                saw_closed_state = true;
+            }
+            ClientEvent::Transport(TransportEvent::Closed) => saw_closed = true,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestSent { .. },
+            )) => saw_ack_request = true,
+            _ => {}
+        }
+    }
+    assert!(saw_failed, "unclean failure must be observable");
+    assert!(saw_closed_state, "closed state must be observable");
+    assert!(saw_closed, "terminal Closed event must be observable");
+    assert!(
+        !saw_ack_request,
+        "a failed generated <r/> write must not publish AckRequestSent"
+    );
 }

@@ -13,7 +13,8 @@ use crate::runtime::XmppRuntime;
 use crate::state::{ClientState, SessionSnapshot};
 use crate::stream_management::SmResumeState;
 use crate::transport::{
-    DefaultTransportFactory, TransportEvent, TransportMessage, TransportState, WebSocketTransport,
+    DefaultTransportFactory, StreamClose, TransportEvent, TransportMessage, TransportState,
+    TransportWriteFailure, TransportWriteResponsibility, WebSocketTransport,
     WebSocketTransportFactory,
 };
 
@@ -321,7 +322,10 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_stanza_command(stanza).await;
+                if self.send_stanza_command(stanza).await.is_err() {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
                 true
             }
             XmppCommand::SendIq { stanza, responder } => {
@@ -331,7 +335,10 @@ impl DriverTask {
                     return true;
                 }
 
-                self.send_iq_command(stanza, responder).await;
+                if self.send_iq_command(stanza, responder).await.is_err() {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
                 true
             }
             XmppCommand::Disconnect => {
@@ -340,7 +347,14 @@ impl DriverTask {
                 // explicit `</stream>` close (wasm driver parity).
                 self.explicit_disconnect = true;
                 self.publish_resume_state_snapshot();
-                let _ = self.transport.close().await;
+                if self
+                    .send_transport_message(TransportMessage::Close(StreamClose))
+                    .await
+                    .is_err()
+                {
+                    self.terminate_uncleanly().await;
+                    return false;
+                }
                 // Drain close events so state reaches Disconnected before we exit.
                 for event in self.transport.drain_events() {
                     self.apply_transport_event(event).await;
@@ -350,58 +364,64 @@ impl DriverTask {
         }
     }
 
-    async fn send_stanza_command(&mut self, stanza: Element) {
+    async fn send_stanza_command(&mut self, stanza: Element) -> Result<(), TransportWriteFailure> {
         let maybe_message_id = message_delivery_stanza_id(&stanza);
-        if self
+        let result = self
             .send_transport_message(TransportMessage::Element(stanza))
-            .await
-            .is_err()
-        {
-            if let Some(stanza_id) = maybe_message_id {
-                self.emit_message_delivery_failed(stanza_id);
+            .await;
+        if let Err(failure) = &result {
+            if failure.responsibility() == TransportWriteResponsibility::DefinitelyNotWritten {
+                if let Some(stanza_id) = maybe_message_id {
+                    self.emit_message_delivery_failed(stanza_id);
+                }
             }
         }
+        result
     }
 
     async fn send_iq_command(
         &mut self,
         stanza: Element,
         responder: oneshot::Sender<ClientResult<Element>>,
-    ) {
+    ) -> Result<(), TransportWriteFailure> {
         let id = stanza.attr("id").map(|s| s.to_string());
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
         {
-            Err(_) => {
+            Err(failure) => {
                 let _ = responder.send(Err(ClientError::Disconnected));
+                Err(failure)
             }
-            Ok(()) => match id {
-                Some(id) => {
-                    self.pending_iqs.insert(id, responder);
+            Ok(()) => {
+                match id {
+                    Some(id) => {
+                        self.pending_iqs.insert(id, responder);
+                    }
+                    None => {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
                 }
-                None => {
-                    let _ = responder.send(Err(ClientError::Disconnected));
-                }
-            },
+                Ok(())
+            }
         }
     }
 
-    async fn flush_deferred_commands(&mut self) {
+    async fn flush_deferred_commands(&mut self) -> Result<(), TransportWriteFailure> {
         while self.runtime.can_send_app_stanza() {
             let Some(command) = self.deferred_commands.pop_front() else {
-                return;
+                return Ok(());
             };
 
-            match command {
-                DeferredXmppCommand::SendStanza(stanza) => {
-                    self.send_stanza_command(stanza).await;
-                }
+            let result = match command {
+                DeferredXmppCommand::SendStanza(stanza) => self.send_stanza_command(stanza).await,
                 DeferredXmppCommand::SendIq { stanza, responder } => {
-                    self.send_iq_command(stanza, responder).await;
+                    self.send_iq_command(stanza, responder).await
                 }
-            }
+            };
+            result?;
         }
+        Ok(())
     }
 
     /// Apply one transport event; returns `false` when the session is fully closed.
@@ -426,7 +446,10 @@ impl DriverTask {
             }
         }
 
-        self.flush_deferred_commands().await;
+        if self.flush_deferred_commands().await.is_err() {
+            self.terminate_uncleanly().await;
+            return false;
+        }
 
         *self.state.write().unwrap() = self.runtime.snapshot().clone();
         !is_terminal
@@ -552,17 +575,65 @@ impl DriverTask {
         }
     }
 
-    async fn send_transport_message(&mut self, message: TransportMessage) -> ClientResult<()> {
-        match message {
-            TransportMessage::Close(_) => self.transport.close().await,
-            TransportMessage::Element(element) => {
-                self.transport
-                    .send(TransportMessage::Element(element.clone()))
-                    .await?;
-                Ok(())
-            }
-            other => self.transport.send(other).await,
+    /// Write one message and every runtime-generated follow-up in strict order.
+    /// A successful transport write is applied to the runtime immediately; the
+    /// transport adapter never owns a delayed `MessageSent` event.
+    async fn send_transport_message(
+        &mut self,
+        message: TransportMessage,
+    ) -> Result<(), TransportWriteFailure> {
+        enum PumpItem {
+            Message(TransportMessage),
+            Event(ClientEvent),
         }
+
+        let mut pending = VecDeque::from([PumpItem::Message(message)]);
+        while let Some(item) = pending.pop_front() {
+            match item {
+                PumpItem::Message(message) => {
+                    let result = match message {
+                        TransportMessage::Close(_) => self.transport.close().await,
+                        _ => self.transport.send(message.clone()).await,
+                    };
+                    if let Err(failure) = result {
+                        if failure.responsibility() == TransportWriteResponsibility::PossiblyWritten
+                        {
+                            self.reconcile_possibly_written(message);
+                        }
+                        return Err(failure);
+                    }
+
+                    let events = self
+                        .runtime
+                        .apply_transport_event(TransportEvent::MessageSent(message))
+                        .map_err(TransportWriteFailure::possibly_written)?;
+                    self.publish_resume_state_snapshot();
+                    *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    for event in events.into_iter().rev() {
+                        pending.push_front(PumpItem::Event(event));
+                    }
+                }
+                PumpItem::Event(event) => {
+                    if let Some(follow_up) = self.dispatch_client_event(event) {
+                        pending.push_front(PumpItem::Message(follow_up));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Assume responsibility for an uncertain native write exactly once.
+    /// Applying the typed message updates XEP-0198 queue state, but generated
+    /// follow-up writes and public `MessageSent`/`AckRequestSent` events are
+    /// deliberately suppressed because the transport did not confirm them.
+    fn reconcile_possibly_written(&mut self, message: TransportMessage) {
+        let _ = self
+            .runtime
+            .apply_transport_event(TransportEvent::MessageSent(message));
+        self.publish_resume_state_snapshot();
+        *self.state.write().unwrap() = self.runtime.snapshot().clone();
     }
 
     /// Broadcast the current XEP-0198 resume snapshot when it differs
