@@ -42,7 +42,9 @@ pub(crate) fn client_error_to_waddle(error: &ClientError) -> WaddleError {
             condition: err.condition.clone(),
             text: err.text.clone(),
         },
-        ClientError::WebSocketConnectTimeout { .. } => WaddleError::Timeout,
+        ClientError::WebSocketConnectTimeout { .. } | ClientError::IqTimeout { .. } => {
+            WaddleError::Timeout
+        }
         _ => WaddleError::Transport,
     }
 }

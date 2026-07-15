@@ -27,7 +27,21 @@ use waddle_xmpp_client::messaging::{
 };
 use waddle_xmpp_client::pin::{build_pin_list_iq, parse_pin_list_response};
 use waddle_xmpp_client::request::StanzaId;
-use waddle_xmpp_client::{ClientError, ClientResult};
+use waddle_xmpp_client::{ClientError, ClientHandle, ClientResult};
+
+/// Bound every fetch-style IQ round-trip:  itself has no
+/// request-level timeout, so a server that accepts but never answers
+/// would otherwise suspend the caller's `await` forever.
+const IQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn send_iq_with_timeout(handle: &ClientHandle, iq: Element) -> Result<Element, ClientError> {
+    match tokio::time::timeout(IQ_TIMEOUT, handle.send_iq(iq)).await {
+        Ok(result) => result,
+        Err(_) => Err(ClientError::IqTimeout {
+            timeout: IQ_TIMEOUT,
+        }),
+    }
+}
 
 use crate::boundary_convert::jid_domain;
 use crate::convert::{mds_catchup_entry_to_ffi, pin_entry_to_ffi, send_options_from_ffi};
@@ -366,7 +380,7 @@ impl WaddleClient {
             return Err(WaddleError::NotConnected);
         };
         let iq = build_mds_catchup_iq(&Uuid::new_v4().to_string());
-        match handle.send_iq(iq).await {
+        match send_iq_with_timeout(&handle, iq).await {
             Ok(result) => Ok(parse_mds_catchup_result(&result)
                 .into_iter()
                 .map(mds_catchup_entry_to_ffi)
@@ -432,7 +446,7 @@ impl WaddleClient {
             return Err(WaddleError::NotConnected);
         };
         let iq = build_pin_list_iq(room.as_str());
-        match handle.send_iq(iq).await {
+        match send_iq_with_timeout(&handle, iq).await {
             Ok(result) => Ok(parse_pin_list_response(&result)
                 .into_iter()
                 .map(pin_entry_to_ffi)
