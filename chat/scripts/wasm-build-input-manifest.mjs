@@ -4,6 +4,8 @@ import {
 	bytewiseCompare,
 	canonicalRelativePath,
 } from "./wasm-build-input-digest.mjs";
+import { validateWasmBuildModuleClosure } from "./wasm-build-module-closure.mjs";
+import { validateWasmRustSourceClosure } from "./wasm-rust-source-closure.mjs";
 
 export const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
 export const PACKAGE_PATH = "chat/package.json";
@@ -18,7 +20,9 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		"chat/scripts/wasm-build-input-digest.mjs",
 		"chat/scripts/wasm-build-input-manifest.mjs",
 		"chat/scripts/wasm-build-inputs.mjs",
+		"chat/scripts/wasm-build-module-closure.mjs",
 		"chat/scripts/wasm-package-bindings.mjs",
+		"chat/scripts/wasm-rust-source-closure.mjs",
 		"flake.lock",
 		"flake.nix",
 		"server/Cargo.lock",
@@ -42,13 +46,11 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 	]),
 });
 
-const IGNORED_DIRECTORY_NAMES = new Set([
-	".git",
-	".jj",
-	"node_modules",
-	"target",
-	"wasm-pkg",
-]);
+const BUILD_MODULE_PATHS = Object.freeze(
+	WASM_BUILD_INPUT_MANIFEST.requiredFiles.filter(
+		(path) => path.startsWith("chat/scripts/") && path.endsWith(".mjs"),
+	),
+);
 const IGNORED_FILE_NAMES = new Set([".DS_Store", "Thumbs.db"]);
 const IGNORED_FILE_PATTERNS = Object.freeze([
 	/^\.#/u,
@@ -56,9 +58,6 @@ const IGNORED_FILE_PATTERNS = Object.freeze([
 	/~$/u,
 	/\.(?:orig|rej|swp|swo|temp|tmp)$/u,
 ]);
-const COMPILE_TIME_INCLUDE = /\binclude(?:_bytes|_str)?!\s*\(/u;
-const RUST_PATH_OVERRIDE = /#\s*\[\s*path\s*=/u;
-const LITERAL_RUST_PATH_OVERRIDE = /#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]/gu;
 
 function absolutePath(repoRoot, relativePath) {
 	return resolve(repoRoot, ...canonicalRelativePath(relativePath).split("/"));
@@ -166,7 +165,7 @@ function walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries) {
 				);
 			}
 			if (stat.isDirectory()) {
-				if (!IGNORED_DIRECTORY_NAMES.has(name)) visit(relativePath, path);
+				visit(relativePath, path);
 				continue;
 			}
 			if (!stat.isFile()) {
@@ -192,46 +191,6 @@ function walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries) {
 		);
 	}
 }
-
-function validateRustSourceClosure(entries) {
-	const decoder = new TextDecoder("utf-8", { fatal: true });
-	const includedPaths = new Set(entries.keys());
-	for (const [path, bytes] of entries) {
-		if (!path.endsWith(".rs")) continue;
-		let source;
-		try {
-			source = decoder.decode(bytes);
-		} catch {
-			throw new Error(`WASM Rust source must be valid UTF-8: ${path}`);
-		}
-		if (COMPILE_TIME_INCLUDE.test(source)) {
-			throw new Error(
-				`unsupported compile-time include macro in ${path}; declare the included input and extend the manifest validator`,
-			);
-		}
-		const pathOverrides = [...source.matchAll(LITERAL_RUST_PATH_OVERRIDE)];
-		const sourceWithoutLiteralOverrides = source.replace(
-			LITERAL_RUST_PATH_OVERRIDE,
-			"",
-		);
-		if (RUST_PATH_OVERRIDE.test(sourceWithoutLiteralOverrides)) {
-			throw new Error(`unsupported dynamic Rust #[path] override in ${path}`);
-		}
-		const sourceDirectory = path.split("/").slice(0, -1).join("/");
-		for (const match of pathOverrides) {
-			const referencedPath = canonicalRelativePath(match[1]);
-			const resolvedPath = canonicalRelativePath(
-				`${sourceDirectory}/${referencedPath}`,
-			);
-			if (!includedPaths.has(resolvedPath)) {
-				throw new Error(
-					`Rust #[path] override in ${path} is outside the declared WASM source closure: ${resolvedPath}`,
-				);
-			}
-		}
-	}
-}
-
 export function collectDeclaredWasmBuildInputs(repoRoot) {
 	assertRepositoryRoot(repoRoot);
 	const entries = new Map();
@@ -251,6 +210,7 @@ export function collectDeclaredWasmBuildInputs(repoRoot) {
 		walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries);
 	}
 
-	validateRustSourceClosure(entries);
+	validateWasmRustSourceClosure(entries);
+	validateWasmBuildModuleClosure(entries, BUILD_MODULE_PATHS);
 	return entries;
 }

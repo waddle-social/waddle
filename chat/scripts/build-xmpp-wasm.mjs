@@ -36,23 +36,20 @@ const checkOnly = process.argv.slice(2).includes("--check");
 const outDir = checkOnly
 	? mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-check-"))
 	: committedOutDir;
+if (checkOnly) {
+	process.on("exit", () => rmSync(outDir, { recursive: true, force: true }));
+}
 const trackedGeneratedFiles = [
 	"package.json",
 	"waddle_xmpp_client_wasm.d.ts",
 	"waddle_xmpp_client_wasm.js",
 ];
-assertHermeticWasmBuildEnvironment(process.env);
-resolvePinnedNixToolchain();
 const {
 	buildId,
 	contract,
 	entries: buildInputs,
 } = canonicalWasmBuildIdentity(repoRoot);
 const crateDir = resolve(repoRoot, ...contract.crate.split("/"));
-
-if (checkOnly) {
-	process.on("exit", () => rmSync(outDir, { recursive: true, force: true }));
-}
 
 function newestBuildInputMtime() {
 	return Math.max(
@@ -100,6 +97,8 @@ if (!checkOnly && process.env.REBUILD_WASM !== "1") {
 	);
 }
 
+assertHermeticWasmBuildEnvironment(process.env);
+resolvePinnedNixToolchain();
 execFileSync(contract.wasmPack.command, wasmPackBuildArgs(contract, outDir), {
 	cwd: crateDir,
 	stdio: "inherit",

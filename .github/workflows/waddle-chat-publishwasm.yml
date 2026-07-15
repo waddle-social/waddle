@@ -29,8 +29,12 @@ on:
     - chat/scripts/wasm-build-input-manifest.mjs/**
     - chat/scripts/wasm-build-inputs.mjs
     - chat/scripts/wasm-build-inputs.mjs/**
+    - chat/scripts/wasm-build-module-closure.mjs
+    - chat/scripts/wasm-build-module-closure.mjs/**
     - chat/scripts/wasm-package-bindings.mjs
     - chat/scripts/wasm-package-bindings.mjs/**
+    - chat/scripts/wasm-rust-source-closure.mjs
+    - chat/scripts/wasm-rust-source-closure.mjs/**
     - cue.mod/**
     - flake.lock
     - flake.lock/**

@@ -68,7 +68,9 @@ let _WasmBuildInputs = [
 	"scripts/wasm-build-input-digest.mjs",
 	"scripts/wasm-build-input-manifest.mjs",
 	"scripts/wasm-build-inputs.mjs",
+	"scripts/wasm-build-module-closure.mjs",
 	"scripts/wasm-package-bindings.mjs",
+	"scripts/wasm-rust-source-closure.mjs",
 ]
 
 schema.#Project & {

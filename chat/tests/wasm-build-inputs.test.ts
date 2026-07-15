@@ -26,6 +26,7 @@ import {
 import { renderWasmWrapper } from "../scripts/wasm-package-bindings.mjs";
 
 const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
+const BUILD_SCRIPT_PATH = "chat/scripts/build-xmpp-wasm.mjs";
 const FORMAT = "waddle:xmpp-client-wasm:canonical-inputs:v1";
 const roots: string[] = [];
 
@@ -81,7 +82,9 @@ function fixtureRoot() {
 			path,
 			path === CONTRACT_PATH
 				? `${JSON.stringify(contract, null, 2)}\n`
-				: `fixture:${path}\n`,
+				: path.endsWith(".mjs")
+					? `// fixture:${path}\n`
+					: `fixture:${path}\n`,
 		);
 	}
 	write(
@@ -183,20 +186,25 @@ describe("canonical WASM build identity", () => {
 		const sourceRoot = WASM_BUILD_INPUT_MANIFEST.sourceRoots[0];
 		write(root, `${sourceRoot}/scratch.tmp`, "temporary");
 		write(root, `${sourceRoot}/editor.rs~`, "temporary");
-		for (const directory of [
-			".git",
-			".jj",
-			"node_modules",
-			"target",
-			"wasm-pkg",
-		]) {
-			write(
-				root,
-				`${sourceRoot}/${directory}/generated.rs`,
-				"pub fn ignored() {}\n",
-			);
-		}
 		expect(buildId(root)).toBe(before);
+	});
+
+	test("includes every nested Rust source directory and fails closed on nested non-Rust files", () => {
+		const nestedRoot = fixtureRoot();
+		const sourceRoot = WASM_BUILD_INPUT_MANIFEST.sourceRoots[0];
+		const before = buildId(nestedRoot);
+		write(
+			nestedRoot,
+			`${sourceRoot}/target/generated.rs`,
+			"pub fn nested_source() {}\n",
+		);
+		expect(buildId(nestedRoot)).not.toBe(before);
+
+		const unsupportedRoot = fixtureRoot();
+		write(unsupportedRoot, `${sourceRoot}/node_modules/schema.json`, "{}\n");
+		expect(() => buildId(unsupportedRoot)).toThrow(
+			"unsupported WASM build source input",
+		);
 	});
 
 	test("fails closed for missing required files and crate entry points", () => {
@@ -226,15 +234,32 @@ describe("canonical WASM build identity", () => {
 			"unsupported WASM build source input",
 		);
 
-		const includeRoot = fixtureRoot();
-		write(
-			includeRoot,
-			`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+		for (const source of [
 			'const DATA: &str = include_str!("data.txt");\n',
+			'const DATA: &[u8] = include_bytes ! ["data.bin"];\n',
+			'include! {"generated.rs"}\n',
+			'const DATA: &[u8] = include_bytes /* outer /* nested */ comment */ ! ["data.bin"];\n',
+			'const DATA: &str = include_str // comment\n ! ("data.txt");\n',
+			'include! /* outer /* nested */ comment */ {"generated.rs"}\n',
+		]) {
+			const includeRoot = fixtureRoot();
+			write(
+				includeRoot,
+				`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+				source,
+			);
+			expect(() => buildId(includeRoot)).toThrow(
+				"unsupported compile-time include macro",
+			);
+		}
+
+		const literalRoot = fixtureRoot();
+		write(
+			literalRoot,
+			`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+			'const TEXT: &str = "include!(\\\"generated.rs\\\")";\nconst RAW: &str = r#"include_bytes![\\"data.bin\\"]"#;\n// include_str!("ignored.txt")\npub fn borrow<\'a>(value: &\'a str) -> &\'a str { value }\n',
 		);
-		expect(() => buildId(includeRoot)).toThrow(
-			"unsupported compile-time include macro",
-		);
+		expect(() => buildId(literalRoot)).not.toThrow();
 	});
 
 	test("allows only canonical in-closure Rust path overrides", () => {
@@ -263,6 +288,50 @@ describe("canonical WASM build identity", () => {
 		expect(() => buildId(dynamicRoot)).toThrow(
 			"unsupported dynamic Rust #[path] override",
 		);
+
+		const decoyRoot = fixtureRoot();
+		write(
+			decoyRoot,
+			`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+			'// #[path = "alpha.rs"]\n#[path = concat!("alpha", ".rs")]\nmod alpha;\n',
+		);
+		expect(() => buildId(decoyRoot)).toThrow(
+			"unsupported dynamic Rust #[path] override",
+		);
+
+		const conditionalRoot = fixtureRoot();
+		write(
+			conditionalRoot,
+			`${WASM_BUILD_INPUT_MANIFEST.sourceRoots[0]}/lib.rs`,
+			'#[cfg_attr(feature = "alternate", path = "alpha.rs")]\nmod alpha;\n',
+		);
+		expect(() => buildId(conditionalRoot)).toThrow(
+			"unsupported conditional Rust #[cfg_attr",
+		);
+	});
+
+	test("allows only declared relative build modules and explicit built-ins", () => {
+		const declaredRoot = fixtureRoot();
+		write(
+			declaredRoot,
+			BUILD_SCRIPT_PATH,
+			'import "node:fs";\nimport "./wasm-build-inputs.mjs";\n',
+		);
+		expect(() => buildId(declaredRoot)).not.toThrow();
+
+		for (const source of [
+			'import "./undeclared-helper.mjs";\n',
+			'await import("./undeclared-helper.mjs");\n',
+			'const name = "helper";\nawait import(`./${name}.mjs`);\n',
+			'import "external-package";\n',
+			'import "./wasm-build-inputs";\n',
+			'import "./wasm-build-inputs.mjs?raw";\n',
+			'import "../../../../outside.mjs";\n',
+		]) {
+			const invalidRoot = fixtureRoot();
+			write(invalidRoot, BUILD_SCRIPT_PATH, source);
+			expect(() => buildId(invalidRoot)).toThrow();
+		}
 	});
 
 	test("rejects symlinks, symlink ancestors, traversal, backslashes, and duplicates", () => {
