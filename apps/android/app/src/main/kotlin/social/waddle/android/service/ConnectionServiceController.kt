@@ -2,6 +2,9 @@ package social.waddle.android.service
 
 import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -26,6 +29,18 @@ class ConnectionServiceController(
                 }
             }
         }
+        // Re-arm on every app foreground: appState is distinct-until-
+        // changed, so a service that stopped itself after a denied
+        // background promotion would otherwise stay down for the rest of
+        // the (still Ready) session. Foreground entry is always an
+        // FGS-start-eligible moment.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                if (appState.value == WaddleAppState.Ready) {
+                    startService()
+                }
+            }
+        })
     }
 
     fun startService() {

@@ -17,7 +17,27 @@ data class TimelineItem(
     val timestamp: String?,
     val isMine: Boolean,
     val source: TimelineSource,
-)
+) {
+    /**
+     * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),
+     * client origin id, and the message id. Pending-send reconciliation
+     * must match against all of them — the send returns the origin id
+     * while the MUC reflection is keyed by the room-assigned stanza id.
+     */
+    val identityIds: Set<String>
+        get() = when (source) {
+            is TimelineSource.Live -> setOfNotNull(
+                source.message.stanzaId,
+                source.message.originId,
+                source.message.id,
+            )
+            is TimelineSource.Archived -> setOfNotNull(
+                source.message.stanzaId,
+                source.message.originId,
+                source.message.id,
+            )
+        }
+}
 
 sealed interface TimelineSource {
     data class Live(val message: WaddleMessage) : TimelineSource

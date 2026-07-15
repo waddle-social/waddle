@@ -37,7 +37,16 @@ open class ConversationViewModel(
 
     val uiState: StateFlow<ConversationUiState> =
         combine(timeline, pending, history) { items, unconfirmed, load ->
-            val storedIds = items.mapTo(HashSet()) { it.id }
+            // Union of every stored identity: the MUC reflection is keyed
+            // by the room-assigned XEP-0359 stanza-id, but the id the send
+            // returned is the client origin-id — matching only the
+            // collapsed key would leave every sent channel message
+            // duplicated (unconfirmed bubble + stored echo).
+            val storedIds = HashSet<String>()
+            items.forEach { item ->
+                storedIds += item.id
+                storedIds += item.identityIds
+            }
             val visiblePending = unconfirmed.filter { message ->
                 message.stanzaId == null || message.stanzaId !in storedIds
             }
@@ -57,6 +66,10 @@ open class ConversationViewModel(
         viewModelScope.launch {
             events.collect { event ->
                 when (event) {
+                    // The 0198 ack carries the client-generated id the
+                    // send returned; the acked pending row can go — the
+                    // stored echo (or history) is authoritative from here.
+                    is XmppEvent.DeliveryAcked -> pruneAcked(event.stanzaId)
                     is XmppEvent.DeliveryFailed -> markFailed(event.stanzaId)
                     // Reconnect catch-up: refetch the newest page.
                     XmppEvent.SessionReady -> refreshHistory()
@@ -131,6 +144,10 @@ open class ConversationViewModel(
         if (history.value.inFlight) return
         history.value = HistoryState()
         loadOlder()
+    }
+
+    private fun pruneAcked(stanzaId: String) {
+        pending.update { list -> list.filterNot { it.stanzaId == stanzaId } }
     }
 
     private fun markFailed(stanzaId: String) {

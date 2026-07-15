@@ -158,8 +158,12 @@ class ConversationViewModelTest {
     }
 
     @Test
-    fun `optimistic send dedupes against the room echo`() = runTest {
-        io.sendOutcome = WaddleSendMessageOutcome.Sent("s-echo")
+    fun `optimistic send dedupes against the room echo by origin id`() = runTest {
+        // Realistic MUC reflection: the room stamps a FRESH XEP-0359
+        // stanza-id; only the origin-id round-trips the client id the
+        // send returned. Matching on the collapsed timeline key alone
+        // rendered every sent channel message twice.
+        io.sendOutcome = WaddleSendMessageOutcome.Sent("client-origin-id")
         val viewModel = createViewModel()
         runCurrent()
 
@@ -172,7 +176,8 @@ class ConversationViewModelTest {
 
         store.onLiveMessage(
             testMessage(
-                stanzaId = "s-echo",
+                stanzaId = "room-assigned-stanza-id",
+                originId = "client-origin-id",
                 from = "$ROOM_JID/icepuma",
                 to = OWN_JID,
                 body = "hello room",
@@ -185,6 +190,22 @@ class ConversationViewModelTest {
         val rows = viewModel.uiState.value.rows
         assertEquals("echo replaces the pending row", 1, rows.size)
         assertTrue(rows.single() is ConversationRow.Stored)
+    }
+
+    @Test
+    fun `delivery ack prunes the pending row even before the echo arrives`() = runTest {
+        io.sendOutcome = WaddleSendMessageOutcome.Sent("client-origin-id")
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.send("hello room")
+        runCurrent()
+        assertEquals(1, viewModel.uiState.value.rows.size)
+
+        events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
+        runCurrent()
+
+        assertEquals("acked pending row is gone", 0, viewModel.uiState.value.rows.size)
     }
 
     @Test
