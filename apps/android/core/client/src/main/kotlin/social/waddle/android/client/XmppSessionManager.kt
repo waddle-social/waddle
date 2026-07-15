@@ -391,13 +391,36 @@ class XmppSessionManager(
         // Serialized per manager: without the mutex a failed send's
         // rollback (ranked newest) would clobber a LATER send's
         // optimistic set.
+        // NOTE (deferred, needs an FFI signature change): the reaction
+        // stanza does not yet echo the target's XEP-0201 <thread/> like
+        // the web client does — send_reaction takes no options today.
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        // Rollback base from the STORE inside the lock — the caller's
+        // snapshot can predate a queued sibling send's outcome.
+        val base = ownReactionSet(conversationJid, targetStanzaId) ?: previousEmojis
         applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, emojis)
-        val sent = clientCall {
-            it.sendReaction(bareJid(conversationJid), targetStanzaId, emojis, isGroupchat)
+        var sent = false
+        try {
+            sent = clientCall {
+                it.sendReaction(bareJid(conversationJid), targetStanzaId, emojis, isGroupchat)
+            }
+        } finally {
+            // Also runs on cancellation (screen closed mid-send): the
+            // optimistic apply must never outlive a send that did not
+            // happen — in a DM nothing on the wire would ever correct
+            // the phantom chip.
+            if (!sent) {
+                applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
+            }
         }
-        if (!sent) applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, previousEmojis)
         return sent
+    }
+
+    /** The account's current reaction set on a row, from the store. */
+    private fun ownReactionSet(conversationJid: String, targetId: String): List<String>? {
+        val row = timelineStore.timeline(bareJid(conversationJid)).value
+            .firstOrNull { targetId in it.identityIds } ?: return null
+        return row.reactions.filter { it.mine }.map { it.emoji }
     }
 
     /** XEP-0308: replace an own message's body; applies locally on a
@@ -569,7 +592,6 @@ class XmppSessionManager(
         // terminal advance/publish land last, regressing the local
         // cursor and the published MDS node.
         val conversation = bareJid(conversationJid)
-        unreadStore.clear(conversation)
         val items = timelineStore.timeline(conversation).value
         val ids = explicitTarget ?: run {
             // Only feed-visible rows count: a thread reply the user has
@@ -579,8 +601,15 @@ class XmppSessionManager(
             } ?: return
             displayedTargetOf(target, isGroupchat) ?: return
         }
-        // Explicit targets (parked replays, notification actions) can be
-        // stale: never move the cursor BACKWARDS in timeline order.
+        // The on-screen path clears the badge unconditionally (looking
+        // IS reading, even offline). Explicit targets (parked replays,
+        // notification actions) must pass the staleness guard first —
+        // a parked replay racing a fresh arrival would otherwise wipe
+        // the badge for a message the user has never seen (the tap-time
+        // clear already happened in the receiver).
+        if (explicitTarget == null) unreadStore.clear(conversation)
+        // Explicit targets can be stale: never move the cursor
+        // BACKWARDS in timeline order.
         if (explicitTarget != null) {
             val targetIndex = items.indexOfLast { ids.markerId in it.identityIds }
             val current = readCursorStore.cursor(conversation)
@@ -710,8 +739,14 @@ class XmppSessionManager(
         // The active (on-screen) conversation's badge is suppressed and
         // owned by the local read path; don't fight it from here.
         if (unreadStore.isActiveConversation(conversation)) return
-        val unread = items.subList(index + 1, items.size).count { !it.isMine && it.tombstone == null }
+        // Feed-visible rows only: hidden thread replies never count.
+        val unread = items.subList(index + 1, items.size).count {
+            !it.isMine && it.tombstone == null && it.isFeedVisible
+        }
         unreadStore.set(conversation, unread)
+        // A sibling device read everything: the stale notification in
+        // the shade must retire too (the notifier owns that side).
+        if (unread == 0) _events.tryEmit(XmppEvent.ReadSynced(conversation))
     }
 
     /**
@@ -1082,8 +1117,12 @@ class XmppSessionManager(
                     if (message.body != null) {
                         // Replays the timeline deduped (XEP-0198 resume)
                         // must not inflate the badge for a message that
-                        // renders once.
-                        if (newlyInserted) {
+                        // renders once. Thread REPLIES are hidden from
+                        // the feed and never count either (web
+                        // feed-only unread parity).
+                        val isThreadReply = message.thread != null &&
+                            message.thread !in setOfNotNull(message.stanzaId, message.originId, message.id)
+                        if (newlyInserted && !isThreadReply) {
                             unreadStore.onLiveMessage(key.jid, key.isMine)
                         }
                         recordResumeCursor(

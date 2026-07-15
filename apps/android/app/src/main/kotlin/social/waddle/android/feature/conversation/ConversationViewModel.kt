@@ -388,7 +388,11 @@ open class ConversationViewModel(
             authorJid = author,
             authorName = authorNameOf(item) ?: author,
             previewBody = item.body,
-            threadId = item.threadId,
+            // DM replies root an implicit thread at the parent when none
+            // exists (web chat-send parity: every DM reply carries a
+            // <thread/>); channels only thread explicit replies.
+            threadId = item.threadId
+                ?: if (isGroupchat) null else (item.originId ?: item.messageId),
         )
     }
 

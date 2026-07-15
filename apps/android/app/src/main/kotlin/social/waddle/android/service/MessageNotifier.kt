@@ -83,6 +83,10 @@ class MessageNotifier(
                     is XmppEvent.Message -> runCatching { onMessage(event.message) }
                     is XmppEvent.DeliveryAcked -> queuedReplies.remove(event.stanzaId)
                     is XmppEvent.DeliveryFailed -> runCatching { onQueuedReplyFailed(event.stanzaId) }
+                    // Read on a sibling device (XEP-0490): the shade
+                    // notification is stale.
+                    is XmppEvent.ReadSynced ->
+                        runCatching { clearConversationNotification(event.conversationJid) }
                     else -> Unit
                 }
             }

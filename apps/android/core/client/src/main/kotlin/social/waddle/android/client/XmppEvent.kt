@@ -59,6 +59,12 @@ sealed interface XmppEvent {
     ) : XmppEvent
 
     /**
+     * A sibling device's XEP-0490 cursor covered everything unread in
+     * this conversation — shade notifications for it are stale.
+     */
+    data class ReadSynced(val conversationJid: String) : XmppEvent
+
+    /**
      * RFC 6120 §6.5 SASL failure: terminal for the presented token —
      * the session manager signs out instead of re-presenting a dead
      * credential forever (web #1164 parity).

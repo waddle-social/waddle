@@ -20,7 +20,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,30 +57,21 @@ fun MessageComposer(
     // destroy what the user was typing.
     var stashedDraft by rememberSaveable { mutableStateOf("") }
 
-    // Not saveable ON PURPOSE: distinguishes a fresh composition
-    // (rotation/process restore/navigation return) from a live mode
-    // transition within one composition.
-    var initialComposition by remember { mutableStateOf(true) }
-
     val editKey = editing?.let { "${it.attempt}:${it.targetId} ${it.originalBody}" }
     LaunchedEffect(editKey) {
-        val initial = initialComposition
-        initialComposition = false
         if (editKey == lastEditKey) return@LaunchedEffect
         if (editing != null) {
             if (lastEditKey == null) stashedDraft = draft
             draft = editing.originalBody
         } else {
-            // A stale edit key with editing == null on the FIRST run of
-            // a composition means either a process death mid-edit
-            // (draft = the typed edit text) or a navigation return after
-            // the edit ended (draft already cleared by send). The
-            // process-death draft must be DISCARDED: the edit context is
-            // gone, and sending the restored text would post the old
-            // body as a brand-new message — the wrong wire shape beats
-            // losing an in-progress edit. Live transitions (and the
-            // nav-return case, whose draft is empty) restore the stash.
-            draft = if (initial && draft.isNotEmpty()) "" else stashedDraft
+            // Editing ended (live send/cancel), or the composition is
+            // fresh with a stale edit key — a process death mid-edit or
+            // a navigation return. In every case the pre-edit stash is
+            // what belongs in the field: the process-death edit text
+            // itself is DISCARDED, because with the edit context gone a
+            // send would post the old body as a brand-new message (the
+            // wrong wire shape beats losing an in-progress edit).
+            draft = stashedDraft
             stashedDraft = ""
         }
         lastEditKey = editKey
