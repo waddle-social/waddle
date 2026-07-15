@@ -197,8 +197,12 @@ schema.#Project & {
 		// Rolling install-in-place artifact: every merge to main rebuilds
 		// the debug APK (shared checked-in debug keystore -> signature is
 		// stable across builders, so `adb install -r` upgrades without an
-		// uninstall) with a monotonic timestamp-derived versionCode, and
-		// replaces the asset on the `android-latest` prerelease.
+		// uninstall) with a monotonic timestamp-derived versionCode.
+		// GitHub releases are immutable once published (asset uploads to
+		// an existing release 422), so each publish deletes and recreates
+		// the `android-latest` prerelease + tag; the stable download URL
+		// releases/download/android-latest/waddle-android-debug.apk is
+		// keyed by tag name and survives the recreate.
 		publishDebugApk: schema.#Task & {
 			command: "bash"
 			env: {
@@ -215,13 +219,12 @@ schema.#Project & {
 				  -PversionName="$(git rev-parse --short HEAD)"
 				apk="app/build/outputs/apk/debug/app-debug.apk"
 				sha="$(git rev-parse --short HEAD)"
-				gh release view android-latest >/dev/null 2>&1 || \
-				  gh release create android-latest --prerelease \
-				    --title "Android (rolling debug)" \
-				    --notes "Rolling debug build; adb install -r upgrades in place."
-				gh release upload android-latest "$apk#waddle-android-debug.apk" --clobber
-				gh release edit android-latest \
-				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)"
+				gh release delete android-latest --yes --cleanup-tag || true
+				gh release create android-latest --prerelease \
+				  --target "$(git rev-parse HEAD)" \
+				  --title "Android (rolling debug)" \
+				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)" \
+				  "${apk}#waddle-android-debug.apk"
 				"""#]
 			dependsOn: [setupSdk, buildRustJni]
 			inputs: _gradleInputs

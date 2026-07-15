@@ -9,12 +9,15 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.client.ffi.WaddleAvatar
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleEventListener
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
@@ -151,6 +154,21 @@ class FakeWaddleClient : WaddleClientInterface {
         return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
+    override suspend fun sendReaction(targetJid: String, targetStanzaId: String, emojis: List<String>, isMuc: Boolean): Boolean = unused()
+    override suspend fun sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Boolean, options: WaddleSendOptions?): WaddleSendMessageOutcome = unused()
+    override suspend fun sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Boolean): Boolean = unused()
+    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
+    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean = unused()
+    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean = unused()
+    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean = unused()
+    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = unused()
+    override suspend fun subscribeMdsDisplayed(): Boolean = unused()
+    override suspend fun supportsMdsPublishOptions(): Boolean = unused()
+    override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = unused()
+    override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()
+    override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()
+    override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
+    override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()
     override suspend fun disablePushNotifications(pushServiceJid: String, node: String?): Boolean = unused()
     override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean = unused()
