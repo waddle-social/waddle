@@ -2725,8 +2725,8 @@ mod ownership_claims_tests {
         assert_eq!(pending.len(), MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES);
     }
 
-    #[test]
-    fn saturated_capacity_admits_existing_but_rejects_novel_responsibility() {
+    #[tokio::test]
+    async fn saturated_capacity_admits_existing_but_rejects_novel_responsibility() {
         let mut registry = RoomRegistryActor::new(
             "muc.example.com".to_string(),
             OccupantIdSecret::for_testing(b"test-secret".to_vec()),
@@ -2742,7 +2742,21 @@ mod ownership_claims_tests {
                 },
             );
         }
-        for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
+        let existing_reclaimed_room = test_room_jid("saturated-exact-reclaimed");
+        let existing_reclaimed_fence = room_claim_fence(&existing_reclaimed_room, ClaimEpoch(500));
+        registry.pending_reclaimed_rooms.insert(
+            (
+                existing_reclaimed_room.clone(),
+                existing_reclaimed_fence.clone(),
+            ),
+            PendingReclaimedState {
+                claim_fence: existing_reclaimed_fence,
+                previous_owner: foreign_identity(),
+                retry_order: 0,
+                first_pending_at: std::time::Instant::now(),
+            },
+        );
+        for index in 0..(MAX_PENDING_RECLAIMED_ROOMS - 1) {
             registry
                 .pending_reclaimed_reservations
                 .insert(test_room_jid(&format!("saturated-reservation-{index}")));
@@ -2777,6 +2791,32 @@ mod ownership_claims_tests {
                 claim_fence: &novel_claim_fence,
             }
         ));
+        let registry = RoomRegistryActor::spawn(registry);
+        let backlog_before = registry
+            .ask(GetPendingReclaimedRoomBacklog)
+            .await
+            .expect("reclaimed backlog before duplicate");
+        assert!(registry
+            .ask(ReservePendingReclaimedRoom {
+                room_jid: existing_reclaimed_room,
+            })
+            .await
+            .expect("repeat existing exact reclaimed reservation"));
+        assert_eq!(
+            registry
+                .ask(GetPendingReclaimedRoomBacklog)
+                .await
+                .expect("reclaimed backlog after duplicate"),
+            backlog_before,
+            "an exact reclaimed responsibility must not gain a redundant bare-JID reservation",
+        );
+        assert!(!registry
+            .ask(ReservePendingReclaimedRoom {
+                room_jid: novel_room_jid,
+            })
+            .await
+            .expect("reject novel reclaimed reservation at capacity"));
+        registry.kill();
     }
 
     #[tokio::test]

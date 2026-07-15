@@ -2819,7 +2819,12 @@ impl kameo::message::Message<ReservePendingReclaimedRoom> for RoomRegistryActor 
         if self.terminal_claim_acquisition_disabled {
             return false;
         }
-        if self.pending_reclaimed_reservations.contains(&msg.room_jid) {
+        if self.pending_reclaimed_reservations.contains(&msg.room_jid)
+            || self
+                .pending_reclaimed_rooms
+                .keys()
+                .any(|(room_jid, _)| room_jid == &msg.room_jid)
+        {
             return true;
         }
         if self.pending_reclaimed_rooms.len() + self.pending_reclaimed_reservations.len()
