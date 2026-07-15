@@ -24,7 +24,7 @@ mod client_tests;
 
 pub use types::*;
 
-use convert::dispatch_event;
+use convert::{dispatch_event, resume_state_from_ffi};
 use waddle_xmpp_client::{
     messaging::SessionId, AccessToken, ClientConfig, ClientHandle, ConnectionConfig,
     OAuthBearerConfig, WebSocketConfig,
@@ -57,7 +57,7 @@ impl WaddleClient {
         let jid: BareJid = match self.config.jid.parse() {
             Ok(j) => j,
             Err(e) => {
-                self.listener.on_error(format!("Invalid JID: {e}"));
+                self.emit_error(format!("Invalid JID: {e}"));
                 return;
             }
         };
@@ -65,7 +65,7 @@ impl WaddleClient {
         let domain: BareJid = match jid.domain().to_string().parse() {
             Ok(d) => d,
             Err(e) => {
-                self.listener.on_error(format!("Invalid domain: {e}"));
+                self.emit_error(format!("Invalid domain: {e}"));
                 return;
             }
         };
@@ -73,7 +73,7 @@ impl WaddleClient {
         let url: Url = match self.config.server_url.parse() {
             Ok(u) => u,
             Err(e) => {
-                self.listener.on_error(format!("Invalid server URL: {e}"));
+                self.emit_error(format!("Invalid server URL: {e}"));
                 return;
             }
         };
@@ -81,8 +81,7 @@ impl WaddleClient {
         let transport = match WebSocketConfig::new(url) {
             Ok(t) => t,
             Err(e) => {
-                self.listener
-                    .on_error(format!("Invalid WebSocket config: {e}"));
+                self.emit_error(format!("Invalid WebSocket config: {e}"));
                 return;
             }
         };
@@ -90,7 +89,7 @@ impl WaddleClient {
         let resource = match ClientResource::new(&self.config.resource) {
             Ok(r) => r,
             Err(e) => {
-                self.listener.on_error(format!("Invalid resource: {e}"));
+                self.emit_error(format!("Invalid resource: {e}"));
                 return;
             }
         };
@@ -100,26 +99,39 @@ impl WaddleClient {
         let auth = match auth {
             Ok(a) => a,
             Err(e) => {
-                self.listener.on_error(format!("Invalid auth config: {e}"));
+                self.emit_error(format!("Invalid auth config: {e}"));
                 return;
             }
         };
 
-        let client_config = match ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                self.listener
-                    .on_error(format!("Invalid client config: {e}"));
-                return;
+        let mut client_config =
+            match ClientConfig::new(ConnectionConfig::new(domain), transport, auth) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.emit_error(format!("Invalid client config: {e}"));
+                    return;
+                }
+            };
+
+        // XEP-0198: seed the runtime with the persisted resume snapshot
+        // so it attempts <resume/> before resource binding, exactly as
+        // the wasm client threads it through StoredConfig.
+        if let Some(resume) = self.config.resume_state.clone() {
+            match resume_state_from_ffi(resume) {
+                Ok(state) => {
+                    client_config.session.stream_management.resume_state = Some(state);
+                }
+                Err(e) => {
+                    self.emit_error(format!("Invalid resume state: {e}"));
+                    return;
+                }
             }
-        };
+        }
 
         let xmpp_client = match XmppClient::new(client_config) {
             Ok(c) => c,
             Err(e) => {
-                self.listener
-                    .on_error(format!("Failed to create XMPP client: {e}"));
+                self.emit_error(format!("Failed to create XMPP client: {e}"));
                 return;
             }
         };
@@ -127,8 +139,7 @@ impl WaddleClient {
         let driver = match xmpp_client.driver() {
             Ok(d) => d,
             Err(e) => {
-                self.listener
-                    .on_error(format!("Failed to create driver: {e}"));
+                self.emit_error(format!("Failed to create driver: {e}"));
                 return;
             }
         };
@@ -136,7 +147,7 @@ impl WaddleClient {
         let client_handle = match driver.connect().await {
             Ok(h) => h,
             Err(e) => {
-                self.listener.on_error(format!("Failed to connect: {e}"));
+                self.emit_error(format!("Failed to connect: {e}"));
                 return;
             }
         };
@@ -149,7 +160,7 @@ impl WaddleClient {
                 match events.recv().await {
                     Ok(event) => dispatch_event(event, &account_bare_jid, &**listener),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        listener.on_disconnected();
+                        listener.on_event(WaddleClientEvent::Disconnected);
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -171,9 +182,17 @@ impl WaddleClient {
 // ── Send helpers ────────────────────────────────────────────────────────────
 
 impl WaddleClient {
+    /// Emit a human-readable diagnostic through the single-event
+    /// listener. Every internal failure path funnels through here so
+    /// diagnostics stay out of the typed payload variants.
+    pub(crate) fn emit_error(&self, description: String) {
+        self.listener
+            .on_event(WaddleClientEvent::Error { description });
+    }
+
     /// Send a built stanza fire-and-forget. Returns `true` on success.
     /// On failure (not connected, transport closed) emits an
-    /// `on_error` and returns `false` so callers can short-circuit.
+    /// `Error` event and returns `false` so callers can short-circuit.
     ///
     /// Holds the client mutex only long enough to clone the
     /// [`ClientHandle`] (cheap — it is `Arc`-backed) and releases
@@ -189,7 +208,7 @@ impl WaddleClient {
         match handle.send_stanza(stanza).await {
             Ok(()) => true,
             Err(e) => {
-                self.listener.on_error(format!("{op} failed: {e}"));
+                self.emit_error(format!("{op} failed: {e}"));
                 false
             }
         }
@@ -197,7 +216,7 @@ impl WaddleClient {
 
     /// Send a built IQ and await its correlated result. Returns
     /// `true` on `<iq type='result'>`, `false` on `<iq type='error'>`
-    /// or transport failure (with an `on_error` for both).
+    /// or transport failure (with an `Error` event for both).
     ///
     /// Clones the [`ClientHandle`] under the mutex and **drops the
     /// guard before awaiting** the IQ response. `send_iq` blocks on
@@ -211,7 +230,7 @@ impl WaddleClient {
         match handle.send_iq(stanza).await {
             Ok(_) => true,
             Err(e) => {
-                self.listener.on_error(format!("{op} failed: {e}"));
+                self.emit_error(format!("{op} failed: {e}"));
                 false
             }
         }
@@ -224,7 +243,7 @@ impl WaddleClient {
         match guard.as_ref() {
             None => {
                 drop(guard);
-                self.listener.on_error("Not connected".to_string());
+                self.emit_error("Not connected".to_string());
                 None
             }
             Some(h) => {
@@ -239,8 +258,7 @@ impl WaddleClient {
         match value.parse::<FullJid>() {
             Ok(j) => Some(j),
             Err(e) => {
-                self.listener
-                    .on_error(format!("{op} failed: invalid full JID '{value}': {e}"));
+                self.emit_error(format!("{op} failed: invalid full JID '{value}': {e}"));
                 None
             }
         }
@@ -250,8 +268,7 @@ impl WaddleClient {
         match value.parse::<BareJid>() {
             Ok(j) => Some(j),
             Err(e) => {
-                self.listener
-                    .on_error(format!("{op} failed: invalid bare JID '{value}': {e}"));
+                self.emit_error(format!("{op} failed: invalid bare JID '{value}': {e}"));
                 None
             }
         }
@@ -266,7 +283,7 @@ impl WaddleClient {
     /// runtime check, so this method is the gate.
     fn parse_session_id(&self, value: String, op: &'static str) -> Option<SessionId> {
         if value.trim().is_empty() {
-            self.listener.on_error(format!(
+            self.emit_error(format!(
                 "{op} failed: session id must be a non-empty, non-whitespace string"
             ));
             return None;

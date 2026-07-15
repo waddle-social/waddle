@@ -425,6 +425,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -1397,12 +1413,53 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
     public var queryId: String?
     public var id: String?
     public var stanzaId: String?
+    /**
+     * XEP-0359 `by` authority of `stanza_id` (unverified — see
+     * `WaddleMessage::stanza_id_by`).
+     */
+    public var stanzaIdBy: String?
+    /**
+     * Every XEP-0359 `<stanza-id/>` on the inner message.
+     */
+    public var stanzaIds: [WaddleStanzaId]
     public var originId: String?
     public var timestamp: String?
     public var from: String?
     public var to: String?
     public var messageType: String
     public var body: String?
+    /**
+     * RFC 6121 `<subject/>` of the inner message.
+     */
+    public var subject: String?
+    /**
+     * XEP-0308 correction target id.
+     */
+    public var replacesId: String?
+    /**
+     * XEP-0424 retraction target id.
+     */
+    public var retractsId: String?
+    /**
+     * XEP-0424 tombstone retraction message id.
+     */
+    public var retractionId: String?
+    /**
+     * XEP-0424: true when the archived row is a retraction tombstone.
+     */
+    public var isRetracted: Bool
+    /**
+     * XEP-0425 moderation target id.
+     */
+    public var moderationTargetId: String?
+    /**
+     * XEP-0425 moderator JID (string form).
+     */
+    public var moderatedBy: String?
+    /**
+     * XEP-0425 human-readable moderation reason.
+     */
+    public var moderationReason: String?
     public var reactionTargetId: String?
     public var reactionEmojis: [String]
     public var thread: String?
@@ -1412,28 +1469,141 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
     public var replyFallbackStart: UInt32?
     public var replyFallbackEnd: UInt32?
     /**
+     * XEP-0394 markup spans of the inner message.
+     */
+    public var markupSpans: [WaddleMarkupSpan]
+    /**
+     * XEP-0372 broadcast mention URI, when present.
+     */
+    public var broadcastMention: String?
+    /**
+     * XEP-0372 mention URIs, flattened from `references`.
+     */
+    public var mentionUris: [String]
+    /**
+     * XEP-0372 references of the inner message.
+     */
+    public var references: [WaddleReference]
+    /**
+     * Forum classification of the archived post.
+     */
+    public var forumPostKind: WaddleForumPostKind?
+    /**
+     * Forum topic title (the subject of a `topic` post).
+     */
+    public var forumTitle: String?
+    /**
+     * XEP-0449: the archived body is a sticker.
+     */
+    public var isSticker: Bool
+    /**
+     * XEP-0045 real author JID from the archived `muc#user` payload,
+     * exposed by non-anonymous room archives.
+     */
+    public var authorRealJid: String?
+    /**
      * urn:waddle:call-thread:0 call-thread anchor marker, if present.
      */
     public var callThread: WaddleCallThreadAnchor?
+    /**
+     * urn:waddle:call-thread:0 ended fastening, if present.
+     */
+    public var callThreadEnded: WaddleCallThreadEnded?
     public var sharedFiles: [WaddleSharedFile]
+    /**
+     * XEP-0511 link previews of the inner message.
+     */
+    public var linkPreviews: [WaddleLinkPreview]
     public var callEvent: WaddleCallEvent?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?, originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?,
+    public init(mamId: String, queryId: String?, id: String?, stanzaId: String?,
+        /**
+         * XEP-0359 `by` authority of `stanza_id` (unverified — see
+         * `WaddleMessage::stanza_id_by`).
+         */stanzaIdBy: String?,
+        /**
+         * Every XEP-0359 `<stanza-id/>` on the inner message.
+         */stanzaIds: [WaddleStanzaId], originId: String?, timestamp: String?, from: String?, to: String?, messageType: String, body: String?,
+        /**
+         * RFC 6121 `<subject/>` of the inner message.
+         */subject: String?,
+        /**
+         * XEP-0308 correction target id.
+         */replacesId: String?,
+        /**
+         * XEP-0424 retraction target id.
+         */retractsId: String?,
+        /**
+         * XEP-0424 tombstone retraction message id.
+         */retractionId: String?,
+        /**
+         * XEP-0424: true when the archived row is a retraction tombstone.
+         */isRetracted: Bool,
+        /**
+         * XEP-0425 moderation target id.
+         */moderationTargetId: String?,
+        /**
+         * XEP-0425 moderator JID (string form).
+         */moderatedBy: String?,
+        /**
+         * XEP-0425 human-readable moderation reason.
+         */moderationReason: String?, reactionTargetId: String?, reactionEmojis: [String], thread: String?, parentThreadId: String?, replyToId: String?, replyToSender: String?, replyFallbackStart: UInt32?, replyFallbackEnd: UInt32?,
+        /**
+         * XEP-0394 markup spans of the inner message.
+         */markupSpans: [WaddleMarkupSpan],
+        /**
+         * XEP-0372 broadcast mention URI, when present.
+         */broadcastMention: String?,
+        /**
+         * XEP-0372 mention URIs, flattened from `references`.
+         */mentionUris: [String],
+        /**
+         * XEP-0372 references of the inner message.
+         */references: [WaddleReference],
+        /**
+         * Forum classification of the archived post.
+         */forumPostKind: WaddleForumPostKind?,
+        /**
+         * Forum topic title (the subject of a `topic` post).
+         */forumTitle: String?,
+        /**
+         * XEP-0449: the archived body is a sticker.
+         */isSticker: Bool,
+        /**
+         * XEP-0045 real author JID from the archived `muc#user` payload,
+         * exposed by non-anonymous room archives.
+         */authorRealJid: String?,
         /**
          * urn:waddle:call-thread:0 call-thread anchor marker, if present.
-         */callThread: WaddleCallThreadAnchor?, sharedFiles: [WaddleSharedFile], callEvent: WaddleCallEvent?) {
+         */callThread: WaddleCallThreadAnchor?,
+        /**
+         * urn:waddle:call-thread:0 ended fastening, if present.
+         */callThreadEnded: WaddleCallThreadEnded?, sharedFiles: [WaddleSharedFile],
+        /**
+         * XEP-0511 link previews of the inner message.
+         */linkPreviews: [WaddleLinkPreview], callEvent: WaddleCallEvent?) {
         self.mamId = mamId
         self.queryId = queryId
         self.id = id
         self.stanzaId = stanzaId
+        self.stanzaIdBy = stanzaIdBy
+        self.stanzaIds = stanzaIds
         self.originId = originId
         self.timestamp = timestamp
         self.from = from
         self.to = to
         self.messageType = messageType
         self.body = body
+        self.subject = subject
+        self.replacesId = replacesId
+        self.retractsId = retractsId
+        self.retractionId = retractionId
+        self.isRetracted = isRetracted
+        self.moderationTargetId = moderationTargetId
+        self.moderatedBy = moderatedBy
+        self.moderationReason = moderationReason
         self.reactionTargetId = reactionTargetId
         self.reactionEmojis = reactionEmojis
         self.thread = thread
@@ -1442,8 +1612,18 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
         self.replyFallbackEnd = replyFallbackEnd
+        self.markupSpans = markupSpans
+        self.broadcastMention = broadcastMention
+        self.mentionUris = mentionUris
+        self.references = references
+        self.forumPostKind = forumPostKind
+        self.forumTitle = forumTitle
+        self.isSticker = isSticker
+        self.authorRealJid = authorRealJid
         self.callThread = callThread
+        self.callThreadEnded = callThreadEnded
         self.sharedFiles = sharedFiles
+        self.linkPreviews = linkPreviews
         self.callEvent = callEvent
     }
 
@@ -1467,12 +1647,22 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 queryId: FfiConverterOptionString.read(from: &buf),
                 id: FfiConverterOptionString.read(from: &buf),
                 stanzaId: FfiConverterOptionString.read(from: &buf),
+                stanzaIdBy: FfiConverterOptionString.read(from: &buf),
+                stanzaIds: FfiConverterSequenceTypeWaddleStanzaId.read(from: &buf),
                 originId: FfiConverterOptionString.read(from: &buf),
                 timestamp: FfiConverterOptionString.read(from: &buf),
                 from: FfiConverterOptionString.read(from: &buf),
                 to: FfiConverterOptionString.read(from: &buf),
                 messageType: FfiConverterString.read(from: &buf),
                 body: FfiConverterOptionString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
+                replacesId: FfiConverterOptionString.read(from: &buf),
+                retractsId: FfiConverterOptionString.read(from: &buf),
+                retractionId: FfiConverterOptionString.read(from: &buf),
+                isRetracted: FfiConverterBool.read(from: &buf),
+                moderationTargetId: FfiConverterOptionString.read(from: &buf),
+                moderatedBy: FfiConverterOptionString.read(from: &buf),
+                moderationReason: FfiConverterOptionString.read(from: &buf),
                 reactionTargetId: FfiConverterOptionString.read(from: &buf),
                 reactionEmojis: FfiConverterSequenceString.read(from: &buf),
                 thread: FfiConverterOptionString.read(from: &buf),
@@ -1481,8 +1671,18 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 replyToSender: FfiConverterOptionString.read(from: &buf),
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf),
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
+                markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
+                broadcastMention: FfiConverterOptionString.read(from: &buf),
+                mentionUris: FfiConverterSequenceString.read(from: &buf),
+                references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
+                forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
+                forumTitle: FfiConverterOptionString.read(from: &buf),
+                isSticker: FfiConverterBool.read(from: &buf),
+                authorRealJid: FfiConverterOptionString.read(from: &buf),
                 callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
+                callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
+                linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
                 callEvent: FfiConverterOptionTypeWaddleCallEvent.read(from: &buf)
         )
     }
@@ -1492,12 +1692,22 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.queryId, into: &buf)
         FfiConverterOptionString.write(value.id, into: &buf)
         FfiConverterOptionString.write(value.stanzaId, into: &buf)
+        FfiConverterOptionString.write(value.stanzaIdBy, into: &buf)
+        FfiConverterSequenceTypeWaddleStanzaId.write(value.stanzaIds, into: &buf)
         FfiConverterOptionString.write(value.originId, into: &buf)
         FfiConverterOptionString.write(value.timestamp, into: &buf)
         FfiConverterOptionString.write(value.from, into: &buf)
         FfiConverterOptionString.write(value.to, into: &buf)
         FfiConverterString.write(value.messageType, into: &buf)
         FfiConverterOptionString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.subject, into: &buf)
+        FfiConverterOptionString.write(value.replacesId, into: &buf)
+        FfiConverterOptionString.write(value.retractsId, into: &buf)
+        FfiConverterOptionString.write(value.retractionId, into: &buf)
+        FfiConverterBool.write(value.isRetracted, into: &buf)
+        FfiConverterOptionString.write(value.moderationTargetId, into: &buf)
+        FfiConverterOptionString.write(value.moderatedBy, into: &buf)
+        FfiConverterOptionString.write(value.moderationReason, into: &buf)
         FfiConverterOptionString.write(value.reactionTargetId, into: &buf)
         FfiConverterSequenceString.write(value.reactionEmojis, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
@@ -1506,8 +1716,18 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
+        FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
+        FfiConverterOptionString.write(value.broadcastMention, into: &buf)
+        FfiConverterSequenceString.write(value.mentionUris, into: &buf)
+        FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
+        FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
+        FfiConverterOptionString.write(value.forumTitle, into: &buf)
+        FfiConverterBool.write(value.isSticker, into: &buf)
+        FfiConverterOptionString.write(value.authorRealJid, into: &buf)
         FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
+        FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
+        FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
         FfiConverterOptionTypeWaddleCallEvent.write(value.callEvent, into: &buf)
     }
 }
@@ -1632,7 +1852,8 @@ public func FfiConverterTypeWaddleAvatar_lower(_ value: WaddleAvatar) -> RustBuf
 
 
 /**
- * Typed A/V call event surfaced to Swift via `on_call(...)`.
+ * Typed A/V call event surfaced to Swift via
+ * `WaddleClientEvent::Call`.
  * `from` is the stamped sender JID (a *full* JID for propose /
  * session-initiate per XEP-0353 §0.6); `to` is the stamped stanza
  * recipient when available; `sid` is the Jingle session id used to
@@ -1825,6 +2046,86 @@ public func FfiConverterTypeWaddleCallThreadAnchor_lower(_ value: WaddleCallThre
 }
 
 
+/**
+ * urn:waddle:call-thread:0 `<call-thread-ended/>` fastening. Mirrors
+ * `waddle_xmpp_client::xep::call_thread::CallThreadEnded` 1:1.
+ */
+public struct WaddleCallThreadEnded: Equatable, Hashable {
+    /**
+     * XEP-0422 `<apply-to id='…'/>` target: the anchor's stanza id.
+     */
+    public var anchorId: String
+    /**
+     * RFC 3339 instant the call ended.
+     */
+    public var ended: String
+    /**
+     * ISO 8601 duration of the call (e.g. `PT5M`).
+     */
+    public var duration: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * XEP-0422 `<apply-to id='…'/>` target: the anchor's stanza id.
+         */anchorId: String,
+        /**
+         * RFC 3339 instant the call ended.
+         */ended: String,
+        /**
+         * ISO 8601 duration of the call (e.g. `PT5M`).
+         */duration: String) {
+        self.anchorId = anchorId
+        self.ended = ended
+        self.duration = duration
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallThreadEnded: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallThreadEnded: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallThreadEnded {
+        return
+            try WaddleCallThreadEnded(
+                anchorId: FfiConverterString.read(from: &buf),
+                ended: FfiConverterString.read(from: &buf),
+                duration: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleCallThreadEnded, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.anchorId, into: &buf)
+        FfiConverterString.write(value.ended, into: &buf)
+        FfiConverterString.write(value.duration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallThreadEnded_lift(_ buf: RustBuffer) throws -> WaddleCallThreadEnded {
+    return try FfiConverterTypeWaddleCallThreadEnded.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallThreadEnded_lower(_ value: WaddleCallThreadEnded) -> RustBuffer {
+    return FfiConverterTypeWaddleCallThreadEnded.lower(value)
+}
+
+
 public struct WaddleChannel: Equatable, Hashable {
     public var id: String
     public var roomJid: String
@@ -1904,14 +2205,26 @@ public struct WaddleConfig: Equatable, Hashable {
     public var jid: String
     public var accessToken: String
     public var resource: String
+    /**
+     * XEP-0198 resume snapshot from a previous session. When present
+     * the runtime attempts `<resume/>` before resource binding and
+     * replays the queued outbound stanzas the server never acked.
+     */
+    public var resumeState: WaddleSmResumeState?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, jid: String, accessToken: String, resource: String) {
+    public init(serverUrl: String, jid: String, accessToken: String, resource: String,
+        /**
+         * XEP-0198 resume snapshot from a previous session. When present
+         * the runtime attempts `<resume/>` before resource binding and
+         * replays the queued outbound stanzas the server never acked.
+         */resumeState: WaddleSmResumeState?) {
         self.serverUrl = serverUrl
         self.jid = jid
         self.accessToken = accessToken
         self.resource = resource
+        self.resumeState = resumeState
     }
 
 
@@ -1933,7 +2246,8 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
                 serverUrl: FfiConverterString.read(from: &buf),
                 jid: FfiConverterString.read(from: &buf),
                 accessToken: FfiConverterString.read(from: &buf),
-                resource: FfiConverterString.read(from: &buf)
+                resource: FfiConverterString.read(from: &buf),
+                resumeState: FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
         )
     }
 
@@ -1942,6 +2256,7 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.jid, into: &buf)
         FfiConverterString.write(value.accessToken, into: &buf)
         FfiConverterString.write(value.resource, into: &buf)
+        FfiConverterOptionTypeWaddleSmResumeState.write(value.resumeState, into: &buf)
     }
 }
 
@@ -2235,6 +2550,291 @@ public func FfiConverterTypeWaddleJidParts_lower(_ value: WaddleJidParts) -> Rus
 
 
 /**
+ * XEP-0511 link preview card produced by the server-side
+ * `urn:waddle:link-preview:0` pipeline.
+ */
+public struct WaddleLinkPreview: Equatable, Hashable {
+    public var originalUrl: String
+    public var normalizedUrl: String?
+    public var title: String?
+    public var description: String?
+    public var image: WaddleLinkPreviewImage?
+    /**
+     * Native-playable `og:video` media with a direct (non-iframe)
+     * media type; rendered in a native player on user action.
+     */
+    public var video: WaddleLinkPreviewVideo?
+    public var playerEmbed: WaddleLinkPreviewPlayer?
+    /**
+     * True when the preview referenced remote media the server did
+     * not cache; the client must not fetch it itself.
+     */
+    public var remoteMediaUnavailable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(originalUrl: String, normalizedUrl: String?, title: String?, description: String?, image: WaddleLinkPreviewImage?,
+        /**
+         * Native-playable `og:video` media with a direct (non-iframe)
+         * media type; rendered in a native player on user action.
+         */video: WaddleLinkPreviewVideo?, playerEmbed: WaddleLinkPreviewPlayer?,
+        /**
+         * True when the preview referenced remote media the server did
+         * not cache; the client must not fetch it itself.
+         */remoteMediaUnavailable: Bool) {
+        self.originalUrl = originalUrl
+        self.normalizedUrl = normalizedUrl
+        self.title = title
+        self.description = description
+        self.image = image
+        self.video = video
+        self.playerEmbed = playerEmbed
+        self.remoteMediaUnavailable = remoteMediaUnavailable
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreview: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreview: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreview {
+        return
+            try WaddleLinkPreview(
+                originalUrl: FfiConverterString.read(from: &buf),
+                normalizedUrl: FfiConverterOptionString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                image: FfiConverterOptionTypeWaddleLinkPreviewImage.read(from: &buf),
+                video: FfiConverterOptionTypeWaddleLinkPreviewVideo.read(from: &buf),
+                playerEmbed: FfiConverterOptionTypeWaddleLinkPreviewPlayer.read(from: &buf),
+                remoteMediaUnavailable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreview, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.originalUrl, into: &buf)
+        FfiConverterOptionString.write(value.normalizedUrl, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewImage.write(value.image, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewVideo.write(value.video, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewPlayer.write(value.playerEmbed, into: &buf)
+        FfiConverterBool.write(value.remoteMediaUnavailable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreview_lift(_ buf: RustBuffer) throws -> WaddleLinkPreview {
+    return try FfiConverterTypeWaddleLinkPreview.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreview_lower(_ value: WaddleLinkPreview) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreview.lower(value)
+}
+
+
+/**
+ * Cached preview image of a XEP-0511 link card.
+ */
+public struct WaddleLinkPreviewImage: Equatable, Hashable {
+    public var url: String
+    public var mediaType: String
+    public var width: UInt32?
+    public var height: UInt32?
+    public var alt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, mediaType: String, width: UInt32?, height: UInt32?, alt: String?) {
+        self.url = url
+        self.mediaType = mediaType
+        self.width = width
+        self.height = height
+        self.alt = alt
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewImage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewImage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewImage {
+        return
+            try WaddleLinkPreviewImage(
+                url: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterString.read(from: &buf),
+                width: FfiConverterOptionUInt32.read(from: &buf),
+                height: FfiConverterOptionUInt32.read(from: &buf),
+                alt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreviewImage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.mediaType, into: &buf)
+        FfiConverterOptionUInt32.write(value.width, into: &buf)
+        FfiConverterOptionUInt32.write(value.height, into: &buf)
+        FfiConverterOptionString.write(value.alt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewImage_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewImage {
+    return try FfiConverterTypeWaddleLinkPreviewImage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewImage_lower(_ value: WaddleLinkPreviewImage) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewImage.lower(value)
+}
+
+
+/**
+ * `og:video` iframe player embed of a XEP-0511 card.
+ */
+public struct WaddleLinkPreviewPlayer: Equatable, Hashable {
+    public var url: String
+    public var width: UInt32?
+    public var height: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, width: UInt32?, height: UInt32?) {
+        self.url = url
+        self.width = width
+        self.height = height
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewPlayer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewPlayer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewPlayer {
+        return
+            try WaddleLinkPreviewPlayer(
+                url: FfiConverterString.read(from: &buf),
+                width: FfiConverterOptionUInt32.read(from: &buf),
+                height: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreviewPlayer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterOptionUInt32.write(value.width, into: &buf)
+        FfiConverterOptionUInt32.write(value.height, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewPlayer_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewPlayer {
+    return try FfiConverterTypeWaddleLinkPreviewPlayer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewPlayer_lower(_ value: WaddleLinkPreviewPlayer) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewPlayer.lower(value)
+}
+
+
+/**
+ * Native-playable `og:video` media surfaced from a XEP-0511 card.
+ */
+public struct WaddleLinkPreviewVideo: Equatable, Hashable {
+    public var url: String
+    public var mediaType: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, mediaType: String) {
+        self.url = url
+        self.mediaType = mediaType
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewVideo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewVideo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewVideo {
+        return
+            try WaddleLinkPreviewVideo(
+                url: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreviewVideo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.mediaType, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewVideo_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewVideo {
+    return try FfiConverterTypeWaddleLinkPreviewVideo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewVideo_lower(_ value: WaddleLinkPreviewVideo) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewVideo.lower(value)
+}
+
+
+/**
  * LiveKit join credentials extracted from the server-issued
  * `urn:waddle:transports:livekit:0` transport on a Jingle
  * session-initiate / session-accept. The Swift app feeds these
@@ -2365,6 +2965,73 @@ public func FfiConverterTypeWaddleMamPage_lower(_ value: WaddleMamPage) -> RustB
 
 
 /**
+ * XEP-0394 markup span over the message body. Offsets count Unicode
+ * scalar values; `end` is exclusive. `uri` is populated only for
+ * `Link` spans.
+ */
+public struct WaddleMarkupSpan: Equatable, Hashable {
+    public var spanType: WaddleMarkupSpanType
+    public var start: UInt32
+    public var end: UInt32
+    public var uri: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spanType: WaddleMarkupSpanType, start: UInt32, end: UInt32, uri: String?) {
+        self.spanType = spanType
+        self.start = start
+        self.end = end
+        self.uri = uri
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMarkupSpan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMarkupSpan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMarkupSpan {
+        return
+            try WaddleMarkupSpan(
+                spanType: FfiConverterTypeWaddleMarkupSpanType.read(from: &buf),
+                start: FfiConverterUInt32.read(from: &buf),
+                end: FfiConverterUInt32.read(from: &buf),
+                uri: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMarkupSpan, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleMarkupSpanType.write(value.spanType, into: &buf)
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.end, into: &buf)
+        FfiConverterOptionString.write(value.uri, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMarkupSpan_lift(_ buf: RustBuffer) throws -> WaddleMarkupSpan {
+    return try FfiConverterTypeWaddleMarkupSpan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMarkupSpan_lower(_ value: WaddleMarkupSpan) -> RustBuffer {
+    return FfiConverterTypeWaddleMarkupSpan.lower(value)
+}
+
+
+/**
  * XEP-0490 §3 displayed-marker entry surfaced to Swift. Mirrors
  * `waddle_xmpp_client::messaging::MdsDisplayedEntry` 1:1 — the
  * FFI does not collapse or rename fields so the Swift consumer
@@ -2454,21 +3121,122 @@ public struct WaddleMessage: Equatable, Hashable {
     public var from: String?
     public var to: String?
     public var body: String?
+    /**
+     * RFC 6121 `<subject/>` — room topic changes and forum topic posts.
+     */
+    public var subject: String?
     public var messageType: String
     public var timestamp: String?
     public var stanzaId: String?
+    /**
+     * XEP-0359 `by` authority of `stanza_id`. NOT verified here —
+     * consumers MUST check it against the expected archive authority
+     * before trusting the id (XEP-0359 §Security Considerations).
+     */
+    public var stanzaIdBy: String?
+    /**
+     * Every XEP-0359 `<stanza-id/>` on the stanza, one per archiving
+     * entity, in document order.
+     */
+    public var stanzaIds: [WaddleStanzaId]
     public var originId: String?
     public var replacesId: String?
     public var retractsId: String?
+    /**
+     * XEP-0424 tombstone: id of the retraction message that replaced
+     * the original in the archive.
+     */
+    public var retractionId: String?
+    /**
+     * XEP-0424: true when this message is a retraction tombstone.
+     */
+    public var isRetracted: Bool
+    /**
+     * XEP-0425 moderation target — the XEP-0359 id of the moderated
+     * message when this stanza is a moderation broadcast.
+     */
+    public var moderationTargetId: String?
+    /**
+     * XEP-0425 moderator JID (string form).
+     */
+    public var moderatedBy: String?
+    /**
+     * XEP-0425 human-readable moderation reason.
+     */
+    public var moderationReason: String?
     public var reactionTargetId: String?
     public var reactionEmojis: [String]
+    /**
+     * XEP-0085 chat state notification carried on this message.
+     * `None` when absent or when the wire value is not one of the
+     * five defined states.
+     */
+    public var chatState: WaddleChatState?
     /**
      * XEP-0333 `<markable/>` request attached to this inbound message.
      */
     public var displayedMarkerRequested: Bool
+    /**
+     * XEP-0333 `<displayed id='…'/>` marker target id.
+     */
+    public var displayedMarkerId: String?
     public var isMuc: Bool
     public var thread: String?
     public var parentThreadId: String?
+    /**
+     * XEP-0394 message markup spans over the body.
+     */
+    public var markupSpans: [WaddleMarkupSpan]
+    /**
+     * XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
+     * one of the mention references targets the whole room.
+     */
+    public var broadcastMention: String?
+    /**
+     * XEP-0372 mention URIs, flattened from `references`.
+     */
+    public var mentionUris: [String]
+    /**
+     * XEP-0372 references attached to this message — every
+     * `<reference/>` with the required `type` and `uri`, regardless
+     * of type. `mention_uris`/`broadcast_mention` are derived views.
+     */
+    public var references: [WaddleReference]
+    /**
+     * Forum channel classification; `None` for plain chat or when the
+     * wire value is not a recognised kind.
+     */
+    public var forumPostKind: WaddleForumPostKind?
+    /**
+     * Forum topic title (the subject of a `topic` post).
+     */
+    public var forumTitle: String?
+    /**
+     * XEP-0449: the message body is a sticker.
+     */
+    public var isSticker: Bool
+    /**
+     * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
+     * pipeline output), one entry per previewed URL.
+     */
+    public var linkPreviews: [WaddleLinkPreview]
+    /**
+     * urn:waddle:pin:0 pin/unpin room system event. `None` when the
+     * message carries no `<pin-event/>` payload.
+     */
+    public var pinEvent: WaddlePinEvent?
+    /**
+     * urn:waddle:call-thread:0 ended fastening targeting a
+     * call-thread anchor.
+     */
+    public var callThreadEnded: WaddleCallThreadEnded?
+    /**
+     * XEP-0280: direction of the carbon envelope this message was
+     * unwrapped from. Only stamped after the runtime verified the
+     * wrapping stanza came from the account's own bare JID (§11
+     * forgery rule); `None` for directly received stanzas.
+     */
+    public var carbon: WaddleCarbonDirection?
     /**
      * XEP-0461 reply target message id.
      */
@@ -2503,10 +3271,90 @@ public struct WaddleMessage: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String?, from: String?, to: String?, body: String?, messageType: String, timestamp: String?, stanzaId: String?, originId: String?, replacesId: String?, retractsId: String?, reactionTargetId: String?, reactionEmojis: [String],
+    public init(id: String?, from: String?, to: String?, body: String?,
+        /**
+         * RFC 6121 `<subject/>` — room topic changes and forum topic posts.
+         */subject: String?, messageType: String, timestamp: String?, stanzaId: String?,
+        /**
+         * XEP-0359 `by` authority of `stanza_id`. NOT verified here —
+         * consumers MUST check it against the expected archive authority
+         * before trusting the id (XEP-0359 §Security Considerations).
+         */stanzaIdBy: String?,
+        /**
+         * Every XEP-0359 `<stanza-id/>` on the stanza, one per archiving
+         * entity, in document order.
+         */stanzaIds: [WaddleStanzaId], originId: String?, replacesId: String?, retractsId: String?,
+        /**
+         * XEP-0424 tombstone: id of the retraction message that replaced
+         * the original in the archive.
+         */retractionId: String?,
+        /**
+         * XEP-0424: true when this message is a retraction tombstone.
+         */isRetracted: Bool,
+        /**
+         * XEP-0425 moderation target — the XEP-0359 id of the moderated
+         * message when this stanza is a moderation broadcast.
+         */moderationTargetId: String?,
+        /**
+         * XEP-0425 moderator JID (string form).
+         */moderatedBy: String?,
+        /**
+         * XEP-0425 human-readable moderation reason.
+         */moderationReason: String?, reactionTargetId: String?, reactionEmojis: [String],
+        /**
+         * XEP-0085 chat state notification carried on this message.
+         * `None` when absent or when the wire value is not one of the
+         * five defined states.
+         */chatState: WaddleChatState?,
         /**
          * XEP-0333 `<markable/>` request attached to this inbound message.
-         */displayedMarkerRequested: Bool, isMuc: Bool, thread: String?, parentThreadId: String?,
+         */displayedMarkerRequested: Bool,
+        /**
+         * XEP-0333 `<displayed id='…'/>` marker target id.
+         */displayedMarkerId: String?, isMuc: Bool, thread: String?, parentThreadId: String?,
+        /**
+         * XEP-0394 message markup spans over the body.
+         */markupSpans: [WaddleMarkupSpan],
+        /**
+         * XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
+         * one of the mention references targets the whole room.
+         */broadcastMention: String?,
+        /**
+         * XEP-0372 mention URIs, flattened from `references`.
+         */mentionUris: [String],
+        /**
+         * XEP-0372 references attached to this message — every
+         * `<reference/>` with the required `type` and `uri`, regardless
+         * of type. `mention_uris`/`broadcast_mention` are derived views.
+         */references: [WaddleReference],
+        /**
+         * Forum channel classification; `None` for plain chat or when the
+         * wire value is not a recognised kind.
+         */forumPostKind: WaddleForumPostKind?,
+        /**
+         * Forum topic title (the subject of a `topic` post).
+         */forumTitle: String?,
+        /**
+         * XEP-0449: the message body is a sticker.
+         */isSticker: Bool,
+        /**
+         * XEP-0511 link preview metadata (`urn:waddle:link-preview:0`
+         * pipeline output), one entry per previewed URL.
+         */linkPreviews: [WaddleLinkPreview],
+        /**
+         * urn:waddle:pin:0 pin/unpin room system event. `None` when the
+         * message carries no `<pin-event/>` payload.
+         */pinEvent: WaddlePinEvent?,
+        /**
+         * urn:waddle:call-thread:0 ended fastening targeting a
+         * call-thread anchor.
+         */callThreadEnded: WaddleCallThreadEnded?,
+        /**
+         * XEP-0280: direction of the carbon envelope this message was
+         * unwrapped from. Only stamped after the runtime verified the
+         * wrapping stanza came from the account's own bare JID (§11
+         * forgery rule); `None` for directly received stanzas.
+         */carbon: WaddleCarbonDirection?,
         /**
          * XEP-0461 reply target message id.
          */replyToId: String?,
@@ -2535,18 +3383,39 @@ public struct WaddleMessage: Equatable, Hashable {
         self.from = from
         self.to = to
         self.body = body
+        self.subject = subject
         self.messageType = messageType
         self.timestamp = timestamp
         self.stanzaId = stanzaId
+        self.stanzaIdBy = stanzaIdBy
+        self.stanzaIds = stanzaIds
         self.originId = originId
         self.replacesId = replacesId
         self.retractsId = retractsId
+        self.retractionId = retractionId
+        self.isRetracted = isRetracted
+        self.moderationTargetId = moderationTargetId
+        self.moderatedBy = moderatedBy
+        self.moderationReason = moderationReason
         self.reactionTargetId = reactionTargetId
         self.reactionEmojis = reactionEmojis
+        self.chatState = chatState
         self.displayedMarkerRequested = displayedMarkerRequested
+        self.displayedMarkerId = displayedMarkerId
         self.isMuc = isMuc
         self.thread = thread
         self.parentThreadId = parentThreadId
+        self.markupSpans = markupSpans
+        self.broadcastMention = broadcastMention
+        self.mentionUris = mentionUris
+        self.references = references
+        self.forumPostKind = forumPostKind
+        self.forumTitle = forumTitle
+        self.isSticker = isSticker
+        self.linkPreviews = linkPreviews
+        self.pinEvent = pinEvent
+        self.callThreadEnded = callThreadEnded
+        self.carbon = carbon
         self.replyToId = replyToId
         self.replyToSender = replyToSender
         self.replyFallbackStart = replyFallbackStart
@@ -2576,18 +3445,39 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 from: FfiConverterOptionString.read(from: &buf),
                 to: FfiConverterOptionString.read(from: &buf),
                 body: FfiConverterOptionString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
                 messageType: FfiConverterString.read(from: &buf),
                 timestamp: FfiConverterOptionString.read(from: &buf),
                 stanzaId: FfiConverterOptionString.read(from: &buf),
+                stanzaIdBy: FfiConverterOptionString.read(from: &buf),
+                stanzaIds: FfiConverterSequenceTypeWaddleStanzaId.read(from: &buf),
                 originId: FfiConverterOptionString.read(from: &buf),
                 replacesId: FfiConverterOptionString.read(from: &buf),
                 retractsId: FfiConverterOptionString.read(from: &buf),
+                retractionId: FfiConverterOptionString.read(from: &buf),
+                isRetracted: FfiConverterBool.read(from: &buf),
+                moderationTargetId: FfiConverterOptionString.read(from: &buf),
+                moderatedBy: FfiConverterOptionString.read(from: &buf),
+                moderationReason: FfiConverterOptionString.read(from: &buf),
                 reactionTargetId: FfiConverterOptionString.read(from: &buf),
                 reactionEmojis: FfiConverterSequenceString.read(from: &buf),
+                chatState: FfiConverterOptionTypeWaddleChatState.read(from: &buf),
                 displayedMarkerRequested: FfiConverterBool.read(from: &buf),
+                displayedMarkerId: FfiConverterOptionString.read(from: &buf),
                 isMuc: FfiConverterBool.read(from: &buf),
                 thread: FfiConverterOptionString.read(from: &buf),
                 parentThreadId: FfiConverterOptionString.read(from: &buf),
+                markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
+                broadcastMention: FfiConverterOptionString.read(from: &buf),
+                mentionUris: FfiConverterSequenceString.read(from: &buf),
+                references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
+                forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
+                forumTitle: FfiConverterOptionString.read(from: &buf),
+                isSticker: FfiConverterBool.read(from: &buf),
+                linkPreviews: FfiConverterSequenceTypeWaddleLinkPreview.read(from: &buf),
+                pinEvent: FfiConverterOptionTypeWaddlePinEvent.read(from: &buf),
+                callThreadEnded: FfiConverterOptionTypeWaddleCallThreadEnded.read(from: &buf),
+                carbon: FfiConverterOptionTypeWaddleCarbonDirection.read(from: &buf),
                 replyToId: FfiConverterOptionString.read(from: &buf),
                 replyToSender: FfiConverterOptionString.read(from: &buf),
                 replyFallbackStart: FfiConverterOptionUInt32.read(from: &buf),
@@ -2603,18 +3493,39 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.from, into: &buf)
         FfiConverterOptionString.write(value.to, into: &buf)
         FfiConverterOptionString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.subject, into: &buf)
         FfiConverterString.write(value.messageType, into: &buf)
         FfiConverterOptionString.write(value.timestamp, into: &buf)
         FfiConverterOptionString.write(value.stanzaId, into: &buf)
+        FfiConverterOptionString.write(value.stanzaIdBy, into: &buf)
+        FfiConverterSequenceTypeWaddleStanzaId.write(value.stanzaIds, into: &buf)
         FfiConverterOptionString.write(value.originId, into: &buf)
         FfiConverterOptionString.write(value.replacesId, into: &buf)
         FfiConverterOptionString.write(value.retractsId, into: &buf)
+        FfiConverterOptionString.write(value.retractionId, into: &buf)
+        FfiConverterBool.write(value.isRetracted, into: &buf)
+        FfiConverterOptionString.write(value.moderationTargetId, into: &buf)
+        FfiConverterOptionString.write(value.moderatedBy, into: &buf)
+        FfiConverterOptionString.write(value.moderationReason, into: &buf)
         FfiConverterOptionString.write(value.reactionTargetId, into: &buf)
         FfiConverterSequenceString.write(value.reactionEmojis, into: &buf)
+        FfiConverterOptionTypeWaddleChatState.write(value.chatState, into: &buf)
         FfiConverterBool.write(value.displayedMarkerRequested, into: &buf)
+        FfiConverterOptionString.write(value.displayedMarkerId, into: &buf)
         FfiConverterBool.write(value.isMuc, into: &buf)
         FfiConverterOptionString.write(value.thread, into: &buf)
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
+        FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
+        FfiConverterOptionString.write(value.broadcastMention, into: &buf)
+        FfiConverterSequenceString.write(value.mentionUris, into: &buf)
+        FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
+        FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
+        FfiConverterOptionString.write(value.forumTitle, into: &buf)
+        FfiConverterBool.write(value.isSticker, into: &buf)
+        FfiConverterSequenceTypeWaddleLinkPreview.write(value.linkPreviews, into: &buf)
+        FfiConverterOptionTypeWaddlePinEvent.write(value.pinEvent, into: &buf)
+        FfiConverterOptionTypeWaddleCallThreadEnded.write(value.callThreadEnded, into: &buf)
+        FfiConverterOptionTypeWaddleCarbonDirection.write(value.carbon, into: &buf)
         FfiConverterOptionString.write(value.replyToId, into: &buf)
         FfiConverterOptionString.write(value.replyToSender, into: &buf)
         FfiConverterOptionUInt32.write(value.replyFallbackStart, into: &buf)
@@ -2737,6 +3648,191 @@ public func FfiConverterTypeWaddleMujiPresence_lower(_ value: WaddleMujiPresence
 }
 
 
+/**
+ * urn:waddle:pin:0 `<pin-event/>` room broadcast. Mirrors
+ * `waddle_xmpp_client::pin::PinEvent`.
+ */
+public struct WaddlePinEvent: Equatable, Hashable {
+    public var action: WaddlePinAction
+    /**
+     * XEP-0359 stanza-id of the targeted message.
+     */
+    public var targetStanzaId: String
+    /**
+     * Bare JID of the pinner/unpinner.
+     */
+    public var by: String
+    /**
+     * `Some("retracted")` when the unpin was triggered by a
+     * XEP-0424 retraction cascade.
+     */
+    public var reason: String?
+    /**
+     * Frozen preview, present only on `Pinned` events.
+     */
+    public var preview: WaddlePinPreview?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(action: WaddlePinAction,
+        /**
+         * XEP-0359 stanza-id of the targeted message.
+         */targetStanzaId: String,
+        /**
+         * Bare JID of the pinner/unpinner.
+         */by: String,
+        /**
+         * `Some("retracted")` when the unpin was triggered by a
+         * XEP-0424 retraction cascade.
+         */reason: String?,
+        /**
+         * Frozen preview, present only on `Pinned` events.
+         */preview: WaddlePinPreview?) {
+        self.action = action
+        self.targetStanzaId = targetStanzaId
+        self.by = by
+        self.reason = reason
+        self.preview = preview
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePinEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePinEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePinEvent {
+        return
+            try WaddlePinEvent(
+                action: FfiConverterTypeWaddlePinAction.read(from: &buf),
+                targetStanzaId: FfiConverterString.read(from: &buf),
+                by: FfiConverterString.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf),
+                preview: FfiConverterOptionTypeWaddlePinPreview.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePinEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddlePinAction.write(value.action, into: &buf)
+        FfiConverterString.write(value.targetStanzaId, into: &buf)
+        FfiConverterString.write(value.by, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+        FfiConverterOptionTypeWaddlePinPreview.write(value.preview, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinEvent_lift(_ buf: RustBuffer) throws -> WaddlePinEvent {
+    return try FfiConverterTypeWaddlePinEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinEvent_lower(_ value: WaddlePinEvent) -> RustBuffer {
+    return FfiConverterTypeWaddlePinEvent.lower(value)
+}
+
+
+/**
+ * Frozen preview snapshot of a pinned message, taken at pin time.
+ */
+public struct WaddlePinPreview: Equatable, Hashable {
+    /**
+     * Bare JID of the message author at pin time.
+     */
+    public var authorJid: String
+    /**
+     * Author's MUC nick at pin time, if known.
+     */
+    public var authorNick: String?
+    /**
+     * Truncated body text (≤280 chars).
+     */
+    public var text: String
+    /**
+     * Original message timestamp (RFC 3339), not the pin time.
+     */
+    public var messageTimestamp: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Bare JID of the message author at pin time.
+         */authorJid: String,
+        /**
+         * Author's MUC nick at pin time, if known.
+         */authorNick: String?,
+        /**
+         * Truncated body text (≤280 chars).
+         */text: String,
+        /**
+         * Original message timestamp (RFC 3339), not the pin time.
+         */messageTimestamp: String) {
+        self.authorJid = authorJid
+        self.authorNick = authorNick
+        self.text = text
+        self.messageTimestamp = messageTimestamp
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePinPreview: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePinPreview: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePinPreview {
+        return
+            try WaddlePinPreview(
+                authorJid: FfiConverterString.read(from: &buf),
+                authorNick: FfiConverterOptionString.read(from: &buf),
+                text: FfiConverterString.read(from: &buf),
+                messageTimestamp: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePinPreview, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.authorJid, into: &buf)
+        FfiConverterOptionString.write(value.authorNick, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterString.write(value.messageTimestamp, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinPreview_lift(_ buf: RustBuffer) throws -> WaddlePinPreview {
+    return try FfiConverterTypeWaddlePinPreview.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinPreview_lower(_ value: WaddlePinPreview) -> RustBuffer {
+    return FfiConverterTypeWaddlePinPreview.lower(value)
+}
+
+
 public struct WaddlePresence: Equatable, Hashable {
     public var from: String?
     public var to: String?
@@ -2746,6 +3842,48 @@ public struct WaddlePresence: Equatable, Hashable {
     public var hats: [WaddlePresenceHat]
     public var mucAffiliation: WaddleMucAffiliation?
     public var mucRole: WaddleMucRole?
+    /**
+     * XEP-0045 real occupant JID from the `muc#user` item, exposed
+     * by non-anonymous rooms.
+     */
+    public var mucJid: String?
+    /**
+     * XEP-0045 `<status code='…'/>` markers from the `muc#user`
+     * payload. `110` identifies the recipient's own presence.
+     */
+    public var mucStatusCodes: [UInt16]
+    /**
+     * XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
+     */
+    public var vcardAvatar: String?
+    /**
+     * XEP-0319 last-interaction instant (RFC 3339) from
+     * `<idle since='…'/>`; `None` when the contact is interacting now.
+     */
+    public var idleSince: String?
+    /**
+     * RFC 6120 §8.3 error condition element name (e.g. `not-found`)
+     * for `type="error"` presences; `None` otherwise.
+     */
+    public var errorCondition: String?
+    /**
+     * RFC 6120 §8.3 error `type` attribute.
+     */
+    public var errorType: WaddleStanzaErrorType?
+    /**
+     * RFC 6120 §8.3 human-readable `<text/>` of an error presence.
+     */
+    public var errorText: String?
+    /**
+     * urn:waddle:in-call:0 raised-hand marker carried alongside
+     * `<muji/>`; `false` when the child is absent (lowered).
+     */
+    public var handRaised: Bool
+    /**
+     * urn:waddle:in-call:0 muted-microphone marker; `false` when the
+     * child is absent (unmuted).
+     */
+    public var muted: Bool
     /**
      * XEP-0272 Muji presence advertisement
      * `<muji xmlns='urn:xmpp:jingle:muji:0'/>` indicating the
@@ -2759,6 +3897,39 @@ public struct WaddlePresence: Equatable, Hashable {
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(from: String?, to: String?, presenceType: String, show: String?, status: String?, hats: [WaddlePresenceHat], mucAffiliation: WaddleMucAffiliation?, mucRole: WaddleMucRole?,
+        /**
+         * XEP-0045 real occupant JID from the `muc#user` item, exposed
+         * by non-anonymous rooms.
+         */mucJid: String?,
+        /**
+         * XEP-0045 `<status code='…'/>` markers from the `muc#user`
+         * payload. `110` identifies the recipient's own presence.
+         */mucStatusCodes: [UInt16],
+        /**
+         * XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
+         */vcardAvatar: String?,
+        /**
+         * XEP-0319 last-interaction instant (RFC 3339) from
+         * `<idle since='…'/>`; `None` when the contact is interacting now.
+         */idleSince: String?,
+        /**
+         * RFC 6120 §8.3 error condition element name (e.g. `not-found`)
+         * for `type="error"` presences; `None` otherwise.
+         */errorCondition: String?,
+        /**
+         * RFC 6120 §8.3 error `type` attribute.
+         */errorType: WaddleStanzaErrorType?,
+        /**
+         * RFC 6120 §8.3 human-readable `<text/>` of an error presence.
+         */errorText: String?,
+        /**
+         * urn:waddle:in-call:0 raised-hand marker carried alongside
+         * `<muji/>`; `false` when the child is absent (lowered).
+         */handRaised: Bool,
+        /**
+         * urn:waddle:in-call:0 muted-microphone marker; `false` when the
+         * child is absent (unmuted).
+         */muted: Bool,
         /**
          * XEP-0272 Muji presence advertisement
          * `<muji xmlns='urn:xmpp:jingle:muji:0'/>` indicating the
@@ -2775,6 +3946,15 @@ public struct WaddlePresence: Equatable, Hashable {
         self.hats = hats
         self.mucAffiliation = mucAffiliation
         self.mucRole = mucRole
+        self.mucJid = mucJid
+        self.mucStatusCodes = mucStatusCodes
+        self.vcardAvatar = vcardAvatar
+        self.idleSince = idleSince
+        self.errorCondition = errorCondition
+        self.errorType = errorType
+        self.errorText = errorText
+        self.handRaised = handRaised
+        self.muted = muted
         self.muji = muji
     }
 
@@ -2802,6 +3982,15 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
                 hats: FfiConverterSequenceTypeWaddlePresenceHat.read(from: &buf),
                 mucAffiliation: FfiConverterOptionTypeWaddleMucAffiliation.read(from: &buf),
                 mucRole: FfiConverterOptionTypeWaddleMucRole.read(from: &buf),
+                mucJid: FfiConverterOptionString.read(from: &buf),
+                mucStatusCodes: FfiConverterSequenceUInt16.read(from: &buf),
+                vcardAvatar: FfiConverterOptionString.read(from: &buf),
+                idleSince: FfiConverterOptionString.read(from: &buf),
+                errorCondition: FfiConverterOptionString.read(from: &buf),
+                errorType: FfiConverterOptionTypeWaddleStanzaErrorType.read(from: &buf),
+                errorText: FfiConverterOptionString.read(from: &buf),
+                handRaised: FfiConverterBool.read(from: &buf),
+                muted: FfiConverterBool.read(from: &buf),
                 muji: FfiConverterOptionTypeWaddleMujiPresence.read(from: &buf)
         )
     }
@@ -2815,6 +4004,15 @@ public struct FfiConverterTypeWaddlePresence: FfiConverterRustBuffer {
         FfiConverterSequenceTypeWaddlePresenceHat.write(value.hats, into: &buf)
         FfiConverterOptionTypeWaddleMucAffiliation.write(value.mucAffiliation, into: &buf)
         FfiConverterOptionTypeWaddleMucRole.write(value.mucRole, into: &buf)
+        FfiConverterOptionString.write(value.mucJid, into: &buf)
+        FfiConverterSequenceUInt16.write(value.mucStatusCodes, into: &buf)
+        FfiConverterOptionString.write(value.vcardAvatar, into: &buf)
+        FfiConverterOptionString.write(value.idleSince, into: &buf)
+        FfiConverterOptionString.write(value.errorCondition, into: &buf)
+        FfiConverterOptionTypeWaddleStanzaErrorType.write(value.errorType, into: &buf)
+        FfiConverterOptionString.write(value.errorText, into: &buf)
+        FfiConverterBool.write(value.handRaised, into: &buf)
+        FfiConverterBool.write(value.muted, into: &buf)
         FfiConverterOptionTypeWaddleMujiPresence.write(value.muji, into: &buf)
     }
 }
@@ -2886,6 +4084,84 @@ public func FfiConverterTypeWaddlePresenceHat_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeWaddlePresenceHat_lower(_ value: WaddlePresenceHat) -> RustBuffer {
     return FfiConverterTypeWaddlePresenceHat.lower(value)
+}
+
+
+/**
+ * XEP-0372 `<reference/>`. `begin`/`end` are body offsets; `(0, 0)`
+ * is the "no body position" sentinel used by anchor-only references.
+ */
+public struct WaddleReference: Equatable, Hashable {
+    public var refType: WaddleReferenceType
+    public var uri: String
+    public var begin: UInt32
+    public var end: UInt32
+    /**
+     * XEP-0372 optional `anchor` attribute: the original, unresolved
+     * display text (or anchor URI) when offsets cannot be relied on.
+     */
+    public var anchor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(refType: WaddleReferenceType, uri: String, begin: UInt32, end: UInt32,
+        /**
+         * XEP-0372 optional `anchor` attribute: the original, unresolved
+         * display text (or anchor URI) when offsets cannot be relied on.
+         */anchor: String?) {
+        self.refType = refType
+        self.uri = uri
+        self.begin = begin
+        self.end = end
+        self.anchor = anchor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleReference: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleReference: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleReference {
+        return
+            try WaddleReference(
+                refType: FfiConverterTypeWaddleReferenceType.read(from: &buf),
+                uri: FfiConverterString.read(from: &buf),
+                begin: FfiConverterUInt32.read(from: &buf),
+                end: FfiConverterUInt32.read(from: &buf),
+                anchor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleReference, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleReferenceType.write(value.refType, into: &buf)
+        FfiConverterString.write(value.uri, into: &buf)
+        FfiConverterUInt32.write(value.begin, into: &buf)
+        FfiConverterUInt32.write(value.end, into: &buf)
+        FfiConverterOptionString.write(value.anchor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReference_lift(_ buf: RustBuffer) throws -> WaddleReference {
+    return try FfiConverterTypeWaddleReference.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReference_lower(_ value: WaddleReference) -> RustBuffer {
+    return FfiConverterTypeWaddleReference.lower(value)
 }
 
 
@@ -3027,23 +4303,59 @@ public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) 
  */
 public struct WaddleSendOptions: Equatable, Hashable {
     public var stanzaId: String?
+    /**
+     * RFC 6121 `<subject/>`, used by forum topic posts.
+     */
+    public var subject: String?
     public var reply: WaddleReplyTarget?
     public var fallback: WaddleFallbackRange?
     public var thread: WaddleThreadTarget?
+    /**
+     * XEP-0394 markup spans over the outbound body.
+     */
+    public var markupSpans: [WaddleMarkupSpan]
+    /**
+     * XEP-0372 references (mentions) attached to the send.
+     */
+    public var references: [WaddleReference]
     public var sharedFiles: [WaddleSharedFile]
     public var linkPreviewToken: String?
     public var requestDisplayedMarker: Bool
+    /**
+     * XEP-0045 §7.5: mark the message as a MUC private message so
+     * the sender's other clients can classify the sent-carbon copy
+     * without knowing the room.
+     */
+    public var mucPm: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(stanzaId: String?, reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?, sharedFiles: [WaddleSharedFile], linkPreviewToken: String?, requestDisplayedMarker: Bool) {
+    public init(stanzaId: String?,
+        /**
+         * RFC 6121 `<subject/>`, used by forum topic posts.
+         */subject: String?, reply: WaddleReplyTarget?, fallback: WaddleFallbackRange?, thread: WaddleThreadTarget?,
+        /**
+         * XEP-0394 markup spans over the outbound body.
+         */markupSpans: [WaddleMarkupSpan],
+        /**
+         * XEP-0372 references (mentions) attached to the send.
+         */references: [WaddleReference], sharedFiles: [WaddleSharedFile], linkPreviewToken: String?, requestDisplayedMarker: Bool,
+        /**
+         * XEP-0045 §7.5: mark the message as a MUC private message so
+         * the sender's other clients can classify the sent-carbon copy
+         * without knowing the room.
+         */mucPm: Bool) {
         self.stanzaId = stanzaId
+        self.subject = subject
         self.reply = reply
         self.fallback = fallback
         self.thread = thread
+        self.markupSpans = markupSpans
+        self.references = references
         self.sharedFiles = sharedFiles
         self.linkPreviewToken = linkPreviewToken
         self.requestDisplayedMarker = requestDisplayedMarker
+        self.mucPm = mucPm
     }
 
 
@@ -3063,23 +4375,31 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         return
             try WaddleSendOptions(
                 stanzaId: FfiConverterOptionString.read(from: &buf),
+                subject: FfiConverterOptionString.read(from: &buf),
                 reply: FfiConverterOptionTypeWaddleReplyTarget.read(from: &buf),
                 fallback: FfiConverterOptionTypeWaddleFallbackRange.read(from: &buf),
                 thread: FfiConverterOptionTypeWaddleThreadTarget.read(from: &buf),
+                markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
+                references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 linkPreviewToken: FfiConverterOptionString.read(from: &buf),
-                requestDisplayedMarker: FfiConverterBool.read(from: &buf)
+                requestDisplayedMarker: FfiConverterBool.read(from: &buf),
+                mucPm: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleSendOptions, into buf: inout [UInt8]) {
         FfiConverterOptionString.write(value.stanzaId, into: &buf)
+        FfiConverterOptionString.write(value.subject, into: &buf)
         FfiConverterOptionTypeWaddleReplyTarget.write(value.reply, into: &buf)
         FfiConverterOptionTypeWaddleFallbackRange.write(value.fallback, into: &buf)
         FfiConverterOptionTypeWaddleThreadTarget.write(value.thread, into: &buf)
+        FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
+        FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionString.write(value.linkPreviewToken, into: &buf)
         FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
+        FfiConverterBool.write(value.mucPm, into: &buf)
     }
 }
 
@@ -3190,6 +4510,114 @@ public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) ->
 }
 
 
+/**
+ * XEP-0198 client resume snapshot crossing the FFI as an opaque
+ * persistence round-trip: the Swift app stores it on disconnect and
+ * feeds it back through [`WaddleConfig`] on the next connect. Queued
+ * outbound stanzas travel as serialized XML strings — the message
+ * stanza-id is re-derived from the element's `id` attribute on
+ * restore, and the original enqueue instant survives only when the
+ * element already carries a `<delay/>` stamp (identical semantics to
+ * the wasm client's localStorage persistence of the same snapshot).
+ */
+public struct WaddleSmResumeState: Equatable, Hashable {
+    /**
+     * SM resumption token from `<enabled id='…'/>`.
+     */
+    public var previd: String
+    /**
+     * Count of inbound stanzas handled by this client.
+     */
+    public var inboundH: UInt32
+    /**
+     * Count of outbound stanzas sent by this client.
+     */
+    public var outboundH: UInt32
+    /**
+     * Server-advertised resumption window in seconds, when supplied.
+     */
+    public var maxResumeSeconds: UInt32?
+    /**
+     * Outbound stanzas the server had not acked at snapshot time,
+     * serialized to XML in send order for lossless replay.
+     */
+    public var queuedStanzasXml: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * SM resumption token from `<enabled id='…'/>`.
+         */previd: String,
+        /**
+         * Count of inbound stanzas handled by this client.
+         */inboundH: UInt32,
+        /**
+         * Count of outbound stanzas sent by this client.
+         */outboundH: UInt32,
+        /**
+         * Server-advertised resumption window in seconds, when supplied.
+         */maxResumeSeconds: UInt32?,
+        /**
+         * Outbound stanzas the server had not acked at snapshot time,
+         * serialized to XML in send order for lossless replay.
+         */queuedStanzasXml: [String]) {
+        self.previd = previd
+        self.inboundH = inboundH
+        self.outboundH = outboundH
+        self.maxResumeSeconds = maxResumeSeconds
+        self.queuedStanzasXml = queuedStanzasXml
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSmResumeState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSmResumeState {
+        return
+            try WaddleSmResumeState(
+                previd: FfiConverterString.read(from: &buf),
+                inboundH: FfiConverterUInt32.read(from: &buf),
+                outboundH: FfiConverterUInt32.read(from: &buf),
+                maxResumeSeconds: FfiConverterOptionUInt32.read(from: &buf),
+                queuedStanzasXml: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSmResumeState, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.previd, into: &buf)
+        FfiConverterUInt32.write(value.inboundH, into: &buf)
+        FfiConverterUInt32.write(value.outboundH, into: &buf)
+        FfiConverterOptionUInt32.write(value.maxResumeSeconds, into: &buf)
+        FfiConverterSequenceString.write(value.queuedStanzasXml, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSmResumeState_lift(_ buf: RustBuffer) throws -> WaddleSmResumeState {
+    return try FfiConverterTypeWaddleSmResumeState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSmResumeState_lower(_ value: WaddleSmResumeState) -> RustBuffer {
+    return FfiConverterTypeWaddleSmResumeState.lower(value)
+}
+
+
 public struct WaddleSpace: Equatable, Hashable {
     public var id: String
     public var serviceJid: String
@@ -3249,6 +4677,70 @@ public func FfiConverterTypeWaddleSpace_lift(_ buf: RustBuffer) throws -> Waddle
 #endif
 public func FfiConverterTypeWaddleSpace_lower(_ value: WaddleSpace) -> RustBuffer {
     return FfiConverterTypeWaddleSpace.lower(value)
+}
+
+
+/**
+ * One XEP-0359 `<stanza-id/>` entry. Mirrors the core `StanzaId`
+ * shape: `by` is required by XEP-0359 and always present.
+ */
+public struct WaddleStanzaId: Equatable, Hashable {
+    public var id: String
+    /**
+     * JID (string form) of the archiving entity that assigned `id`.
+     */
+    public var by: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String,
+        /**
+         * JID (string form) of the archiving entity that assigned `id`.
+         */by: String) {
+        self.id = id
+        self.by = by
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStanzaId: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStanzaId: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStanzaId {
+        return
+            try WaddleStanzaId(
+                id: FfiConverterString.read(from: &buf),
+                by: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStanzaId, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.by, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaId_lift(_ buf: RustBuffer) throws -> WaddleStanzaId {
+    return try FfiConverterTypeWaddleStanzaId.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaId_lower(_ value: WaddleStanzaId) -> RustBuffer {
+    return FfiConverterTypeWaddleStanzaId.lower(value)
 }
 
 
@@ -3666,6 +5158,436 @@ public func FfiConverterTypeWaddleCallEventKind_lower(_ value: WaddleCallEventKi
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * XEP-0280 carbon direction of an unwrapped forwarded copy. Always
+ * §11-verified by the runtime before it reaches this boundary.
+ */
+
+public enum WaddleCarbonDirection: Equatable, Hashable {
+
+    /**
+     * Mirror of a message another of our resources sent (`<sent/>`).
+     */
+    case sent
+    /**
+     * Mirror of a message another of our resources received
+     * (`<received/>`).
+     */
+    case received
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCarbonDirection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCarbonDirection: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCarbonDirection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCarbonDirection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .sent
+
+        case 2: return .received
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCarbonDirection, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .sent:
+            writeInt(&buf, Int32(1))
+
+
+        case .received:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCarbonDirection_lift(_ buf: RustBuffer) throws -> WaddleCarbonDirection {
+    return try FfiConverterTypeWaddleCarbonDirection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCarbonDirection_lower(_ value: WaddleCarbonDirection) -> RustBuffer {
+    return FfiConverterTypeWaddleCarbonDirection.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0085 chat state notification states. Wire values outside these
+ * five are dropped to `None` at the conversion boundary.
+ */
+
+public enum WaddleChatState: Equatable, Hashable {
+
+    case active
+    case composing
+    case paused
+    case inactive
+    case gone
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleChatState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleChatState: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleChatState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleChatState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .active
+
+        case 2: return .composing
+
+        case 3: return .paused
+
+        case 4: return .inactive
+
+        case 5: return .gone
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleChatState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .active:
+            writeInt(&buf, Int32(1))
+
+
+        case .composing:
+            writeInt(&buf, Int32(2))
+
+
+        case .paused:
+            writeInt(&buf, Int32(3))
+
+
+        case .inactive:
+            writeInt(&buf, Int32(4))
+
+
+        case .gone:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleChatState_lift(_ buf: RustBuffer) throws -> WaddleChatState {
+    return try FfiConverterTypeWaddleChatState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleChatState_lower(_ value: WaddleChatState) -> RustBuffer {
+    return FfiConverterTypeWaddleChatState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Single typed event stream surfaced to the app. New event kinds are
+ * added as enum variants, which keeps the callback protocol itself
+ * stable across FFI releases.
+ */
+
+public enum WaddleClientEvent: Equatable, Hashable {
+
+    /**
+     * Session is bound and ready (fires on `SessionReady`).
+     */
+    case connected
+    /**
+     * The event stream closed; no further events will fire.
+     */
+    case disconnected
+    /**
+     * Typed inbound chat/groupchat message (or message-shaped event).
+     */
+    case message(message: WaddleMessage
+    )
+    /**
+     * Typed inbound presence.
+     */
+    case presence(presence: WaddlePresence
+    )
+    /**
+     * XEP-0313 archived message from an active history query.
+     */
+    case mamResult(message: WaddleArchivedMessage
+    )
+    /**
+     * XEP-0198: the server acked the outbound message with this id.
+     */
+    case deliveryAcked(stanzaId: String
+    )
+    /**
+     * XEP-0198: transport-level delivery failure for this id.
+     */
+    case deliveryFailed(stanzaId: String
+    )
+    /**
+     * XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
+     * envelope and Jingle session control stanza addressed to the
+     * bound resource. The Swift app surfaces it as the ringing UI,
+     * the in-call HUD, and the hang-up handler.
+     */
+    case call(event: WaddleCallEvent
+    )
+    /**
+     * XEP-0198 resume snapshot changed. `None` after an explicit
+     * disconnect or when the session carries no resumable state;
+     * persist `Some(state)` and feed it back via
+     * `WaddleConfig.resume_state` on the next connect.
+     */
+    case resumeStateChanged(state: WaddleSmResumeState?
+    )
+    /**
+     * Human-readable diagnostic. Never carries protocol data.
+     */
+    case error(description: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleClientEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleClientEvent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleClientEvent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .connected
+
+        case 2: return .disconnected
+
+        case 3: return .message(message: try FfiConverterTypeWaddleMessage.read(from: &buf)
+        )
+
+        case 4: return .presence(presence: try FfiConverterTypeWaddlePresence.read(from: &buf)
+        )
+
+        case 5: return .mamResult(message: try FfiConverterTypeWaddleArchivedMessage.read(from: &buf)
+        )
+
+        case 6: return .deliveryAcked(stanzaId: try FfiConverterString.read(from: &buf)
+        )
+
+        case 7: return .deliveryFailed(stanzaId: try FfiConverterString.read(from: &buf)
+        )
+
+        case 8: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        )
+
+        case 9: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+        )
+
+        case 10: return .error(description: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleClientEvent, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .connected:
+            writeInt(&buf, Int32(1))
+
+
+        case .disconnected:
+            writeInt(&buf, Int32(2))
+
+
+        case let .message(message):
+            writeInt(&buf, Int32(3))
+            FfiConverterTypeWaddleMessage.write(message, into: &buf)
+
+
+        case let .presence(presence):
+            writeInt(&buf, Int32(4))
+            FfiConverterTypeWaddlePresence.write(presence, into: &buf)
+
+
+        case let .mamResult(message):
+            writeInt(&buf, Int32(5))
+            FfiConverterTypeWaddleArchivedMessage.write(message, into: &buf)
+
+
+        case let .deliveryAcked(stanzaId):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(stanzaId, into: &buf)
+
+
+        case let .deliveryFailed(stanzaId):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(stanzaId, into: &buf)
+
+
+        case let .call(event):
+            writeInt(&buf, Int32(8))
+            FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
+
+
+        case let .resumeStateChanged(state):
+            writeInt(&buf, Int32(9))
+            FfiConverterOptionTypeWaddleSmResumeState.write(state, into: &buf)
+
+
+        case let .error(description):
+            writeInt(&buf, Int32(10))
+            FfiConverterString.write(description, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleClientEvent_lift(_ buf: RustBuffer) throws -> WaddleClientEvent {
+    return try FfiConverterTypeWaddleClientEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleClientEvent_lower(_ value: WaddleClientEvent) -> RustBuffer {
+    return FfiConverterTypeWaddleClientEvent.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Waddle forum post classification: `Topic` (thread + body + subject)
+ * or `Reply` (thread + body). Wire values outside these two are
+ * dropped to `None` at the conversion boundary.
+ */
+
+public enum WaddleForumPostKind: Equatable, Hashable {
+
+    case topic
+    case reply
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleForumPostKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleForumPostKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleForumPostKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleForumPostKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .topic
+
+        case 2: return .reply
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleForumPostKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .topic:
+            writeInt(&buf, Int32(1))
+
+
+        case .reply:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleForumPostKind_lift(_ buf: RustBuffer) throws -> WaddleForumPostKind {
+    return try FfiConverterTypeWaddleForumPostKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleForumPostKind_lower(_ value: WaddleForumPostKind) -> RustBuffer {
+    return FfiConverterTypeWaddleForumPostKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0166 §7.4 session-terminate reason conditions. Mirrors the
  * 17 variants in `xmpp_parsers::jingle::Reason` so the wire
  * parser's enum is the single source of truth — outbound calls
@@ -3844,6 +5766,113 @@ public func FfiConverterTypeWaddleJingleReason_lower(_ value: WaddleJingleReason
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0394 markup span kind. Mirrors the client crate's
+ * `MarkupSpanType`; `Link` is Waddle's `urn:waddle:markup:0` span
+ * extension (XEP-0394 defines no link span).
+ */
+
+public enum WaddleMarkupSpanType: Equatable, Hashable {
+
+    case bold
+    case italic
+    case strikethrough
+    case code
+    case codeBlock
+    case blockquote
+    case link
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMarkupSpanType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMarkupSpanType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMarkupSpanType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMarkupSpanType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .bold
+
+        case 2: return .italic
+
+        case 3: return .strikethrough
+
+        case 4: return .code
+
+        case 5: return .codeBlock
+
+        case 6: return .blockquote
+
+        case 7: return .link
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleMarkupSpanType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .bold:
+            writeInt(&buf, Int32(1))
+
+
+        case .italic:
+            writeInt(&buf, Int32(2))
+
+
+        case .strikethrough:
+            writeInt(&buf, Int32(3))
+
+
+        case .code:
+            writeInt(&buf, Int32(4))
+
+
+        case .codeBlock:
+            writeInt(&buf, Int32(5))
+
+
+        case .blockquote:
+            writeInt(&buf, Int32(6))
+
+
+        case .link:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMarkupSpanType_lift(_ buf: RustBuffer) throws -> WaddleMarkupSpanType {
+    return try FfiConverterTypeWaddleMarkupSpanType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMarkupSpanType_lower(_ value: WaddleMarkupSpanType) -> RustBuffer {
+    return FfiConverterTypeWaddleMarkupSpanType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum WaddleMucAffiliation: Equatable, Hashable {
 
@@ -4014,6 +6043,76 @@ public func FfiConverterTypeWaddleMucRole_lower(_ value: WaddleMucRole) -> RustB
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * urn:waddle:pin:0 pin/unpin action carried on a room system message.
+ */
+
+public enum WaddlePinAction: Equatable, Hashable {
+
+    case pinned
+    case unpinned
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePinAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePinAction: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePinAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePinAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .pinned
+
+        case 2: return .unpinned
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePinAction, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .pinned:
+            writeInt(&buf, Int32(1))
+
+
+        case .unpinned:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinAction_lift(_ buf: RustBuffer) throws -> WaddlePinAction {
+    return try FfiConverterTypeWaddlePinAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinAction_lower(_ value: WaddlePinAction) -> RustBuffer {
+    return FfiConverterTypeWaddlePinAction.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Platform-discriminated provider credentials. Mirrors the upstream
  * `PushDeviceCredentials` enum exactly; UniFFI generates a Swift
  * associated-value enum that the Apple client populates per
@@ -4177,6 +6276,88 @@ public func FfiConverterTypeWaddlePushEnvironment_lower(_ value: WaddlePushEnvir
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+ * values explicitly so extension references survive the boundary
+ * instead of being silently dropped or smuggled through a bare String.
+ */
+
+public enum WaddleReferenceType: Equatable, Hashable {
+
+    case mention
+    case data
+    case other(value: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleReferenceType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleReferenceType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleReferenceType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleReferenceType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .mention
+
+        case 2: return .data
+
+        case 3: return .other(value: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleReferenceType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .mention:
+            writeInt(&buf, Int32(1))
+
+
+        case .data:
+            writeInt(&buf, Int32(2))
+
+
+        case let .other(value):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(value, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReferenceType_lift(_ buf: RustBuffer) throws -> WaddleReferenceType {
+    return try FfiConverterTypeWaddleReferenceType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceType) -> RustBuffer {
+    return FfiConverterTypeWaddleReferenceType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Typed outcome for outbound message sends. The old FFI surface
  * returned an empty string for not-connected, invalid options, and
  * transport/protocol failures; this keeps Swift-side control flow
@@ -4285,34 +6466,112 @@ public func FfiConverterTypeWaddleSendMessageOutcome_lower(_ value: WaddleSendMe
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * RFC 6120 §8.3.2 stanza-error `type` attribute. Mirrors the client
+ * crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
+ * value so consumers can distinguish it from every defined type.
+ */
+
+public enum WaddleStanzaErrorType: Equatable, Hashable {
+
+    case auth
+    case cancel
+    case `continue`
+    case modify
+    case wait
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStanzaErrorType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStanzaErrorType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStanzaErrorType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .auth
+
+        case 2: return .cancel
+
+        case 3: return .`continue`
+
+        case 4: return .modify
+
+        case 5: return .wait
+
+        case 6: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleStanzaErrorType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .auth:
+            writeInt(&buf, Int32(1))
+
+
+        case .cancel:
+            writeInt(&buf, Int32(2))
+
+
+        case .`continue`:
+            writeInt(&buf, Int32(3))
+
+
+        case .modify:
+            writeInt(&buf, Int32(4))
+
+
+        case .wait:
+            writeInt(&buf, Int32(5))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaErrorType_lift(_ buf: RustBuffer) throws -> WaddleStanzaErrorType {
+    return try FfiConverterTypeWaddleStanzaErrorType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStanzaErrorType_lower(_ value: WaddleStanzaErrorType) -> RustBuffer {
+    return FfiConverterTypeWaddleStanzaErrorType.lower(value)
+}
+
+
 
 
 
 public protocol WaddleEventListener: AnyObject, Sendable {
 
-    func onMessage(message: WaddleMessage)
-
-    func onPresence(presence: WaddlePresence)
-
-    func onMamResult(message: WaddleArchivedMessage)
-
-    func onMessageDeliveryAcked(stanzaId: String)
-
-    func onMessageDeliveryFailed(stanzaId: String)
-
-    func onConnected()
-
-    func onDisconnected()
-
-    func onError(description: String)
-
-    /**
-     * XEP-0353 / XEP-0166 inbound call event. Fires for every
-     * JMI envelope and Jingle session control stanza addressed to
-     * the bound resource. The Swift app surfaces it as the
-     * ringing UI, the in-call HUD, and the hang-up handler.
-     */
-    func onCall(event: WaddleCallEvent)
+    func onEvent(event: WaddleClientEvent)
 
 }
 
@@ -4339,195 +6598,7 @@ fileprivate struct UniffiCallbackInterfaceWaddleEventListener {
                 fatalError("Uniffi callback interface WaddleEventListener: handle missing in uniffiClone")
             }
         },
-        onMessage: { (
-            uniffiHandle: UInt64,
-            message: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onMessage(
-                     message: try FfiConverterTypeWaddleMessage_lift(message)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onPresence: { (
-            uniffiHandle: UInt64,
-            presence: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onPresence(
-                     presence: try FfiConverterTypeWaddlePresence_lift(presence)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onMamResult: { (
-            uniffiHandle: UInt64,
-            message: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onMamResult(
-                     message: try FfiConverterTypeWaddleArchivedMessage_lift(message)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onMessageDeliveryAcked: { (
-            uniffiHandle: UInt64,
-            stanzaId: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onMessageDeliveryAcked(
-                     stanzaId: try FfiConverterString.lift(stanzaId)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onMessageDeliveryFailed: { (
-            uniffiHandle: UInt64,
-            stanzaId: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onMessageDeliveryFailed(
-                     stanzaId: try FfiConverterString.lift(stanzaId)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onConnected: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onConnected(
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onDisconnected: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onDisconnected(
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onError: { (
-            uniffiHandle: UInt64,
-            description: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onError(
-                     description: try FfiConverterString.lift(description)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onCall: { (
+        onEvent: { (
             uniffiHandle: UInt64,
             event: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
@@ -4538,8 +6609,8 @@ fileprivate struct UniffiCallbackInterfaceWaddleEventListener {
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return uniffiObj.onCall(
-                     event: try FfiConverterTypeWaddleCallEvent_lift(event)
+                return uniffiObj.onEvent(
+                     event: try FfiConverterTypeWaddleClientEvent_lift(event)
                 )
             }
 
@@ -4777,6 +6848,30 @@ fileprivate struct FfiConverterOptionTypeWaddleCallThreadAnchor: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleCallThreadEnded: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallThreadEnded?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleCallThreadEnded.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleCallThreadEnded.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleEncryptedFile: FfiConverterRustBuffer {
     typealias SwiftType = WaddleEncryptedFile?
 
@@ -4849,6 +6944,78 @@ fileprivate struct FfiConverterOptionTypeWaddleJidParts: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewImage: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleLinkPreviewImage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleLinkPreviewImage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleLinkPreviewImage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewPlayer: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleLinkPreviewPlayer?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleLinkPreviewPlayer.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleLinkPreviewPlayer.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewVideo: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleLinkPreviewVideo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleLinkPreviewVideo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleLinkPreviewVideo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuffer {
     typealias SwiftType = WaddleMujiPresence?
 
@@ -4865,6 +7032,54 @@ fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleMujiPresence.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddlePinEvent: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePinEvent?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddlePinEvent.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddlePinEvent.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddlePinPreview: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePinPreview?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddlePinPreview.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddlePinPreview.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4945,6 +7160,30 @@ fileprivate struct FfiConverterOptionTypeWaddleSendOptions: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleSmResumeState: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSmResumeState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleSmResumeState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleSmResumeState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleThreadTarget: FfiConverterRustBuffer {
     typealias SwiftType = WaddleThreadTarget?
 
@@ -4985,6 +7224,78 @@ fileprivate struct FfiConverterOptionTypeWaddleUploadSlot: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleUploadSlot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleCarbonDirection: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCarbonDirection?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleCarbonDirection.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleCarbonDirection.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleChatState: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleChatState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleChatState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleChatState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleForumPostKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleForumPostKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleForumPostKind.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5065,6 +7376,30 @@ fileprivate struct FfiConverterOptionTypeWaddleMucRole: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStanzaErrorType?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleStanzaErrorType.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleStanzaErrorType.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleMdsDisplayedEntry]?
 
@@ -5083,6 +7418,31 @@ fileprivate struct FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry: FfiCon
         case 1: return try FfiConverterSequenceTypeWaddleMdsDisplayedEntry.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt16]
+
+    public static func write(_ value: [UInt16], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt16.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt16] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt16]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt16.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -5189,6 +7549,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleLinkPreview: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleLinkPreview]
+
+    public static func write(_ value: [WaddleLinkPreview], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleLinkPreview.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleLinkPreview] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleLinkPreview]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleLinkPreview.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleMarkupSpan: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleMarkupSpan]
+
+    public static func write(_ value: [WaddleMarkupSpan], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleMarkupSpan.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleMarkupSpan] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleMarkupSpan]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleMarkupSpan.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleMdsDisplayedEntry]
 
@@ -5239,6 +7649,31 @@ fileprivate struct FfiConverterSequenceTypeWaddlePresenceHat: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleReference]
+
+    public static func write(_ value: [WaddleReference], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleReference.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleReference] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleReference]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleReference.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleSharedFile]
 
@@ -5281,6 +7716,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleSpace: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleSpace.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStanzaId: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStanzaId]
+
+    public static func write(_ value: [WaddleStanzaId], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStanzaId.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStanzaId] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStanzaId]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStanzaId.read(from: &buf))
         }
         return seq
     }
@@ -5474,31 +7934,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message() != 22165) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_presence() != 47318) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_mam_result() != 6626) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_acked() != 46331) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_failed() != 7405) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_connected() != 11479) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_disconnected() != 39983) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_error() != 64857) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_call() != 41030) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event() != 13709) {
         return InitializationResult.apiChecksumMismatch
     }
 

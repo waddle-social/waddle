@@ -95,12 +95,16 @@ extension AppModel {
         let options: WaddleSendOptions? = hasOptions
             ? WaddleSendOptions(
                 stanzaId: nil,
+                subject: nil,
                 reply: replyTarget,
                 fallback: fallbackOpt,
                 thread: threadTarget,
+                markupSpans: [],
+                references: [],
                 sharedFiles: sharedFiles,
                 linkPreviewToken: nil,
-                requestDisplayedMarker: false
+                requestDisplayedMarker: false,
+                mucPm: false
             )
             : nil
 

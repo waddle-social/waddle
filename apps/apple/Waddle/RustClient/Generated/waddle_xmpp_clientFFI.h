@@ -250,76 +250,12 @@ typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod0)(uint64_t, Rust
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD1
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD1
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod1)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD2
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD2
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod2)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD3
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod3)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD4
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod4)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod5)(uint64_t, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD6
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod6)(uint64_t, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD7
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod7)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD8
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER_METHOD8
-typedef void (*UniffiCallbackInterfaceWaddleEventListenerMethod8)(uint64_t, RustBuffer, void* _Nonnull,
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_WADDLE_EVENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceWaddleEventListener {
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
-    UniffiCallbackInterfaceWaddleEventListenerMethod0 _Nonnull onMessage;
-    UniffiCallbackInterfaceWaddleEventListenerMethod1 _Nonnull onPresence;
-    UniffiCallbackInterfaceWaddleEventListenerMethod2 _Nonnull onMamResult;
-    UniffiCallbackInterfaceWaddleEventListenerMethod3 _Nonnull onMessageDeliveryAcked;
-    UniffiCallbackInterfaceWaddleEventListenerMethod4 _Nonnull onMessageDeliveryFailed;
-    UniffiCallbackInterfaceWaddleEventListenerMethod5 _Nonnull onConnected;
-    UniffiCallbackInterfaceWaddleEventListenerMethod6 _Nonnull onDisconnected;
-    UniffiCallbackInterfaceWaddleEventListenerMethod7 _Nonnull onError;
-    UniffiCallbackInterfaceWaddleEventListenerMethod8 _Nonnull onCall;
+    UniffiCallbackInterfaceWaddleEventListenerMethod0 _Nonnull onEvent;
 } UniffiVTableCallbackInterfaceWaddleEventListener;
 
 #endif
@@ -928,57 +864,9 @@ uint16_t uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(voi
 
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_PRESENCE
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_PRESENCE
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_presence(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MAM_RESULT
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_mam_result(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_ACKED
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_acked(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_MESSAGE_DELIVERY_FAILED
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_message_delivery_failed(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CONNECTED
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CONNECTED
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_connected(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_DISCONNECTED
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_DISCONNECTED
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_disconnected(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_ERROR
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_ERROR
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_error(void
-
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CALL
-#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_CALL
-uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_call(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_WADDLE_XMPP_CLIENT_FFI_CHECKSUM_METHOD_WADDLEEVENTLISTENER_ON_EVENT
+uint16_t uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(void
 
 );
 #endif

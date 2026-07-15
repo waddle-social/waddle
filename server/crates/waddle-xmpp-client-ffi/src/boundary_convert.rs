@@ -55,10 +55,12 @@ pub(crate) fn empty_mam_page() -> WaddleMamPage {
 
 pub(crate) fn mam_page_to_ffi(page: waddle_xmpp_client::mam::MamPage) -> WaddleMamPage {
     WaddleMamPage {
+        // filter_map: rows whose trusted parse was rejected and that carry
+        // no call event are dropped (spoofed-moderation guard, wasm parity).
         messages: page
             .messages
             .into_iter()
-            .map(crate::convert::archived_to_ffi)
+            .filter_map(crate::convert::archived_to_ffi)
             .collect(),
         first_id: page.rsm.first,
         last_id: page.rsm.last,

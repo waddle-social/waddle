@@ -10,6 +10,7 @@ use crate::pep::PepItem;
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
 use crate::state::{SessionBinding, SessionSnapshot};
+use crate::stream_management::SmResumeState;
 use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
 /// Public event surface emitted by the client runtime.
@@ -39,6 +40,13 @@ pub enum ClientEvent {
     PepEvent(PepItem),
     /// Transport-level delivery status for outbound message stanzas.
     MessageDelivery(MessageDeliveryEvent),
+    /// XEP-0198 resume snapshot changed. Broadcast by the native driver
+    /// whenever the runtime's resumable state differs from the last
+    /// published snapshot — the same hook points the wasm driver uses
+    /// for its cell-based snapshot. `None` after an explicit disconnect
+    /// (resume MUST NOT be attempted across a clean `</stream>` close)
+    /// or when the session carries no resumable SM state.
+    ResumeStateChanged(Option<SmResumeState>),
     /// Correlated IQ result or error for in-flight `send_iq` calls.
     ///
     /// Consumed by the native driver to resolve the pending IQ request; never

@@ -72,6 +72,8 @@ fn make_driver_task_with_config(
         state,
         pending_iqs: HashMap::new(),
         deferred_commands: VecDeque::new(),
+        explicit_disconnect: false,
+        last_resume_state: None,
     };
     (task, cmd_tx, evt_rx)
 }
@@ -340,6 +342,82 @@ async fn driver_flushes_deferred_stanzas_when_fresh_sm_enable_fails() {
         sent.iter()
             .any(|message| transport_message_id(message) == Some("queued-1")),
         "queued app stanza should flush after fresh SM enable fails"
+    );
+}
+
+// ── XEP-0198 resume snapshot broadcast ────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn driver_broadcasts_resume_state_transitions() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut rx) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+
+    task.runtime
+        .queue_request(ClientRequest::Connect)
+        .expect("connect request should queue");
+    task.apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+        .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        pre_auth_features(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        Element::builder("success", NS_SASL).build(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        post_auth_features_with_sm(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        bind_result("bind-1"),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        enabled_sm("new-stream"),
+    )))
+    .await;
+
+    let mut snapshots = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ClientEvent::ResumeStateChanged(state) = event {
+            snapshots.push(state);
+        }
+    }
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "identical snapshots must be deduped; only the <enabled/> transition broadcasts"
+    );
+    let state = snapshots[0]
+        .clone()
+        .expect("resumable snapshot after <enabled/>");
+    assert_eq!(state.previd(), "new-stream");
+
+    task.handle_command(XmppCommand::Disconnect).await;
+
+    let mut saw_cleared = false;
+    while let Ok(event) = rx.try_recv() {
+        if let ClientEvent::ResumeStateChanged(state) = event {
+            assert!(
+                state.is_none(),
+                "explicit disconnect must clear the resume snapshot"
+            );
+            saw_cleared = true;
+        }
+    }
+    assert!(
+        saw_cleared,
+        "expected ResumeStateChanged(None) on explicit disconnect"
     );
 }
 

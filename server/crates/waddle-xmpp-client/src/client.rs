@@ -11,6 +11,7 @@ use crate::event::{ClientEvent, ConnectionEvent, MessageDeliveryEvent, StreamMan
 use crate::request::{ClientRequest, StanzaId};
 use crate::runtime::XmppRuntime;
 use crate::state::{ClientState, SessionSnapshot};
+use crate::stream_management::SmResumeState;
 use crate::transport::{
     DefaultTransportFactory, TransportEvent, TransportMessage, TransportState, WebSocketTransport,
     WebSocketTransportFactory,
@@ -182,6 +183,8 @@ where
             state,
             pending_iqs: HashMap::new(),
             deferred_commands: VecDeque::new(),
+            explicit_disconnect: false,
+            last_resume_state: None,
         };
 
         tokio::spawn(task.run());
@@ -199,6 +202,14 @@ struct DriverTask {
     state: Arc<RwLock<SessionSnapshot>>,
     pending_iqs: HashMap<String, oneshot::Sender<ClientResult<Element>>>,
     deferred_commands: VecDeque<DeferredXmppCommand>,
+    /// Set on [`XmppCommand::Disconnect`]. XEP-0198 forbids resuming
+    /// across a clean close, so the snapshot publisher pins the
+    /// broadcast state to `None` from that point on — mirroring the
+    /// wasm driver's `explicit_disconnect` flag.
+    explicit_disconnect: bool,
+    /// Last broadcast XEP-0198 resume snapshot; publishing is deduped
+    /// against it so subscribers only see actual state transitions.
+    last_resume_state: Option<SmResumeState>,
 }
 
 enum DeferredXmppCommand {
@@ -211,6 +222,11 @@ enum DeferredXmppCommand {
 
 impl DriverTask {
     async fn run(mut self) {
+        // Publish the config-seeded resume state (if any) before the
+        // first transport event, mirroring the wasm driver's snapshot
+        // right after `queue_request(Connect)`.
+        self.publish_resume_state_snapshot();
+
         // Process events the transport queued during connection setup.
         for event in self.transport.drain_events() {
             if !self.apply_transport_event(event).await {
@@ -278,6 +294,11 @@ impl DriverTask {
                 true
             }
             XmppCommand::Disconnect => {
+                // Pin the resume snapshot to `None` BEFORE closing:
+                // XEP-0198 resume must not be attempted across an
+                // explicit `</stream>` close (wasm driver parity).
+                self.explicit_disconnect = true;
+                self.publish_resume_state_snapshot();
                 let _ = self.transport.close().await;
                 // Drain close events so state reaches Disconnected before we exit.
                 for event in self.transport.drain_events() {
@@ -353,6 +374,7 @@ impl DriverTask {
                 return false;
             }
         };
+        self.publish_resume_state_snapshot();
 
         for evt in client_events {
             if let Some(msg) = self.dispatch_client_event(evt) {
@@ -456,6 +478,27 @@ impl DriverTask {
             }
             other => self.transport.send(other).await,
         }
+    }
+
+    /// Broadcast the current XEP-0198 resume snapshot when it differs
+    /// from the last published one. Runs at the same semantic points
+    /// the wasm driver refreshes its snapshot cell: once at task
+    /// start, after every runtime transport transition, and (forced
+    /// to `None`) on explicit disconnect. Deduped by value so the
+    /// broadcast bus only carries actual transitions.
+    fn publish_resume_state_snapshot(&mut self) {
+        let resume_state = if self.explicit_disconnect {
+            None
+        } else {
+            self.runtime.resume_state()
+        };
+        if resume_state == self.last_resume_state {
+            return;
+        }
+        self.last_resume_state = resume_state.clone();
+        let _ = self
+            .events
+            .send(ClientEvent::ResumeStateChanged(resume_state));
     }
 
     fn emit_message_delivery_failed(&self, stanza_id: StanzaId) {
