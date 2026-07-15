@@ -63,12 +63,11 @@ class XmppSessionManagerVerbsTest {
         harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1")))
         runCurrent()
 
-        val sent = harness.manager.sendReaction(
+        val sent = harness.manager.toggleReaction(
             room,
             isGroupchat = true,
             targetStanzaId = "s1",
-            emojis = listOf("👍"),
-            previousEmojis = emptyList(),
+            emoji = "👍",
         )
 
         assertTrue(sent)
@@ -77,6 +76,11 @@ class XmppSessionManagerVerbsTest {
             listOf(ReactionGroup("👍", 1, mine = true)),
             harness.manager.timelineStore.timeline(room).value.single().reactions,
         )
+
+        // Toggling again clears (the manager derives the set in-lock).
+        harness.manager.toggleReaction(room, isGroupchat = true, targetStanzaId = "s1", emoji = "👍")
+        assertEquals(listOf(room, room).size, harness.client.reactionCalls.size)
+        assertEquals(emptyList<String>(), harness.client.reactionCalls.last().third)
         harness.manager.logout()
     }
 
@@ -88,12 +92,11 @@ class XmppSessionManagerVerbsTest {
         runCurrent()
         harness.client.reactionResult = false
 
-        val sent = harness.manager.sendReaction(
+        val sent = harness.manager.toggleReaction(
             room,
             isGroupchat = true,
             targetStanzaId = "s1",
-            emojis = listOf("👍"),
-            previousEmojis = emptyList(),
+            emoji = "👍",
         )
 
         assertFalse(sent)

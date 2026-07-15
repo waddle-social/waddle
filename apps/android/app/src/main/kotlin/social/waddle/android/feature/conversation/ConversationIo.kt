@@ -42,9 +42,8 @@ interface ConversationIo {
      */
     suspend fun markDisplayed() {}
 
-    /** XEP-0444: send the account's full reaction set for [targetId]. */
-    suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
-        false
+    /** XEP-0444: toggle [emoji] on the account's set for [targetId]. */
+    suspend fun toggleReaction(targetId: String, emoji: String): Boolean = false
 
     /** XEP-0308: replace an own message's body; [threadId] repeats
      *  the corrected message's XEP-0201 thread. */

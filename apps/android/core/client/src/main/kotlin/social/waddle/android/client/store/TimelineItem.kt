@@ -110,14 +110,23 @@ data class TimelineItem(
             is TimelineSource.Archived -> source.message.replyToSender
         }
 
+    /** `urn:waddle:call-thread:0` anchor riding this message. */
+    val hasCallThread: Boolean
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.callThread != null
+            is TimelineSource.Archived -> source.message.callThread != null
+        }
+
     /**
      * True when this row renders in the main conversation feed: thread
      * REPLIES render only inside their thread screen, while the thread
      * root (id == threadId) stays in the feed with a replies chip (web
-     * `isFeedTimelineMessage` parity).
+     * `isFeedTimelineMessage` parity). Call-thread anchors carry a
+     * thread id that is NOT one of their own ids (the call sid) yet
+     * belong in the feed — web's explicit callThread exception.
      */
     val isFeedVisible: Boolean
-        get() = threadId == null || threadId in identityIds
+        get() = threadId == null || threadId in identityIds || hasCallThread
 }
 
 sealed interface TimelineSource {

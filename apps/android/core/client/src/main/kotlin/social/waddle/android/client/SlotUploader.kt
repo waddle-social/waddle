@@ -31,13 +31,26 @@ class SlotUploader(private val httpClient: OkHttpClient) {
             .url(slot.putUrl)
             .put(body)
             .header("Content-Type", contentType)
-            .apply { slot.putHeaders.forEach { header(it.name, it.value) } }
+            .apply {
+                // XEP-0363 §5.1: only Authorization/Cookie/Expires may be
+                // relayed from the slot; anything else (or a header with
+                // an injected newline) is discarded.
+                slot.putHeaders
+                    .filter { it.name.lowercase() in ALLOWED_PUT_HEADERS }
+                    .filterNot { '\n' in it.name || '\r' in it.name || '\n' in it.value || '\r' in it.value }
+                    .forEach { header(it.name, it.value) }
+            }
             .build()
         try {
             httpClient.newCall(request).execute().use { response -> response.isSuccessful }
         } catch (_: IOException) {
             false
         }
+    }
+
+    private companion object {
+        /** XEP-0363 §5.1 relayable header allowlist (lowercase). */
+        val ALLOWED_PUT_HEADERS = setOf("authorization", "cookie", "expires")
     }
 
     private fun streamingBody(

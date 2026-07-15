@@ -72,8 +72,6 @@ open class ConversationViewModel(
     @Volatile
     private var atNewestEdge = true
 
-    /** Store handle for action-time (non-composition) reads. */
-    private val timelineState = timeline
 
     private val typingNotifier = ComposerTypingNotifier(
         scope = viewModelScope,
@@ -330,10 +328,24 @@ open class ConversationViewModel(
             when (result) {
                 is UploadResult.Done -> {
                     _uploadState.value = UploadState.Idle
-                    val extras = MessageSendExtras(
-                        threadId = threadId,
-                        sharedFiles = listOf(result.file),
-                    )
+                    // A file sent while replying IS the reply (web
+                    // parity: files and replyTo ride the same stanza).
+                    val mode = _composerMode.value
+                    val extras = if (mode is ComposerMode.Replying) {
+                        MessageSendExtras(
+                            replyToId = mode.targetId,
+                            replyToAuthorJid = mode.authorJid,
+                            replyParentBody = mode.previewBody,
+                            threadId = mode.threadId ?: threadId,
+                            sharedFiles = listOf(result.file),
+                        )
+                    } else {
+                        MessageSendExtras(
+                            threadId = threadId,
+                            sharedFiles = listOf(result.file),
+                        )
+                    }
+                    if (mode is ComposerMode.Replying) _composerMode.value = ComposerMode.Normal
                     val message = PendingMessage(
                         localId = nextLocalId++,
                         stanzaId = null,
@@ -359,22 +371,15 @@ open class ConversationViewModel(
     }
 
     /**
-     * XEP-0444 chip/sheet toggle: flip [emoji] in the account's current
-     * set for the message and send the COMPLETE remaining set.
+     * XEP-0444 chip/sheet toggle. The replacement set is computed by
+     * the session manager INSIDE its reaction mutex — computing it here
+     * would read a stale base while a prior send holds the lock, and
+     * the full-set replace semantics would erase the queued toggle.
      */
     fun toggleReaction(item: TimelineItem, emoji: String) {
         val target = actionTargetIdOf(item) ?: return
-        // Resolve the CURRENT reaction state straight from the store
-        // (synchronously fresh — the optimistic apply writes before the
-        // send suspends), not from a composition snapshot or a collector
-        // cache that lags by a dispatch: two rapid toggles computing
-        // from the same base would drop the first (XEP-0444 replaces
-        // the full set).
-        val fresh = timelineState.value.firstOrNull { it.id == item.id } ?: item
-        val own = fresh.reactions.filter { it.mine }.map { it.emoji }
-        val next = if (emoji in own) own - emoji else own + emoji
         viewModelScope.launch {
-            runCatching { io.sendReaction(target, next, previousEmojis = own) }
+            runCatching { io.toggleReaction(target, emoji) }
         }
     }
 

@@ -73,8 +73,8 @@ internal class ChannelIo(
         sessionManager.markConversationDisplayed(roomJid, isGroupchat = true)
     }
 
-    override suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
-        sessionManager.sendReaction(roomJid, isGroupchat = true, targetStanzaId = targetId, emojis = emojis, previousEmojis = previousEmojis)
+    override suspend fun toggleReaction(targetId: String, emoji: String): Boolean =
+        sessionManager.toggleReaction(roomJid, isGroupchat = true, targetStanzaId = targetId, emoji = emoji)
 
     override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean =
         sessionManager.sendCorrection(roomJid, isGroupchat = true, targetId = targetId, newBody = newBody, threadId = threadId)

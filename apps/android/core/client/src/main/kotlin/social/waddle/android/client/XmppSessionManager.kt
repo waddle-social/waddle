@@ -376,33 +376,31 @@ class XmppSessionManager(
     }
 
     /**
-     * XEP-0444: send the account's COMPLETE reaction set for a message
-     * (empty = clear) and apply it optimistically — a DM send never
-     * echoes back to this client. A failed send rolls back to
-     * [previousEmojis] (web parity).
+     * XEP-0444 toggle: flip [emoji] in the account's CURRENT reaction
+     * set for a message and send the complete replacement set (empty =
+     * clear), applied optimistically — a DM send never echoes back to
+     * this client. The current set is resolved INSIDE the mutex: a
+     * caller-computed set would read a stale base whenever a prior
+     * send still holds the lock, and the full-set replace semantics
+     * would silently erase the queued toggle.
      */
-    suspend fun sendReaction(
+    suspend fun toggleReaction(
         conversationJid: String,
         isGroupchat: Boolean,
         targetStanzaId: String,
-        emojis: List<String>,
-        previousEmojis: List<String>,
+        emoji: String,
     ): Boolean = reactionMutex.withLock {
-        // Serialized per manager: without the mutex a failed send's
-        // rollback (ranked newest) would clobber a LATER send's
-        // optimistic set.
         // NOTE (deferred, needs an FFI signature change): the reaction
         // stanza does not yet echo the target's XEP-0201 <thread/> like
         // the web client does — send_reaction takes no options today.
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
-        // Rollback base from the STORE inside the lock — the caller's
-        // snapshot can predate a queued sibling send's outcome.
-        val base = ownReactionSet(conversationJid, targetStanzaId) ?: previousEmojis
-        applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, emojis)
+        val base = ownReactionSet(conversationJid, targetStanzaId) ?: emptyList()
+        val next = if (emoji in base) base - emoji else base + emoji
+        applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
         var sent = false
         try {
             sent = clientCall {
-                it.sendReaction(bareJid(conversationJid), targetStanzaId, emojis, isGroupchat)
+                it.sendReaction(bareJid(conversationJid), targetStanzaId, next, isGroupchat)
             }
         } finally {
             // Also runs on cancellation (screen closed mid-send): the
@@ -609,12 +607,18 @@ class XmppSessionManager(
         // clear already happened in the receiver).
         if (explicitTarget == null) unreadStore.clear(conversation)
         // Explicit targets can be stale: never move the cursor
-        // BACKWARDS in timeline order.
+        // BACKWARDS in timeline order, and when the target cannot be
+        // ordered against an EXISTING cursor (not in the loaded
+        // timeline) treat it as stale rather than risk regressing the
+        // published MDS node.
+        var expectedCursor: String? = null
         if (explicitTarget != null) {
             val targetIndex = items.indexOfLast { ids.markerId in it.identityIds }
             val current = readCursorStore.cursor(conversation)
             val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
             if (targetIndex in 0..currentIndex) return
+            if (targetIndex < 0 && current != null) return
+            expectedCursor = current
         }
         val client = activeClient ?: run {
             // No live session: park the RESOLVED target and replay it on
@@ -653,7 +657,15 @@ class XmppSessionManager(
             }.getOrDefault(false)
             failed = failed || !published
         }
-        if (!failed) readCursorStore.advance(conversation, ids.markerId)
+        if (!failed) {
+            if (explicitTarget != null) {
+                // CAS for explicit targets: a concurrent local/MDS
+                // advance during our sends must not be clobbered.
+                readCursorStore.compareAndAdvance(conversation, expectedCursor, ids.markerId)
+            } else {
+                readCursorStore.advance(conversation, ids.markerId)
+            }
+        }
     }
 
     /**
@@ -1121,7 +1133,8 @@ class XmppSessionManager(
                         // the feed and never count either (web
                         // feed-only unread parity).
                         val isThreadReply = message.thread != null &&
-                            message.thread !in setOfNotNull(message.stanzaId, message.originId, message.id)
+                            message.thread !in setOfNotNull(message.stanzaId, message.originId, message.id) &&
+                            message.callThread == null
                         if (newlyInserted && !isThreadReply) {
                             unreadStore.onLiveMessage(key.jid, key.isMine)
                         }

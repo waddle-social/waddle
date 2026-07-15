@@ -188,13 +188,14 @@ class TimelineStore(
             // rows that the ambiguous-alias guard refuses to mutate.
             val incomingUnique = uniqueWireIds(item)
             val incomingSender = senderKeyOf(item.from, isGroupchat)
+            // Sender continuity gates BOTH disjuncts: a different sender
+            // reusing a primary id must not suppress or overwrite the
+            // original row (cross-sender collisions stay distinct and
+            // un-mutatable via the ambiguous-alias guard).
             val existingIndex = list.indexOfFirst { entry ->
-                entry.item.id == item.id ||
-                    (
-                        incomingSender != null &&
-                            senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
-                            uniqueWireIds(entry.item).any { it in incomingUnique }
-                        )
+                incomingSender != null &&
+                    senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
+                    (entry.item.id == item.id || uniqueWireIds(entry.item).any { it in incomingUnique })
             }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
@@ -295,7 +296,15 @@ class TimelineStore(
      * never land on an ambiguous alias.
      */
     private fun resolveTargetIndex(list: List<Entry>, targetId: String): Int {
-        val primary = list.indexOfFirst { it.item.id == targetId }
+        // Cross-sender collisions can leave several rows sharing a
+        // primary id; a mutation may only land when exactly one claims it.
+        var primary = -1
+        list.forEachIndexed { index, entry ->
+            if (entry.item.id == targetId) {
+                if (primary >= 0) return -1
+                primary = index
+            }
+        }
         if (primary >= 0) return primary
         var found = -1
         list.forEachIndexed { index, entry ->

@@ -64,8 +64,8 @@ internal class DmIo(
         sessionManager.markConversationDisplayed(peerJid, isGroupchat = false)
     }
 
-    override suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
-        sessionManager.sendReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emojis = emojis, previousEmojis = previousEmojis)
+    override suspend fun toggleReaction(targetId: String, emoji: String): Boolean =
+        sessionManager.toggleReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emoji = emoji)
 
     override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean =
         sessionManager.sendCorrection(peerJid, isGroupchat = false, targetId = targetId, newBody = newBody, threadId = threadId)
