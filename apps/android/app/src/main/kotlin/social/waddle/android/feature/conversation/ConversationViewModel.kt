@@ -78,7 +78,14 @@ open class ConversationViewModel(
                     is XmppEvent.DeliveryAcked -> markAcked(event.stanzaId)
                     is XmppEvent.DeliveryFailed -> markFailed(event.stanzaId)
                     // Reconnect catch-up: refetch the newest page.
-                    XmppEvent.SessionReady -> refreshHistory()
+                    XmppEvent.SessionReady -> {
+                        // A join tapped before the first Ready only
+                        // persisted its intent; re-ensure it here so the
+                        // open screen goes live without waiting for a
+                        // reconnect (no-op when already joined).
+                        io.ensureJoined()
+                        refreshHistory()
+                    }
                     else -> Unit
                 }
             }

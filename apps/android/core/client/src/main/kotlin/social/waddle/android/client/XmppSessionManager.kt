@@ -235,9 +235,20 @@ class XmppSessionManager(
     /**
      * Join a MUC room on the live connection; on success the room is
      * marked joined in [roomStore] and the joined set is persisted.
+     *
+     * With no live session yet (e.g. a channel tapped during the 1-3s
+     * connect window — the shell is interactive before `SessionReady`)
+     * the join INTENT is still persisted so [rejoinPersistedRooms]
+     * fires it on the next ready session; silently dropping it left a
+     * live channel that never received messages.
      */
     suspend fun joinRoom(roomJid: String, nick: String): Boolean {
-        val client = activeClient ?: return false
+        val client = activeClient
+        if (client == null) {
+            roomStore.markJoined(roomJid)
+            sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value)
+            return false
+        }
         try {
             client.joinRoom(roomJid, nick)
         } catch (cancellation: CancellationException) {

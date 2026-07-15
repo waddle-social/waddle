@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import social.waddle.android.MainActivity
 import social.waddle.android.R
 import social.waddle.android.client.XmppEvent
@@ -46,6 +48,15 @@ class MessageNotifier(
     },
 ) {
     private val historyLock = Any()
+
+    /**
+     * Serializes append+notify as one unit: the inbound collector and the
+     * reply receiver run on different Default-pool coroutines, and two
+     * unordered notify() calls for the same tag can leave SystemUI showing
+     * the OLDER MessagingStyle snapshot (a reply or newest message
+     * silently missing from the shade).
+     */
+    private val postMutex = Mutex()
     private val history = HashMap<String, MutableList<NotificationCompat.MessagingStyle.Message>>()
 
     fun start(scope: CoroutineScope) {
@@ -64,14 +75,16 @@ class MessageNotifier(
     }
 
     /** Direct-reply echo: append the user's own message and re-post. */
-    fun appendOwnReply(conversationJid: String, isGroupchat: Boolean, body: String) {
-        val entry = NotificationCompat.MessagingStyle.Message(
-            body,
-            System.currentTimeMillis(),
-            selfPerson(),
-        )
-        val messages = appendToHistory(conversationJid, entry)
-        postNotification(conversationJid, isGroupchat, messages, silent = true)
+    suspend fun appendOwnReply(conversationJid: String, isGroupchat: Boolean, body: String) {
+        postMutex.withLock {
+            val entry = NotificationCompat.MessagingStyle.Message(
+                body,
+                System.currentTimeMillis(),
+                selfPerson(),
+            )
+            val messages = appendToHistory(conversationJid, entry)
+            postNotification(conversationJid, isGroupchat, messages, silent = true)
+        }
     }
 
     /**
@@ -79,7 +92,7 @@ class MessageNotifier(
      * the conversation WITHOUT echoing the reply, audibly, with an
      * explicit failure note so the loss is visible instead of silent.
      */
-    fun notifyReplyFailed(conversationJid: String, isGroupchat: Boolean) {
+    suspend fun notifyReplyFailed(conversationJid: String, isGroupchat: Boolean) = postMutex.withLock {
         // Process death wipes the in-memory history while SystemUI still
         // owns the notification (stuck in the RemoteInput spinner). The
         // failure must be surfaced even then, so seed a minimal entry
@@ -127,9 +140,11 @@ class MessageNotifier(
             timestampMillis(message.timestamp),
             person,
         )
-        val messages = appendToHistory(conversationJid, entry)
-        val silent = !userPrefs.messageSoundsEnabled.first()
-        postNotification(conversationJid, isGroupchat, messages, silent)
+        postMutex.withLock {
+            val messages = appendToHistory(conversationJid, entry)
+            val silent = !userPrefs.messageSoundsEnabled.first()
+            postNotification(conversationJid, isGroupchat, messages, silent)
+        }
     }
 
     private fun appendToHistory(

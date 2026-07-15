@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.RemoteInput
 import kotlinx.coroutines.launch
+import social.waddle.android.AppGraph
 import social.waddle.android.WaddleApplication
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
@@ -26,27 +27,46 @@ class ReplyReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
-                val result = if (isGroupchat) {
-                    graph.sessionManager.sendGroupchatMessage(conversationJid, text)
-                } else {
-                    graph.sessionManager.sendChatMessage(conversationJid, text)
-                }
-                // A written send OR a queued one may echo into the shade:
-                // queued replies are persisted and replayed by the session
-                // manager on reconnect, so prompting the user to retype
-                // (notifyReplyFailed) would produce a duplicate. Only a
-                // permanent rejection (invalid recipient/options, stanza
-                // error) surfaces as a visible failure — silently
-                // swallowing the reply while showing it as sent loses
-                // the message.
-                if (result.outcome is WaddleSendMessageOutcome.Sent || result.queued) {
-                    graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
-                } else {
-                    graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
-                }
+                // Same defensive posture as the bootstrap/login/notifier
+                // paths: the offline enqueue is a DataStore write and the
+                // shade re-post is a notify() — both can throw, and an
+                // uncaught throw on this root coroutine kills the process
+                // while leaving the RemoteInput spinner stuck.
+                runCatching { deliver(graph, conversationJid, isGroupchat, text) }
+                    .onFailure {
+                        runCatching {
+                            graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
+                        }
+                    }
             } finally {
                 pendingResult.finish()
             }
+        }
+    }
+
+    private suspend fun deliver(
+        graph: AppGraph,
+        conversationJid: String,
+        isGroupchat: Boolean,
+        text: String,
+    ) {
+        val result = if (isGroupchat) {
+            graph.sessionManager.sendGroupchatMessage(conversationJid, text)
+        } else {
+            graph.sessionManager.sendChatMessage(conversationJid, text)
+        }
+        // A written send OR a queued one may echo into the shade:
+        // queued replies are persisted and replayed by the session
+        // manager on reconnect, so prompting the user to retype
+        // (notifyReplyFailed) would produce a duplicate. Only a
+        // permanent rejection (invalid recipient/options, stanza
+        // error) surfaces as a visible failure — silently
+        // swallowing the reply while showing it as sent loses
+        // the message.
+        if (result.outcome is WaddleSendMessageOutcome.Sent || result.queued) {
+            graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
+        } else {
+            graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
         }
     }
 
