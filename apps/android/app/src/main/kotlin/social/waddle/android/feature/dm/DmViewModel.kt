@@ -13,17 +13,23 @@ import social.waddle.client.ffi.WaddleMamPage
 class DmViewModel(
     sessionManager: XmppSessionManager,
     peerJid: String,
+    onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = peerJid,
     timeline = sessionManager.timelineStore.timeline(peerJid),
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
     io = DmIo(sessionManager, peerJid),
+    onConversationRead = onConversationRead,
 ) {
     companion object {
         fun factory(graph: AppGraph, peerJid: String): ViewModelProvider.Factory =
             viewModelFactoryOf {
-                DmViewModel(sessionManager = graph.sessionManager, peerJid = peerJid)
+                DmViewModel(
+                    sessionManager = graph.sessionManager,
+                    peerJid = peerJid,
+                    onConversationRead = graph.messageNotifier::clearConversationNotification,
+                )
             }
     }
 }

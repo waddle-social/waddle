@@ -50,6 +50,18 @@ class SessionPrefs(
         dataStore.edit { it[KEY_SERVER_URL] = url }
     }
 
+    /**
+     * Bare JID of the signed-in account, persisted so process-death
+     * revivals (notification direct replies) can attribute work before
+     * the in-memory session manager has restored. Cleared with the rest
+     * of the session on logout.
+     */
+    val ownerBareJid: Flow<String?> = dataStore.data.map { prefs -> prefs[KEY_OWNER_BARE_JID] }
+
+    suspend fun setOwnerBareJid(bareJid: String) {
+        dataStore.edit { prefs -> prefs[KEY_OWNER_BARE_JID] = bareJid }
+    }
+
     suspend fun setSessionId(sessionId: String) {
         dataStore.edit { it[KEY_SESSION_ID] = sessionId }
     }
@@ -132,6 +144,7 @@ class SessionPrefs(
     private companion object {
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_SESSION_ID = stringPreferencesKey("session_id")
+        val KEY_OWNER_BARE_JID = stringPreferencesKey("owner_bare_jid")
         val KEY_SM_RESUME = stringPreferencesKey("sm_resume")
         val KEY_JOINED_ROOMS = stringSetPreferencesKey("joined_rooms")
         val KEY_LAST_SEEN = stringPreferencesKey("last_seen")

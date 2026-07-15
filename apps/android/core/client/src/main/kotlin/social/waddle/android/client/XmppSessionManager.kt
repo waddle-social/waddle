@@ -130,6 +130,7 @@ class XmppSessionManager(
         cancelSessionScope()
         clearStores()
         ownBareJid = bareJid(session.jid)
+        persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
         sessionPrefs.setSessionId(session.sessionId)
         seedStoresFromPrefs()
@@ -246,7 +247,7 @@ class XmppSessionManager(
         val client = activeClient
         if (client == null) {
             roomStore.markJoined(roomJid)
-            sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value)
+            persistQuietly { sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value) }
             return false
         }
         try {
@@ -257,7 +258,7 @@ class XmppSessionManager(
             return false
         }
         roomStore.markJoined(roomJid)
-        sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value)
+        persistQuietly { sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value) }
         return true
     }
 
@@ -306,9 +307,15 @@ class XmppSessionManager(
         // A logout can race this persist (reply-receiver sends run on the
         // process scope): never enqueue without an owner, and the owned
         // entry gets pruned by the next account's drain if it survives
-        // the teardown window.
-        val owner = ownBareJid ?: return SendResult(outcome)
-        val evicted = outboundQueue.enqueue(
+        // the teardown window. Process-death revivals (notification
+        // direct replies) have no in-memory owner yet — fall back to the
+        // persisted one so the reply queues instead of being discarded;
+        // logout clears that key too, keeping the teardown race safe.
+        val owner = ownBareJid
+            ?: runCatching { sessionPrefs.ownerBareJid.first() }.getOrNull()
+            ?: return SendResult(outcome)
+        val evicted = try {
+            outboundQueue.enqueue(
             QueuedOutboundMessage(
                 ownerBareJid = owner,
                 conversationJid = conversationJid,
@@ -317,7 +324,15 @@ class XmppSessionManager(
                 clientStanzaId = clientStanzaId,
                 enqueuedAtMillis = System.currentTimeMillis(),
             ),
-        )
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Persistence is best-effort: a failed enqueue write behaves
+            // like the pre-queue behavior (the outcome already reports
+            // the failure) instead of crashing the sender's scope.
+            return SendResult(outcome)
+        }
         evicted?.let { reportDroppedQueuedMessage(it, DROP_REASON_QUEUE_FULL) }
         return SendResult(outcome, queuedId = clientStanzaId)
     }
@@ -692,7 +707,7 @@ class XmppSessionManager(
     fun recordDmSeen(peerJid: String) {
         val scope = sessionScope ?: return
         scope.launch {
-            sessionPrefs.setLastSeen(bareJid(peerJid), nowRfc3339())
+            persistQuietly { sessionPrefs.setLastSeen(bareJid(peerJid), nowRfc3339()) }
         }
     }
 
@@ -708,11 +723,26 @@ class XmppSessionManager(
         if (peer == ownBareJid) return
         val scope = sessionScope ?: return
         scope.launch {
-            sessionPrefs.setLastSeen(peer, message.timestamp ?: nowRfc3339())
+            persistQuietly { sessionPrefs.setLastSeen(peer, message.timestamp ?: nowRfc3339()) }
         }
     }
 
     private fun nowRfc3339(): String = java.time.OffsetDateTime.now().toString()
+
+    /**
+     * Passthroughs document a never-throw contract, but DataStore writes
+     * can raise IOException (disk-full, corruption). Persistence best-
+     * effort here: losing a prefs write degrades a convenience (queue,
+     * recency), while an escaped throw would crash the caller's scope.
+     */
+    private suspend fun persistQuietly(write: suspend () -> Unit) {
+        try {
+            write()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+        }
+    }
 
     private suspend fun seedStoresFromPrefs() {
         val joinedRooms = sessionPrefs.joinedRooms.first()

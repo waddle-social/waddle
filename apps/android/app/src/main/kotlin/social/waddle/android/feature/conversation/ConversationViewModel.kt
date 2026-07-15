@@ -31,6 +31,13 @@ open class ConversationViewModel(
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Reading a conversation must also retire its shade notification —
+     * otherwise a notification for content read in-app lingers, and its
+     * retained MessagingStyle history re-surfaces already-read messages
+     * alongside the next backgrounded arrival.
+     */
+    private val onConversationRead: suspend (String) -> Unit = {},
 ) : ViewModel() {
     private val pending = MutableStateFlow<List<PendingMessage>>(emptyList())
     private val history = MutableStateFlow(HistoryState())
@@ -169,6 +176,7 @@ open class ConversationViewModel(
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
         io.recordConversationSeen()
+        viewModelScope.launch { runCatching { onConversationRead(conversationJid) } }
     }
 
     fun onConversationHidden() {

@@ -15,12 +15,14 @@ class ChannelViewModel(
     sessionManager: XmppSessionManager,
     roomJid: String,
     nick: String,
+    onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = roomJid,
     timeline = sessionManager.timelineStore.timeline(roomJid),
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
     io = ChannelIo(sessionManager, roomJid, nick),
+    onConversationRead = onConversationRead,
 ) {
     companion object {
         fun factory(graph: AppGraph, roomJid: String): ViewModelProvider.Factory =
@@ -29,6 +31,7 @@ class ChannelViewModel(
                     sessionManager = graph.sessionManager,
                     roomJid = roomJid,
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                    onConversationRead = graph.messageNotifier::clearConversationNotification,
                 )
             }
     }

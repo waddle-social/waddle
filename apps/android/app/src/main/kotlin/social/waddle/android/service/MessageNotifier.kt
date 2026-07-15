@@ -129,9 +129,24 @@ class MessageNotifier(
     }
 
     /** Sign-out: drop every message notification and the cached history. */
-    fun clearAll() {
-        synchronized(historyLock) { history.clear() }
-        NotificationManagerCompat.from(context).cancelAll()
+    suspend fun clearAll() {
+        // Under the post mutex: a message racing sign-out could otherwise
+        // re-post a notification for the just-signed-out account after
+        // the cancelAll.
+        postMutex.withLock {
+            synchronized(historyLock) { history.clear() }
+            queuedReplies.clear()
+            NotificationManagerCompat.from(context).cancelAll()
+        }
+    }
+
+    /** The conversation is being read in-app: retire its notification. */
+    suspend fun clearConversationNotification(conversationJid: String) {
+        postMutex.withLock {
+            synchronized(historyLock) { history.remove(conversationJid) }
+            NotificationManagerCompat.from(context)
+                .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
+        }
     }
 
     /** Notification dismissed: forget the conversation's history. */
