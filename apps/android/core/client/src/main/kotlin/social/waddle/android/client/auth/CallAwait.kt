@@ -1,7 +1,6 @@
 package social.waddle.android.client.auth
 
 import java.io.IOException
-import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
@@ -13,7 +12,10 @@ internal suspend fun Call.await(): Response = suspendCancellableCoroutine { cont
     enqueue(
         object : Callback {
             override fun onResponse(call: Call, response: Response) {
-                continuation.resume(response)
+                // The onCancellation lambda closes the body when the
+                // response arrives exactly as the coroutine is cancelled —
+                // a plain resume would leak the connection.
+                continuation.resume(response) { _, res, _ -> res.close() }
             }
 
             override fun onFailure(call: Call, e: IOException) {

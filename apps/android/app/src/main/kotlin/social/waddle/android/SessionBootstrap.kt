@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.WaddleAppState
@@ -32,6 +33,16 @@ class SessionBootstrap(
     private val scope: CoroutineScope,
 ) {
     private val restoreFailure = MutableStateFlow<String?>(null)
+
+    private val _splashHold = MutableStateFlow(true)
+
+    /**
+     * True only until the LOCAL prefs read completes: the system splash
+     * must never be pinned on the session-validation network round-trip
+     * (up to the full HTTP timeout on a bad link) — the in-app Loading
+     * composable covers that instead.
+     */
+    val splashHold: StateFlow<Boolean> = _splashHold
 
     init {
         // Boot-time restores routinely lose the race against Wi-Fi
@@ -82,19 +93,32 @@ class SessionBootstrap(
     }
 
     private suspend fun runRestore() {
-        restoreFailure.value = null
-        val sessionId = sessionPrefs.sessionId.first()
-        if (sessionId == null) {
-            signOutLocally()
-            return
+        // Whole-body guard: DataStore reads/writes (corrupted
+        // preferences_pb, disk-full) and login() are not Result-typed
+        // like the HTTP call — an uncaught throw on this root coroutine
+        // would crash the process at launch instead of surfacing the
+        // retryable Error screen.
+        try {
+            restoreFailure.value = null
+            val sessionId = sessionPrefs.sessionId.first()
+            _splashHold.value = false
+            if (sessionId == null) {
+                signOutLocally()
+                return
+            }
+            authApi.session(sessionId).fold(
+                onSuccess = { session ->
+                    if (session == null || session.isExpired) signOutLocally() else signIn(session)
+                },
+                onFailure = { failure ->
+                    restoreFailure.value = failure.message ?: failure.javaClass.simpleName
+                },
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Throwable) {
+            _splashHold.value = false
+            restoreFailure.value = failure.message ?: failure.javaClass.simpleName
         }
-        authApi.session(sessionId).fold(
-            onSuccess = { session ->
-                if (session == null || session.isExpired) signOutLocally() else signIn(session)
-            },
-            onFailure = { failure ->
-                restoreFailure.value = failure.message ?: failure.javaClass.simpleName
-            },
-        )
     }
 }

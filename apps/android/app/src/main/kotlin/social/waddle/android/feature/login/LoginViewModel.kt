@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.client.auth.AuthProvider
@@ -124,7 +125,15 @@ class LoginViewModel(
             fail(LoginFailureReason.SESSION_INVALID, null)
             return
         }
-        signIn(session)
+        // login() persists to DataStore; a disk failure must surface as a
+        // retryable login error, not crash the process.
+        try {
+            signIn(session)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Throwable) {
+            fail(LoginFailureReason.SESSION_INVALID, failure)
+        }
     }
 
     /** `null` return means the flow already failed (state is set). */

@@ -10,7 +10,6 @@ import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.MutableStateFlow
-import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.theme.WaddleTheme
 
@@ -28,7 +27,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val graph = (application as WaddleApplication).graph
         splashScreen.setKeepOnScreenCondition {
-            graph.appState.value is WaddleAppState.Loading
+            // Local init only — never the session-validation network call
+            // (the in-app Loading composable covers that).
+            graph.bootstrap.splashHold.value
         }
         // Fresh starts only: removeExtra() mutates the in-process intent
         // (covers rotation/theme recreation) but never reaches the

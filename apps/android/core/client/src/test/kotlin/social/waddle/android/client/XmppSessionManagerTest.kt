@@ -177,6 +177,27 @@ class XmppSessionManagerTest {
     }
 
     @Test
+    fun `temporary auth failure retries instead of signing out`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        harness.factory.emit(
+            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.TEMPORARY_AUTH_FAILURE),
+        )
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+
+        // RFC 6120 §6.5: temporary-auth-failure is transient — the session
+        // survives and the loop backs off instead of wiping prefs.
+        assertEquals(WaddleAppState.Ready, harness.manager.appState.value)
+        assertNotNull(harness.prefs.sessionId.first())
+        assertTrue(harness.manager.connectionState.value is ConnectionState.Reconnecting)
+
+        harness.manager.logout()
+    }
+
+    @Test
     fun `auth shaped error after session ready reconnects instead of signing out`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())

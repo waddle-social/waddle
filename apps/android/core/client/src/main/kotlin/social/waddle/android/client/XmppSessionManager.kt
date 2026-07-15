@@ -48,6 +48,7 @@ import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
@@ -337,10 +338,15 @@ class XmppSessionManager(
             when (event) {
                 is XmppEvent.SessionReady -> return Readiness.READY
                 // Typed SASL failure from the FFI: the ONLY terminal auth
-                // signal. Free-text matching was removed — SASL failures
-                // never arrived as Error events, and post-ready stanza
-                // errors reusing the same vocabulary must stay recoverable.
-                is XmppEvent.AuthenticationFailed -> return Readiness.AUTH_FAILED
+                // signal, and only for credential-shaped conditions — RFC
+                // 6120 §6.5 temporary-auth-failure (and mechanism/encoding
+                // conditions) must retry, not wipe the session (web #1164).
+                is XmppEvent.AuthenticationFailed ->
+                    return if (isTerminalSaslCondition(event.condition)) {
+                        Readiness.AUTH_FAILED
+                    } else {
+                        Readiness.CLOSED
+                    }
                 is XmppEvent.Disconnected -> return Readiness.CLOSED
                 else -> Unit
             }
@@ -438,6 +444,21 @@ class XmppSessionManager(
         ).first()
     }
 
+    /**
+     * Credential-shaped conditions invalidate the stored token; every
+     * other condition (temporary-auth-failure, mechanism/encoding
+     * mismatches, Unknown) is treated as a failed attempt and retried —
+     * the backoff budget parks the loop if it persists.
+     */
+    private fun isTerminalSaslCondition(condition: WaddleSaslCondition): Boolean =
+        when (condition) {
+            WaddleSaslCondition.NOT_AUTHORIZED,
+            WaddleSaslCondition.ACCOUNT_DISABLED,
+            WaddleSaslCondition.CREDENTIALS_EXPIRED,
+            -> true
+            else -> false
+        }
+
     private suspend fun onTerminalAuthFailure() {
         _connectionState.value = ConnectionState.AuthFailed
         _appState.value = WaddleAppState.SignedOut
@@ -478,7 +499,13 @@ class XmppSessionManager(
     private suspend fun seedStoresFromPrefs() {
         val joinedRooms = sessionPrefs.joinedRooms.first()
         roomStore.replaceJoinedRooms(joinedRooms)
-        dmStore.seed(sessionPrefs.lastSeen.first().keys - joinedRooms)
+        dmStore.seed(
+            sessionPrefs.lastSeen.first()
+                .filterKeys { it !in joinedRooms }
+                .entries
+                .sortedBy { it.value }
+                .map { it.key },
+        )
     }
 
     private suspend fun cancelSessionScope() {
