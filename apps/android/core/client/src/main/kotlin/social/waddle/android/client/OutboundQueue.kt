@@ -56,9 +56,15 @@ class OutboundQueue(
      * anyway).
      */
     suspend fun drain(
+        ownerBareJid: String,
         send: suspend (QueuedOutboundMessage) -> WaddleSendMessageOutcome,
         onDropped: suspend (QueuedOutboundMessage, WaddleSendMessageOutcome) -> Unit,
     ) {
+        // Cross-account guard: drop anything another account enqueued
+        // (e.g. a send committed in the logout teardown window) BEFORE
+        // draining — replaying it here would misdeliver it under the
+        // current account.
+        pruneForeign(ownerBareJid)
         while (true) {
             val head = sessionPrefs.outboundQueue.first().firstOrNull() ?: return
             when (val outcome = send(head)) {
@@ -70,6 +76,14 @@ class OutboundQueue(
                     remove(head.clientStanzaId)
                     onDropped(head, outcome)
                 }
+            }
+        }
+    }
+
+    private suspend fun pruneForeign(ownerBareJid: String) {
+        withContext(NonCancellable) {
+            sessionPrefs.updateOutboundQueue { current ->
+                current.filter { it.ownerBareJid == ownerBareJid }
             }
         }
     }

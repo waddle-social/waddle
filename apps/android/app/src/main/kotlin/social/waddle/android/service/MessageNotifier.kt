@@ -48,6 +48,8 @@ class MessageNotifier(
     },
 ) {
     private val historyLock = Any()
+    private val queuedReplies =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<String, Boolean>>()
 
     /**
      * Serializes append+notify as one unit: the inbound collector and the
@@ -62,16 +64,34 @@ class MessageNotifier(
     fun start(scope: CoroutineScope) {
         scope.launch {
             events.collect { event ->
-                if (event is XmppEvent.Message) {
-                    // Per-event guard: notify() can throw at runtime (e.g.
-                    // a MessagingStyle bundle past the Binder limit, OEM
-                    // quirks) and an uncaught throw here would both crash
-                    // the app AND terminate this collector, silently
-                    // killing all future message notifications.
-                    runCatching { onMessage(event.message) }
+                // Per-event guard: notify() can throw at runtime (e.g.
+                // a MessagingStyle bundle past the Binder limit, OEM
+                // quirks) and an uncaught throw here would both crash
+                // the app AND terminate this collector, silently
+                // killing all future message notifications.
+                when (event) {
+                    is XmppEvent.Message -> runCatching { onMessage(event.message) }
+                    is XmppEvent.DeliveryAcked -> queuedReplies.remove(event.stanzaId)
+                    is XmppEvent.DeliveryFailed -> runCatching { onQueuedReplyFailed(event.stanzaId) }
+                    else -> Unit
                 }
             }
         }
+    }
+
+    /**
+     * A direct reply that was offline-queued was already echoed into the
+     * shade as delivered; if its replay is later dropped permanently the
+     * shade must stop lying. Track the queued id → conversation so the
+     * eventual DeliveryFailed can re-post the failure note.
+     */
+    fun trackQueuedReply(stanzaId: String, conversationJid: String, isGroupchat: Boolean) {
+        queuedReplies[stanzaId] = conversationJid to isGroupchat
+    }
+
+    private suspend fun onQueuedReplyFailed(stanzaId: String) {
+        val (conversationJid, isGroupchat) = queuedReplies.remove(stanzaId) ?: return
+        notifyReplyFailed(conversationJid, isGroupchat)
     }
 
     /** Direct-reply echo: append the user's own message and re-post. */

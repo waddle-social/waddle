@@ -10,6 +10,13 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 data class QueuedOutboundMessage(
+    /**
+     * Bare JID of the account that authored the send. The queue file is
+     * shared process state: drains MUST skip (and logins prune) entries
+     * from another account, or a message enqueued around logout would be
+     * replayed — and misdelivered — under the next signed-in account.
+     */
+    val ownerBareJid: String = "",
     val conversationJid: String,
     val isGroupchat: Boolean,
     val body: String,

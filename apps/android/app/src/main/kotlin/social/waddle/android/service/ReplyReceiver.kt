@@ -64,6 +64,9 @@ class ReplyReceiver : BroadcastReceiver() {
         // swallowing the reply while showing it as sent loses
         // the message.
         if (result.outcome is WaddleSendMessageOutcome.Sent || result.queued) {
+            result.queuedId?.let { queuedId ->
+                graph.messageNotifier.trackQueuedReply(queuedId, conversationJid, isGroupchat)
+            }
             graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
         } else {
             graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)

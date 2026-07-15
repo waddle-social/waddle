@@ -303,8 +303,14 @@ class XmppSessionManager(
         val clientStanzaId = newClientStanzaId()
         val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId)
         if (!isQueueableFailure(outcome)) return SendResult(outcome)
+        // A logout can race this persist (reply-receiver sends run on the
+        // process scope): never enqueue without an owner, and the owned
+        // entry gets pruned by the next account's drain if it survives
+        // the teardown window.
+        val owner = ownBareJid ?: return SendResult(outcome)
         val evicted = outboundQueue.enqueue(
             QueuedOutboundMessage(
+                ownerBareJid = owner,
                 conversationJid = conversationJid,
                 isGroupchat = isGroupchat,
                 body = body,
@@ -458,7 +464,9 @@ class XmppSessionManager(
      * them here can never duplicate a resume replay).
      */
     private suspend fun drainOutboundQueue() {
+        val owner = ownBareJid ?: return
         outboundQueue.drain(
+            ownerBareJid = owner,
             send = { queued ->
                 sendMessage(
                     conversationJid = queued.conversationJid,

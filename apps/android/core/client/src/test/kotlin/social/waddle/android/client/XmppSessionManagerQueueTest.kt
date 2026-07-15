@@ -182,6 +182,7 @@ class XmppSessionManagerQueueTest {
         harness.prefs.updateOutboundQueue {
             listOf(
                 QueuedOutboundMessage(
+                    ownerBareJid = "icepuma@waddle.test",
                     conversationJid = "alice@waddle.test",
                     isGroupchat = false,
                     body = "written before the crash",
@@ -203,6 +204,39 @@ class XmppSessionManagerQueueTest {
             "drained entry leaves the persisted queue",
             harness.prefs.outboundQueue.first().any { it.clientStanzaId == "q-persisted" },
         )
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `another account's persisted queue entries are pruned, never replayed`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.updateOutboundQueue {
+            listOf(
+                QueuedOutboundMessage(
+                    ownerBareJid = "someone-else@waddle.test",
+                    conversationJid = "peer@waddle.test",
+                    isGroupchat = false,
+                    body = "secret written by the previous account",
+                    clientStanzaId = "q-foreign",
+                    enqueuedAtMillis = 0L,
+                ),
+            )
+        }
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        // Cross-account misdelivery guard: the foreign entry must be
+        // dropped before the drain, not sent under this account.
+        val client = harness.factory.clients.last()
+        assertTrue(
+            "foreign queued message must never be sent",
+            client.sendCalls.none { it.second.contains("secret") },
+        )
+        assertEquals(emptyList<QueuedOutboundMessage>(), harness.prefs.outboundQueue.first())
 
         harness.manager.logout()
     }
