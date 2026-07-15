@@ -6,6 +6,7 @@ import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
@@ -17,6 +18,7 @@ class ChannelViewModel(
     sessionManager: XmppSessionManager,
     roomJid: String,
     nick: String,
+    uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = roomJid,
@@ -27,6 +29,7 @@ class ChannelViewModel(
     io = ChannelIo(sessionManager, roomJid, nick),
     typingNames = sessionManager.chatStateStore.composingNames(roomJid),
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
+    uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -36,6 +39,7 @@ class ChannelViewModel(
                     sessionManager = graph.sessionManager,
                     roomJid = roomJid,
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                    uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
                 )
             }

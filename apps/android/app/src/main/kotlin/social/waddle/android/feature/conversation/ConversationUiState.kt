@@ -52,6 +52,17 @@ data class ThreadSummary(
     val lastTimestamp: String?,
 )
 
+/** XEP-0363 attachment upload progress. */
+sealed interface UploadState {
+    data object Idle : UploadState
+
+    data object Uploading : UploadState
+
+    data object TooLarge : UploadState
+
+    data object Failed : UploadState
+}
+
 /**
  * Composer target: a fresh send, an XEP-0308 edit of an own row, or an
  * XEP-0461 reply.

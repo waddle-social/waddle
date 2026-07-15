@@ -1,5 +1,7 @@
 package social.waddle.android.feature.conversation
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,7 +56,11 @@ fun ConversationScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
     val composerMode by viewModel.composerMode.collectAsStateWithLifecycle()
+    val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(viewModel::sendAttachment) }
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
 
@@ -119,6 +125,9 @@ fun ConversationScreen(
                 onCancelEdit = viewModel::cancelEdit,
                 replying = composerMode as? ComposerMode.Replying,
                 onCancelReply = viewModel::cancelReply,
+                onAttach = { attachmentPicker.launch("*/*") },
+                uploadState = uploadState,
+                onClearUpload = viewModel::clearUploadState,
             )
         }
     }

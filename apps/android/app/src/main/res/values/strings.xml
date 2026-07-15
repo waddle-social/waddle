@@ -60,6 +60,11 @@
     <string name="composer_cancel_reply">Cancel reply</string>
     <string name="reply_original_unloaded">Original message isn\'t in this loaded history yet.</string>
     <string name="thread_title">Thread</string>
+    <string name="composer_attach">Attach file</string>
+    <string name="upload_in_progress">Uploading…</string>
+    <string name="upload_too_large">File is larger than 10 MB.</string>
+    <string name="upload_failed">Upload failed.</string>
+    <string name="upload_dismiss">Dismiss</string>
     <string name="threads_overview_title">Threads</string>
     <string name="thread_replies_count">%1$d replies · started by %2$s</string>
     <plurals name="thread_replies_chip">

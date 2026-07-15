@@ -42,6 +42,7 @@ open class ConversationViewModel(
      * feed, which hides thread replies behind reply-count chips.
      */
     private val threadId: String? = null,
+    private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -119,6 +120,11 @@ open class ConversationViewModel(
 
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = _composerMode
+
+    private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
+
+    /** XEP-0363 attachment upload progress for the composer banner. */
+    val uploadState: StateFlow<UploadState> = _uploadState
 
     init {
         // Prune (not just hide) pending rows once the timeline holds their
@@ -239,8 +245,12 @@ open class ConversationViewModel(
         viewModelScope.launch { dispatch(message, extras) }
     }
 
-    private suspend fun dispatch(message: PendingMessage, extras: MessageSendExtras?) {
-        val result = io.send(message.body, extras)
+    private suspend fun dispatch(
+        message: PendingMessage,
+        extras: MessageSendExtras?,
+        wireBody: String = message.body,
+    ) {
+        val result = io.send(wireBody, extras)
         val trackedId = when (val outcome = result.outcome) {
             is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
             else -> result.queuedId
@@ -267,6 +277,48 @@ open class ConversationViewModel(
     /** The composer's text changed: drive the XEP-0085 state machine. */
     fun onDraftChanged() {
         typingNotifier.onTyping()
+    }
+
+    /**
+     * Upload a picked document (XEP-0363) and send it as a files-only
+     * message (empty wire body, XEP-0447 metadata — web parity); the
+     * optimistic row shows the file name.
+     */
+    fun sendAttachment(uri: android.net.Uri) {
+        val up = uploader ?: return
+        if (_uploadState.value == UploadState.Uploading) return
+        _uploadState.value = UploadState.Uploading
+        viewModelScope.launch {
+            val result = runCatching { up.upload(uri) }.getOrElse { UploadResult.Failed }
+            when (result) {
+                is UploadResult.Done -> {
+                    _uploadState.value = UploadState.Idle
+                    val extras = MessageSendExtras(
+                        threadId = threadId,
+                        sharedFiles = listOf(result.file),
+                    )
+                    val message = PendingMessage(
+                        localId = nextLocalId++,
+                        stanzaId = null,
+                        body = result.file.name ?: result.file.url,
+                        timestampMillis = clock(),
+                        failed = false,
+                        extras = extras,
+                    )
+                    pending.update { it + message }
+                    dispatch(message, extras, wireBody = "")
+                }
+                UploadResult.TooLarge -> _uploadState.value = UploadState.TooLarge
+                UploadResult.Failed -> _uploadState.value = UploadState.Failed
+            }
+        }
+    }
+
+    /** Dismiss a failed-upload banner. */
+    fun clearUploadState() {
+        if (_uploadState.value != UploadState.Uploading) {
+            _uploadState.value = UploadState.Idle
+        }
     }
 
     /**
@@ -394,7 +446,12 @@ open class ConversationViewModel(
             extras = message.extras,
         )
         pending.update { it + retried }
-        viewModelScope.launch { dispatch(retried, message.extras) }
+        viewModelScope.launch {
+            // Files-only sends carry an empty wire body (the row shows
+            // the file name); everything else resends its body.
+            val wireBody = if (message.extras?.sharedFiles.orEmpty().isNotEmpty()) "" else retried.body
+            dispatch(retried, message.extras, wireBody)
+        }
     }
 
     /** The conversation is on screen: suppress and clear unread counts. */

@@ -65,6 +65,7 @@ import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSmResumeState
+import social.waddle.client.ffi.WaddleUploadSlot
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -128,6 +129,10 @@ class XmppSessionManager(
     /** XEP-0490 publish-options probe result, reset per attempt. */
     @Volatile
     private var mdsPublishSupported: Boolean? = null
+
+    /** XEP-0363 upload service JID, discovered once per attempt. */
+    @Volatile
+    private var uploadService: String? = null
 
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
@@ -328,6 +333,31 @@ class XmppSessionManager(
         extras: MessageSendExtras? = null,
     ): SendResult =
         sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body, extras = extras)
+
+    /**
+     * XEP-0363: request an upload slot from the account's upload
+     * service (discovered once per attempt). `null` when offline, no
+     * service exists, or the service refused (e.g. size over quota).
+     */
+    suspend fun requestUploadSlot(
+        filename: String,
+        sizeBytes: ULong,
+        contentType: String,
+    ): WaddleUploadSlot? {
+        val client = activeClient ?: return null
+        val service = uploadService ?: run {
+            val discovered = runCatching { client.discoverUploadService() }.getOrNull() ?: return null
+            uploadService = discovered
+            discovered
+        }
+        return try {
+            client.requestUploadSlot(service, filename, sizeBytes, contentType)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     /**
      * XEP-0444: send the account's COMPLETE reaction set for a message
@@ -708,6 +738,7 @@ class XmppSessionManager(
         }
         activeClient = client
         mdsPublishSupported = null
+        uploadService = null
         // Fresh-stream heuristic: the FFI does not report whether the
         // XEP-0198 <resume/> was accepted, so treat the stream as fresh
         // when (a) no resume snapshot was presented (definitely a new

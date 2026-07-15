@@ -5,6 +5,7 @@ import social.waddle.android.AppGraph
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
@@ -15,6 +16,7 @@ import social.waddle.client.ffi.WaddleMamPage
 class DmViewModel(
     sessionManager: XmppSessionManager,
     peerJid: String,
+    uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = peerJid,
@@ -24,6 +26,7 @@ class DmViewModel(
     unreadStore = sessionManager.unreadStore,
     io = DmIo(sessionManager, peerJid),
     typingNames = sessionManager.chatStateStore.composingNames(peerJid),
+    uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -32,6 +35,7 @@ class DmViewModel(
                 DmViewModel(
                     sessionManager = graph.sessionManager,
                     peerJid = peerJid,
+                    uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
                 )
             }

@@ -1,9 +1,11 @@
 package social.waddle.android.client
 
 import social.waddle.android.client.prefs.QueuedOutboundMessage
+import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.client.ffi.WaddleFallbackRange
 import social.waddle.client.ffi.WaddleReplyTarget
 import social.waddle.client.ffi.WaddleSendOptions
+import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleThreadTarget
 
 /**
@@ -21,19 +23,22 @@ data class MessageSendExtras(
     val replyParentBody: String? = null,
     val threadId: String? = null,
     val threadParent: String? = null,
+    /** Completed XEP-0363 uploads to attach (XEP-0447 metadata). */
+    val sharedFiles: List<SharedFileRef> = emptyList(),
 ) {
     val hasReply: Boolean get() = replyToId != null && replyToAuthorJid != null
 }
 
 /** Rebuild the extras a queued send was persisted with (replay path). */
 internal fun QueuedOutboundMessage.sendExtras(): MessageSendExtras? {
-    if (replyToId == null && threadId == null) return null
+    if (replyToId == null && threadId == null && sharedFiles.isEmpty()) return null
     return MessageSendExtras(
         replyToId = replyToId,
         replyToAuthorJid = replyToAuthorJid,
         replyParentBody = replyParentBody,
         threadId = threadId,
         threadParent = threadParent,
+        sharedFiles = sharedFiles,
     )
 }
 
@@ -75,7 +80,33 @@ internal fun preparedSend(
         }
     }
     val thread = extras.threadId?.let { WaddleThreadTarget(id = it, parent = extras.threadParent) }
-    return finalBody to base.copy(reply = reply, fallback = fallback, thread = thread)
+    val files = extras.sharedFiles.map { ref ->
+        WaddleSharedFile(
+            url = ref.url,
+            name = ref.name,
+            mediaType = ref.mediaType,
+            size = ref.sizeBytes?.toULong(),
+            // Web-parity: dimensions are not probed on send.
+            width = null,
+            height = null,
+            disposition = ref.disposition,
+            encrypted = null,
+        )
+    }
+    return finalBody to base.copy(
+        reply = reply,
+        fallback = fallback,
+        thread = thread,
+        sharedFiles = files,
+    )
+}
+
+/** Web `inferredFileDisposition` parity. */
+fun dispositionFor(mediaType: String?): String {
+    val type = mediaType.orEmpty()
+    val inline = type.startsWith("image/") || type.startsWith("video/") ||
+        type.startsWith("audio/") || type == "application/pdf"
+    return if (inline) "inline" else "attachment"
 }
 
 /**

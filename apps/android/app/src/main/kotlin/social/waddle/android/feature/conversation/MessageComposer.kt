@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,9 @@ fun MessageComposer(
     onCancelEdit: () -> Unit = {},
     replying: ComposerMode.Replying? = null,
     onCancelReply: () -> Unit = {},
+    onAttach: (() -> Unit)? = null,
+    uploadState: UploadState = UploadState.Idle,
+    onClearUpload: () -> Unit = {},
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
 
@@ -63,12 +67,46 @@ fun MessageComposer(
                     onCancel = onCancelReply,
                 )
             }
+            when (uploadState) {
+                UploadState.Idle -> Unit
+                UploadState.Uploading -> ComposerBanner(
+                    text = stringResource(R.string.upload_in_progress),
+                    cancelContentDescription = null,
+                    onCancel = null,
+                )
+                UploadState.TooLarge -> ComposerBanner(
+                    text = stringResource(R.string.upload_too_large),
+                    cancelContentDescription = stringResource(R.string.upload_dismiss),
+                    onCancel = onClearUpload,
+                    isError = true,
+                )
+                UploadState.Failed -> ComposerBanner(
+                    text = stringResource(R.string.upload_failed),
+                    cancelContentDescription = stringResource(R.string.upload_dismiss),
+                    onCancel = onClearUpload,
+                    isError = true,
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
+                if (onAttach != null) {
+                    IconButton(
+                        onClick = onAttach,
+                        enabled = uploadState != UploadState.Uploading,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .size(48.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.AttachFile,
+                            contentDescription = stringResource(R.string.composer_attach),
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { value ->
@@ -102,8 +140,9 @@ fun MessageComposer(
 @Composable
 private fun ComposerBanner(
     text: String,
-    cancelContentDescription: String,
-    onCancel: () -> Unit,
+    cancelContentDescription: String?,
+    onCancel: (() -> Unit)?,
+    isError: Boolean = false,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -114,16 +153,18 @@ private fun ComposerBanner(
         Text(
             text = text,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
+            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        IconButton(onClick = onCancel) {
-            Icon(
-                Icons.Filled.Close,
-                contentDescription = cancelContentDescription,
-            )
+        if (onCancel != null) {
+            IconButton(onClick = onCancel) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = cancelContentDescription,
+                )
+            }
         }
     }
 }

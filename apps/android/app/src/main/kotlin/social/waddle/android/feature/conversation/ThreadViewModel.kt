@@ -19,6 +19,7 @@ class ThreadViewModel(
     isGroupchat: Boolean,
     threadId: String,
     nick: String,
+    uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = conversationJid,
@@ -34,6 +35,7 @@ class ThreadViewModel(
     typingNames = sessionManager.chatStateStore.composingNames(conversationJid),
     pinnedIds = sessionManager.pinStore.pinnedIds(conversationJid),
     threadId = threadId,
+    uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -49,6 +51,7 @@ class ThreadViewModel(
                 isGroupchat = isGroupchat,
                 threadId = threadId,
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                uploader = graph.attachmentUploader,
                 onConversationRead = graph.messageNotifier::clearConversationNotification,
             )
         }

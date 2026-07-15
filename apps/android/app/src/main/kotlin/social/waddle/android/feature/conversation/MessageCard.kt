@@ -2,13 +2,18 @@ package social.waddle.android.feature.conversation
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -25,14 +30,25 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil3.compose.AsyncImage
 import social.waddle.android.client.store.ReactionGroup
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -143,15 +159,7 @@ private fun StoredMessageCard(
             )
         }
         sharedFilesOf(item).forEach { file ->
-            AttachmentRow(
-                icon = {
-                    Icon(
-                        Icons.Outlined.AttachFile,
-                        contentDescription = stringResource(R.string.message_attachment),
-                    )
-                },
-                label = file.name ?: file.url,
-            )
+            SharedFileContent(file)
         }
         if (item.reactions.isNotEmpty()) {
             ReactionChips(
@@ -365,6 +373,86 @@ private fun ReactionChips(
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * One XEP-0447 attachment: inline images render via Coil with a tap-to-
+ * expand viewer (web lightbox parity); everything else is a card that
+ * opens the URL externally. Encrypted attachments (XEP-0448) cannot be
+ * decrypted without OMEMO — they degrade to a plain card.
+ */
+@Composable
+private fun SharedFileContent(file: WaddleSharedFile) {
+    val uriHandler = LocalUriHandler.current
+    var viewerOpen by remember { mutableStateOf(false) }
+    val isInlineImage = file.encrypted == null &&
+        file.disposition == "inline" &&
+        file.mediaType?.startsWith("image/") == true
+    if (isInlineImage) {
+        AsyncImage(
+            model = file.url,
+            contentDescription = file.name ?: stringResource(R.string.message_attachment),
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp, max = 240.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { viewerOpen = true },
+        )
+        if (viewerOpen) {
+            MediaViewerDialog(
+                url = file.url,
+                contentDescription = file.name,
+                onDismiss = { viewerOpen = false },
+            )
+        }
+    } else {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clickable { uriHandler.openUri(file.url) },
+        ) {
+            Icon(
+                Icons.Outlined.AttachFile,
+                contentDescription = stringResource(R.string.message_attachment),
+            )
+            Text(
+                text = file.name ?: file.url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+    }
+}
+
+/** Full-screen image viewer (single image; tap anywhere to dismiss). */
+@Composable
+private fun MediaViewerDialog(
+    url: String,
+    contentDescription: String?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.92f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            AsyncImage(
+                model = url,
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }
