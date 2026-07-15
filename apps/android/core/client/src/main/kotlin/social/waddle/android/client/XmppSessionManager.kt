@@ -132,8 +132,8 @@ class XmppSessionManager(
         ownBareJid = bareJid(session.jid)
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
-        sessionPrefs.setSessionId(session.sessionId)
-        seedStoresFromPrefs()
+        persistQuietly { sessionPrefs.setSessionId(session.sessionId) }
+        persistQuietly { seedStoresFromPrefs() }
 
         resumeSnapshots = Channel(Channel.CONFLATED)
         cursorWrites = Channel(Channel.CONFLATED)
@@ -160,7 +160,18 @@ class XmppSessionManager(
         while (currentCoroutineContext().isActive) {
             waitUntilOnline()
             _connectionState.value = ConnectionState.Connecting
-            when (runAttempt(session)) {
+            // The attempt touches DataStore (buildConfig reads the resume
+            // snapshot/resource suffix): IOException on a corrupt or full
+            // store must back off like any failed attempt — escaping this
+            // handler-less root coroutine would crash-loop the process.
+            val end = try {
+                runAttempt(session)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                AttemptEnd.CONNECT_FAILED
+            }
+            when (end) {
                 AttemptEnd.AUTH_FAILED -> {
                     onTerminalAuthFailure()
                     return
@@ -700,7 +711,7 @@ class XmppSessionManager(
     private suspend fun onTerminalAuthFailure() {
         _connectionState.value = ConnectionState.AuthFailed
         _appState.value = WaddleAppState.SignedOut
-        sessionPrefs.clear()
+        persistQuietly { sessionPrefs.clear() }
         // Last statement on purpose: cancelling the session scope kills
         // this coroutine too, but also the parked snapshot persister that
         // would otherwise leak until the next login.
