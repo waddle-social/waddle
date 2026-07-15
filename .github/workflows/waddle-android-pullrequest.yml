@@ -16,6 +16,8 @@ on:
     - apps/android/core/client/consumer-rules.pro/**
     - apps/android/core/client/src/main/kotlin/**
     - apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/**
+    - apps/android/debug.keystore
+    - apps/android/debug.keystore/**
     - apps/android/env.cue
     - apps/android/env.cue/**
     - apps/android/gradle.properties

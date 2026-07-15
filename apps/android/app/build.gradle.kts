@@ -16,6 +16,7 @@ android {
         targetSdk = 36
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
         versionName = (project.findProperty("versionName") as String?) ?: "0.1.0-dev"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // REST auth + session base URL; override per build with
         // `-PwaddleServerUrl=https://…`.
@@ -27,6 +28,36 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    signingConfigs {
+        // Shared, checked-in debug keystore (deliberately NOT a secret —
+        // it may never sign release builds): every machine and CI run
+        // produces identically-signed debug APKs, so `adb install -r`
+        // upgrades in place instead of demanding an uninstall (which
+        // wipes app data) whenever the APK came from a different builder.
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
+    testOptions {
+        managedDevices {
+            localDevices {
+                // Headless automated-test device for CI (no GPU, low
+                // memory): `./gradlew :app:atdApi34DebugAndroidTest`.
+                // API 34 = minSdk; the aosp-atd image line trails the
+                // newest platforms.
+                create("atdApi34") {
+                    device = "Pixel 8"
+                    apiLevel = 34
+                    systemImageSource = "aosp-atd"
+                }
+            }
+        }
     }
 
     buildTypes {
@@ -73,4 +104,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
+
+    androidTestImplementation(composeBom)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.compose.ui.test.junit4)
 }

@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -43,7 +44,10 @@ fun AppShell(
 ) {
     val graph = LocalAppGraph.current
     val appState by graph.appState.collectAsStateWithLifecycle()
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(
+        modifier = Modifier.fillMaxSize().testTag(AppShellTestTags.ROOT),
+        color = MaterialTheme.colorScheme.background,
+    ) {
         when (val state = appState) {
             WaddleAppState.Loading -> LoadingScreen()
             WaddleAppState.SignedOut -> LoginScreen()
@@ -144,3 +148,8 @@ private fun RequestNotificationPermissionOnce() {
 
 /** Fallback MUC nick when the session is briefly unavailable. */
 internal const val DEFAULT_NICK = "waddle"
+
+/** Semantics tags shared with instrumented tests. */
+object AppShellTestTags {
+    const val ROOT = "waddle-app-shell"
+}

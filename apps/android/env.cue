@@ -80,6 +80,7 @@ let _gradleInputs = [
 	"core/client/build.gradle.kts",
 	"core/client/consumer-rules.pro",
 	"core/client/src/main/kotlin/**",
+	"debug.keystore",
 ]
 
 schema.#Project & {
@@ -113,8 +114,8 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: contents: "read"
-			"tasks": [tasks.checkBindingsDrift, tasks.build]
+			provider: github: permissions: contents: "write"
+			"tasks": [tasks.checkBindingsDrift, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
@@ -122,6 +123,14 @@ schema.#Project & {
 			}
 			provider: github: permissions: contents: "read"
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.build]
+		}
+		// Manual probe: verifies /dev/kvm on the Namespace runner and runs
+		// the Gradle-managed-device instrumented smoke suite on a headless
+		// ATD emulator. Promoted into pullRequest once proven stable.
+		deviceTests: {
+			when: manual: true
+			provider: github: permissions: contents: "read"
+			"tasks": [tasks.gmdCheck]
 		}
 	}
 
@@ -173,6 +182,50 @@ schema.#Project & {
 			args: ["-c", "./gradlew --no-daemon testDebugUnitTest"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
+		}
+
+		// KVM probe + headless ATD emulator smoke suite (deviceTests
+		// pipeline). API 34: the aosp-atd image line trails the newest
+		// platform; 34 matches minSdk and has stable ATD images.
+		gmdCheck: schema.#Task & {
+			command: "bash"
+			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon :app:atdApi34DebugAndroidTest"]
+			dependsOn: [setupSdk, buildRustJni]
+			inputs: _gradleInputs
+		}
+
+		// Rolling install-in-place artifact: every merge to main rebuilds
+		// the debug APK (shared checked-in debug keystore -> signature is
+		// stable across builders, so `adb install -r` upgrades without an
+		// uninstall) with a monotonic timestamp-derived versionCode, and
+		// replaces the asset on the `android-latest` prerelease.
+		publishDebugApk: schema.#Task & {
+			command: "bash"
+			env: {
+				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+			}
+			args: ["-c", #"""
+				set -euo pipefail
+				export GH_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
+				# Commit-timestamp minutes: monotonic across builds and immune
+				# to shallow CI clones (rev-list --count would report 1).
+				version_code="$(( $(git show -s --format=%ct HEAD) / 60 ))"
+				./gradlew --no-daemon :app:assembleDebug \
+				  -PversionCode="${version_code}" \
+				  -PversionName="$(git rev-parse --short HEAD)"
+				apk="app/build/outputs/apk/debug/app-debug.apk"
+				sha="$(git rev-parse --short HEAD)"
+				gh release view android-latest >/dev/null 2>&1 || \
+				  gh release create android-latest --prerelease \
+				    --title "Android (rolling debug)" \
+				    --notes "Rolling debug build; adb install -r upgrades in place."
+				gh release upload android-latest "$apk#waddle-android-debug.apk" --clobber
+				gh release edit android-latest \
+				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)"
+				"""#]
+			dependsOn: [setupSdk, buildRustJni]
+			inputs: _gradleInputs
+			outputs: ["app/build/outputs/apk/debug/app-debug.apk"]
 		}
 	}
 }
