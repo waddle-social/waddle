@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
@@ -45,10 +46,13 @@ class ConversationViewModelTest {
             return page
         }
 
-        override suspend fun send(body: String): SendResult {
+        override suspend fun send(body: String, extras: MessageSendExtras?): SendResult {
             sent += body
+            sentExtras += extras
             return sendResult
         }
+
+        val sentExtras = mutableListOf<MessageSendExtras?>()
     }
 
     private val store = TimelineStore().apply { setOwnBareJid(OWN_JID) }

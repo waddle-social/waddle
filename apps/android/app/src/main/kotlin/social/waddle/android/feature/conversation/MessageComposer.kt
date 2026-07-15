@@ -36,6 +36,8 @@ fun MessageComposer(
     onDraftChanged: () -> Unit = {},
     editing: ComposerMode.Editing? = null,
     onCancelEdit: () -> Unit = {},
+    replying: ComposerMode.Replying? = null,
+    onCancelReply: () -> Unit = {},
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
 
@@ -48,27 +50,18 @@ fun MessageComposer(
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.navigationBarsPadding()) {
             if (editing != null) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 4.dp, top = 4.dp),
-                ) {
-                    Text(
-                        text = stringResource(R.string.composer_editing),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(onClick = onCancelEdit) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = stringResource(R.string.composer_cancel_edit),
-                        )
-                    }
-                }
+                ComposerBanner(
+                    text = stringResource(R.string.composer_editing),
+                    cancelContentDescription = stringResource(R.string.composer_cancel_edit),
+                    onCancel = onCancelEdit,
+                )
+            }
+            if (replying != null && editing == null) {
+                ComposerBanner(
+                    text = stringResource(R.string.composer_replying_to, replying.authorName),
+                    cancelContentDescription = stringResource(R.string.composer_cancel_reply),
+                    onCancel = onCancelReply,
+                )
             }
             Row(
                 modifier = Modifier
@@ -102,6 +95,35 @@ fun MessageComposer(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ComposerBanner(
+    text: String,
+    cancelContentDescription: String,
+    onCancel: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onCancel) {
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = cancelContentDescription,
+            )
         }
     }
 }

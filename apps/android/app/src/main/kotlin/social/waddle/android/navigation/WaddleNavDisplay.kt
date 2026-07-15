@@ -7,6 +7,7 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import social.waddle.android.feature.channel.ChannelScreen
+import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.home.HomeScreen
@@ -39,12 +40,38 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     roomJid = key.roomJid,
                     name = key.name,
                     onBack = { backStack.popSafely() },
+                    onOpenThread = { threadId ->
+                        backStack.add(
+                            WaddleNavKey.Thread(
+                                conversationJid = key.roomJid,
+                                isGroupchat = true,
+                                threadId = threadId,
+                            ),
+                        )
+                    },
                 )
             }
             entry<WaddleNavKey.Dm> { key ->
                 DmScreen(
                     peerJid = key.peerJid,
                     name = key.name,
+                    onBack = { backStack.popSafely() },
+                    onOpenThread = { threadId ->
+                        backStack.add(
+                            WaddleNavKey.Thread(
+                                conversationJid = key.peerJid,
+                                isGroupchat = false,
+                                threadId = threadId,
+                            ),
+                        )
+                    },
+                )
+            }
+            entry<WaddleNavKey.Thread> { key ->
+                ThreadScreen(
+                    conversationJid = key.conversationJid,
+                    isGroupchat = key.isGroupchat,
+                    threadId = key.threadId,
                     onBack = { backStack.popSafely() },
                 )
             }

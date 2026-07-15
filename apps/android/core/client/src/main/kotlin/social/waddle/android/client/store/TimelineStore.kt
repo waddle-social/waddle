@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
+import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 
@@ -96,7 +97,7 @@ class TimelineStore(
                 id = message.stanzaId ?: message.originId ?: message.id ?: return false,
                 conversationJid = key.jid,
                 from = message.from,
-                body = body,
+                body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
@@ -126,7 +127,7 @@ class TimelineStore(
                 id = message.stanzaId ?: message.originId ?: message.id ?: message.mamId,
                 conversationJid = key.jid,
                 from = message.from,
-                body = body,
+                body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Archived(message),

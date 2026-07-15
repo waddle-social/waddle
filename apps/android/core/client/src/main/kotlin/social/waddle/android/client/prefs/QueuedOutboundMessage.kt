@@ -27,4 +27,11 @@ data class QueuedOutboundMessage(
      */
     val clientStanzaId: String,
     val enqueuedAtMillis: Long,
+    /** XEP-0461 reply annotation (see `MessageSendExtras`). */
+    val replyToId: String? = null,
+    val replyToAuthorJid: String? = null,
+    val replyParentBody: String? = null,
+    /** XEP-0201 thread annotation. */
+    val threadId: String? = null,
+    val threadParent: String? = null,
 )

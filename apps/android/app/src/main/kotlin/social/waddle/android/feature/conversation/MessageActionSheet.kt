@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
@@ -46,6 +48,8 @@ fun MessageActionSheet(
     isPinned: Boolean,
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
+    onReply: () -> Unit,
+    onReplyInThread: (() -> Unit)?,
     onEdit: () -> Unit,
     onRetract: () -> Unit,
     onCopy: () -> Unit,
@@ -65,6 +69,24 @@ fun MessageActionSheet(
                             Text(text = emoji, style = MaterialTheme.typography.headlineSmall)
                         }
                     }
+                }
+            }
+            if (actionable && item.tombstone == null) {
+                SheetAction(
+                    icon = { Icon(Icons.AutoMirrored.Outlined.Reply, contentDescription = null) },
+                    label = stringResource(R.string.action_reply),
+                ) {
+                    onReply()
+                    onDismiss()
+                }
+            }
+            if (onReplyInThread != null && item.tombstone == null) {
+                SheetAction(
+                    icon = { Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null) },
+                    label = stringResource(R.string.action_reply_in_thread),
+                ) {
+                    onReplyInThread()
+                    onDismiss()
                 }
             }
             if (item.isMine && actionable && item.tombstone == null) {

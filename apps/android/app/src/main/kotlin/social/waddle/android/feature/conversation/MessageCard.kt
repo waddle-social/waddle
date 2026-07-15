@@ -27,6 +27,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
@@ -54,6 +55,10 @@ fun MessageCard(
     pinnedIds: Set<String> = emptySet(),
     onLongPress: (TimelineItem) -> Unit = {},
     onToggleReaction: (TimelineItem, String) -> Unit = { _, _ -> },
+    resolveQuoted: (String) -> TimelineItem? = { null },
+    onQuoteClick: (String) -> Unit = {},
+    threadReplyCount: Int = 0,
+    onOpenThread: ((TimelineItem) -> Unit)? = null,
 ) {
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
@@ -61,6 +66,10 @@ fun MessageCard(
             isPinned = row.item.stanzaId?.let { it in pinnedIds } == true,
             onLongPress = onLongPress,
             onToggleReaction = onToggleReaction,
+            resolveQuoted = resolveQuoted,
+            onQuoteClick = onQuoteClick,
+            threadReplyCount = threadReplyCount,
+            onOpenThread = onOpenThread,
             modifier = modifier,
         )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
@@ -77,6 +86,10 @@ private fun StoredMessageCard(
     isPinned: Boolean,
     onLongPress: (TimelineItem) -> Unit,
     onToggleReaction: (TimelineItem, String) -> Unit,
+    resolveQuoted: (String) -> TimelineItem?,
+    onQuoteClick: (String) -> Unit,
+    threadReplyCount: Int,
+    onOpenThread: ((TimelineItem) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     if (item.tombstone != null) {
@@ -113,6 +126,15 @@ private fun StoredMessageCard(
         pinned = isPinned,
         onLongPress = { onLongPress(item) },
         modifier = modifier,
+        header = {
+            item.replyToId?.let { replyToId ->
+                QuotedReply(
+                    quoted = resolveQuoted(replyToId),
+                    fallbackSender = item.replyToSender,
+                    onClick = { onQuoteClick(replyToId) },
+                )
+            }
+        },
     ) {
         if (isSticker(item)) {
             AttachmentRow(
@@ -135,6 +157,56 @@ private fun StoredMessageCard(
             ReactionChips(
                 reactions = item.reactions,
                 onToggle = { emoji -> onToggleReaction(item, emoji) },
+            )
+        }
+        if (threadReplyCount > 0 && onOpenThread != null) {
+            TextButton(onClick = { onOpenThread(item) }) {
+                Text(
+                    text = pluralStringResource(
+                        R.plurals.thread_replies_chip,
+                        threadReplyCount,
+                        threadReplyCount,
+                    ),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+/** Collapsed XEP-0461 quote above the reply body; tap scrolls to it. */
+@Composable
+private fun QuotedReply(
+    quoted: TimelineItem?,
+    fallbackSender: String?,
+    onClick: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        onClick = onClick,
+        modifier = Modifier.padding(bottom = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            val author = quoted?.let { authorOf(it) }
+                ?: fallbackSender?.let { localpartOf(it) }
+            author?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(
+                text = when {
+                    quoted == null -> stringResource(R.string.reply_original_unloaded)
+                    quoted.tombstone != null -> stringResource(R.string.message_deleted)
+                    else -> quoted.body
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -189,6 +261,7 @@ private fun MessageBubble(
     edited: Boolean = false,
     pinned: Boolean = false,
     onLongPress: (() -> Unit)? = null,
+    header: @Composable () -> Unit = {},
     extras: @Composable () -> Unit,
 ) {
     Column(
@@ -252,6 +325,7 @@ private fun MessageBubble(
                         )
                     }
                 }
+                header()
                 body?.let { Text(text = it, style = MaterialTheme.typography.bodyLarge) }
                 extras()
             }

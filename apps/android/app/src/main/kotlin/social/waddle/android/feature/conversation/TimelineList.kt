@@ -12,10 +12,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import social.waddle.android.client.store.TimelineItem
 
 /**
@@ -30,12 +32,26 @@ fun TimelineList(
     onRetry: (Long) -> Unit,
     modifier: Modifier = Modifier,
     pinnedIds: Set<String> = emptySet(),
+    threadReplyCounts: Map<String, Int> = emptyMap(),
     onLongPress: (item: TimelineItem) -> Unit = {},
     onToggleReaction: (item: TimelineItem, emoji: String) -> Unit = { _, _ -> },
+    onOpenThread: ((item: TimelineItem) -> Unit)? = null,
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     // reverseLayout renders index 0 at the bottom → newest first.
     val newestFirst = remember(rows) { rows.asReversed() }
+    // Every wire identity → row, for quote previews and scroll targets.
+    val byIdentity = remember(rows) {
+        buildMap {
+            rows.forEach { row ->
+                if (row is ConversationRow.Stored) {
+                    put(row.item.id, row.item)
+                    row.item.identityIds.forEach { put(it, row.item) }
+                }
+            }
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -50,6 +66,21 @@ fun TimelineList(
                 pinnedIds = pinnedIds,
                 onLongPress = onLongPress,
                 onToggleReaction = onToggleReaction,
+                resolveQuoted = { id -> byIdentity[id] },
+                onQuoteClick = { id ->
+                    val target = byIdentity[id] ?: return@MessageCard
+                    val index = newestFirst.indexOfFirst { candidate ->
+                        candidate is ConversationRow.Stored && candidate.item.id == target.id
+                    }
+                    if (index >= 0) scope.launch { listState.animateScrollToItem(index) }
+                },
+                // A root's replies key their <thread/> by ANY of the
+                // root's wire identities.
+                threadReplyCount = (row as? ConversationRow.Stored)?.item?.let { item ->
+                    (listOfNotNull(item.threadId) + item.identityIds)
+                        .firstNotNullOfOrNull { threadReplyCounts[it] }
+                } ?: 0,
+                onOpenThread = onOpenThread,
             )
         }
         if (isLoadingOlder) {

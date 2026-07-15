@@ -3,6 +3,7 @@ package social.waddle.android.feature.channel
 import androidx.lifecycle.ViewModelProvider
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.ConversationIo
@@ -41,7 +42,7 @@ class ChannelViewModel(
     }
 }
 
-private class ChannelIo(
+internal class ChannelIo(
     private val sessionManager: XmppSessionManager,
     private val roomJid: String,
     private val nick: String,
@@ -57,8 +58,8 @@ private class ChannelIo(
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         sessionManager.fetchRoomHistory(roomJid, maxMessages, beforeId)
 
-    override suspend fun send(body: String): SendResult =
-        sessionManager.sendGroupchatMessage(roomJid, body)
+    override suspend fun send(body: String, extras: MessageSendExtras?): SendResult =
+        sessionManager.sendGroupchatMessage(roomJid, body, extras)
 
     override suspend fun sendChatState(state: WaddleChatState) {
         sessionManager.sendChatState(roomJid, isGroupchat = true, state = state)

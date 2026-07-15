@@ -88,6 +88,36 @@ data class TimelineItem(
             is TimelineSource.Live -> source.message.id
             is TimelineSource.Archived -> source.message.id
         }
+
+    /** XEP-0201 thread this message belongs to. */
+    val threadId: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.thread
+            is TimelineSource.Archived -> source.message.thread
+        }
+
+    /** XEP-0461 reply target id. */
+    val replyToId: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.replyToId
+            is TimelineSource.Archived -> source.message.replyToId
+        }
+
+    /** XEP-0461 reply target author (string JID). */
+    val replyToSender: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.replyToSender
+            is TimelineSource.Archived -> source.message.replyToSender
+        }
+
+    /**
+     * True when this row renders in the main conversation feed: thread
+     * REPLIES render only inside their thread screen, while the thread
+     * root (id == threadId) stays in the feed with a replies chip (web
+     * `isFeedTimelineMessage` parity).
+     */
+    val isFeedVisible: Boolean
+        get() = threadId == null || threadId in identityIds
 }
 
 sealed interface TimelineSource {

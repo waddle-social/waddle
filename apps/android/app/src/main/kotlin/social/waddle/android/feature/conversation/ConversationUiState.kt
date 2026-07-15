@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.store.TimelineItem
 
 /** An optimistic own message that has not echoed back from the server. */
@@ -17,6 +18,8 @@ data class PendingMessage(
     val acked: Boolean = false,
     /** Persisted to the outbound queue; sends itself on reconnect. */
     val queued: Boolean = false,
+    /** Reply/thread annotations, kept so retry preserves the wire shape. */
+    val extras: MessageSendExtras? = null,
 )
 
 /** One timeline row: a store-backed message or an optimistic pending one. */
@@ -34,11 +37,35 @@ data class ConversationUiState(
     /** `urn:waddle:pin:0`: pinned stanza ids (rooms only). */
     val pinnedIds: Set<String> = emptySet(),
     val canPin: Boolean = false,
+    /** Feed mode: thread id → reply count for the roots' chips. */
+    val threadReplyCounts: Map<String, Int> = emptyMap(),
+    /** Feed mode: loaded-history threads overview, newest first. */
+    val threads: List<ThreadSummary> = emptyList(),
 )
 
-/** Composer target: a fresh send, or an XEP-0308 edit of an own row. */
+/** One thread of the loaded history (overview sheet row). */
+data class ThreadSummary(
+    val threadId: String,
+    val rootAuthor: String?,
+    val rootPreview: String,
+    val replyCount: Int,
+    val lastTimestamp: String?,
+)
+
+/**
+ * Composer target: a fresh send, an XEP-0308 edit of an own row, or an
+ * XEP-0461 reply.
+ */
 sealed interface ComposerMode {
     data object Normal : ComposerMode
 
     data class Editing(val targetId: String, val originalBody: String) : ComposerMode
+
+    data class Replying(
+        val targetId: String,
+        val authorJid: String,
+        val authorName: String,
+        val previewBody: String,
+        val threadId: String?,
+    ) : ComposerMode
 }

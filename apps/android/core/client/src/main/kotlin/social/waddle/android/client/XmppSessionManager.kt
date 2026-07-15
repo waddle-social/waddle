@@ -311,14 +311,23 @@ class XmppSessionManager(
     /**
      * Send a groupchat message on the live connection; a session-shaped
      * failure persists the message to the outbound queue for replay (see
-     * [sendOrEnqueue]).
+     * [sendOrEnqueue]). [extras] carry XEP-0461 reply / XEP-0201 thread
+     * annotations and survive queueing.
      */
-    suspend fun sendGroupchatMessage(roomJid: String, body: String): SendResult =
-        sendOrEnqueue(conversationJid = roomJid, isGroupchat = true, body = body)
+    suspend fun sendGroupchatMessage(
+        roomJid: String,
+        body: String,
+        extras: MessageSendExtras? = null,
+    ): SendResult =
+        sendOrEnqueue(conversationJid = roomJid, isGroupchat = true, body = body, extras = extras)
 
     /** 1:1 chat twin of [sendGroupchatMessage]. */
-    suspend fun sendChatMessage(peerJid: String, body: String): SendResult =
-        sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
+    suspend fun sendChatMessage(
+        peerJid: String,
+        body: String,
+        extras: MessageSendExtras? = null,
+    ): SendResult =
+        sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body, extras = extras)
 
     /**
      * XEP-0444: send the account's COMPLETE reaction set for a message
@@ -575,9 +584,10 @@ class XmppSessionManager(
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
+        extras: MessageSendExtras? = null,
     ): SendResult {
         val clientStanzaId = newClientStanzaId()
-        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId)
+        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId, extras)
         if (!isQueueableFailure(outcome)) return SendResult(outcome)
         // A logout can race this persist (reply-receiver sends run on the
         // process scope): never enqueue without an owner, and the owned
@@ -598,6 +608,11 @@ class XmppSessionManager(
                 body = body,
                 clientStanzaId = clientStanzaId,
                 enqueuedAtMillis = System.currentTimeMillis(),
+                replyToId = extras?.replyToId,
+                replyToAuthorJid = extras?.replyToAuthorJid,
+                replyParentBody = extras?.replyParentBody,
+                threadId = extras?.threadId,
+                threadParent = extras?.threadParent,
             ),
             )
         } catch (cancellation: CancellationException) {
@@ -617,11 +632,13 @@ class XmppSessionManager(
         isGroupchat: Boolean,
         body: String,
         stanzaId: String,
+        extras: MessageSendExtras? = null,
     ): WaddleSendMessageOutcome = send { client ->
+        val (finalBody, options) = preparedSend(stanzaId, body, extras)
         if (isGroupchat) {
-            client.sendGroupchatMessage(conversationJid, body, sendOptionsFor(stanzaId))
+            client.sendGroupchatMessage(conversationJid, finalBody, options)
         } else {
-            client.sendChatMessage(conversationJid, body, sendOptionsFor(stanzaId))
+            client.sendChatMessage(conversationJid, finalBody, options)
         }
     }
 
@@ -772,6 +789,7 @@ class XmppSessionManager(
                     isGroupchat = queued.isGroupchat,
                     body = queued.body,
                     stanzaId = queued.clientStanzaId,
+                    extras = queued.sendExtras(),
                 )
             },
             onDropped = { queued, outcome ->

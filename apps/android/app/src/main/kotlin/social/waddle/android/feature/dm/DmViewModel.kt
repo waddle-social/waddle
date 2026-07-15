@@ -2,6 +2,7 @@ package social.waddle.android.feature.dm
 
 import androidx.lifecycle.ViewModelProvider
 import social.waddle.android.AppGraph
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.ConversationIo
@@ -37,15 +38,15 @@ class DmViewModel(
     }
 }
 
-private class DmIo(
+internal class DmIo(
     private val sessionManager: XmppSessionManager,
     private val peerJid: String,
 ) : ConversationIo {
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         sessionManager.fetchDmHistory(peerJid, maxMessages, beforeId)
 
-    override suspend fun send(body: String): SendResult =
-        sessionManager.sendChatMessage(peerJid, body)
+    override suspend fun send(body: String, extras: MessageSendExtras?): SendResult =
+        sessionManager.sendChatMessage(peerJid, body, extras)
 
     override fun recordConversationSeen() {
         sessionManager.recordDmSeen(peerJid)

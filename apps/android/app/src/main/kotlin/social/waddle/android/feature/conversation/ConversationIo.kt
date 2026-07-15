@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
@@ -18,8 +19,9 @@ interface ConversationIo {
     /**
      * Send [body] to the conversation; [SendResult.queuedId] is set when
      * the session manager persisted the message for offline replay.
+     * [extras] carry XEP-0461 reply / XEP-0201 thread annotations.
      */
-    suspend fun send(body: String): SendResult
+    suspend fun send(body: String, extras: MessageSendExtras? = null): SendResult
 
     /**
      * The user is looking at the conversation: persist recency so the
