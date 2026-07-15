@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- ConnectivityNetworkSignal registers a default network callback;
+         declared here (not just in :app) so the library lints clean and
+         every consumer inherits the requirement via manifest merge. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+</manifest>
