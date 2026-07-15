@@ -38,13 +38,13 @@ use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
     DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DrainPendingReclaimedRoomsForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
+    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
     ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
-    PendingReclaimedRoomBacklog, PendingReclaimedRoomDrainOutcome, PendingRoomReleaseBacklog,
-    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
-    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
+    PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
+    ReconcileReclaimedRoom, RememberPendingReclaimedRoom, ReservePendingReclaimedRoom,
+    RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome,
     RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
@@ -298,11 +298,11 @@ impl RoomRegistry {
     );
 
     registry_method!(
-        drain_pending_reclaimed_rooms_for_shutdown(
+        drain_room_ownership_for_shutdown(
             pending_handoffs: Vec<PendingReclaimedRoom>
-        ) -> PendingReclaimedRoomDrainOutcome,
-        "drain_pending_reclaimed_rooms_for_shutdown",
-        DrainPendingReclaimedRoomsForShutdown { pending_handoffs }
+        ) -> RoomOwnershipDrainOutcome,
+        "drain_room_ownership_for_shutdown",
+        DrainRoomOwnershipForShutdown { pending_handoffs }
     );
 
     registry_method!(

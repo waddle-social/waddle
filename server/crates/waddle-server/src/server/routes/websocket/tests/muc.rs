@@ -158,6 +158,249 @@ async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constra
     );
 }
 
+#[tokio::test]
+async fn ordinary_join_coalesces_with_restoring_room_without_create_permission() {
+    use std::sync::Arc;
+
+    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    struct BlockingExistingRoomStore {
+        started: Arc<tokio::sync::Notify>,
+        allow: Arc<tokio::sync::Notify>,
+        snapshot: DurableRoomState,
+    }
+
+    impl MucDurableStore for BlockingExistingRoomStore {
+        fn load_room_state<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(Some(snapshot)) })
+        }
+
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            let started = Arc::clone(&self.started);
+            let allow = Arc::clone(&self.allow);
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move {
+                started.notify_one();
+                allow.notified().await;
+                Ok(Some(snapshot))
+            })
+        }
+
+        fn save_config<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _waddle_id: &'a str,
+            _channel_id: &'a str,
+            _config: &'a waddle_xmpp::muc::RoomConfig,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_subject<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_affiliation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    let state = create_test_websocket_state().await;
+    let creator_session = create_test_server_owner_session(state.as_ref(), "alice").await;
+    let ordinary_session = create_test_session(state.as_ref(), "bob").await;
+    let admin_session = create_test_session(state.as_ref(), "carol").await;
+    let room_jid: BareJid = "restoring-existing@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let durable_owner: BareJid = "carol@example.com".parse().expect("owner JID");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let allow = Arc::new(tokio::sync::Notify::new());
+    let store = Arc::new(BlockingExistingRoomStore {
+        started: Arc::clone(&started),
+        allow: Arc::clone(&allow),
+        snapshot: DurableRoomState {
+            waddle_id: "restored-waddle".to_string(),
+            channel_id: "restored-channel".to_string(),
+            config: waddle_xmpp::muc::RoomConfig {
+                name: "Restored room".to_string(),
+                persistent: true,
+                members_only: false,
+                ..Default::default()
+            },
+            subject: None,
+            affiliations: vec![waddle_xmpp::muc::affiliation::AffiliationEntry::new(
+                durable_owner.clone(),
+                Affiliation::Owner,
+            )],
+        },
+    });
+    state
+        .deps
+        .protocol
+        .room_registry
+        .ask(WireClusteringClaims {
+            claim_store: Arc::new(InProcessClaimStore::new()) as Arc<dyn ClaimStore>,
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            durable_store: Some(store as Arc<dyn MucDurableStore>),
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire blocking durable store");
+
+    let creator_state = Arc::clone(&state);
+    let creator_room = room_jid.clone();
+    let creator_jid: FullJid = "alice@example.com/web".parse().expect("creator JID");
+    let creator_join = tokio::spawn(async move {
+        handle_muc_join(
+            creator_state.as_ref(),
+            "example.com",
+            &creator_room,
+            &creator_jid,
+            "alice",
+            None,
+            &Some(creator_session),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("durable restore started");
+
+    let ordinary_state = Arc::clone(&state);
+    let ordinary_room = room_jid.clone();
+    let ordinary_jid: FullJid = "bob@example.com/web".parse().expect("ordinary JID");
+    let ordinary_join = tokio::spawn(async move {
+        handle_muc_join(
+            ordinary_state.as_ref(),
+            "example.com",
+            &ordinary_room,
+            &ordinary_jid,
+            "bob",
+            None,
+            &Some(ordinary_session),
+        )
+        .await
+    });
+    let admin_iq = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "restore-admin")
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                room_jid.to_string(),
+            )
+            .append(
+                Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                            .attr(
+                                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                "owner",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    );
+    let admin_state = Arc::clone(&state);
+    let admin_jid: FullJid = "carol@example.com/web".parse().expect("admin JID");
+    let admin_ready = ready_phase(&admin_jid);
+    let admin_lookup = tokio::spawn(async move {
+        handle_iq(
+            &admin_iq,
+            "example.com",
+            "muc.example.com",
+            admin_state.as_ref(),
+            &Some(admin_session),
+            &admin_ready,
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(
+        !admin_lookup.is_finished(),
+        "admin IQ must coalesce behind the pending durable restore"
+    );
+    allow.notify_one();
+
+    let creator_responses = creator_join.await.expect("creator join task");
+    let ordinary_responses = ordinary_join.await.expect("ordinary join task");
+    let admin_responses = admin_lookup.await.expect("admin lookup task");
+    assert_eq!(
+        admin_responses.len(),
+        1,
+        "admin response: {admin_responses:?}"
+    );
+    assert!(
+        admin_responses[0].contains("type='result'")
+            && !admin_responses[0].contains("item-not-found"),
+        "a restoring room must not appear absent to MUC admin IQ: {admin_responses:?}"
+    );
+    assert!(
+        ordinary_responses
+            .iter()
+            .all(|response| !response.contains("not-allowed")),
+        "a restoring existing room must not run create-room authorization: {ordinary_responses:?}"
+    );
+    for responses in [&creator_responses, &ordinary_responses] {
+        let self_presence = responses
+            .iter()
+            .filter_map(|xml| Element::from_str(xml).ok())
+            .find(|presence| {
+                presence
+                    .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .is_some_and(|payload| {
+                        payload.children().any(|child| {
+                            child.name() == "status" && child.attr("code") == Some("110")
+                        })
+                    })
+            })
+            .unwrap_or_else(|| panic!("self presence in responses: {responses:?}"));
+        let payload = self_presence
+            .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+            .expect("MUC user payload");
+        assert!(
+            payload
+                .children()
+                .all(|child| child.name() != "status" || child.attr("code") != Some("201")),
+            "restoring an existing room must not emit creator status 201: {responses:?}"
+        );
+        assert_ne!(
+            payload
+                .get_child("item", waddle_xmpp::muc::presence::NS_MUC_USER)
+                .and_then(|item| item.attr("affiliation")),
+            Some("owner"),
+            "the first post-restore joiner must not receive CreatorOwner"
+        );
+    }
+    let snapshot = snapshot_room(state.as_ref(), &room_jid).await.room;
+    assert_eq!(snapshot.get_affiliation(&durable_owner), Affiliation::Owner);
+}
+
 /// #1107 / XEP-0045 §7.6: a full JID already in the room under nick A
 /// joining as nick B gets `<error type='cancel'><not-acceptable/>`
 /// on the wire (nicknames are locked to identity) and no second

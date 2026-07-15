@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::websocket::cleanup::get_room_actor_result;
 
 mod access;
 mod xml;
@@ -1683,7 +1684,27 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 )];
             }
         };
-        let existing_room_actor = get_room_actor(state, room_jid).await;
+        let (existing_room_actor, room_preparation_pending) =
+            match get_room_actor_result(state, room_jid).await {
+                Ok(actor) => (actor, false),
+                Err(
+                    waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
+                ) => (None, true),
+                Err(error) => {
+                    warn!(room = %room_jid, %error, "Failed to look up MUC room before join");
+                    return vec![build_muc_presence_error_xml(
+                        room_jid,
+                        &nick,
+                        sender_jid,
+                        StanzaError::new(
+                            ErrorType::Wait,
+                            DefinedCondition::InternalServerError,
+                            "en",
+                            "Failed to look up room before join.",
+                        ),
+                    )];
+                }
+            };
         let existing_room_snapshot = if let Some(actor) = existing_room_actor.as_ref() {
             match actor.ask(GetSnapshot).await {
                 Ok(snapshot) => Some(snapshot),
@@ -1851,6 +1872,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             Some(actor) => (actor, false),
             None => {
                 if managed_channel.is_none()
+                    && !room_preparation_pending
                     && !server_permission_allowed(
                         state,
                         authenticated_session.as_ref(),

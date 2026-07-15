@@ -1,5 +1,6 @@
 use super::*;
 use crate::permissions::DeleteTuple;
+use crate::server::routes::websocket::cleanup::get_room_actor_result;
 
 pub(super) fn build_xmpp_error_response(
     request_iq: &xmpp_parsers::iq::Iq,
@@ -399,14 +400,15 @@ pub(super) async fn muc_owner_authorized(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     _session: Option<&Session>,
-) -> Result<bool, String> {
-    let room_actor = get_room_actor(state, room_jid)
+) -> Result<bool, XmppError> {
+    let room_actor = get_room_actor_result(state, room_jid)
         .await
-        .ok_or_else(|| "room actor not found".to_string())?;
+        .map_err(|error| XmppError::internal(format!("room lookup failed: {error}")))?
+        .ok_or_else(|| XmppError::internal("room actor not found"))?;
     let snapshot = room_actor
         .ask(GetSnapshot)
         .await
-        .map_err(|error| format!("snapshot failed: {error:?}"))?;
+        .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
     if matches!(
         snapshot.room.get_affiliation(&sender_jid.to_bare()),
         Affiliation::Owner
@@ -422,17 +424,20 @@ pub(super) async fn build_muc_owner_config_response(
     room_jid: &BareJid,
     id: &str,
     response_to: Option<&str>,
-) -> Result<String, String> {
-    let room_actor = get_room_actor(state, room_jid)
+) -> Result<String, XmppError> {
+    let room_actor = get_room_actor_result(state, room_jid)
         .await
-        .ok_or_else(|| "room actor not found".to_string())?;
+        .map_err(|error| XmppError::internal(format!("room lookup failed: {error}")))?
+        .ok_or_else(|| XmppError::internal("room actor not found"))?;
     let snapshot = room_actor
         .ask(GetSnapshot)
         .await
-        .map_err(|error| format!("snapshot failed: {error:?}"))?;
+        .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
     let mut room = snapshot.room;
     if let Some(channel_type) =
-        super::muc_owner_config::managed_channel_type_for_room(state, room_jid).await?
+        super::muc_owner_config::managed_channel_type_for_room(state, room_jid)
+            .await
+            .map_err(XmppError::internal)?
     {
         super::muc_owner_config::project_channel_type_to_config(&mut room.config, channel_type);
     }

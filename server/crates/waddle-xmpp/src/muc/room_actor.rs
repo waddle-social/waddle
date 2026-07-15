@@ -377,22 +377,38 @@ pub struct RoomActor {
     restore_state: DurableRestoreState,
 }
 
+#[derive(PartialEq)]
+struct AdmissionPolicySnapshot {
+    waddle_id: String,
+    channel_id: String,
+    requires_membership: bool,
+    max_occupants: u32,
+    affiliations: HashMap<BareJid, Affiliation>,
+}
+
 /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): fail-closed
-/// tracking for [`RestoreDurableRoomState`]. `Ready` (the default) means
-/// either no durable store is configured (single-node/non-clustering —
-/// today's behavior, unchanged) or the restore genuinely completed
-/// (`Ok(Some(_))` applied, or `Ok(None)` — a legitimately brand-new room
-/// with nothing to restore). `Pending` means the initial load hit a
+/// tracking for [`RestoreDurableRoomState`]. `Ready(origin)` means either no
+/// durable store is configured (single-node/non-clustering, therefore a new
+/// in-memory room) or the restore genuinely completed. The typed origin
+/// preserves whether the fenced load returned an existing snapshot or proved
+/// that no durable room exists; the registry uses it to keep XEP-0045 creator
+/// ownership and status 201 exclusive to actual room creation. `Pending`
+/// means the initial load hit a
 /// genuine backend error: joins are refused (a typed, recoverable bounce)
 /// until [`RoomActor::ensure_restored_before_join`]'s bounded inline retry
 /// succeeds — never silently served with the caller-supplied defaults,
 /// which would look exactly like a legitimate empty new room while
 /// actually discarding every ban/member/owner grant on record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DurableRestoreState {
-    #[default]
-    Ready,
+    Ready(DurableRoomOrigin),
     Pending,
+}
+
+impl Default for DurableRestoreState {
+    fn default() -> Self {
+        Self::Ready(DurableRoomOrigin::New)
+    }
 }
 
 /// Why a room actor has stopped accepting admissions.
@@ -511,7 +527,7 @@ impl RoomActor {
             durable_member_recipients: Vec::new(),
             membership_source: None,
             durable_store: None,
-            restore_state: DurableRestoreState::Ready,
+            restore_state: DurableRestoreState::Ready(DurableRoomOrigin::New),
         }
     }
 
@@ -520,33 +536,30 @@ impl RoomActor {
     /// constructor/default state. Subject changes are deliberately excluded:
     /// they do not affect whether or how an occupant may enter.
     fn install_durable_room_state(&mut self, state: super::durable::DurableRoomState) {
-        let previous_admission_state = (
-            self.room.waddle_id.clone(),
-            self.room.channel_id.clone(),
-            self.room.config.clone(),
-            self.room
-                .get_all_affiliations()
-                .into_iter()
-                .map(|entry| (entry.jid, entry.affiliation))
-                .collect::<HashMap<_, _>>(),
-        );
+        let previous_admission_state = self.admission_policy_snapshot();
         self.room.waddle_id = state.waddle_id;
         self.room.channel_id = state.channel_id;
         self.replace_config(state.config);
         self.room.subject = state.subject;
         self.room.restore_affiliations(state.affiliations);
-        let installed_admission_state = (
-            self.room.waddle_id.clone(),
-            self.room.channel_id.clone(),
-            self.room.config.clone(),
-            self.room
+        let installed_admission_state = self.admission_policy_snapshot();
+        if installed_admission_state != previous_admission_state {
+            self.advance_room_admission_revision();
+        }
+    }
+
+    fn admission_policy_snapshot(&self) -> AdmissionPolicySnapshot {
+        AdmissionPolicySnapshot {
+            waddle_id: self.room.waddle_id.clone(),
+            channel_id: self.room.channel_id.clone(),
+            requires_membership: self.room.config.requires_membership(),
+            max_occupants: self.room.config.max_occupants,
+            affiliations: self
+                .room
                 .get_all_affiliations()
                 .into_iter()
                 .map(|entry| (entry.jid, entry.affiliation))
-                .collect::<HashMap<_, _>>(),
-        );
-        if installed_admission_state != previous_admission_state {
-            self.advance_room_admission_revision();
+                .collect(),
         }
     }
 
@@ -631,7 +644,7 @@ impl RoomActor {
 
     /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): the
     /// fail-closed join gate. `Ok(())` when this incarnation's durable
-    /// restore is already known-good (`DurableRestoreState::Ready` — the
+    /// restore is already known-good (`DurableRestoreState::Ready(_)` — the
     /// overwhelmingly common case). When `Pending` (the initial
     /// [`RestoreDurableRoomState`] load failed), runs ONE bounded inline
     /// retry against the same store before deciding: success applies the
@@ -643,7 +656,7 @@ impl RoomActor {
     /// join against defaulted config/affiliations/subject while a
     /// genuine restore failure is unresolved.
     async fn ensure_restored_before_join(&mut self) -> Result<(), RoomActorError> {
-        if self.restore_state == DurableRestoreState::Ready {
+        if matches!(self.restore_state, DurableRestoreState::Ready(_)) {
             return Ok(());
         }
         let Some(store) = self.durable_store.clone() else {
@@ -652,17 +665,17 @@ impl RoomActor {
             // `durable_store = Some(..)` in the same message. Treat a
             // missing store as nothing-to-restore rather than wedging
             // every future join on an invariant violation.
-            self.restore_state = DurableRestoreState::Ready;
+            self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
             return Ok(());
         };
         match store.load_room_state_fenced(&self.room.room_jid).await {
             Ok(Some(state)) => {
                 self.install_durable_room_state(state);
-                self.restore_state = DurableRestoreState::Ready;
+                self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::Restored);
                 Ok(())
             }
             Ok(None) => {
-                self.restore_state = DurableRestoreState::Ready;
+                self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
                 Ok(())
             }
             Err(error) => {
@@ -980,9 +993,17 @@ pub struct RestoreDurableRoomState {
 /// [`RestoreDurableRoomState`] in the same mailbox. A `Ready` reply is
 /// therefore a publication barrier: every caller that can discover the actor
 /// observes the restored config, affiliations, and subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableRoomOrigin {
+    /// The exact fenced load proved no durable row exists for this room.
+    New,
+    /// An existing durable room snapshot was installed into this actor.
+    Restored,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
 pub enum DurableRestoreReadiness {
-    Ready,
+    Ready(DurableRoomOrigin),
     Pending,
 }
 
@@ -998,7 +1019,7 @@ impl kameo::message::Message<GetDurableRestoreReadiness> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         match self.restore_state {
-            DurableRestoreState::Ready => DurableRestoreReadiness::Ready,
+            DurableRestoreState::Ready(origin) => DurableRestoreReadiness::Ready(origin),
             DurableRestoreState::Pending => DurableRestoreReadiness::Pending,
         }
     }
@@ -1015,11 +1036,11 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
         match msg.store.load_room_state_fenced(&self.room.room_jid).await {
             Ok(Some(state)) => {
                 self.install_durable_room_state(state);
-                self.restore_state = DurableRestoreState::Ready;
+                self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::Restored);
             }
             Ok(None) => {
                 // No durable row yet — brand new room, nothing to restore.
-                self.restore_state = DurableRestoreState::Ready;
+                self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
             }
             Err(error) => {
                 // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated):

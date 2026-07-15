@@ -264,13 +264,25 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             // alongside the IQ result so it lands on the same socket;
             // others are routed via the connection registry.
             let destroy_request = parse_destroy_request(iq).unwrap_or_default();
-            let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    response_from,
-                    response_to,
-                    item_not_found_iq_error("Requested item not found."),
-                )];
+            let room_actor = match get_room_actor_result(state, &room_jid).await {
+                Ok(Some(room_actor)) => room_actor,
+                Ok(None) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )];
+                }
+                Err(error) => {
+                    warn!(room = %room_jid, %error, "MUC destroy room lookup failed");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
             };
             let Ok(snapshot) = room_actor.ask(GetSnapshot).await else {
                 return vec![build_iq_error_xml_typed(
@@ -483,13 +495,25 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 bad_request_iq_error("Malformed IQ payload."),
             )];
         };
-        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-            return vec![build_iq_error_xml_typed(
-                id,
-                response_from,
-                response_to,
-                item_not_found_iq_error("Requested item not found."),
-            )];
+        let room_actor = match get_room_actor_result(state, &room_jid).await {
+            Ok(Some(room_actor)) => room_actor,
+            Ok(None) => {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )];
+            }
+            Err(error) => {
+                warn!(room = %room_jid, %error, "MUC moderation room lookup failed");
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    internal_server_error_iq_error("Internal server error."),
+                )];
+            }
         };
         let context = match room_actor
             .ask(GetAdminContext {
