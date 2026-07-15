@@ -8,7 +8,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
@@ -26,9 +28,27 @@ class SessionBootstrap(
     private val signIn: suspend (WaddleSessionInfo) -> Unit,
     private val signOutLocally: suspend () -> Unit,
     managerAppState: StateFlow<WaddleAppState>,
+    private val networkSignal: NetworkSignal,
     private val scope: CoroutineScope,
 ) {
     private val restoreFailure = MutableStateFlow<String?>(null)
+
+    init {
+        // Boot-time restores routinely lose the race against Wi-Fi
+        // reassociation: the boot receiver has already raised the
+        // foreground service, whose resident process would otherwise pin
+        // the failed one-shot restore forever (a zombie service that
+        // delivers nothing until the user opens the app). Re-run the
+        // restore on every connectivity arrival while it is failed —
+        // restoreInFlight keeps it single-flight.
+        scope.launch {
+            networkSignal.online.filter { it }.collect {
+                if (restoreFailure.value != null) {
+                    restore()
+                }
+            }
+        }
+    }
 
     /**
      * The session-manager app state, with restore failures surfaced as

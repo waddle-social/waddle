@@ -45,12 +45,14 @@ class AppGraph(context: Context) {
     val userPrefs: UserPrefs = UserPrefs(appContext.userPreferencesDataStore)
     val authApi: WaddleAuthApi = WaddleAuthApi(serverUrl, okHttpClient)
 
+    private val networkSignal = ConnectivityNetworkSignal(
+        appContext.getSystemService(ConnectivityManager::class.java),
+    )
+
     val sessionManager: XmppSessionManager = XmppSessionManager(
         sessionPrefs = sessionPrefs,
         clientFactory = RustClientFactory(),
-        networkSignal = ConnectivityNetworkSignal(
-            appContext.getSystemService(ConnectivityManager::class.java),
-        ),
+        networkSignal = networkSignal,
     )
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
@@ -64,6 +66,7 @@ class AppGraph(context: Context) {
         signIn = ::signIn,
         signOutLocally = { sessionManager.logout() },
         managerAppState = sessionManager.appState,
+        networkSignal = networkSignal,
         scope = applicationScope,
     )
 

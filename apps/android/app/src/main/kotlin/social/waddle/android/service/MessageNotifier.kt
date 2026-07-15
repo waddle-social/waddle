@@ -52,7 +52,12 @@ class MessageNotifier(
         scope.launch {
             events.collect { event ->
                 if (event is XmppEvent.Message) {
-                    onMessage(event.message)
+                    // Per-event guard: notify() can throw at runtime (e.g.
+                    // a MessagingStyle bundle past the Binder limit, OEM
+                    // quirks) and an uncaught throw here would both crash
+                    // the app AND terminate this collector, silently
+                    // killing all future message notifications.
+                    runCatching { onMessage(event.message) }
                 }
             }
         }
