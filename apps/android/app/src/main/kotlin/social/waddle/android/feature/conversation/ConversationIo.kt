@@ -1,7 +1,7 @@
 package social.waddle.android.feature.conversation
 
+import social.waddle.android.client.SendResult
 import social.waddle.client.ffi.WaddleMamPage
-import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /** Transport seam of a conversation screen (MUC channel or 1:1 DM). */
 interface ConversationIo {
@@ -14,8 +14,11 @@ interface ConversationIo {
      */
     suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage?
 
-    /** Send [body] to the conversation. */
-    suspend fun send(body: String): WaddleSendMessageOutcome
+    /**
+     * Send [body] to the conversation; [SendResult.queuedId] is set when
+     * the session manager persisted the message for offline replay.
+     */
+    suspend fun send(body: String): SendResult
 
     /**
      * The user is looking at the conversation: persist recency so the

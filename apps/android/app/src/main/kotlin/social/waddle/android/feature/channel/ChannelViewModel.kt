@@ -3,12 +3,12 @@ package social.waddle.android.feature.channel
 import androidx.lifecycle.ViewModelProvider
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
+import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleMamPage
-import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /** MUC channel conversation: joins on open, room MAM, groupchat sends. */
 class ChannelViewModel(
@@ -49,6 +49,6 @@ private class ChannelIo(
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         sessionManager.fetchRoomHistory(roomJid, maxMessages, beforeId)
 
-    override suspend fun send(body: String): WaddleSendMessageOutcome =
+    override suspend fun send(body: String): SendResult =
         sessionManager.sendGroupchatMessage(roomJid, body)
 }

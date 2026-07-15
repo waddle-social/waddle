@@ -35,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.toFfi
@@ -75,6 +76,9 @@ class XmppSessionManager(
     val dmStore = DmStore()
     val unreadStore = UnreadStore()
 
+    private val outboundQueue = OutboundQueue(sessionPrefs)
+    private val cursorTracker = ResumeCursorTracker()
+
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
 
@@ -106,6 +110,17 @@ class XmppSessionManager(
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
 
+    /** Conflated "cursors changed" ticks; the persister coalesces bursts. */
+    @Volatile
+    private var cursorWrites: Channel<Unit> = Channel(Channel.CONFLATED)
+
+    /**
+     * Set on the first `SessionReady` since process start — half of the
+     * fresh-stream heuristic in [consumeEvents].
+     */
+    @Volatile
+    private var hadReadySessionThisProcess = false
+
     private val retryRequests = Channel<Unit>(Channel.CONFLATED)
 
     private val lifecycleMutex = Mutex()
@@ -120,10 +135,12 @@ class XmppSessionManager(
         seedStoresFromPrefs()
 
         resumeSnapshots = Channel(Channel.CONFLATED)
+        cursorWrites = Channel(Channel.CONFLATED)
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         scope.launch { persistResumeSnapshots(resumeSnapshots) }
+        scope.launch { persistResumeCursors(cursorWrites) }
         scope.launch { runConnectionLoop(session) }
     }
 
@@ -174,7 +191,9 @@ class XmppSessionManager(
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
         val bridge = XmppEventBridge(::queueResumeSnapshot)
-        val client = clientFactory.create(buildConfig(session), bridge)
+        val config = buildConfig(session)
+        val client = clientFactory.create(config, bridge)
+        val hadResumeSnapshot = config.resumeState != null
         try {
             return coroutineScope {
                 val connector = async {
@@ -187,7 +206,9 @@ class XmppSessionManager(
                         failure
                     }
                 }
-                val consumer = async { consumeEvents(bridge.events, client, session, this) }
+                val consumer = async {
+                    consumeEvents(bridge.events, client, session, this, hadResumeSnapshot)
+                }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
                     connector.onAwait { failure ->
@@ -241,13 +262,79 @@ class XmppSessionManager(
     suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         fetchHistory { client -> client.fetchDmHistory(peerJid, maxMessages, beforeId) }
 
-    /** Send a groupchat message on the live connection. */
-    suspend fun sendGroupchatMessage(roomJid: String, body: String): WaddleSendMessageOutcome =
-        send { client -> client.sendGroupchatMessage(roomJid, body, null) }
+    /**
+     * Send a groupchat message on the live connection; a session-shaped
+     * failure persists the message to the outbound queue for replay (see
+     * [sendOrEnqueue]).
+     */
+    suspend fun sendGroupchatMessage(roomJid: String, body: String): SendResult =
+        sendOrEnqueue(conversationJid = roomJid, isGroupchat = true, body = body)
 
-    /** Send a 1:1 chat message on the live connection. */
-    suspend fun sendChatMessage(peerJid: String, body: String): WaddleSendMessageOutcome =
-        send { client -> client.sendChatMessage(peerJid, body, null) }
+    /** 1:1 chat twin of [sendGroupchatMessage]. */
+    suspend fun sendChatMessage(peerJid: String, body: String): SendResult =
+        sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
+
+    /**
+     * One manager-level send: the client stanza id is generated HERE
+     * (not by the FFI) so a queued replay can resend under the same
+     * XEP-0359 origin-id. `NotConnected`/`TransportError` mean no live
+     * session carried the message — those enqueue for replay on the
+     * next `SessionReady` and hand the queue id back via
+     * [SendResult.queuedId]; every other outcome passes through
+     * untouched (a live session rejected the payload — replaying the
+     * identical stanza cannot succeed).
+     */
+    private suspend fun sendOrEnqueue(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        body: String,
+    ): SendResult {
+        val clientStanzaId = newClientStanzaId()
+        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId)
+        if (!isQueueableFailure(outcome)) return SendResult(outcome)
+        val evicted = outboundQueue.enqueue(
+            QueuedOutboundMessage(
+                conversationJid = conversationJid,
+                isGroupchat = isGroupchat,
+                body = body,
+                clientStanzaId = clientStanzaId,
+                enqueuedAtMillis = System.currentTimeMillis(),
+            ),
+        )
+        evicted?.let { reportDroppedQueuedMessage(it, DROP_REASON_QUEUE_FULL) }
+        return SendResult(outcome, queuedId = clientStanzaId)
+    }
+
+    private suspend fun sendMessage(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        body: String,
+        stanzaId: String,
+    ): WaddleSendMessageOutcome = send { client ->
+        if (isGroupchat) {
+            client.sendGroupchatMessage(conversationJid, body, sendOptionsFor(stanzaId))
+        } else {
+            client.sendChatMessage(conversationJid, body, sendOptionsFor(stanzaId))
+        }
+    }
+
+    private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
+        outcome == WaddleSendMessageOutcome.NotConnected ||
+            outcome == WaddleSendMessageOutcome.TransportError
+
+    /**
+     * A queued message will never be delivered (cap eviction or a
+     * permanent replay rejection): `DeliveryFailed` flips any optimistic
+     * row that tracks the id to the retryable failed state — factual,
+     * not a faked ack — and the `Error` diagnostic surfaces the drop
+     * even when no conversation screen is tracking it.
+     */
+    private fun reportDroppedQueuedMessage(message: QueuedOutboundMessage, reason: String) {
+        fanOut(XmppEvent.DeliveryFailed(message.clientStanzaId))
+        fanOut(XmppEvent.Error("dropped queued message to ${message.conversationJid}: $reason"))
+    }
+
+    private fun newClientStanzaId(): String = java.util.UUID.randomUUID().toString()
 
     private suspend fun fetchHistory(
         fetch: suspend (WaddleClientInterface) -> WaddleMamPage,
@@ -287,6 +374,7 @@ class XmppSessionManager(
         client: WaddleClientInterface,
         session: WaddleSessionInfo,
         attemptScope: CoroutineScope,
+        hadResumeSnapshot: Boolean,
     ): AttemptEnd {
         val readiness = withTimeoutOrNull(connectTimeoutMillis) { awaitReadiness(events) }
         when (readiness) {
@@ -295,9 +383,28 @@ class XmppSessionManager(
             Readiness.READY -> Unit
         }
         activeClient = client
+        // Fresh-stream heuristic: the FFI does not report whether the
+        // XEP-0198 <resume/> was accepted, so treat the stream as fresh
+        // when (a) no resume snapshot was presented (definitely a new
+        // stream) or (b) this is the first `SessionReady` of the process
+        // (a snapshot that survived process death may resume, but
+        // catching up is cheap and dedupe collapses the overlap). Known
+        // gap, accepted: a mid-process resume that the server REJECTS
+        // looks resumed here and skips catch-up until the next fresh
+        // session; the open screen still refetches via its own
+        // SessionReady hook.
+        val freshStream = !hadResumeSnapshot || !hadReadySessionThisProcess
+        hadReadySessionThisProcess = true
         _connectionState.value = ConnectionState.Ready
         attemptScope.launch { refreshTopology(client) }
-        attemptScope.launch { rejoinPersistedRooms(client, session) }
+        // One sequential pipeline, deliberately not parallel: queued
+        // groupchat sends need the rejoin's join presence first, and the
+        // bounded catch-up must not race the replay or hammer the server.
+        attemptScope.launch {
+            rejoinPersistedRooms(client, session)
+            drainOutboundQueue()
+            if (freshStream) catchUpConversations()
+        }
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
@@ -332,6 +439,50 @@ class XmppSessionManager(
         }
     }
 
+    /**
+     * Replays the persisted outbound queue through the live attempt's
+     * client. Runs unconditionally on every `SessionReady` (a resumed
+     * stream replays 0198-unacked stanzas itself, but the persisted
+     * queue only ever holds messages NO stream accepted, so replaying
+     * them here can never duplicate a resume replay).
+     */
+    private suspend fun drainOutboundQueue() {
+        outboundQueue.drain(
+            send = { queued ->
+                sendMessage(
+                    conversationJid = queued.conversationJid,
+                    isGroupchat = queued.isGroupchat,
+                    body = queued.body,
+                    stanzaId = queued.clientStanzaId,
+                )
+            },
+            onDropped = { queued, outcome ->
+                reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
+            },
+        )
+    }
+
+    /**
+     * Fresh-stream MAM catch-up (web reconnect-catchup parity): fetch
+     * the newest archive page for every joined room plus the most
+     * recently active DMs, so conversations that are NOT on screen also
+     * recover messages missed while the stream was down. The FFI only
+     * pages with `before_id`, so instead of the web's `after`-cursor
+     * query this fetches the newest page and lets the timeline store's
+     * identity dedupe collapse the overlap — the same shape as the
+     * per-screen refetch. Sequential and bounded (one page each, DMs
+     * capped) to avoid hammering the server after every reconnect.
+     */
+    private suspend fun catchUpConversations() {
+        val rooms = roomStore.joinedRooms.value
+        for (roomJid in rooms) {
+            fetchRoomHistory(roomJid, CATCHUP_PAGE_SIZE, beforeId = null)
+        }
+        for (peerJid in cursorTracker.newestFirst(excluding = rooms, limit = CATCHUP_DM_LIMIT)) {
+            fetchDmHistory(peerJid, CATCHUP_PAGE_SIZE, beforeId = null)
+        }
+    }
+
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {
         for (event in events) {
             fanOut(event)
@@ -361,23 +512,66 @@ class XmppSessionManager(
                 persistDmRecency(event)
                 timelineStore.onLiveMessage(event.message)
                 dmStore.onChatMessage(ownBareJid, event.message)
+                val message = event.message
                 conversationKeyOf(
                     ownBareJid = ownBareJid,
                     ownNick = ownBareJid?.substringBefore('@'),
-                    from = event.message.from,
-                    to = event.message.to,
-                    isGroupchat = event.message.isMuc || event.message.messageType == "groupchat",
+                    from = message.from,
+                    to = message.to,
+                    isGroupchat = message.isMuc || message.messageType == "groupchat",
                 )?.let { key ->
-                    if (event.message.body != null) {
+                    if (message.body != null) {
                         unreadStore.onLiveMessage(key.jid, key.isMine)
+                        recordResumeCursor(
+                            conversationJid = key.jid,
+                            stanzaId = message.stanzaId ?: message.originId ?: message.id,
+                            timestamp = message.timestamp,
+                        )
                     }
                 }
             }
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
-            is XmppEvent.MamResult -> timelineStore.onArchivedMessage(event.message)
+            is XmppEvent.MamResult -> {
+                timelineStore.onArchivedMessage(event.message)
+                val message = event.message
+                if (message.body != null) {
+                    conversationKeyOf(
+                        ownBareJid = ownBareJid,
+                        ownNick = ownBareJid?.substringBefore('@'),
+                        from = message.from,
+                        to = message.to,
+                        isGroupchat = message.messageType == "groupchat",
+                    )?.let { key ->
+                        recordResumeCursor(
+                            conversationJid = key.jid,
+                            stanzaId = message.stanzaId ?: message.originId ?: message.id ?: message.mamId,
+                            timestamp = message.timestamp,
+                        )
+                    }
+                }
+            }
             else -> Unit
         }
         _events.tryEmit(event)
+    }
+
+    /**
+     * Advance-only cursor bookkeeping from the fan-out (never blocks):
+     * a moved cursor pokes the conflated write channel and the session-
+     * scoped persister flushes the snapshot — bursts coalesce into one
+     * DataStore write.
+     */
+    private fun recordResumeCursor(conversationJid: String, stanzaId: String?, timestamp: String?) {
+        stanzaId ?: return
+        if (cursorTracker.advance(conversationJid, stanzaId, timestamp ?: nowRfc3339())) {
+            cursorWrites.trySend(Unit)
+        }
+    }
+
+    private suspend fun persistResumeCursors(writes: ReceiveChannel<Unit>) {
+        for (write in writes) {
+            sessionPrefs.setResumeCursors(cursorTracker.snapshot())
+        }
     }
 
     private suspend fun refreshTopology(client: WaddleClientInterface) {
@@ -499,6 +693,7 @@ class XmppSessionManager(
     private suspend fun seedStoresFromPrefs() {
         val joinedRooms = sessionPrefs.joinedRooms.first()
         roomStore.replaceJoinedRooms(joinedRooms)
+        cursorTracker.seed(sessionPrefs.resumeCursors.first())
         dmStore.seed(
             sessionPrefs.lastSeen.first()
                 .filterKeys { it !in joinedRooms }
@@ -524,6 +719,7 @@ class XmppSessionManager(
         presenceStore.clear()
         dmStore.clear()
         unreadStore.clearAll()
+        cursorTracker.clear()
     }
 
     private enum class AttemptEnd { AUTH_FAILED, CONNECT_FAILED, DROPPED_AFTER_READY }
@@ -536,7 +732,16 @@ class XmppSessionManager(
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = 15_000L
+
+        /** Newest page per conversation on fresh-stream catch-up. */
+        const val CATCHUP_PAGE_SIZE = 50u
+
+        /** Only the most recently active DMs catch up (rooms: all joined). */
+        const val CATCHUP_DM_LIMIT = 3
+
         private const val RESOURCE_PREFIX = "waddle-android-"
         private const val EVENT_BUFFER_CAPACITY = 256
+        private const val DROP_REASON_QUEUE_FULL = "outbound queue full, oldest evicted"
+        private const val DROP_REASON_UNKNOWN = "rejected"
     }
 }

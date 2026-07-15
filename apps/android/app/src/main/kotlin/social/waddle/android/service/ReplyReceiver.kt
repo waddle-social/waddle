@@ -26,18 +26,20 @@ class ReplyReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
-                val outcome = if (isGroupchat) {
+                val result = if (isGroupchat) {
                     graph.sessionManager.sendGroupchatMessage(conversationJid, text)
                 } else {
                     graph.sessionManager.sendChatMessage(conversationJid, text)
                 }
-                // Only a server-acked send may echo into the shade as
-                // delivered; anything else (NotConnected during a
-                // reconnect window or process restart, transport/stanza
-                // errors) must surface as a visible failure — silently
+                // A written send OR a queued one may echo into the shade:
+                // queued replies are persisted and replayed by the session
+                // manager on reconnect, so prompting the user to retype
+                // (notifyReplyFailed) would produce a duplicate. Only a
+                // permanent rejection (invalid recipient/options, stanza
+                // error) surfaces as a visible failure — silently
                 // swallowing the reply while showing it as sent loses
                 // the message.
-                if (outcome is WaddleSendMessageOutcome.Sent) {
+                if (result.outcome is WaddleSendMessageOutcome.Sent || result.queued) {
                     graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
                 } else {
                     graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)

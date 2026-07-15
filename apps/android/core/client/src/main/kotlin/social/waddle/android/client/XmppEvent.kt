@@ -28,7 +28,11 @@ sealed interface XmppEvent {
     /** XEP-0198: the server acked the outbound message with this id. */
     data class DeliveryAcked(val stanzaId: String) : XmppEvent
 
-    /** XEP-0198: transport-level delivery failure for this id. */
+    /**
+     * The message with this id will not be delivered: a XEP-0198
+     * transport-level failure, or a dropped outbound-queue entry (cap
+     * eviction / permanent replay rejection).
+     */
     data class DeliveryFailed(val stanzaId: String) : XmppEvent
 
     data class Call(val event: WaddleCallEvent) : XmppEvent

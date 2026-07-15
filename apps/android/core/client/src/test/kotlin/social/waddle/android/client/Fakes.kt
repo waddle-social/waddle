@@ -90,6 +90,12 @@ class FakeWaddleClient : WaddleClientInterface {
     val sendCalls = mutableListOf<Pair<String, String>>()
     var sendOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("sent-1")
 
+    /** Options captured per send (the manager passes the stanza id here). */
+    val sendOptions = mutableListOf<WaddleSendOptions?>()
+
+    /** Per-call outcome overrides consumed before [sendOutcome]. */
+    val sendOutcomes = ArrayDeque<WaddleSendMessageOutcome>()
+
     override suspend fun connect() {
         connectCalls += 1
     }
@@ -135,12 +141,14 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
         sendCalls += peerJid to body
-        return sendOutcome
+        sendOptions += options
+        return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
 
     override suspend fun sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
         sendCalls += roomJid to body
-        return sendOutcome
+        sendOptions += options
+        return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()

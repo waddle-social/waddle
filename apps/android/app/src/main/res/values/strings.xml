@@ -46,6 +46,7 @@
     <string name="message_unknown_sender">Unknown</string>
     <string name="message_author_me">You</string>
     <string name="message_sending">Sending…</string>
+    <string name="message_queued">Queued — sends when connected</string>
     <string name="message_delivery_failed">Not delivered</string>
     <string name="message_retry">Retry</string>
     <string name="message_sticker">Sticker</string>

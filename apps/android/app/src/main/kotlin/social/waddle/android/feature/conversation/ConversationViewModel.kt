@@ -18,8 +18,9 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 /**
  * Shared timeline/composer logic for channels and DMs: store-backed
  * rows plus optimistic pending sends (deduped against echoes by stanza
- * id), single-flight budgeted MAM paging, delivery-failed markers, and
- * unread clearing while the conversation is on screen.
+ * id), single-flight budgeted MAM paging, delivery-failed and
+ * offline-queued markers, and unread clearing while the conversation is
+ * on screen.
  */
 open class ConversationViewModel(
     private val conversationJid: String,
@@ -106,7 +107,15 @@ open class ConversationViewModel(
         }
     }
 
-    /** Optimistic send: append a pending row, mark failed on bad outcome. */
+    /**
+     * Optimistic send: append a pending row. A `Sent` outcome adopts the
+     * returned stanza id; a QUEUED failure (the manager persisted the
+     * message for replay — [SendResult.queuedId]) adopts the queue id,
+     * which the replay reuses as its XEP-0359 origin-id, so the eventual
+     * echo collapses this row and delivery events target it, exactly
+     * like a live send. Only non-queued (permanent) outcomes mark the
+     * row failed.
+     */
     fun send(body: String) {
         val text = body.trim()
         if (text.isEmpty()) return
@@ -119,20 +128,24 @@ open class ConversationViewModel(
         )
         pending.update { it + message }
         viewModelScope.launch {
-            when (val outcome = io.send(text)) {
-                is WaddleSendMessageOutcome.Sent ->
-                    updatePending(message.localId) {
-                        it.copy(
-                            stanzaId = outcome.stanzaId,
-                            // Both the ack AND the failure event can beat
-                            // this continuation; failure wins.
-                            acked = outcome.stanzaId in ackedIds &&
-                                outcome.stanzaId !in failedIds,
-                            failed = outcome.stanzaId in failedIds,
-                        )
-                    }
-                else ->
-                    updatePending(message.localId) { it.copy(failed = true) }
+            val result = io.send(text)
+            val trackedId = when (val outcome = result.outcome) {
+                is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
+                else -> result.queuedId
+            }
+            if (trackedId == null) {
+                updatePending(message.localId) { it.copy(failed = true) }
+                return@launch
+            }
+            updatePending(message.localId) {
+                it.copy(
+                    stanzaId = trackedId,
+                    queued = result.queued && trackedId !in failedIds,
+                    // Both the ack AND the failure event can beat this
+                    // continuation; failure wins.
+                    acked = trackedId in ackedIds && trackedId !in failedIds,
+                    failed = trackedId in failedIds,
+                )
             }
         }
     }
@@ -164,14 +177,18 @@ open class ConversationViewModel(
     private fun markAcked(stanzaId: String) {
         ackedIds += stanzaId
         pending.update { list ->
-            list.map { if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false) else it }
+            list.map {
+                if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false, queued = false) else it
+            }
         }
     }
 
     private fun markFailed(stanzaId: String) {
         failedIds += stanzaId
         pending.update { list ->
-            list.map { if (it.stanzaId == stanzaId) it.copy(failed = true) else it }
+            list.map {
+                if (it.stanzaId == stanzaId) it.copy(failed = true, queued = false) else it
+            }
         }
     }
 

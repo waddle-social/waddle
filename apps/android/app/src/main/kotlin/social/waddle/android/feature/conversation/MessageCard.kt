@@ -85,7 +85,11 @@ private fun PendingMessageCard(
 ) {
     MessageBubble(
         author = stringResource(R.string.message_author_me),
-        time = if (message.failed) null else stringResource(R.string.message_sending),
+        time = when {
+            message.failed -> null
+            message.queued -> stringResource(R.string.message_queued)
+            else -> stringResource(R.string.message_sending)
+        },
         body = message.body,
         isMine = true,
         modifier = modifier,

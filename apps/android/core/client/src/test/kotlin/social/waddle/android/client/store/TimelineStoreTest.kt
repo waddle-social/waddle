@@ -104,6 +104,95 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `live overflow trims the oldest rows at the cap`() {
+        val bounded = TimelineStore(maxItemsPerConversation = 3).apply {
+            setOwnBareJid("me@waddle.test")
+        }
+        repeat(5) { index ->
+            bounded.onLiveMessage(
+                testMessage(
+                    stanzaId = "s-$index",
+                    body = "live-$index",
+                    from = "alice@waddle.test",
+                    timestamp = "2026-07-15T10:00:0${index}Z",
+                ),
+            )
+        }
+
+        val bodies = bounded.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals("newest cap-many survive, oldest dropped", listOf("live-2", "live-3", "live-4"), bodies)
+    }
+
+    @Test
+    fun `mam backfill is never evicted while the user is paging`() {
+        val bounded = TimelineStore(maxItemsPerConversation = 3).apply {
+            setOwnBareJid("me@waddle.test")
+        }
+        // Live traffic fills the conversation to the cap...
+        repeat(3) { index ->
+            bounded.onLiveMessage(
+                testMessage(
+                    stanzaId = "live-$index",
+                    body = "live-$index",
+                    from = "alice@waddle.test",
+                    timestamp = "2026-07-15T10:00:0${index}Z",
+                ),
+            )
+        }
+        // ...and an older MAM page merges in: the archived rows must all
+        // land (only LIVE appends enforce the cap — class KDoc invariant).
+        bounded.onArchivedMessage(
+            testArchivedMessage(mamId = "m1", stanzaId = "old-1", body = "old-1", timestamp = "2026-07-15T09:00:00Z"),
+        )
+        bounded.onArchivedMessage(
+            testArchivedMessage(mamId = "m2", stanzaId = "old-2", body = "old-2", timestamp = "2026-07-15T09:00:01Z"),
+        )
+
+        val bodies = bounded.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(
+            listOf("old-1", "old-2", "live-0", "live-1", "live-2"),
+            bodies,
+        )
+    }
+
+    @Test
+    fun `live arrival while over the cap re-trims from the oldest end`() {
+        val bounded = TimelineStore(maxItemsPerConversation = 3).apply {
+            setOwnBareJid("me@waddle.test")
+        }
+        repeat(3) { index ->
+            bounded.onLiveMessage(
+                testMessage(
+                    stanzaId = "live-$index",
+                    body = "live-$index",
+                    from = "alice@waddle.test",
+                    timestamp = "2026-07-15T10:00:0${index}Z",
+                ),
+            )
+        }
+        bounded.onArchivedMessage(
+            testArchivedMessage(mamId = "m1", stanzaId = "old-1", body = "old-1", timestamp = "2026-07-15T09:00:00Z"),
+        )
+        assertEquals(4, bounded.timeline("alice@waddle.test").value.size)
+
+        bounded.onLiveMessage(
+            testMessage(
+                stanzaId = "live-3",
+                body = "live-3",
+                from = "alice@waddle.test",
+                timestamp = "2026-07-15T10:00:03Z",
+            ),
+        )
+
+        val bodies = bounded.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(
+            "oldest (backfilled) rows evict first; paging can re-fetch them",
+            listOf("live-1", "live-2", "live-3"),
+            bodies,
+        )
+    }
+
+    @Test
     fun `clear empties published timelines`() {
         val timeline = store.timeline("alice@waddle.test")
         store.onLiveMessage(testMessage(stanzaId = "s1"))

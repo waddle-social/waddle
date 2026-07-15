@@ -13,7 +13,8 @@ import kotlinx.serialization.json.Json
 /**
  * Session-scoped persistence (`session.preferences_pb`), mirroring the
  * web localStorage keys: `waddle.chat.session`, `waddle.chat.sm-resume`,
- * `waddle.chat.joined-rooms`, `waddle.chat.last-seen`.
+ * `waddle.chat.joined-rooms`, `waddle.chat.last-seen`,
+ * `waddle.chat.outbound-queue`, `waddle.chat.resume-cursors`.
  */
 class SessionPrefs(
     private val dataStore: DataStore<Preferences>,
@@ -32,6 +33,16 @@ class SessionPrefs(
     val lastSeen: Flow<Map<String, String>> = dataStore.data.map { prefs ->
         prefs[KEY_LAST_SEEN]?.let { stored ->
             runCatching { json.decodeFromString<Map<String, String>>(stored) }.getOrNull()
+        } ?: emptyMap()
+    }
+
+    val outboundQueue: Flow<List<QueuedOutboundMessage>> = dataStore.data.map { prefs ->
+        prefs[KEY_OUTBOUND_QUEUE]?.let(::decodeOutboundQueue) ?: emptyList()
+    }
+
+    val resumeCursors: Flow<Map<String, ResumeCursor>> = dataStore.data.map { prefs ->
+        prefs[KEY_RESUME_CURSORS]?.let { stored ->
+            runCatching { json.decodeFromString<Map<String, ResumeCursor>>(stored) }.getOrNull()
         } ?: emptyMap()
     }
 
@@ -63,6 +74,31 @@ class SessionPrefs(
             prefs[KEY_LAST_SEEN] = json.encodeToString(current + (conversationJid to marker))
         }
     }
+
+    /**
+     * Atomic read-modify-write of the persisted outbound queue: the
+     * DataStore serializes concurrent edits, so enqueue/remove callers
+     * need no external lock.
+     */
+    suspend fun updateOutboundQueue(
+        transform: (List<QueuedOutboundMessage>) -> List<QueuedOutboundMessage>,
+    ) {
+        dataStore.edit { prefs ->
+            val next = transform(prefs[KEY_OUTBOUND_QUEUE]?.let(::decodeOutboundQueue) ?: emptyList())
+            if (next.isEmpty()) prefs.remove(KEY_OUTBOUND_QUEUE)
+            else prefs[KEY_OUTBOUND_QUEUE] = json.encodeToString(next)
+        }
+    }
+
+    suspend fun setResumeCursors(cursors: Map<String, ResumeCursor>) {
+        dataStore.edit { prefs ->
+            if (cursors.isEmpty()) prefs.remove(KEY_RESUME_CURSORS)
+            else prefs[KEY_RESUME_CURSORS] = json.encodeToString(cursors)
+        }
+    }
+
+    private fun decodeOutboundQueue(stored: String): List<QueuedOutboundMessage>? =
+        runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
 
     /**
      * Stable-per-install 8-hex suffix for the XMPP resource
@@ -99,6 +135,8 @@ class SessionPrefs(
         val KEY_SM_RESUME = stringPreferencesKey("sm_resume")
         val KEY_JOINED_ROOMS = stringSetPreferencesKey("joined_rooms")
         val KEY_LAST_SEEN = stringPreferencesKey("last_seen")
+        val KEY_OUTBOUND_QUEUE = stringPreferencesKey("outbound_queue")
+        val KEY_RESUME_CURSORS = stringPreferencesKey("resume_cursors")
         val KEY_RESOURCE_SUFFIX = stringPreferencesKey("resource_suffix")
 
         const val RESOURCE_SUFFIX_LENGTH = 8

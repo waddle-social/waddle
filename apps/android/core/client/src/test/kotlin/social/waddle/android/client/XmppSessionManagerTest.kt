@@ -350,14 +350,12 @@ class XmppSessionManagerTest {
 
         assertEquals(false, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
         assertEquals(null, harness.manager.fetchRoomHistory("general@muc.waddle.test", 50u, null))
-        assertEquals(
-            WaddleSendMessageOutcome.NotConnected,
-            harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hi"),
-        )
-        assertEquals(
-            WaddleSendMessageOutcome.NotConnected,
-            harness.manager.sendChatMessage("alice@waddle.test", "hi"),
-        )
+        val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hi")
+        assertEquals(WaddleSendMessageOutcome.NotConnected, roomSend.outcome)
+        assertTrue("session-shaped failure queues for replay", roomSend.queued)
+        val dmSend = harness.manager.sendChatMessage("alice@waddle.test", "hi")
+        assertEquals(WaddleSendMessageOutcome.NotConnected, dmSend.outcome)
+        assertTrue(dmSend.queued)
         assertTrue(harness.factory.clients.single().sendCalls.isEmpty())
 
         harness.manager.logout()
@@ -433,17 +431,20 @@ class XmppSessionManagerTest {
         val client = harness.factory.clients.single()
         client.sendOutcome = WaddleSendMessageOutcome.Sent("stanza-42")
 
+        val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room")
+        assertEquals(WaddleSendMessageOutcome.Sent("stanza-42"), roomSend.outcome)
+        assertEquals("live sends never queue", false, roomSend.queued)
         assertEquals(
             WaddleSendMessageOutcome.Sent("stanza-42"),
-            harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room"),
-        )
-        assertEquals(
-            WaddleSendMessageOutcome.Sent("stanza-42"),
-            harness.manager.sendChatMessage("alice@waddle.test", "hello dm"),
+            harness.manager.sendChatMessage("alice@waddle.test", "hello dm").outcome,
         )
         assertEquals(
             listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
             client.sendCalls,
+        )
+        assertTrue(
+            "manager-generated stanza id rides the send options",
+            client.sendOptions.all { it?.stanzaId != null },
         )
 
         // The attempt died → the passthrough must stop targeting the client.
@@ -451,7 +452,7 @@ class XmppSessionManagerTest {
         runCurrent()
         assertEquals(
             WaddleSendMessageOutcome.NotConnected,
-            harness.manager.sendChatMessage("alice@waddle.test", "late"),
+            harness.manager.sendChatMessage("alice@waddle.test", "late").outcome,
         )
 
         harness.manager.logout()

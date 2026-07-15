@@ -67,6 +67,38 @@ class SessionPrefsTest {
     }
 
     @Test
+    fun `outbound queue updates atomically and clears when empty`() = runBlocking {
+        val prefs = newPrefs()
+        val message = QueuedOutboundMessage(
+            conversationJid = "alice@waddle.test",
+            isGroupchat = false,
+            body = "hello",
+            clientStanzaId = "q-1",
+            enqueuedAtMillis = 1_000L,
+        )
+
+        prefs.updateOutboundQueue { current -> current + message }
+        assertEquals(listOf(message), prefs.outboundQueue.first())
+
+        prefs.updateOutboundQueue { current -> current.filterNot { it.clientStanzaId == "q-1" } }
+        assertTrue(prefs.outboundQueue.first().isEmpty())
+    }
+
+    @Test
+    fun `resume cursors round trip and empty clears the key`() = runBlocking {
+        val prefs = newPrefs()
+        val cursors = mapOf(
+            "alice@waddle.test" to ResumeCursor(stanzaId = "s-1", timestamp = "2026-07-15T10:00:00Z"),
+        )
+
+        prefs.setResumeCursors(cursors)
+        assertEquals(cursors, prefs.resumeCursors.first())
+
+        prefs.setResumeCursors(emptyMap())
+        assertTrue(prefs.resumeCursors.first().isEmpty())
+    }
+
+    @Test
     fun `resource suffix is eight hex chars and stable across clear`() = runBlocking {
         val prefs = newPrefs()
 

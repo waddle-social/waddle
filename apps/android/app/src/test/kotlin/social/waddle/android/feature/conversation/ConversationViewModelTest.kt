@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
@@ -30,7 +31,7 @@ class ConversationViewModelTest {
         val fetchCalls = mutableListOf<Pair<UInt, String?>>()
         val pages = ArrayDeque<WaddleMamPage>()
         var joinedCount = 0
-        var sendOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("stanza-1")
+        var sendResult: SendResult = SendResult(WaddleSendMessageOutcome.Sent("stanza-1"))
         val sent = mutableListOf<String>()
 
         override suspend fun ensureJoined() {
@@ -44,9 +45,9 @@ class ConversationViewModelTest {
             return page
         }
 
-        override suspend fun send(body: String): WaddleSendMessageOutcome {
+        override suspend fun send(body: String): SendResult {
             sent += body
-            return sendOutcome
+            return sendResult
         }
     }
 
@@ -163,7 +164,7 @@ class ConversationViewModelTest {
         // stanza-id; only the origin-id round-trips the client id the
         // send returned. Matching on the collapsed timeline key alone
         // rendered every sent channel message twice.
-        io.sendOutcome = WaddleSendMessageOutcome.Sent("client-origin-id")
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("client-origin-id"))
         val viewModel = createViewModel()
         runCurrent()
 
@@ -194,7 +195,7 @@ class ConversationViewModelTest {
 
     @Test
     fun `delivery ack marks the pending row without hiding it`() = runTest {
-        io.sendOutcome = WaddleSendMessageOutcome.Sent("client-origin-id")
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("client-origin-id"))
         val viewModel = createViewModel()
         runCurrent()
 
@@ -232,7 +233,7 @@ class ConversationViewModelTest {
 
     @Test
     fun `acked dm send stays visible with no reflection`() = runTest {
-        io.sendOutcome = WaddleSendMessageOutcome.Sent("dm-origin-id")
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("dm-origin-id"))
         val viewModel = createViewModel()
         runCurrent()
 
@@ -252,20 +253,21 @@ class ConversationViewModelTest {
 
     @Test
     fun `failed outcomes and delivery failures mark the pending row`() = runTest {
-        io.sendOutcome = WaddleSendMessageOutcome.NotConnected
+        // Permanent (non-queueable) failure: no queue id accompanies it.
+        io.sendResult = SendResult(WaddleSendMessageOutcome.StanzaError)
         val viewModel = createViewModel()
         runCurrent()
 
-        viewModel.send("offline message")
+        viewModel.send("rejected message")
         runCurrent()
         val failedRow = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
         assertTrue(failedRow.message.failed)
 
         // Retry with a working transport that later reports a 0198 failure.
-        io.sendOutcome = WaddleSendMessageOutcome.Sent("s-late-fail")
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("s-late-fail"))
         viewModel.retry(failedRow.message.localId)
         runCurrent()
-        assertEquals(listOf("offline message", "offline message"), io.sent)
+        assertEquals(listOf("rejected message", "rejected message"), io.sent)
         val retried = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
         assertFalse(retried.message.failed)
 
@@ -273,6 +275,90 @@ class ConversationViewModelTest {
         runCurrent()
         val lateFailed = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
         assertTrue(lateFailed.message.failed)
+    }
+
+    @Test
+    fun `queued send renders as queued and reconciles with the replayed echo`() = runTest {
+        // The manager persisted the offline send under "q-1"; the queue
+        // replay reuses that id as the XEP-0359 origin-id.
+        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-1")
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.send("typed on the subway")
+        runCurrent()
+        val queuedRow = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
+        assertTrue("queued, not failed", queuedRow.message.queued)
+        assertFalse(queuedRow.message.failed)
+        assertEquals("q-1", queuedRow.message.stanzaId)
+
+        // Reconnect: the drain sent the message and the room echoed it.
+        store.onLiveMessage(
+            testMessage(
+                stanzaId = "room-assigned-id",
+                originId = "q-1",
+                from = "$ROOM_JID/icepuma",
+                to = OWN_JID,
+                body = "typed on the subway",
+                messageType = "groupchat",
+                isMuc = true,
+            ),
+        )
+        runCurrent()
+
+        val rows = viewModel.uiState.value.rows
+        assertEquals("echo replaces the queued row", 1, rows.size)
+        assertTrue(rows.single() is ConversationRow.Stored)
+    }
+
+    @Test
+    fun `queued send flips to failed when the queue drops it`() = runTest {
+        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-2")
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.send("never makes it")
+        runCurrent()
+        assertTrue(
+            (viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed).message.queued,
+        )
+
+        // Cap eviction / permanent replay rejection surfaces as a
+        // DeliveryFailed for the queue id.
+        events.emit(XmppEvent.DeliveryFailed("q-2"))
+        runCurrent()
+
+        val row = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
+        assertTrue(row.message.failed)
+        assertFalse("failed row is retryable, no longer queued", row.message.queued)
+
+        // Retry goes back through the composer path.
+        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("s-retry"))
+        viewModel.retry(row.message.localId)
+        runCurrent()
+        assertEquals(listOf("never makes it", "never makes it"), io.sent)
+        val retried = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
+        assertFalse(retried.message.failed)
+        assertFalse(retried.message.queued)
+    }
+
+    @Test
+    fun `queued dm send acks after the replay without an echo`() = runTest {
+        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-3")
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.send("dm while offline")
+        runCurrent()
+
+        // Reconnect: the drain sent it and the server 0198-acked the id.
+        events.emit(XmppEvent.DeliveryAcked("q-3"))
+        runCurrent()
+
+        val row = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
+        assertTrue(row.message.acked)
+        assertFalse("delivered, no longer queued", row.message.queued)
+        assertFalse(row.message.failed)
     }
 
     @Test
