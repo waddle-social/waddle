@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -38,11 +40,15 @@ import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.android.client.store.ChatStateStore
 import social.waddle.android.client.store.DmStore
+import social.waddle.android.client.store.ReadCursorStore
+import social.waddle.android.client.store.TimelineItem
+import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.store.PresenceStore
 import social.waddle.android.client.store.RoomStore
 import social.waddle.android.client.store.TimelineStore
@@ -52,6 +58,7 @@ import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSaslCondition
@@ -71,6 +78,7 @@ class XmppSessionManager(
     private val sessionPrefs: SessionPrefs,
     private val clientFactory: ClientFactory,
     private val networkSignal: NetworkSignal,
+    private val userPrefs: UserPrefs,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
@@ -81,6 +89,7 @@ class XmppSessionManager(
     val dmStore = DmStore()
     val unreadStore = UnreadStore()
     val chatStateStore = ChatStateStore()
+    val readCursorStore = ReadCursorStore()
 
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val cursorTracker = ResumeCursorTracker()
@@ -112,6 +121,10 @@ class XmppSessionManager(
 
     @Volatile
     private var ownBareJid: String? = null
+
+    /** XEP-0490 publish-options probe result, reset per attempt. */
+    @Volatile
+    private var mdsPublishSupported: Boolean? = null
 
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
@@ -305,6 +318,90 @@ class XmppSessionManager(
         sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
 
     /**
+     * Mark the newest displayable message of a conversation as read:
+     * sends the XEP-0333 `<displayed/>` (gated on the read-receipts
+     * pref, and on `stanza_id_by == room` for MUCs / an explicit marker
+     * request for DMs — web parity) and publishes the XEP-0490 MDS
+     * cursor (independent of the pref) so sibling devices retire their
+     * badges. Equality-deduped per conversation; safe to call on every
+     * timeline change while the conversation is visible.
+     */
+    suspend fun markConversationDisplayed(conversationJid: String, isGroupchat: Boolean) {
+        val conversation = bareJid(conversationJid)
+        val target = timelineStore.timeline(conversation).value.lastOrNull {
+            !it.isMine && it.tombstone == null
+        } ?: return
+        val ids = displayIdsOf(target) ?: return
+        if (!readCursorStore.advance(conversation, ids.stanzaId)) return
+        unreadStore.clear(conversation)
+        val client = activeClient ?: return
+        val markerAllowed = when {
+            !readReceiptsEnabled() -> false
+            isGroupchat -> ids.stanzaIdBy == conversation
+            else -> ids.markerRequested
+        }
+        if (markerAllowed) {
+            runCatching { client.sendDisplayed(conversation, ids.stanzaId, isGroupchat) }
+        }
+        if (ids.stanzaIdBy != null && supportsMdsPublish(client)) {
+            runCatching { client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy) }
+        }
+    }
+
+    private suspend fun readReceiptsEnabled(): Boolean =
+        runCatching { userPrefs.readReceiptsEnabled.first() }.getOrDefault(true)
+
+    /**
+     * XEP-0490 §3 publish-options probe, once per session attempt
+     * (web parity); a failed probe retries on the next dispatch.
+     */
+    private suspend fun supportsMdsPublish(client: WaddleClientInterface): Boolean {
+        mdsPublishSupported?.let { return it }
+        val supported = runCatching { client.supportsMdsPublishOptions() }.getOrNull() ?: return false
+        mdsPublishSupported = supported
+        return supported
+    }
+
+    private fun displayIdsOf(item: TimelineItem): DisplayIds? = when (val source = item.source) {
+        is TimelineSource.Live -> source.message.stanzaId?.let { id ->
+            DisplayIds(id, source.message.stanzaIdBy, source.message.displayedMarkerRequested)
+        }
+        is TimelineSource.Archived -> source.message.stanzaId?.let { id ->
+            // The archive does not carry `<request/>`; archived DM rows
+            // sync via MDS only.
+            DisplayIds(id, source.message.stanzaIdBy, markerRequested = false)
+        }
+    }
+
+    /**
+     * A displayed cursor from ANOTHER device (MDS fetch or live PEP
+     * event): advance the local cursor and recompute the badge from the
+     * loaded timeline. An entry whose target is not loaded is ignored —
+     * the conversation's next open recomputes from scratch anyway.
+     */
+    private fun applyMdsEntry(entry: WaddleMdsDisplayedEntry) {
+        val conversation = bareJid(entry.chatId)
+        val items = timelineStore.timeline(conversation).value
+        val index = items.indexOfLast { entry.stanzaId in it.identityIds }
+        if (index < 0) return
+        val current = readCursorStore.cursor(conversation)
+        val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
+        if (currentIndex >= index) return
+        readCursorStore.advance(conversation, entry.stanzaId)
+        val unread = items.subList(index + 1, items.size).count { !it.isMine && it.tombstone == null }
+        unreadStore.set(conversation, unread)
+    }
+
+    /**
+     * XEP-0490 connect bootstrap: seed cursors from the account's MDS
+     * node, then subscribe for live sibling-device updates.
+     */
+    private suspend fun bootstrapMdsDisplayed(client: WaddleClientInterface) {
+        runCatching { client.fetchMdsDisplayed() }.getOrNull()?.forEach(::applyMdsEntry)
+        runCatching { client.subscribeMdsDisplayed() }
+    }
+
+    /**
      * XEP-0085 typing notification: best-effort and live-session-only —
      * a stale typing state must never replay from a queue, so a
      * disconnected send is simply dropped (web parity).
@@ -449,6 +546,7 @@ class XmppSessionManager(
             Readiness.READY -> Unit
         }
         activeClient = client
+        mdsPublishSupported = null
         // Fresh-stream heuristic: the FFI does not report whether the
         // XEP-0198 <resume/> was accepted, so treat the stream as fresh
         // when (a) no resume snapshot was presented (definitely a new
@@ -474,6 +572,9 @@ class XmppSessionManager(
                 rejoinPersistedRooms(client, session)
                 drainOutboundQueue()
                 if (freshStream) catchUpConversations()
+                // After catch-up so fetched cursors can resolve against
+                // the freshly loaded newest pages.
+                bootstrapMdsDisplayed(client)
             }
         }
         // Auth classification is deliberately confined to the pre-ready
@@ -582,6 +683,14 @@ class XmppSessionManager(
     private fun fanOut(event: XmppEvent) {
         when (event) {
             is XmppEvent.Message -> {
+                // A live MDS PEP event is pure read-state metadata from a
+                // sibling device — apply the cursors and skip every chat
+                // consumer.
+                event.message.mdsDisplayed?.let { entries ->
+                    entries.forEach(::applyMdsEntry)
+                    _events.tryEmit(event)
+                    return
+                }
                 // Mutation stanzas (reactions/corrections/retractions/
                 // moderation) alter existing rows via the timeline store;
                 // they are not new DM activity and must not reorder or
@@ -658,14 +767,23 @@ class XmppSessionManager(
     }
 
     /**
-     * 1s expiry ticker for incoming typing indicators, alive for the
-     * session; skips work (and publishes nothing) while nobody types.
+     * 1s expiry ticker for incoming typing indicators — armed ONLY while
+     * someone is composing. An unconditional periodic timer would keep a
+     * task perpetually pending on virtual-time test schedulers (and wake
+     * the process forever); this one parks on the composing flow when
+     * idle and dies with the last composer.
      */
     private suspend fun sweepChatStates() {
-        while (true) {
-            delay(CHAT_STATE_SWEEP_MILLIS)
-            chatStateStore.sweep()
-        }
+        chatStateStore.composing
+            .map { it.isNotEmpty() }
+            .distinctUntilChanged()
+            .collectLatest { anyComposing ->
+                if (!anyComposing) return@collectLatest
+                while (true) {
+                    delay(CHAT_STATE_SWEEP_MILLIS)
+                    if (!chatStateStore.sweep()) break
+                }
+            }
     }
 
     /**
@@ -855,6 +973,7 @@ class XmppSessionManager(
         dmStore.clear()
         unreadStore.clearAll()
         chatStateStore.clear()
+        readCursorStore.clear()
         cursorTracker.clear()
     }
 
@@ -864,6 +983,13 @@ class XmppSessionManager(
 
     /** Wrapper so a conflated channel can carry a `null` (= clear) update. */
     private data class ResumeUpdate(val snapshot: SmResumeSnapshot?)
+
+    /** The identity a displayed dispatch needs off a timeline row. */
+    private data class DisplayIds(
+        val stanzaId: String,
+        val stanzaIdBy: String?,
+        val markerRequested: Boolean,
+    )
 
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */

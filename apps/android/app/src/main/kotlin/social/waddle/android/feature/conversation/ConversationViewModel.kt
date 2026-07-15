@@ -48,6 +48,9 @@ open class ConversationViewModel(
     private val ackedIds = mutableSetOf<String>()
     private val failedIds = mutableSetOf<String>()
 
+    @Volatile
+    private var visible = false
+
     private val typingNotifier = ComposerTypingNotifier(
         scope = viewModelScope,
         sendState = { state -> io.sendChatState(state) },
@@ -95,6 +98,10 @@ open class ConversationViewModel(
                 pending.update { list ->
                     list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
                 }
+                // New rows arriving while the conversation is on screen
+                // count as read (the marker path dedupes repeats). Guarded:
+                // a marker failure must not kill the pruning collector.
+                if (visible) runCatching { io.markDisplayed() }
             }
         }
         viewModelScope.launch {
@@ -209,13 +216,16 @@ open class ConversationViewModel(
 
     /** The conversation is on screen: suppress and clear unread counts. */
     fun onConversationVisible() {
+        visible = true
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
         io.recordConversationSeen()
         viewModelScope.launch { runCatching { onConversationRead(conversationJid) } }
+        viewModelScope.launch { runCatching { io.markDisplayed() } }
     }
 
     fun onConversationHidden() {
+        visible = false
         unreadStore.clearActiveConversationIf(conversationJid)
     }
 

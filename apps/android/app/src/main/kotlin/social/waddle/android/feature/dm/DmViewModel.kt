@@ -53,4 +53,8 @@ private class DmIo(
     override suspend fun sendChatState(state: WaddleChatState) {
         sessionManager.sendChatState(peerJid, isGroupchat = false, state = state)
     }
+
+    override suspend fun markDisplayed() {
+        sessionManager.markConversationDisplayed(peerJid, isGroupchat = false)
+    }
 }

@@ -5,6 +5,7 @@ import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSmResumeState
@@ -29,6 +30,9 @@ fun testMessage(
     reactionTargetId: String? = null,
     reactionEmojis: List<String> = emptyList(),
     chatState: WaddleChatState? = null,
+    stanzaIdBy: String? = null,
+    displayedMarkerRequested: Boolean = false,
+    mdsDisplayed: List<WaddleMdsDisplayedEntry>? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -38,7 +42,7 @@ fun testMessage(
     messageType = messageType,
     timestamp = timestamp,
     stanzaId = stanzaId,
-    stanzaIdBy = null,
+    stanzaIdBy = stanzaIdBy,
     stanzaIds = emptyList(),
     originId = originId,
     replacesId = replacesId,
@@ -51,7 +55,7 @@ fun testMessage(
     reactionTargetId = reactionTargetId,
     reactionEmojis = reactionEmojis,
     chatState = chatState,
-    displayedMarkerRequested = false,
+    displayedMarkerRequested = displayedMarkerRequested,
     displayedMarkerId = null,
     isMuc = isMuc,
     thread = null,
@@ -73,7 +77,7 @@ fun testMessage(
     replyFallbackEnd = null,
     callThread = null,
     sharedFiles = emptyList(),
-    mdsDisplayed = null,
+    mdsDisplayed = mdsDisplayed,
 )
 
 fun testArchivedMessage(
@@ -94,12 +98,13 @@ fun testArchivedMessage(
     moderationReason: String? = null,
     reactionTargetId: String? = null,
     reactionEmojis: List<String> = emptyList(),
+    stanzaIdBy: String? = null,
 ): WaddleArchivedMessage = WaddleArchivedMessage(
     mamId = mamId,
     queryId = null,
     id = id,
     stanzaId = stanzaId,
-    stanzaIdBy = null,
+    stanzaIdBy = stanzaIdBy,
     stanzaIds = emptyList(),
     originId = originId,
     timestamp = timestamp,

@@ -38,7 +38,7 @@ class ChatStateStore(private val clock: () -> Long = System::currentTimeMillis) 
             if (state == WaddleChatState.COMPOSING) {
                 composers.getOrPut(conversation) { mutableMapOf() }[sender] = clock() + TYPING_EXPIRY_MILLIS
             } else {
-                composers[conversation]?.remove(sender)
+                removeComposer(conversation, sender)
             }
             publish()
         }
@@ -47,8 +47,18 @@ class ChatStateStore(private val clock: () -> Long = System::currentTimeMillis) 
     /** A delivered message ends its sender's typing state. */
     fun onLiveMessage(conversationJid: String, sender: String) {
         synchronized(lock) {
-            if (composers[bareJid(conversationJid)]?.remove(sender) != null) publish()
+            if (removeComposer(bareJid(conversationJid), sender)) publish()
         }
+    }
+
+    /** Never leaves an empty conversation entry: [composing]'s emptiness
+     *  gates the caller's sweep ticker, so a stale empty map would keep
+     *  a timer armed forever. */
+    private fun removeComposer(conversation: String, sender: String): Boolean {
+        val senders = composers[conversation] ?: return false
+        val removed = senders.remove(sender) != null
+        if (senders.isEmpty()) composers.remove(conversation)
+        return removed
     }
 
     /**

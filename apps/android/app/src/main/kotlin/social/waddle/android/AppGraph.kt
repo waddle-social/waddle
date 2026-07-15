@@ -53,6 +53,7 @@ class AppGraph(context: Context) {
         sessionPrefs = sessionPrefs,
         clientFactory = RustClientFactory(),
         networkSignal = networkSignal,
+        userPrefs = userPrefs,
     )
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)

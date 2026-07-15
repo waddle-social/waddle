@@ -227,6 +227,7 @@ class MessageNotifier(
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(contentIntent(conversationJid))
             .addAction(replyAction(conversationJid, isGroupchat))
+            .addAction(markReadAction(conversationJid, isGroupchat))
             .setDeleteIntent(dismissIntent(conversationJid))
         if (replyFailed) {
             builder.setSubText(context.getString(R.string.notification_reply_failed))
@@ -293,6 +294,28 @@ class MessageNotifier(
             .addRemoteInput(remoteInput)
             .setAllowGeneratedReplies(false)
             .build()
+    }
+
+    private fun markReadAction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+    ): NotificationCompat.Action {
+        val intent = Intent(context, MarkReadReceiver::class.java)
+            .setAction(MarkReadReceiver.ACTION_MARK_READ)
+            .setData(conversationUri("mark-read", conversationJid))
+            .putExtra(MarkReadReceiver.EXTRA_CONVERSATION_JID, conversationJid)
+            .putExtra(MarkReadReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Action.Builder(
+            R.drawable.ic_launcher_foreground,
+            context.getString(R.string.notification_mark_read_label),
+            pendingIntent,
+        ).build()
     }
 
     private fun dismissIntent(conversationJid: String): PendingIntent =

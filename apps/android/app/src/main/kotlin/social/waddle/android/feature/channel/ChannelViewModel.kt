@@ -60,4 +60,8 @@ private class ChannelIo(
     override suspend fun sendChatState(state: WaddleChatState) {
         sessionManager.sendChatState(roomJid, isGroupchat = true, state = state)
     }
+
+    override suspend fun markDisplayed() {
+        sessionManager.markConversationDisplayed(roomJid, isGroupchat = true)
+    }
 }

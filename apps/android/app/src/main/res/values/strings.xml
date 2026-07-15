@@ -81,6 +81,9 @@
     <string name="notification_channel_messages">Messages</string>
     <string name="notification_channel_messages_description">New chat messages.</string>
     <string name="notification_reply_label">Reply</string>
+    <string name="notification_mark_read_label">Mark as read</string>
+    <string name="settings_privacy">Privacy</string>
+    <string name="settings_read_receipts">Send read receipts</string>
     <string name="notification_reply_failed">Reply not sent — open Waddle to retry</string>
     <string name="connection_retry">Retry</string>
     <string name="notification_self_fallback">You</string>

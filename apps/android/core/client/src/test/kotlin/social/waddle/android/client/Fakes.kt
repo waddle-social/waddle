@@ -158,12 +158,43 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Boolean, options: WaddleSendOptions?): WaddleSendMessageOutcome = unused()
     override suspend fun sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Boolean): Boolean = unused()
     override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
-    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean = unused()
-    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean = unused()
-    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean = unused()
-    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = unused()
-    override suspend fun subscribeMdsDisplayed(): Boolean = unused()
-    override suspend fun supportsMdsPublishOptions(): Boolean = unused()
+    /** Recorded (conversation, state, isMuc) typing notifications. */
+    val chatStateCalls = mutableListOf<Triple<String, WaddleChatState, Boolean>>()
+
+    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean {
+        chatStateCalls += Triple(peerJid, state, isMuc)
+        return true
+    }
+
+    /** Recorded (conversation, stanzaId, isMuc) displayed markers. */
+    val displayedCalls = mutableListOf<Triple<String, String, Boolean>>()
+
+    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean {
+        displayedCalls += Triple(peerJid, stanzaId, isMuc)
+        return true
+    }
+
+    /** Recorded (chatJid, stanzaId, stanzaIdBy) MDS publishes. */
+    val mdsPublishCalls = mutableListOf<Triple<String, String, String>>()
+
+    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean {
+        mdsPublishCalls += Triple(chatJid, stanzaId, stanzaIdBy)
+        return true
+    }
+
+    /** Canned XEP-0490 catch-up entries served by [fetchMdsDisplayed]. */
+    var mdsEntries: List<WaddleMdsDisplayedEntry> = emptyList()
+    var mdsSubscribeCalls = 0
+    var mdsPublishOptionsSupported = true
+
+    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = mdsEntries
+
+    override suspend fun subscribeMdsDisplayed(): Boolean {
+        mdsSubscribeCalls += 1
+        return true
+    }
+
+    override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
     override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = unused()
     override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()

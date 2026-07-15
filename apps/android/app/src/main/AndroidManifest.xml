@@ -43,6 +43,10 @@
             android:exported="false" />
 
         <receiver
+            android:name=".service.MarkReadReceiver"
+            android:exported="false" />
+
+        <receiver
             android:name=".service.NotificationDismissReceiver"
             android:exported="false" />
 

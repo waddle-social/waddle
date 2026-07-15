@@ -33,4 +33,10 @@ interface ConversationIo {
      * (a stale state must never queue for replay).
      */
     suspend fun sendChatState(state: WaddleChatState) {}
+
+    /**
+     * The newest message is on screen and read: dispatch the XEP-0333
+     * displayed marker + XEP-0490 MDS cursor (deduped downstream).
+     */
+    suspend fun markDisplayed() {}
 }

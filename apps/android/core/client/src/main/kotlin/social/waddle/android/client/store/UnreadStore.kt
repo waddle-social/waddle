@@ -48,6 +48,15 @@ class UnreadStore {
         _counts.update { it - bareJid(conversationJid) }
     }
 
+    /**
+     * Cross-device read sync (XEP-0490): a sibling device's displayed
+     * cursor recomputes this conversation's count outright.
+     */
+    fun set(conversationJid: String, count: Int) {
+        val conversation = bareJid(conversationJid)
+        _counts.update { if (count <= 0) it - conversation else it + (conversation to count) }
+    }
+
     fun clearAll() {
         _counts.value = emptyMap()
     }
