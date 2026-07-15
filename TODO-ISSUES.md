@@ -6,7 +6,8 @@ within a tier, lanes run in parallel and bullets within a lane run top-to-bottom
 Bundles marked `[one PR]` touch the same files and should land together.
 
 **Update 2026-07-10:** a second deep audit of 1:1 + group chat vs main @ `c35afb9d`
-added **Lane J** (#1243–#1268, epic #1269) — the highest-impact chat/MUC defects.
+added **Lane J** (#1243–#1268, plus review-discovered #1275; epic #1269) —
+the highest-impact chat/MUC defects.
 
 ## Tier 0 — Close / rescope on GitHub (no implementation)
 
@@ -114,10 +115,11 @@ final-SHA Greptile check, the Qodo report's actionable findings were addressed, 
 zero unresolved review threads remained. Post-completion residuals are tracked below.
 
 Second deep audit (6 lanes incl. independent gpt-5.5) of private + group chat vs
-main @ `c35afb9d`; all findings verified in code. #1243–#1268 filed, indexed by
-epic **#1269**. Both features are broadly implemented — the user-visible breakage
-is the High/Critical items below. Sub-bundles touch mostly-disjoint files and run
-in parallel; within a bundle, top-to-bottom.
+main @ `c35afb9d`; all findings verified in code. #1243–#1268 were filed in the
+audit, and #1275 was added during its review loop; all are indexed by epic
+**#1269**. Both features are broadly implemented — the user-visible breakage is
+the High/Critical items below. Sub-bundles touch mostly-disjoint files and run in
+parallel; within a bundle, top-to-bottom.
 
 **J1 — Client chat `[one PR bundle]`**
 1. ✅ **#1243 — High: WASM core now unwraps normal XEP-0280 carbons (§11 own-bare-JID verified, forged envelopes fully ignored) and surfaces the inner message with a `carbon` direction marker; TS renders/dedupes it (dead `carbon:*` compat handlers deleted). DONE (PR #1273).**
@@ -170,7 +172,8 @@ remaining unblocked frontier.
 3. ✅ **#1287 — scope MUC-PM displayed state to the full occupant JID. DONE (PR #1308, merged).**
 4. ✅ **#1282 — reject untrusted delay timestamps on ordinary MUC messages while preserving conformant foreign-authority stanza IDs. DONE (already implemented by PR #324, merged: authenticated ingress strips it in `server/crates/waddle-server/src/server/routes/websocket/handlers/message.rs`; `xep0203_delayed_delivery_ws::client_spoofed_delay_is_stripped_from_groupchat_flow` injects a forged occupant delay and proves it absent from live reflection and MAM replay).**
 5. ✅ **#1288 — prevent cross-occupant MUC message-ID collision merges. DONE (PR #1304, merged).**
-6. #1289 — make mediated-invite grants and rollback atomic.
+6. #1289 — make mediated-invite grants and rollback atomic. PR #1343 was a
+   prerequisite only; the durable journal and production coordinator remain.
 7. #1283 — seal room destruction and purge the destroyed MAM epoch.
 8. ✅ **#1290 — implement XEP-0313 `with=self` intersection semantics. DONE (PR #1309, merged).**
 9. ✅ **#1286 — advertise XEP-0085 chat-state support in entity capabilities. DONE (PR #1307, merged).**

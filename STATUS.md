@@ -9,7 +9,8 @@ and must be updated and merged after each completed issue.
 
 ## Executive summary
 
-- The original Lane J (#1243–#1268) is complete.
+- The original Lane J (#1243–#1268, plus review-discovered #1275) is
+  complete.
 - Nine of the twelve Lane J follow-up issues are genuinely complete.
 - The three remaining product issues are #1289, #1283, and #1285.
 - #1289 is incorrectly closed on GitHub even though its durable journal and
