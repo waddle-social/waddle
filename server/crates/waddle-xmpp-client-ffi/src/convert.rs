@@ -26,8 +26,8 @@ use crate::{
     WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEvent, WaddlePinPreview,
-    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleSendOptions, WaddleSharedFile,
-    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
+    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSendOptions,
+    WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -316,11 +316,27 @@ fn markup_spans_to_ffi(spans: Vec<MarkupSpan>) -> Vec<WaddleMarkupSpan> {
 
 fn reference_to_ffi(reference: ReferenceData) -> WaddleReference {
     WaddleReference {
-        ref_type: reference.ref_type,
+        ref_type: reference_type_to_ffi(reference.ref_type),
         uri: reference.uri,
         begin: reference.begin,
         end: reference.end,
         anchor: reference.anchor,
+    }
+}
+
+fn reference_type_to_ffi(ref_type: String) -> WaddleReferenceType {
+    match ref_type.as_str() {
+        "mention" => WaddleReferenceType::Mention,
+        "data" => WaddleReferenceType::Data,
+        _ => WaddleReferenceType::Other { value: ref_type },
+    }
+}
+
+fn reference_type_wire_name(ref_type: WaddleReferenceType) -> String {
+    match ref_type {
+        WaddleReferenceType::Mention => "mention".to_string(),
+        WaddleReferenceType::Data => "data".to_string(),
+        WaddleReferenceType::Other { value } => value,
     }
 }
 
@@ -825,7 +841,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
             .references
             .into_iter()
             .map(|reference| ReferenceData {
-                ref_type: reference.ref_type,
+                ref_type: reference_type_wire_name(reference.ref_type),
                 uri: reference.uri,
                 begin: reference.begin,
                 end: reference.end,
@@ -1345,12 +1361,12 @@ mod tests {
         );
         assert_eq!(ffi.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
         assert_eq!(ffi.references.len(), 3);
-        assert_eq!(ffi.references[0].ref_type, "mention");
+        assert_eq!(ffi.references[0].ref_type, WaddleReferenceType::Mention);
         assert_eq!(ffi.references[0].uri, "xmpp:bob@waddle.test");
         assert_eq!(ffi.references[0].begin, 3);
         assert_eq!(ffi.references[0].end, 7);
         assert_eq!(ffi.references[1].anchor.as_deref(), Some("@everyone"));
-        assert_eq!(ffi.references[2].ref_type, "data");
+        assert_eq!(ffi.references[2].ref_type, WaddleReferenceType::Data);
         assert!(ffi.references[2].anchor.is_none());
     }
 
@@ -1664,7 +1680,7 @@ mod tests {
         assert_eq!(ffi.markup_spans[0].span_type, WaddleMarkupSpanType::Bold);
         assert_eq!(ffi.mention_uris, vec!["xmpp:bob@waddle.test".to_string()]);
         assert_eq!(ffi.references.len(), 1);
-        assert_eq!(ffi.references[0].ref_type, "mention");
+        assert_eq!(ffi.references[0].ref_type, WaddleReferenceType::Mention);
         assert_eq!(ffi.forum_post_kind, Some(WaddleForumPostKind::Topic));
         assert_eq!(ffi.forum_title.as_deref(), Some("Release planning"));
         assert!(ffi.is_sticker);
@@ -1781,7 +1797,7 @@ mod tests {
                 },
             ],
             references: vec![WaddleReference {
-                ref_type: "mention".to_string(),
+                ref_type: WaddleReferenceType::Mention,
                 uri: "xmpp:bob@waddle.test".to_string(),
                 begin: 5,
                 end: 9,

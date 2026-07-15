@@ -4092,7 +4092,7 @@ public func FfiConverterTypeWaddlePresenceHat_lower(_ value: WaddlePresenceHat) 
  * is the "no body position" sentinel used by anchor-only references.
  */
 public struct WaddleReference: Equatable, Hashable {
-    public var refType: String
+    public var refType: WaddleReferenceType
     public var uri: String
     public var begin: UInt32
     public var end: UInt32
@@ -4104,7 +4104,7 @@ public struct WaddleReference: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(refType: String, uri: String, begin: UInt32, end: UInt32,
+    public init(refType: WaddleReferenceType, uri: String, begin: UInt32, end: UInt32,
         /**
          * XEP-0372 optional `anchor` attribute: the original, unresolved
          * display text (or anchor URI) when offsets cannot be relied on.
@@ -4132,7 +4132,7 @@ public struct FfiConverterTypeWaddleReference: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleReference {
         return
             try WaddleReference(
-                refType: FfiConverterString.read(from: &buf),
+                refType: FfiConverterTypeWaddleReferenceType.read(from: &buf),
                 uri: FfiConverterString.read(from: &buf),
                 begin: FfiConverterUInt32.read(from: &buf),
                 end: FfiConverterUInt32.read(from: &buf),
@@ -4141,7 +4141,7 @@ public struct FfiConverterTypeWaddleReference: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: WaddleReference, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.refType, into: &buf)
+        FfiConverterTypeWaddleReferenceType.write(value.refType, into: &buf)
         FfiConverterString.write(value.uri, into: &buf)
         FfiConverterUInt32.write(value.begin, into: &buf)
         FfiConverterUInt32.write(value.end, into: &buf)
@@ -6270,6 +6270,88 @@ public func FfiConverterTypeWaddlePushEnvironment_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeWaddlePushEnvironment_lower(_ value: WaddlePushEnvironment) -> RustBuffer {
     return FfiConverterTypeWaddlePushEnvironment.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+ * values explicitly so extension references survive the boundary
+ * instead of being silently dropped or smuggled through a bare String.
+ */
+
+public enum WaddleReferenceType: Equatable, Hashable {
+
+    case mention
+    case data
+    case other(value: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleReferenceType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleReferenceType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleReferenceType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleReferenceType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .mention
+
+        case 2: return .data
+
+        case 3: return .other(value: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleReferenceType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .mention:
+            writeInt(&buf, Int32(1))
+
+
+        case .data:
+            writeInt(&buf, Int32(2))
+
+
+        case let .other(value):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(value, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReferenceType_lift(_ buf: RustBuffer) throws -> WaddleReferenceType {
+    return try FfiConverterTypeWaddleReferenceType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceType) -> RustBuffer {
+    return FfiConverterTypeWaddleReferenceType.lower(value)
 }
 
 

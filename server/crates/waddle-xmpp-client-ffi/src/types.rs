@@ -220,11 +220,21 @@ pub struct WaddleMarkupSpan {
     pub uri: Option<String>,
 }
 
+/// XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+/// values explicitly so extension references survive the boundary
+/// instead of being silently dropped or smuggled through a bare String.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum WaddleReferenceType {
+    Mention,
+    Data,
+    Other { value: String },
+}
+
 /// XEP-0372 `<reference/>`. `begin`/`end` are body offsets; `(0, 0)`
 /// is the "no body position" sentinel used by anchor-only references.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleReference {
-    pub ref_type: String,
+    pub ref_type: WaddleReferenceType,
     pub uri: String,
     pub begin: u32,
     pub end: u32,

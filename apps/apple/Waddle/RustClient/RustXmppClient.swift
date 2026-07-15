@@ -406,17 +406,17 @@ private final class _EventListener: WaddleEventListener {
             replyToID: message.replyToId,
             replyToSender: message.replyToSender,
             replyFallbackRange: makeFallbackRange(message.replyFallbackStart, message.replyFallbackEnd),
-            markupSpans: [],
-            chatState: nil,
-            displayedMarkerID: nil,
+            markupSpans: message.markupSpans.compactMap(makeMarkupSpan),
+            chatState: message.chatState.map(chatStateWireName),
+            displayedMarkerID: message.displayedMarkerId,
             sharedFiles: message.sharedFiles.map(makeSharedFile),
-            broadcastMention: nil,
-            mentionURIs: [],
-            forumPostKind: nil,
-            forumTitle: nil,
+            broadcastMention: message.broadcastMention,
+            mentionURIs: message.mentionUris,
+            forumPostKind: message.forumPostKind.map(forumPostKindWireName),
+            forumTitle: message.forumTitle,
             threadID: message.thread,
             parentThreadID: message.parentThreadId,
-            isSticker: false
+            isSticker: message.isSticker
         )
         continuation.yield(.message(event))
     }
@@ -566,6 +566,38 @@ private func makeCallEvent(_ event: WaddleCallEvent) -> XMPPCallEvent {
     return XMPPCallEvent(from: event.from, to: event.to, sid: event.sid, kind: kind)
 }
 
+private func makeMarkupSpan(_ span: WaddleMarkupSpan) -> XMPPMarkupSpan? {
+    let type: XMPPMarkupSpan.SpanType = {
+        switch span.spanType {
+        case .bold: return .bold
+        case .italic: return .italic
+        case .strikethrough: return .strikethrough
+        case .code: return .code
+        case .codeBlock: return .codeBlock
+        case .blockquote: return .blockquote
+        case .link: return .link
+        }
+    }()
+    return XMPPMarkupSpan(type: type, start: Int(span.start), end: Int(span.end), uri: span.uri)
+}
+
+private func chatStateWireName(_ state: WaddleChatState) -> String {
+    switch state {
+    case .active: return "active"
+    case .composing: return "composing"
+    case .paused: return "paused"
+    case .inactive: return "inactive"
+    case .gone: return "gone"
+    }
+}
+
+private func forumPostKindWireName(_ kind: WaddleForumPostKind) -> String {
+    switch kind {
+    case .topic: return "topic"
+    case .reply: return "reply"
+    }
+}
+
 private func makeSharedFile(_ file: WaddleSharedFile) -> XMPPSharedFile {
     XMPPSharedFile(
         url: file.url,
@@ -613,17 +645,17 @@ private extension WaddleMamPage {
                 replyToID: archived.replyToId,
                 replyToSender: archived.replyToSender,
                 replyFallbackRange: makeFallbackRange(archived.replyFallbackStart, archived.replyFallbackEnd),
-                markupSpans: [],
+                markupSpans: archived.markupSpans.compactMap(makeMarkupSpan),
                 chatState: nil,
                 displayedMarkerID: nil,
                 sharedFiles: archived.sharedFiles.map(makeSharedFile),
-                broadcastMention: nil,
-                mentionURIs: [],
-                forumPostKind: nil,
-                forumTitle: nil,
+                broadcastMention: archived.broadcastMention,
+                mentionURIs: archived.mentionUris,
+                forumPostKind: archived.forumPostKind.map(forumPostKindWireName),
+                forumTitle: archived.forumTitle,
                 threadID: archived.thread,
                 parentThreadID: archived.parentThreadId,
-                isSticker: false
+                isSticker: archived.isSticker
             )
             return XMPPArchiveMessage(
                 mamID: archived.mamId,
