@@ -68,6 +68,7 @@ class ConversationViewModelTest {
 
     private fun createViewModel(): ConversationViewModel = ConversationViewModel(
         conversationJid = ROOM_JID,
+        isGroupchat = true,
         timeline = store.timeline(ROOM_JID),
         events = events,
         unreadStore = unreadStore,

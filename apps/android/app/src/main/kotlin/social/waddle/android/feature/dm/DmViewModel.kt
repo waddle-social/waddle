@@ -17,6 +17,7 @@ class DmViewModel(
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = peerJid,
+    isGroupchat = false,
     timeline = sessionManager.timelineStore.timeline(peerJid),
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
@@ -57,4 +58,13 @@ private class DmIo(
     override suspend fun markDisplayed() {
         sessionManager.markConversationDisplayed(peerJid, isGroupchat = false)
     }
+
+    override suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
+        sessionManager.sendReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emojis = emojis, previousEmojis = previousEmojis)
+
+    override suspend fun sendCorrection(targetId: String, newBody: String): Boolean =
+        sessionManager.sendCorrection(peerJid, isGroupchat = false, targetId = targetId, newBody = newBody)
+
+    override suspend fun sendRetraction(targetId: String): Boolean =
+        sessionManager.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)
 }

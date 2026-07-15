@@ -60,6 +60,34 @@ data class TimelineItem(
                 source.message.id,
             )
         }
+
+    /** XEP-0359 stanza id (action target in MUCs when [stanzaIdBy] is the room). */
+    val stanzaId: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.stanzaId
+            is TimelineSource.Archived -> source.message.stanzaId
+        }
+
+    /** XEP-0359 assigning authority of [stanzaId]. */
+    val stanzaIdBy: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.stanzaIdBy
+            is TimelineSource.Archived -> source.message.stanzaIdBy
+        }
+
+    /** XEP-0359 client origin id (the author-assigned correction target). */
+    val originId: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.originId
+            is TimelineSource.Archived -> source.message.originId
+        }
+
+    /** The author's message id. */
+    val messageId: String?
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.id
+            is TimelineSource.Archived -> source.message.id
+        }
 }
 
 sealed interface TimelineSource {

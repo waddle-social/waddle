@@ -44,6 +44,16 @@
     <string name="composer_placeholder">Message</string>
     <string name="typing_one">%1$s is typing…</string>
     <string name="typing_many">%1$s are typing…</string>
+    <string name="composer_editing">Editing message</string>
+    <string name="composer_cancel_edit">Cancel edit</string>
+    <string name="message_edited">(edited)</string>
+    <string name="message_deleted">This message was deleted.</string>
+    <string name="message_pinned">Pinned</string>
+    <string name="action_edit_message">Edit</string>
+    <string name="action_delete_message">Delete</string>
+    <string name="action_copy_message">Copy text</string>
+    <string name="action_pin_message">Pin to channel</string>
+    <string name="action_unpin_message">Unpin from channel</string>
     <string name="composer_send">Send</string>
     <string name="message_unknown_sender">Unknown</string>
     <string name="message_author_me">You</string>

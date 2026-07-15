@@ -6,6 +6,7 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSmResumeState
@@ -33,6 +34,7 @@ fun testMessage(
     stanzaIdBy: String? = null,
     displayedMarkerRequested: Boolean = false,
     mdsDisplayed: List<WaddleMdsDisplayedEntry>? = null,
+    pinEvent: WaddlePinEvent? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -68,7 +70,7 @@ fun testMessage(
     forumTitle = null,
     isSticker = false,
     linkPreviews = emptyList(),
-    pinEvent = null,
+    pinEvent = pinEvent,
     callThreadEnded = null,
     carbon = null,
     replyToId = null,

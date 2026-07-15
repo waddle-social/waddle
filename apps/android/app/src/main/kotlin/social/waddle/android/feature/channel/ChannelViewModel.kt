@@ -19,11 +19,13 @@ class ChannelViewModel(
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = roomJid,
+    isGroupchat = true,
     timeline = sessionManager.timelineStore.timeline(roomJid),
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
     io = ChannelIo(sessionManager, roomJid, nick),
     typingNames = sessionManager.chatStateStore.composingNames(roomJid),
+    pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -49,6 +51,7 @@ private class ChannelIo(
         if (roomJid !in sessionManager.roomStore.joinedRooms.value) {
             sessionManager.joinRoom(roomJid, nick)
         }
+        sessionManager.refreshRoomPins(roomJid)
     }
 
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
@@ -64,4 +67,18 @@ private class ChannelIo(
     override suspend fun markDisplayed() {
         sessionManager.markConversationDisplayed(roomJid, isGroupchat = true)
     }
+
+    override suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
+        sessionManager.sendReaction(roomJid, isGroupchat = true, targetStanzaId = targetId, emojis = emojis, previousEmojis = previousEmojis)
+
+    override suspend fun sendCorrection(targetId: String, newBody: String): Boolean =
+        sessionManager.sendCorrection(roomJid, isGroupchat = true, targetId = targetId, newBody = newBody)
+
+    override suspend fun sendRetraction(targetId: String): Boolean =
+        sessionManager.sendRetraction(roomJid, isGroupchat = true, targetStanzaId = targetId)
+
+    override val canPin: Boolean get() = true
+
+    override suspend fun setPinned(targetId: String, pinned: Boolean): Boolean =
+        sessionManager.pinRoomMessage(roomJid, targetId, pinned)
 }

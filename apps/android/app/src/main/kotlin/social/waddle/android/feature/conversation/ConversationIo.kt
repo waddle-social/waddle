@@ -39,4 +39,20 @@ interface ConversationIo {
      * displayed marker + XEP-0490 MDS cursor (deduped downstream).
      */
     suspend fun markDisplayed() {}
+
+    /** XEP-0444: send the account's full reaction set for [targetId]. */
+    suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
+        false
+
+    /** XEP-0308: replace an own message's body. */
+    suspend fun sendCorrection(targetId: String, newBody: String): Boolean = false
+
+    /** XEP-0424: retract an own message. */
+    suspend fun sendRetraction(targetId: String): Boolean = false
+
+    /** Whether this conversation supports pinning (rooms only). */
+    val canPin: Boolean get() = false
+
+    /** `urn:waddle:pin:0` pin/unpin (rooms only). */
+    suspend fun setPinned(targetId: String, pinned: Boolean): Boolean = false
 }

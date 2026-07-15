@@ -46,6 +46,8 @@ import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.android.client.store.ChatStateStore
 import social.waddle.android.client.store.DmStore
+import social.waddle.android.client.store.MessageMutation
+import social.waddle.android.client.store.PinStore
 import social.waddle.android.client.store.ReadCursorStore
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
@@ -90,6 +92,7 @@ class XmppSessionManager(
     val unreadStore = UnreadStore()
     val chatStateStore = ChatStateStore()
     val readCursorStore = ReadCursorStore()
+    val pinStore = PinStore()
 
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val cursorTracker = ResumeCursorTracker()
@@ -316,6 +319,147 @@ class XmppSessionManager(
     /** 1:1 chat twin of [sendGroupchatMessage]. */
     suspend fun sendChatMessage(peerJid: String, body: String): SendResult =
         sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
+
+    /**
+     * XEP-0444: send the account's COMPLETE reaction set for a message
+     * (empty = clear) and apply it optimistically — a DM send never
+     * echoes back to this client. A failed send rolls back to
+     * [previousEmojis] (web parity).
+     */
+    suspend fun sendReaction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetStanzaId: String,
+        emojis: List<String>,
+        previousEmojis: List<String>,
+    ): Boolean {
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, emojis)
+        val sent = clientCall {
+            it.sendReaction(bareJid(conversationJid), targetStanzaId, emojis, isGroupchat)
+        }
+        if (!sent) applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, previousEmojis)
+        return sent
+    }
+
+    /** XEP-0308: replace an own message's body; applies locally on a
+     *  successful send (no DM echo). */
+    suspend fun sendCorrection(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetId: String,
+        newBody: String,
+    ): Boolean {
+        val client = activeClient ?: return false
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val outcome = try {
+            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, null)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return false
+        }
+        if (outcome !is WaddleSendMessageOutcome.Sent) return false
+        timelineStore.applyLocalMutation(
+            conversationJid,
+            MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
+            isGroupchat,
+        )
+        return true
+    }
+
+    /** XEP-0424: retract an own message; tombstones locally on success. */
+    suspend fun sendRetraction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetStanzaId: String,
+    ): Boolean {
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val sent = clientCall {
+            it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
+        }
+        if (sent) {
+            timelineStore.applyLocalMutation(
+                conversationJid,
+                MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
+                isGroupchat,
+            )
+        }
+        return sent
+    }
+
+    /**
+     * `urn:waddle:pin:0` room pin/unpin. No optimistic pin-set write —
+     * the room broadcasts a `<pin-event/>` that lands in [pinStore]
+     * (and a forbidden reply for non-admins surfaces via `on_error`).
+     */
+    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): Boolean =
+        clientCall { client ->
+            if (pin) {
+                client.pinMessage(bareJid(roomJid), targetStanzaId)
+            } else {
+                client.unpinMessage(bareJid(roomJid), targetStanzaId)
+            }
+        }
+
+    /** Seed [pinStore] with the room's current pin list (room open). */
+    suspend fun refreshRoomPins(roomJid: String) {
+        val client = activeClient ?: return
+        val entries = try {
+            client.fetchRoomPins(bareJid(roomJid))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return
+        }
+        pinStore.seed(roomJid, entries)
+    }
+
+    private fun applyOwnReaction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        sender: String,
+        targetStanzaId: String,
+        emojis: List<String>,
+    ) {
+        timelineStore.applyLocalMutation(
+            conversationJid,
+            MessageMutation.Reaction(
+                targetId = targetStanzaId,
+                from = sender,
+                senderKey = sender,
+                mine = true,
+                emojis = emojis,
+            ),
+            isGroupchat,
+        )
+    }
+
+    /**
+     * The account's mutation identity in a conversation: the occupant
+     * JID (room/nick) in a MUC, the bare account JID in 1:1 — matching
+     * how [conversationKeyOf] classifies own incoming copies.
+     */
+    private fun ownMutationSender(conversationJid: String, isGroupchat: Boolean): String? {
+        val own = ownBareJid ?: return null
+        return if (isGroupchat) {
+            "${bareJid(conversationJid)}/${own.substringBefore('@')}"
+        } else {
+            own
+        }
+    }
+
+    /** Boolean client verb with the standard not-connected/error → false. */
+    private suspend fun clientCall(op: suspend (WaddleClientInterface) -> Boolean): Boolean {
+        val client = activeClient ?: return false
+        return try {
+            op(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     /**
      * Mark the newest displayable message of a conversation as read:
@@ -691,6 +835,13 @@ class XmppSessionManager(
                     _events.tryEmit(event)
                     return
                 }
+                // Pin/unpin room broadcasts mutate the pin set, not the
+                // timeline.
+                event.message.pinEvent?.let { pin ->
+                    event.message.from?.let { from -> pinStore.onPinEvent(bareJid(from), pin) }
+                    _events.tryEmit(event)
+                    return
+                }
                 // Mutation stanzas (reactions/corrections/retractions/
                 // moderation) alter existing rows via the timeline store;
                 // they are not new DM activity and must not reorder or
@@ -974,6 +1125,7 @@ class XmppSessionManager(
         unreadStore.clearAll()
         chatStateStore.clear()
         readCursorStore.clear()
+        pinStore.clear()
         cursorTracker.clear()
     }
 

@@ -137,6 +137,18 @@ class TimelineStore(
         )
     }
 
+    /**
+     * Apply one of the account's OWN mutations optimistically (a DM
+     * send is never reflected back to the sending client, so waiting
+     * for an echo would leave the sender's UI stale; the MUC reflection
+     * re-applies idempotently). Same pipeline as wire mutations —
+     * sender checks and ranking included — so a bad local apply cannot
+     * do anything a spoofed stanza couldn't.
+     */
+    fun applyLocalMutation(conversationJid: String, mutation: MessageMutation, isGroupchat: Boolean) {
+        applyMutation(bareJid(conversationJid), mutation, isGroupchat, timestamp = null)
+    }
+
     fun clear() {
         synchronized(lock) {
             entries.clear()

@@ -15,12 +15,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.client.store.TimelineItem
 
 /**
  * Shared conversation scaffold (channel + DM): top bar, timeline,
@@ -36,6 +42,9 @@ fun ConversationScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
+    val composerMode by viewModel.composerMode.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
+    var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
 
     LifecycleResumeEffect(viewModel) {
         viewModel.onConversationVisible()
@@ -72,12 +81,32 @@ fun ConversationScreen(
                 onTopReached = viewModel::loadOlder,
                 onRetry = viewModel::retry,
                 modifier = Modifier.weight(1f),
+                pinnedIds = state.pinnedIds,
+                onLongPress = { item -> sheetTarget = item },
+                onToggleReaction = viewModel::toggleReaction,
             )
             TypingIndicator(names = typing)
             MessageComposer(
                 onSend = viewModel::send,
                 onDraftChanged = viewModel::onDraftChanged,
+                editing = composerMode as? ComposerMode.Editing,
+                onCancelEdit = viewModel::cancelEdit,
             )
         }
+    }
+
+    sheetTarget?.let { item ->
+        MessageActionSheet(
+            item = item,
+            actionable = viewModel.actionTargetIdOf(item) != null,
+            canPin = state.canPin,
+            isPinned = item.stanzaId?.let { it in state.pinnedIds } == true,
+            onDismiss = { sheetTarget = null },
+            onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
+            onEdit = { viewModel.startEdit(item) },
+            onRetract = { viewModel.retract(item) },
+            onCopy = { clipboard.setText(AnnotatedString(item.body)) },
+            onSetPinned = { pinned -> viewModel.setPinned(item, pinned) },
+        )
     }
 }

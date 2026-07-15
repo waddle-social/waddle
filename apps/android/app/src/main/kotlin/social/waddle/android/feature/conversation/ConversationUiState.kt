@@ -31,4 +31,14 @@ data class ConversationUiState(
     val rows: List<ConversationRow> = emptyList(),
     val isLoadingOlder: Boolean = false,
     val reachedHistoryStart: Boolean = false,
+    /** `urn:waddle:pin:0`: pinned stanza ids (rooms only). */
+    val pinnedIds: Set<String> = emptySet(),
+    val canPin: Boolean = false,
 )
+
+/** Composer target: a fresh send, or an XEP-0308 edit of an own row. */
+sealed interface ComposerMode {
+    data object Normal : ComposerMode
+
+    data class Editing(val targetId: String, val originalBody: String) : ComposerMode
+}

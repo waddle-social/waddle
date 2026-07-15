@@ -16,6 +16,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import social.waddle.android.client.store.TimelineItem
 
 /**
  * Reverse-layout timeline (newest pinned at the bottom); reaching the
@@ -28,6 +29,9 @@ fun TimelineList(
     onTopReached: () -> Unit,
     onRetry: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    pinnedIds: Set<String> = emptySet(),
+    onLongPress: (item: TimelineItem) -> Unit = {},
+    onToggleReaction: (item: TimelineItem, emoji: String) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
     // reverseLayout renders index 0 at the bottom → newest first.
@@ -40,7 +44,13 @@ fun TimelineList(
         contentPadding = PaddingValues(vertical = 8.dp),
     ) {
         items(items = newestFirst, key = ::rowKey) { row ->
-            MessageCard(row = row, onRetry = onRetry)
+            MessageCard(
+                row = row,
+                onRetry = onRetry,
+                pinnedIds = pinnedIds,
+                onLongPress = onLongPress,
+                onToggleReaction = onToggleReaction,
+            )
         }
         if (isLoadingOlder) {
             item(key = LOADING_KEY) {

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -26,11 +27,14 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  */
 open class ConversationViewModel(
     private val conversationJid: String,
+    private val isGroupchat: Boolean,
     timeline: StateFlow<List<TimelineItem>>,
     events: SharedFlow<XmppEvent>,
     private val unreadStore: UnreadStore,
     private val io: ConversationIo,
     typingNames: Flow<List<String>> = emptyFlow(),
+    // Must emit (combine stalls on a never-emitting source).
+    pinnedIds: Flow<Set<String>> = flowOf(emptySet()),
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -61,7 +65,7 @@ open class ConversationViewModel(
         typingNames.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val uiState: StateFlow<ConversationUiState> =
-        combine(timeline, pending, history) { items, unconfirmed, load ->
+        combine(timeline, pending, history, pinnedIds) { items, unconfirmed, load, pins ->
             // Union of every stored identity: the MUC reflection is keyed
             // by the room-assigned XEP-0359 stanza-id, but the id the send
             // returned is the client origin-id — matching only the
@@ -80,8 +84,15 @@ open class ConversationViewModel(
                     visiblePending.map { ConversationRow.Unconfirmed(it) },
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
+                pinnedIds = pins,
+                canPin = io.canPin,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
+
+    private val _composerMode = MutableStateFlow<ComposerMode>(ComposerMode.Normal)
+
+    /** Normal sends vs editing an existing own message (XEP-0308). */
+    val composerMode: StateFlow<ComposerMode> = _composerMode
 
     init {
         // Prune (not just hide) pending rows once the timeline holds their
@@ -168,6 +179,15 @@ open class ConversationViewModel(
     fun send(body: String) {
         val text = body.trim()
         if (text.isEmpty()) return
+        val editing = _composerMode.value
+        if (editing is ComposerMode.Editing) {
+            _composerMode.value = ComposerMode.Normal
+            viewModelScope.launch {
+                runCatching { io.sendCorrection(editing.targetId, text) }
+                typingNotifier.onMessageSent()
+            }
+            return
+        }
         val message = PendingMessage(
             localId = nextLocalId++,
             stanzaId = null,
@@ -206,6 +226,58 @@ open class ConversationViewModel(
     fun onDraftChanged() {
         typingNotifier.onTyping()
     }
+
+    /**
+     * XEP-0444 chip/sheet toggle: flip [emoji] in the account's current
+     * set for the message and send the COMPLETE remaining set.
+     */
+    fun toggleReaction(item: TimelineItem, emoji: String) {
+        val target = actionTargetIdOf(item) ?: return
+        val own = item.reactions.filter { it.mine }.map { it.emoji }
+        val next = if (emoji in own) own - emoji else own + emoji
+        viewModelScope.launch {
+            runCatching { io.sendReaction(target, next, previousEmojis = own) }
+        }
+    }
+
+    /** Enter edit mode for an own, non-tombstoned message. */
+    fun startEdit(item: TimelineItem) {
+        if (!item.isMine || item.tombstone != null) return
+        val target = correctionTargetIdOf(item) ?: return
+        _composerMode.value = ComposerMode.Editing(targetId = target, originalBody = item.body)
+    }
+
+    fun cancelEdit() {
+        _composerMode.value = ComposerMode.Normal
+    }
+
+    /** XEP-0424 retraction of an own message. */
+    fun retract(item: TimelineItem) {
+        if (!item.isMine || item.tombstone != null) return
+        val target = actionTargetIdOf(item) ?: return
+        viewModelScope.launch { runCatching { io.sendRetraction(target) } }
+    }
+
+    /** `urn:waddle:pin:0` room pin toggle. */
+    fun setPinned(item: TimelineItem, pinned: Boolean) {
+        val target = actionTargetIdOf(item) ?: return
+        viewModelScope.launch { runCatching { io.setPinned(target, pinned) } }
+    }
+
+    /**
+     * Reaction/retraction/pin target (web parity): in a MUC strictly
+     * the room-assigned XEP-0359 stanza id (`by` must be the room — no
+     * id means the action is unavailable); in a DM any wire identity.
+     */
+    fun actionTargetIdOf(item: TimelineItem): String? = if (isGroupchat) {
+        item.stanzaId?.takeIf { item.stanzaIdBy == conversationJid }
+    } else {
+        item.stanzaId ?: item.originId ?: item.messageId
+    }
+
+    /** XEP-0308 targets the AUTHOR-assigned id of the original send. */
+    private fun correctionTargetIdOf(item: TimelineItem): String? =
+        item.originId ?: item.messageId
 
     /** Re-send a failed optimistic message. */
     fun retry(localId: Long) {
