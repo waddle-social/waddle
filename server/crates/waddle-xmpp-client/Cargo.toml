@@ -34,7 +34,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "WebSocket", "console"], optional = true }
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "ErrorEvent", "Event", "MessageEvent", "Performance", "WebSocket", "Window", "console"], optional = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 xmpp-parsers = { workspace = true }
 

@@ -56,6 +56,44 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 let _ = callback.call1(&JsValue::NULL, &JsValue::from_str("resumed"));
             }
         }
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent { attempt, unacked },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::Request { attempt, unacked },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckObserved {
+                progressed,
+                latency_ms,
+                unacked,
+            },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::Observed {
+                progressed,
+                latency_ms,
+                unacked,
+            },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestTimedOut { unacked },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::RequestTimeout { unacked },
+        ),
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckProgressStalled {
+                unacked,
+                elapsed_ms,
+            },
+        )) => emit_stream_management_callback(
+            inner,
+            JsStreamManagementTelemetry::ProgressStalled {
+                unacked,
+                elapsed_ms,
+            },
+        ),
         ClientEvent::Connection(ConnectionEvent::StreamError { condition, detail }) => {
             emit_stream_error_callback(inner, condition, detail);
         }
@@ -147,6 +185,35 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
             }
         }
         _ => {}
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum JsStreamManagementTelemetry {
+    #[serde(rename = "ack-request")]
+    Request { attempt: u32, unacked: u32 },
+    #[serde(rename = "ack-observed")]
+    Observed {
+        progressed: bool,
+        latency_ms: Option<u64>,
+        unacked: u32,
+    },
+    #[serde(rename = "ack-request-timeout")]
+    RequestTimeout { unacked: u32 },
+    #[serde(rename = "ack-progress-stalled")]
+    ProgressStalled { unacked: u32, elapsed_ms: u64 },
+}
+
+fn emit_stream_management_callback(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    event: JsStreamManagementTelemetry,
+) {
+    let callback = inner.borrow().on_stream_management.clone();
+    if let Some(callback) = callback {
+        if let Ok(value) = to_js_value(&event) {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
     }
 }
 

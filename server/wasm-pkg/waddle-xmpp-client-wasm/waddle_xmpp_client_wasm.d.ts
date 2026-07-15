@@ -268,6 +268,12 @@ export class WaddleClient {
      */
     register_push_device(options: any): Promise<any>;
     request_avatar(jid: string): Promise<any>;
+    /**
+     * Best-effort XEP-0198 acknowledgement request for page lifecycle
+     * handoff. The shared runtime suppresses duplicates while another
+     * request is already awaiting `<a/>`.
+     */
+    request_stream_management_ack(): Promise<any>;
     request_upload_slot(service_jid: string, filename: string, size: bigint, content_type: string): Promise<any>;
     retract_activity(): Promise<any>;
     retract_mood(): Promise<any>;
@@ -456,6 +462,7 @@ export class WaddleClient {
      */
     set_on_pubsub_event(cb: Function): void;
     set_on_session_lifecycle(cb: Function): void;
+    set_on_stream_management(cb: Function): void;
     set_room_affiliation(room_jid: string, jid: string, affiliation: string): Promise<any>;
     /**
      * Set the per-chat XEP-0492 notification mode for one room by

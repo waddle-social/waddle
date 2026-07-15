@@ -421,6 +421,75 @@ async fn driver_broadcasts_resume_state_transitions() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn driver_sends_one_ack_request_for_the_first_countable_stanza() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut rx) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+
+    task.handle_command(XmppCommand::SendStanza(message_stanza("message-1")))
+        .await;
+    drain_task_transport_events(&mut task).await;
+
+    let requests = shared
+        .sent_messages()
+        .into_iter()
+        .filter(|message| {
+            matches!(message, TransportMessage::Element(element) if element.name() == "r" && element.ns() == NS_SM)
+        })
+        .count();
+    assert_eq!(
+        requests, 1,
+        "the generated <r/> must reach the transport once"
+    );
+
+    let mut request_events = 0;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequestSent { .. }
+            ))
+        ) {
+            request_events += 1;
+        }
+    }
+    assert_eq!(request_events, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn driver_aborts_uncleanly_after_thirty_seconds_without_ack_progress() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _rx) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+
+    task.handle_command(XmppCommand::SendStanza(message_stanza("message-1")))
+        .await;
+    drain_task_transport_events(&mut task).await;
+    let resumable_before_abort = task.runtime.resume_state();
+    assert!(resumable_before_abort.is_some());
+
+    let keep_running = task
+        .handle_stream_management_timer_at(
+            crate::runtime::monotonic_now_ms().saturating_add(30_001),
+        )
+        .await;
+
+    assert!(!keep_running);
+    assert_eq!(shared.abort_count(), 1);
+    assert_eq!(shared.close_count(), 0);
+    assert!(
+        !shared
+            .sent_messages()
+            .iter()
+            .any(|message| matches!(message, TransportMessage::Close(_))),
+        "a stalled resumable stream must not send a clean XML close"
+    );
+    assert_eq!(task.runtime.resume_state(), resumable_before_abort);
+}
+
 // ── full bootstrap integration tests ─────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
@@ -604,6 +673,7 @@ async fn driver_cleans_up_failed_connects() {
 struct MockTransportShared {
     sent_messages: Arc<Mutex<Vec<TransportMessage>>>,
     close_count: Arc<Mutex<usize>>,
+    abort_count: Arc<Mutex<usize>>,
 }
 
 impl MockTransportShared {
@@ -613,6 +683,10 @@ impl MockTransportShared {
 
     fn close_count(&self) -> usize {
         *self.close_count.lock().unwrap()
+    }
+
+    fn abort_count(&self) -> usize {
+        *self.abort_count.lock().unwrap()
     }
 }
 
@@ -707,6 +781,18 @@ impl WebSocketTransport for MockTransport {
             self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closing),
                 TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+                TransportEvent::StateChanged(TransportState::Closed),
+                TransportEvent::Closed,
+            ]);
+            Ok(())
+        })
+    }
+
+    fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            *self.shared.abort_count.lock().unwrap() += 1;
+            self.pending_events.extend([
+                TransportEvent::StateChanged(TransportState::Closing),
                 TransportEvent::StateChanged(TransportState::Closed),
                 TransportEvent::Closed,
             ]);
@@ -830,4 +916,54 @@ async fn drive_task_to_resume_attempt(task: &mut DriverTask) {
     )))
     .await;
     assert_eq!(task.runtime.snapshot().phase, SessionPhase::Resuming);
+}
+
+async fn drive_task_to_sm_enabled(task: &mut DriverTask) {
+    task.runtime
+        .queue_request(ClientRequest::Connect)
+        .expect("connect request should queue");
+    task.apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+        .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        pre_auth_features(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        Element::builder("success", NS_SASL).build(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+        StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        post_auth_features_with_sm(),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        bind_result("bind-1"),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        enabled_sm("stream-1"),
+    )))
+    .await;
+    drain_task_transport_events(task).await;
+    assert_eq!(task.runtime.snapshot().phase, SessionPhase::Established);
+}
+
+async fn drain_task_transport_events(task: &mut DriverTask) {
+    loop {
+        let events = task.transport.drain_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            assert!(task.apply_transport_event(event).await);
+        }
+    }
 }

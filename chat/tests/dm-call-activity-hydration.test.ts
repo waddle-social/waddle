@@ -132,14 +132,16 @@ describe("DM call activity hydration", () => {
     };
     const client = new BrowserXmppClient(session(), persistence);
     const resource = client.fullJid.split("/")[1];
+    const requestStreamManagementAck = mock(async () => undefined);
     const xmpp = {
       get_resume_state_handle: () => ({ free: () => undefined }),
       get_resume_state: () => ({ previd: "prev-live", inboundH: 7, outboundH: 9 }),
+      request_stream_management_ack: requestStreamManagementAck,
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
 
-    client.persistResumeStateForPageHide();
+    client.prepareForPageHide();
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
     client.persistResumeStateForPageHide();
@@ -148,6 +150,7 @@ describe("DM call activity hydration", () => {
       { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
       { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
     ]);
+    expect(requestStreamManagementAck).toHaveBeenCalledTimes(1);
   });
 
   test("hydrates active call state from personal MAM pages without loading the DM timeline", async () => {

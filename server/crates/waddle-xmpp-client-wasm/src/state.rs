@@ -176,6 +176,7 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_presence: Option<Function>,
     pub(crate) on_connected: Option<Function>,
     pub(crate) on_session_lifecycle: Option<Function>,
+    pub(crate) on_stream_management: Option<Function>,
     pub(crate) on_disconnected: Option<Function>,
     pub(crate) on_error: Option<Function>,
     pub(crate) on_message_delivery_acked: Option<Function>,
@@ -211,6 +212,9 @@ pub(crate) enum WasmCommand {
     },
     CancelIq {
         id: String,
+        responder: oneshot::Sender<DriverResult<()>>,
+    },
+    RequestStreamManagementAck {
         responder: oneshot::Sender<DriverResult<()>>,
     },
     Disconnect {

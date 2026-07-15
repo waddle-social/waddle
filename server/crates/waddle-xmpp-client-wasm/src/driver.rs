@@ -60,13 +60,17 @@ impl WasmDriverTask {
         }
 
         loop {
+            let now_ms = waddle_xmpp_client::runtime::monotonic_now_ms();
+            let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
             let ws_event_fut = self.ws.rx.next().fuse();
             let cmd_fut = self.cmd_rx.next().fuse();
-            pin_mut!(ws_event_fut, cmd_fut);
+            let sm_timer_fut = wait_for_stream_management_wakeup(sm_wakeup_ms).fuse();
+            pin_mut!(ws_event_fut, cmd_fut, sm_timer_fut);
 
             let keep_running = select! {
                 ws_event = ws_event_fut => self.handle_wasm_transport_event(ws_event).await,
                 cmd = cmd_fut => self.handle_command(cmd).await,
+                _ = sm_timer_fut => self.handle_stream_management_timer().await,
             };
 
             if !keep_running {
@@ -75,6 +79,32 @@ impl WasmDriverTask {
         }
 
         self.finish().await;
+    }
+
+    async fn handle_stream_management_timer(&mut self) -> bool {
+        let events = self
+            .runtime
+            .poll_stream_management_at(waddle_xmpp_client::runtime::monotonic_now_ms());
+        let progress_stalled = events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::AckProgressStalled { .. }
+                ))
+            )
+        });
+
+        for event in events {
+            if !self.handle_client_event(event).await {
+                return false;
+            }
+        }
+
+        if progress_stalled {
+            let _ = self.ws.close();
+            return false;
+        }
+        true
     }
 
     async fn handle_wasm_transport_event(&mut self, event: Option<WasmTransportEvent>) -> bool {
@@ -183,6 +213,21 @@ impl WasmDriverTask {
                 self.cancel_iq_command(&id);
                 let _ = responder.send(Ok(()));
                 true
+            }
+            Some(WasmCommand::RequestStreamManagementAck { responder }) => {
+                let events = self.runtime.request_stream_management_ack_at(
+                    waddle_xmpp_client::runtime::monotonic_now_ms(),
+                );
+                let mut result = Ok(());
+                for event in events {
+                    if !self.handle_client_event(event).await {
+                        result = Err(ClientError::TransportClosed);
+                        break;
+                    }
+                }
+                let keep_running = result.is_ok();
+                let _ = responder.send(result);
+                keep_running
             }
             Some(WasmCommand::Disconnect { responder }) => {
                 self.explicit_disconnect = true;
@@ -608,6 +653,22 @@ impl WasmDriverTask {
     }
 }
 
+async fn wait_for_stream_management_wakeup(delay_ms: Option<u64>) {
+    let Some(delay_ms) = delay_ms else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let Some(window) = web_sys::window() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let timeout_ms = i32::try_from(delay_ms).unwrap_or(i32::MAX);
+    let promise = Promise::new(&mut |resolve, _reject| {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, timeout_ms);
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
 fn publish_resume_state_snapshot(
     inner: &Rc<RefCell<WaddleClientInner>>,
     runtime: &XmppRuntime,
@@ -703,6 +764,7 @@ mod tests {
             on_presence: None,
             on_connected: None,
             on_session_lifecycle: None,
+            on_stream_management: None,
             on_disconnected: None,
             on_error: None,
             on_message_delivery_acked: None,

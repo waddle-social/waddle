@@ -41,6 +41,7 @@ import type {
   ClientEvents,
   MdsDisplayedEntry,
   PubsubEvent,
+  QueueDepthTelemetry,
 } from "./client-events";
 import {
   OfflineSendQueue,
@@ -182,6 +183,7 @@ import type {
   WasmRosterContact,
   WasmSendMessageOutcome,
   WasmServerVersion,
+  WasmStreamManagementTelemetry,
   WasmThreadsPage,
   WasmUserSearchResult,
 } from "./wasm-types";
@@ -333,11 +335,13 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
   set_on_call?: (cb: (event: CallEvent) => void) => void;
   set_on_session_lifecycle?: (cb: (event: string) => void) => void;
+  set_on_stream_management?: (cb: (event: WasmStreamManagementTelemetry) => void) => void;
   set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
   set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  request_stream_management_ack?: () => Promise<void>;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -807,7 +811,8 @@ export class BrowserXmppClient {
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
   onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
   onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
-  onQueueDepthChange(hook: (depth: { kind: "room" | "dm"; persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
+  onQueueDepthChange(hook: (depth: QueueDepthTelemetry) => void) { this.events.on("queueDepthChange", hook); }
+  onStreamManagement(hook: (event: WasmStreamManagementTelemetry) => void) { this.events.on("streamManagement", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
   onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
@@ -872,6 +877,13 @@ export class BrowserXmppClient {
       this.resource,
       () => this.persistRetainedJoinedRooms(),
     );
+  }
+
+  prepareForPageHide(): void {
+    try {
+      void this.xmpp?.request_stream_management_ack?.().catch(() => undefined);
+    } catch {}
+    this.persistResumeStateForPageHide();
   }
 
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
@@ -1487,15 +1499,23 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
       this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "room");
       let id: string | null;
       try {
         id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
+        this.outboundQueue.rollbackAttempt(outboundId);
         if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "room");
+      if (!id) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        return { id: null, state: "queued" };
+      }
+      if (id !== outboundId) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        throw new Error("XMPP send returned a different stanza id");
+      }
       return { id, state: "sending" };
     }
     const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
@@ -1534,15 +1554,23 @@ export class BrowserXmppClient {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
       this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "dm");
       let id: string | null;
       try {
         id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
+        this.outboundQueue.rollbackAttempt(outboundId);
         if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
-      if (id) this.outboundQueue.markInflight(id);
-      this.outboundQueue.notePendingSend(id, "dm");
+      if (!id) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        return { id: null, state: "queued" };
+      }
+      if (id !== outboundId) {
+        this.outboundQueue.rollbackAttempt(outboundId);
+        throw new Error("XMPP send returned a different stanza id");
+      }
       return { id, state: "sending" };
     }
     return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
@@ -2837,6 +2865,10 @@ export class BrowserXmppClient {
     xmpp.set_on_session_lifecycle?.((event: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });
+    });
+    xmpp.set_on_stream_management?.((event: WasmStreamManagementTelemetry) => {
+      if (!this.isCurrentXmpp(xmpp)) return;
+      this.events.emitSafe("streamManagement", event);
     });
     xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
     xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {

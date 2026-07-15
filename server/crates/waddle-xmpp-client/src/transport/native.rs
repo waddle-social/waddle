@@ -45,6 +45,11 @@ pub trait WebSocketTransport: Send + Sync {
     fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
 
     fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
+
+    /// Terminate the WebSocket without sending RFC 7395 `<close/>`.
+    /// XEP-0198 treats this as an unclean XML-stream loss, so the runtime's
+    /// resume snapshot remains eligible for the reconnecting owner.
+    fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
 }
 
 /// Default runtime factory for the concrete WebSocket transport.
@@ -203,6 +208,18 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                 ));
             }
 
+            self.sink.close().await?;
+            self.queue_closed();
+            Ok(())
+        })
+    }
+
+    fn abort<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            if self.state == TransportState::Closed {
+                return Ok(());
+            }
+            self.queue_state_change(TransportState::Closing);
             self.sink.close().await?;
             self.queue_closed();
             Ok(())

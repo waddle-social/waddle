@@ -26,6 +26,7 @@ import {
   reportSessionLifecycle,
   reportStatusChange,
   setXmppResourceForTelemetry,
+  reportStreamManagement,
 } from "@/lib/telemetry";
 
 const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
@@ -58,6 +59,9 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   });
   client.onQueueDepthChange((depth) => {
     reportQueueDepthChange(depth);
+  });
+  client.onStreamManagement((event) => {
+    reportStreamManagement(event);
   });
   client.onError((event) => {
     const kind = ERROR_KIND_MAP[event.kind];

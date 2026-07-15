@@ -14,6 +14,23 @@ use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage
 use crate::AuthenticationConfig;
 use minidom::Element;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn monotonic_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn monotonic_now_ms() -> u64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now().max(0.0) as u64)
+        .unwrap_or_else(|| js_sys::Date::now().max(0.0) as u64)
+}
+
 mod app_stanza;
 mod sm;
 #[cfg(test)]
@@ -178,11 +195,63 @@ impl XmppRuntime {
         &mut self,
         event: TransportEvent,
     ) -> ClientResult<Vec<ClientEvent>> {
+        self.apply_transport_event_at(event, monotonic_now_ms())
+    }
+
+    /// Apply one transport event at an injected monotonic timestamp.
+    /// Drivers and deterministic SM tests use this to share one cadence on
+    /// native and WASM without putting a platform clock inside [`SmState`].
+    pub fn apply_transport_event_at(
+        &mut self,
+        event: TransportEvent,
+        now_ms: u64,
+    ) -> ClientResult<Vec<ClientEvent>> {
         let previous = self.snapshot.clone();
         let mut events = vec![ClientEvent::Transport(event.clone())];
-        self.apply_transport_side_effects(event, &mut events)?;
+        self.apply_transport_side_effects(event, now_ms, &mut events)?;
         self.push_state_change(previous, &mut events);
         Ok(events)
+    }
+
+    /// Poll the XEP-0198 acknowledgement cadence at an injected monotonic
+    /// timestamp. Returned events are transport instructions and content-free
+    /// telemetry; drivers must abort uncleanly when the stalled event appears.
+    pub fn poll_stream_management_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
+        let poll = self.sm_state.poll_ack_timer_at(now_ms);
+        let mut events = Vec::new();
+        if poll.request_timed_out {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                crate::event::StreamManagementEvent::AckRequestTimedOut {
+                    unacked: self.sm_state.unacked_count(),
+                },
+            )));
+        }
+        if let Some(request) = poll.request {
+            self.push_ack_request(request, &mut events);
+        }
+        if let Some(elapsed_ms) = poll.progress_stalled_ms {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                crate::event::StreamManagementEvent::AckProgressStalled {
+                    unacked: self.sm_state.unacked_count(),
+                    elapsed_ms,
+                },
+            )));
+        }
+        events
+    }
+
+    pub fn next_stream_management_wakeup_in_ms(&self, now_ms: u64) -> Option<u64> {
+        self.sm_state.next_ack_wakeup_in_ms(now_ms)
+    }
+
+    /// Best-effort pagehide hook. It shares the normal request-in-flight gate
+    /// and therefore never emits a second concurrent `<r/>`.
+    pub fn request_stream_management_ack_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
+        let mut events = Vec::new();
+        if let Some(request) = self.sm_state.request_ack_now_at(now_ms) {
+            self.push_ack_request(request, &mut events);
+        }
+        events
     }
 
     fn resolved_event(&self, pending: PendingRequest) -> ClientEvent {
@@ -192,6 +261,7 @@ impl XmppRuntime {
     fn apply_transport_side_effects(
         &mut self,
         event: TransportEvent,
+        now_ms: u64,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         self.snapshot.transport = event.transport_state();
@@ -209,10 +279,10 @@ impl XmppRuntime {
                 self.handle_stream_open(open, events)?;
             }
             TransportEvent::MessageReceived(TransportMessage::Element(element)) => {
-                self.handle_received_element(element, events)?;
+                self.handle_received_element(element, now_ms, events)?;
             }
             TransportEvent::MessageSent(TransportMessage::Element(element)) => {
-                self.handle_sent_element(&element);
+                self.handle_sent_element(&element, now_ms, events);
             }
             TransportEvent::MessageReceived(TransportMessage::Close(_))
             | TransportEvent::StateChanged(TransportState::Closed)
@@ -233,15 +303,20 @@ impl XmppRuntime {
         Ok(())
     }
 
-    fn handle_sent_element(&mut self, element: &Element) {
+    fn handle_sent_element(
+        &mut self,
+        element: &Element,
+        now_ms: u64,
+        events: &mut Vec<ClientEvent>,
+    ) {
         if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
             self.sm_state.start_outbound();
             return;
         }
 
-        if self.sm_state.outbound_enabled && matches!(element.name(), "iq" | "message" | "presence")
-        {
-            self.sm_state.record_sent_stanza(element);
+        let sent = self.sm_state.record_sent_stanza_at(element, now_ms);
+        if let Some(request) = sent.request {
+            self.push_ack_request(request, events);
         }
         self.mark_fallback_retry_sent(element);
     }
@@ -262,12 +337,13 @@ impl XmppRuntime {
     fn handle_received_element(
         &mut self,
         element: minidom::Element,
+        now_ms: u64,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         use crate::stream_management::NS_SM;
 
         if element.ns() == NS_SM {
-            self.handle_sm_element(&element, events)?;
+            self.handle_sm_element(&element, now_ms, events)?;
             return Ok(());
         }
 
@@ -307,6 +383,22 @@ impl XmppRuntime {
         }
 
         Ok(())
+    }
+
+    fn push_ack_request(
+        &self,
+        request: crate::stream_management::AckRequest,
+        events: &mut Vec<ClientEvent>,
+    ) {
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(SmState::build_request_ack()),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            crate::event::StreamManagementEvent::AckRequestSent {
+                attempt: request.attempt,
+                unacked: request.unacked,
+            },
+        )));
     }
 
     fn handle_stream_features(

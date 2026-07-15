@@ -27,6 +27,7 @@ import {
   reportStatusChange,
   setXmppResourceForTelemetry,
   websocketUrlWithTraceparent,
+  reportStreamManagement,
 } from "../src/lib/telemetry";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
@@ -244,6 +245,7 @@ describe("telemetry module no-op behaviour", () => {
       reportReconnectScheduled({ attempt: 1, delayMs: 2_000 });
       reportCatchup({ conversations: 1, pages: 1, pageFailures: 0, messages: 1, durationMs: 10 });
       reportResumeDrain({ buffered: 1, durationMs: 10 });
+      reportStreamManagement({ kind: "ack-request-timeout", unacked: 2 });
     }).not.toThrow();
   });
 
@@ -254,7 +256,12 @@ describe("telemetry module no-op behaviour", () => {
     reportMessageAcked({ id: "m-1", kind: "room", latencyMs: 123.4 });
     reportMessageFailed({ id: "m-2", kind: "dm" });
     reportSendEnqueued({ kind: "dm", reason: "offline" });
-    reportQueueDepthChange({ kind: "room", persisted: 2, inflight: 1 });
+    reportQueueDepthChange({
+      kind: "room",
+      persisted: 2,
+      inflight: 1,
+      oldestAgeMs: 321,
+    });
     reportSessionLifecycle({ type: "resumed" });
     reportStatusChange({ state: "reconnecting" });
     reportStatusChange({ state: "online", reconnectDurationMs: 4_321 });
@@ -300,7 +307,7 @@ describe("telemetry module no-op behaviour", () => {
     expect(ackMeasurement.context).toEqual({ kind: "room" });
 
     const depthMeasurement = stub.measurements[1];
-    expect(depthMeasurement.values).toEqual({ persisted: 2, inflight: 1 });
+    expect(depthMeasurement.values).toEqual({ persisted: 2, inflight: 1, oldest_age_ms: 321 });
     expect(depthMeasurement.context).toEqual({ kind: "room" });
 
     const reconnectMeasurement = stub.measurements[2];
@@ -497,6 +504,52 @@ describe("telemetry module no-op behaviour", () => {
       `wss://xmpp.example/ws?traceparent=${zeroTraceparent}`,
       ["https://xmpp.example"],
     )).toBe("wss://xmpp.example/:route");
+  });
+
+  test("stream-management telemetry contains cadence values but no stanza identity", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportStreamManagement({
+      kind: "ack-observed",
+      progressed: false,
+      latencyMs: 250,
+      unacked: 3,
+    });
+    reportStreamManagement({
+      kind: "ack-progress-stalled",
+      unacked: 3,
+      elapsedMs: 30_000,
+    });
+
+    expect(stub.events).toEqual([
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "ack-observed", progressed: "false" },
+      },
+      {
+        name: "chat.xmpp.stream_management",
+        attributes: { kind: "ack-progress-stalled" },
+      },
+      {
+        name: "chat.xmpp.reconnect.required",
+        attributes: { reason: "sm-ack-progress-stalled" },
+      },
+    ]);
+    expect(stub.measurements).toEqual([
+      {
+        type: "chat.xmpp.stream_management",
+        values: { count: 1, unacked: 3, latency_ms: 250 },
+        context: { kind: "ack-observed", progressed: "false" },
+      },
+      {
+        type: "chat.xmpp.stream_management",
+        values: { count: 1, unacked: 3, elapsed_ms: 30_000 },
+        context: { kind: "ack-progress-stalled" },
+      },
+    ]);
+    expect(JSON.stringify({ events: stub.events, measurements: stub.measurements }))
+      .not.toContain("message-id");
   });
 
   test("reportError drops identifier-bearing context fields", () => {
@@ -739,8 +792,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     // added an inflight entry plus a pending timestamp, then emit ack.
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: { on: (name: string, fn: (msg: unknown) => void) => void; emit: (name: string, msg: unknown) => void };
       wireEvents: (xmpp: unknown) => void;
@@ -758,8 +810,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp as never;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("room-1");
-    internal.outboundQueue.notePendingSend("room-1", "room");
+    internal.outboundQueue.beginAttempt("room-1", "room");
 
     stubXmpp.emit("message:acked", { id: "room-1" });
 
@@ -779,8 +830,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -789,6 +839,10 @@ describe("BrowserXmppClient telemetry hooks", () => {
       events: { emitSafe: (event: string, ...args: unknown[]) => void };
     };
     const handlers = new Map<string, Array<(msg: unknown) => void>>();
+    let onStreamManagement: ((event: {
+      kind: "ack-request-timeout";
+      unacked: number;
+    }) => void) | undefined;
     const stubXmpp = {
       on(event: string, handler: (msg: unknown) => void) {
         const list = handlers.get(event) ?? [];
@@ -798,13 +852,15 @@ describe("BrowserXmppClient telemetry hooks", () => {
       emit(event: string, msg: unknown) {
         for (const h of handlers.get(event) ?? []) h(msg);
       },
+      set_on_stream_management(callback: typeof onStreamManagement) {
+        onStreamManagement = callback;
+      },
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-9");
-    internal.outboundQueue.notePendingSend("dm-9", "dm");
+    internal.outboundQueue.beginAttempt("dm-9", "dm");
     // Record the pending kind so the failure hook reports it truthfully.
-    internal.outboundQueue.notePendingSend("live-1", "dm");
+    internal.outboundQueue.beginAttempt("live-1", "dm");
 
     // Ack → Faro event + measurement
     (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
@@ -826,12 +882,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
       outcome: "completed",
     });
     internal.events.emitSafe("resumeDrain", { buffered: 7, durationMs: 8 });
+    onStreamManagement?.({ kind: "ack-request-timeout", unacked: 2 });
 
     const eventNames = stub.events.map((e) => e.name);
     expect(eventNames).toContain("chat.xmpp.message.acked");
     expect(eventNames).toContain("chat.xmpp.message.failed");
     expect(eventNames).toContain("chat.xmpp.session.lifecycle");
     expect(eventNames).toContain("chat.xmpp.reconnect.scheduled");
+    expect(eventNames).toContain("chat.xmpp.stream_management");
     expect(eventNames.filter((n) => n === "chat.xmpp.status")).toHaveLength(2);
 
     const reconnectMeasurement = stub.measurements.find(
@@ -842,6 +900,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.reconnect.attempt")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.catchup")).toBe(true);
     expect(stub.measurements.some((m) => m.type === "chat.xmpp.resume_drain")).toBe(true);
+    expect(stub.measurements.some((m) => m.type === "chat.xmpp.stream_management")).toBe(true);
   });
 
   test("catch-up hook reports failed outcomes and processed conversation count", async () => {
@@ -1375,8 +1434,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -1394,7 +1452,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.notePendingSend("m-bad", "dm");
+    internal.outboundQueue.beginAttempt("m-bad", "dm");
 
     expect(() => {
       (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
@@ -1411,8 +1469,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     const internal = client as unknown as {
       outboundQueue: {
-        markInflight: (id: string) => void;
-        notePendingSend: (id: string | null, kind: "room" | "dm") => void;
+        beginAttempt: (id: string, kind: "room" | "dm") => void;
       };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
@@ -1430,14 +1487,26 @@ describe("BrowserXmppClient telemetry hooks", () => {
     };
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.markInflight("dm-fail-1");
-    internal.outboundQueue.notePendingSend("dm-fail-1", "dm");
+    internal.outboundQueue.beginAttempt("dm-fail-1", "dm");
 
     stubXmpp.emit("message:failed", { id: "dm-fail-1" });
 
     expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
-    expect(depths).toHaveLength(2);
-    expect(depths.find((depth) => depth.kind === "dm")?.inflight).toBe(0);
+    expect(depths).toHaveLength(4);
+    expect(depths.filter((depth) => depth.kind === "dm")).toEqual([
+      { kind: "dm", persisted: 0, inflight: 0 },
+      { kind: "dm", persisted: 0, inflight: 0 },
+    ]);
+    expect(depths.filter((depth) => depth.kind === "room")).toEqual([
+      { kind: "room", persisted: 0, inflight: 0 },
+      { kind: "room", persisted: 0, inflight: 0 },
+    ]);
+    expect(Object.fromEntries(
+      depths.slice(-2).map((depth) => [depth.kind, depth]),
+    )).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("message:failed without a recorded pending entry does not fire the failure hook", () => {

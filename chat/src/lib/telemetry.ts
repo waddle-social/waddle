@@ -51,6 +51,7 @@ import type {
   CallKind,
   CallLifecyclePayload,
 } from "./calls/call-lifecycle-telemetry";
+import type { QueueDepthTelemetry } from "./xmpp/client-events";
 
 type MessageKind = "room" | "dm";
 type DisplayedMarkerLatencyBand = "unknown" | "under-250ms" | "250ms-1s" | "1s-5s" | "over-5s";
@@ -1131,19 +1132,49 @@ export function reportSendEnqueued(payload: {
   });
 }
 
-export function reportQueueDepthChange(payload: {
-  kind: MessageKind;
-  persisted: number;
-  inflight: number;
-}): void {
+export function reportQueueDepthChange(payload: QueueDepthTelemetry): void {
   if (!faro) return;
   faro.api.pushMeasurement({
     type: "chat.xmpp.queue.depth",
     values: {
       persisted: payload.persisted,
       inflight: payload.inflight,
+      ...(payload.oldestAgeMs === undefined ? {} : { oldest_age_ms: payload.oldestAgeMs }),
     },
   }, { context: { kind: payload.kind } });
+}
+
+export type StreamManagementTelemetry =
+  | { kind: "ack-request"; attempt: number; unacked: number }
+  | { kind: "ack-observed"; progressed: boolean; latencyMs?: number | null; unacked: number }
+  | { kind: "ack-request-timeout"; unacked: number }
+  | { kind: "ack-progress-stalled"; unacked: number; elapsedMs: number };
+
+/** Content-free XEP-0198 cadence telemetry. No stanza or session identity leaves the client. */
+export function reportStreamManagement(payload: StreamManagementTelemetry): void {
+  if (!faro) return;
+  const progressed = payload.kind === "ack-observed" ? String(payload.progressed) : undefined;
+  faro.api.pushEvent("chat.xmpp.stream_management", {
+    kind: payload.kind,
+    ...(progressed === undefined ? {} : { progressed }),
+  });
+  faro.api.pushMeasurement({
+    type: "chat.xmpp.stream_management",
+    values: {
+      count: 1,
+      unacked: payload.unacked,
+      ...(payload.kind === "ack-request" ? { attempt: payload.attempt } : {}),
+      ...(payload.kind === "ack-observed" && payload.latencyMs != null
+        ? { latency_ms: payload.latencyMs }
+        : {}),
+      ...(payload.kind === "ack-progress-stalled" ? { elapsed_ms: payload.elapsedMs } : {}),
+    },
+  }, { context: { kind: payload.kind, ...(progressed === undefined ? {} : { progressed }) } });
+  if (payload.kind === "ack-progress-stalled") {
+    faro.api.pushEvent("chat.xmpp.reconnect.required", {
+      reason: "sm-ack-progress-stalled",
+    });
+  }
 }
 
 export function reportSessionLifecycle(payload: {

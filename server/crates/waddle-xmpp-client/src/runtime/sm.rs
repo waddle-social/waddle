@@ -71,6 +71,7 @@ impl XmppRuntime {
     pub(super) fn handle_sm_element(
         &mut self,
         element: &minidom::Element,
+        now_ms: u64,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         if crate::stream_management::SmState::is_request_ack(element) {
@@ -87,11 +88,18 @@ impl XmppRuntime {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
-            let acked = self.sm_state.process_ack(h);
+            let processed = self.sm_state.process_ack_at(h, now_ms);
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::AckReceived { h },
             )));
-            events.extend(acked.into_iter().map(|stanza_id| {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckObserved {
+                    progressed: processed.observation.progressed,
+                    latency_ms: processed.observation.latency_ms,
+                    unacked: processed.observation.unacked,
+                },
+            )));
+            events.extend(processed.acked.into_iter().map(|stanza_id| {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
         } else if element.name() == "enabled" {
@@ -137,7 +145,7 @@ impl XmppRuntime {
                 self.handle_sm_handled_count_too_high(h, events);
                 return Ok(());
             }
-            let acked = self.sm_state.process_ack(h);
+            let processed = self.sm_state.process_ack_at(h, now_ms);
             self.sm_state.previd = Some(previd.to_string());
             self.sm_state.enabled = true;
             self.sm_state.outbound_enabled = true;
@@ -147,7 +155,14 @@ impl XmppRuntime {
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::Resumed { h },
             )));
-            events.extend(acked.into_iter().map(|stanza_id| {
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckObserved {
+                    progressed: processed.observation.progressed,
+                    latency_ms: processed.observation.latency_ms,
+                    unacked: processed.observation.unacked,
+                },
+            )));
+            events.extend(processed.acked.into_iter().map(|stanza_id| {
                 ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
             }));
             for replay in self.sm_state.mark_unhandled_for_replay() {
@@ -162,8 +177,8 @@ impl XmppRuntime {
                     self.handle_sm_handled_count_too_high(h, events);
                     return Ok(());
                 }
-                let acked = self.sm_state.process_ack(h);
-                events.extend(acked.into_iter().map(|stanza_id| {
+                let processed = self.sm_state.process_ack_at(h, now_ms);
+                events.extend(processed.acked.into_iter().map(|stanza_id| {
                     ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
                 }));
             }

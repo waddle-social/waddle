@@ -442,7 +442,10 @@ describe("client send readiness", () => {
 
     await expect((client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> }).flushQueuedRoomMessages(roomJid)).rejects.toThrow("XMPP send failed: transport-error");
     expect(listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id)).toEqual(["room-replay-1"]);
-    expect(statuses).toEqual([["room-replay-1", "sending"]]);
+    expect(statuses).toEqual([
+      ["room-replay-1", "sending"],
+      ["room-replay-1", "queued"],
+    ]);
   });
 
   test("room join readiness waits for this resource's MUC self-presence", async () => {
@@ -1125,6 +1128,24 @@ describe("client send readiness", () => {
     ]);
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("a live DM ack delivered before the send promise resolves clears the durable copy", async () => {
+    const client = new BrowserXmppClient(session());
+    const xmpp = {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
+        (client as unknown as { handleMessageAck: (id: string) => void })
+          .handleMessageAck(opts.stanza_id!);
+        return opts.stanza_id;
+      }),
+    };
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+
+    const result = await client.sendDirectMessage("bob@example.com", "fast ack", { id: "dm-fast-live" });
+
+    expect(result).toEqual({ id: "dm-fast-live", state: "sending" });
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 

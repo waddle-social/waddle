@@ -1,5 +1,11 @@
 import type { CallEvent } from "@/lib/calls/types";
 
+export type WasmStreamManagementTelemetry =
+  | { kind: "ack-request"; attempt: number; unacked: number }
+  | { kind: "ack-observed"; progressed: boolean; latencyMs?: number | null; unacked: number }
+  | { kind: "ack-request-timeout"; unacked: number }
+  | { kind: "ack-progress-stalled"; unacked: number; elapsedMs: number };
+
 /** TypeScript interfaces for Rust/WASM callback payload shapes.
  * All fields are snake_case (serde serialization convention).
  */

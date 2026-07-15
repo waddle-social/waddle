@@ -132,6 +132,20 @@ pub(crate) async fn cancel_iq_command(
         .map_err(|err| js_error(err.to_string()))
 }
 
+pub(crate) async fn request_stream_management_ack(
+    inner: Rc<RefCell<WaddleClientInner>>,
+) -> Result<(), JsValue> {
+    let mut cmd_tx = command_sender(&inner)?;
+    let (responder, rx) = oneshot::channel();
+    cmd_tx
+        .send(WasmCommand::RequestStreamManagementAck { responder })
+        .await
+        .map_err(|_| js_error("client is disconnected"))?;
+    rx.await
+        .map_err(|_| js_error("client is disconnected"))?
+        .map_err(|err| js_error(err.to_string()))
+}
+
 /// Variant of [`send_iq_command`] that surfaces RFC 6120 §8.3 stanza
 /// errors as a typed [`waddle_xmpp_client::StanzaError`] on the Rust
 /// side instead of rejecting the Promise. Transport / disconnect

@@ -235,6 +235,8 @@ impl DriverTask {
         }
 
         loop {
+            let now_ms = crate::runtime::monotonic_now_ms();
+            let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
             tokio::select! {
                 result = self.transport.next_event() => {
                     match result {
@@ -267,8 +269,47 @@ impl DriverTask {
                         None => return,
                     }
                 }
+                _ = wait_for_stream_management_wakeup(sm_wakeup_ms) => {
+                    if !self.handle_stream_management_timer().await {
+                        return;
+                    }
+                }
             }
         }
+    }
+
+    async fn handle_stream_management_timer(&mut self) -> bool {
+        self.handle_stream_management_timer_at(crate::runtime::monotonic_now_ms())
+            .await
+    }
+
+    async fn handle_stream_management_timer_at(&mut self, now_ms: u64) -> bool {
+        let events = self.runtime.poll_stream_management_at(now_ms);
+        let progress_stalled = events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::AckProgressStalled { .. }
+                ))
+            )
+        });
+
+        for event in events {
+            if let Some(message) = self.dispatch_client_event(event) {
+                if self.send_transport_message(message).await.is_err() {
+                    return false;
+                }
+            }
+        }
+
+        if progress_stalled {
+            let _ = self.transport.abort().await;
+            for event in self.transport.drain_events() {
+                let _ = self.apply_transport_event(event).await;
+            }
+            return false;
+        }
+        true
     }
 
     async fn handle_command(&mut self, command: XmppCommand) -> bool {
@@ -507,6 +548,13 @@ impl DriverTask {
             .send(ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
                 stanza_id,
             }));
+    }
+}
+
+async fn wait_for_stream_management_wakeup(delay_ms: Option<u64>) {
+    match delay_ms {
+        Some(delay_ms) => tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await,
+        None => std::future::pending::<()>().await,
     }
 }
 

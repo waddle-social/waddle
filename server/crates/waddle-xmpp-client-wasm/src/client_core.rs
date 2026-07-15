@@ -12,6 +12,7 @@ impl WaddleClient {
                 on_presence: None,
                 on_connected: None,
                 on_session_lifecycle: None,
+                on_stream_management: None,
                 on_disconnected: None,
                 on_error: None,
                 on_message_delivery_acked: None,
@@ -55,6 +56,10 @@ impl WaddleClient {
 
     pub fn set_on_session_lifecycle(&mut self, cb: Function) {
         self.inner.borrow_mut().on_session_lifecycle = Some(cb);
+    }
+
+    pub fn set_on_stream_management(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_stream_management = Some(cb);
     }
 
     pub fn set_on_disconnected(&mut self, cb: Function) {
@@ -125,6 +130,17 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             disconnect_client(inner).await?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Best-effort XEP-0198 acknowledgement request for page lifecycle
+    /// handoff. The shared runtime suppresses duplicates while another
+    /// request is already awaiting `<a/>`.
+    pub fn request_stream_management_ack(&self) -> Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            request_stream_management_ack(inner).await?;
             Ok(JsValue::UNDEFINED)
         })
     }

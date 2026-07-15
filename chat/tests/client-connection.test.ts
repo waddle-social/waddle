@@ -152,7 +152,7 @@ describe("OfflineSendQueue drain ordering", () => {
     queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
     queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
     queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
-    queue.markInflight("dm-1");
+    queue.beginAttempt("dm-1", "dm");
 
     await queue.flushDirect();
 
@@ -177,6 +177,54 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "dm", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
+  });
+
+  test("a synchronous ack inside send clears persistence before the promise resolves", async () => {
+    let queue!: OfflineSendQueue;
+    const created = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        queue.handleAck(opts.id);
+        return opts.id;
+      },
+    });
+    queue = created.queue;
+    const acked: string[] = [];
+    created.events.on("messageAcked", (id) => acked.push(id));
+
+    queue.queueDirectMessage("bob@example.com", "fast ack", { id: "dm-fast" });
+    await queue.flushDirect();
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(acked).toEqual(["dm-fast"]);
+  });
+
+  test("a rejected attempt rolls back so the persisted message can retry", async () => {
+    let attempt = 0;
+    const { queue } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("socket unavailable");
+        return opts.id;
+      },
+    });
+    queue.queueDirectMessage("bob@example.com", "retry me", { id: "dm-retry" });
+
+    await expect(queue.flushDirect()).rejects.toThrow("socket unavailable");
+    expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["dm-retry"]);
+
+    await queue.flushDirect();
+    queue.handleAck("dm-retry");
+    expect(attempt).toBe(2);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
+  test("an ack after reload deletes persistence without ephemeral inflight state", () => {
+    const { queue } = createQueue();
+    queue.queueDirectMessage("bob@example.com", "already handled", { id: "dm-reloaded" });
+
+    queue.handleAck("dm-reloaded");
+
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 
   test("non-retryable send failures are discarded instead of retried forever", async () => {
