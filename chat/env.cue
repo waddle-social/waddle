@@ -3,6 +3,7 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
+	"list"
 )
 
 let _NamespaceNix = schema.#Contributor & {
@@ -37,6 +38,38 @@ let _NamespaceNix = schema.#Contributor & {
 		},
 	]
 }
+
+// Keep generated path filters aligned with the versioned manifest consumed by
+// the WASM builder. env.cue and package.json are triggers because they own the
+// task/package invocation; only the relevant contract descriptor is hashed.
+let _WasmBuildInputs = [
+	"../flake.lock",
+	"../flake.nix",
+	"../server/.cargo/**",
+	"../server/Cargo.lock",
+	"../server/Cargo.toml",
+	"../server/crates/waddle-xmpp-client-wasm/Cargo.toml",
+	"../server/crates/waddle-xmpp-client-wasm/build.rs",
+	"../server/crates/waddle-xmpp-client-wasm/src/**",
+	"../server/crates/waddle-xmpp-client/Cargo.toml",
+	"../server/crates/waddle-xmpp-client/build.rs",
+	"../server/crates/waddle-xmpp-client/src/**",
+	"../server/crates/waddle-xmpp-core/Cargo.toml",
+	"../server/crates/waddle-xmpp-core/build.rs",
+	"../server/crates/waddle-xmpp-core/src/**",
+	"../server/rust-toolchain.toml",
+	"env.cue",
+	"package.json",
+	"scripts/build-and-publish-wasm.mjs",
+	"scripts/build-xmpp-wasm.mjs",
+	"scripts/wasm-build-contract.mjs",
+	"scripts/wasm-build-contract.json",
+	"scripts/wasm-build-environment.mjs",
+	"scripts/wasm-build-input-digest.mjs",
+	"scripts/wasm-build-input-manifest.mjs",
+	"scripts/wasm-build-inputs.mjs",
+	"scripts/wasm-package-bindings.mjs",
+]
 
 schema.#Project & {
 	name: "waddle-chat"
@@ -103,13 +136,7 @@ schema.#Project & {
 		buildAndPublishWasm: schema.#Task & {
 			command: "bun"
 			args: ["run", "scripts/build-and-publish-wasm.mjs"]
-			inputs: [
-				"../server/Cargo.toml",
-				"../server/Cargo.lock",
-				"../server/crates/waddle-xmpp-client/**",
-				"../server/crates/waddle-xmpp-client-wasm/**",
-				"scripts/build-and-publish-wasm.mjs",
-			]
+			inputs: _WasmBuildInputs
 		}
 
 		// Builds WASM from Rust source for the PR lint/build pipelines.
@@ -118,13 +145,7 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", "REBUILD_WASM=1 bun run wasm:build"]
 			dependsOn: [checkWasmDrift]
-			inputs: [
-				"../server/Cargo.toml",
-				"../server/Cargo.lock",
-				"../server/crates/waddle-xmpp-client/**",
-				"../server/crates/waddle-xmpp-client-wasm/**",
-				"scripts/build-xmpp-wasm.mjs",
-			]
+			inputs: _WasmBuildInputs
 			outputs: [
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 			]
@@ -135,17 +156,11 @@ schema.#Project & {
 		checkWasmDrift: schema.#Task & {
 			command: "bun"
 			args: ["run", "scripts/build-xmpp-wasm.mjs", "--check"]
-			inputs: [
-				"../server/Cargo.toml",
-				"../server/Cargo.lock",
-				"../server/crates/waddle-xmpp-core/**",
-				"../server/crates/waddle-xmpp-client/**",
-				"../server/crates/waddle-xmpp-client-wasm/**",
+			inputs: list.Concat([_WasmBuildInputs, [
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
-				"scripts/build-xmpp-wasm.mjs",
-			]
+			]])
 		}
 
 		generateTypes: schema.#Task & {

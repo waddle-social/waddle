@@ -1,0 +1,26 @@
+{
+	"schemaVersion": 1,
+	"digestFormat": "waddle:xmpp-client-wasm:canonical-inputs:v1",
+	"packageScript": "bun run scripts/build-xmpp-wasm.mjs",
+	"crate": "server/crates/waddle-xmpp-client-wasm",
+	"cargo": {
+		"profile": "release",
+		"target": "wasm32-unknown-unknown",
+		"defaultFeatures": true,
+		"features": [],
+		"locked": true
+	},
+	"wasmPack": {
+		"command": "wasm-pack",
+		"args": [
+			"build",
+			"--target",
+			"bundler",
+			"--release",
+			"--out-dir",
+			"{outDir}",
+			"--",
+			"--locked"
+		]
+	}
+}
