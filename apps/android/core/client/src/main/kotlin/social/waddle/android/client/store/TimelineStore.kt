@@ -57,6 +57,9 @@ class TimelineStore(
     private val flows = HashMap<String, MutableStateFlow<List<TimelineItem>>>()
     private val entries = HashMap<String, MutableList<Entry>>()
     private val pendingMutations = HashMap<String, ArrayDeque<RankedMutation>>()
+
+    /** Newest wire timestamp seen per conversation (the rank anchor). */
+    private val newestWireInstant = HashMap<String, Instant>()
     private var insertionCounter = 0L
 
     @Volatile
@@ -154,9 +157,17 @@ class TimelineStore(
         synchronized(lock) {
             entries.clear()
             pendingMutations.clear()
+            newestWireInstant.clear()
             insertionCounter = 0L
             flows.values.forEach { it.value = emptyList() }
         }
+    }
+
+    /** Must hold [lock]. */
+    private fun recordWireInstant(conversation: String, timestamp: String?) {
+        val instant = timestamp?.let(::parseInstant) ?: return
+        val current = newestWireInstant[conversation]
+        if (current == null || instant > current) newestWireInstant[conversation] = instant
     }
 
     private fun insert(
@@ -192,18 +203,28 @@ class TimelineStore(
                 // replay is dropped. Applied mutations live on the entry
                 // and survive the swap.
                 if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
+                    val merged = item.copy(timestamp = item.timestamp ?: existing.item.timestamp)
+                    // The sort key must follow the adopted timestamp or
+                    // the row keeps its stale placement forever.
                     list[existingIndex] = existing.copy(
-                        item = item.copy(timestamp = item.timestamp ?: existing.item.timestamp),
+                        item = merged,
+                        sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
                     )
+                    list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 } else if (existing.item.timestamp == null && item.timestamp != null) {
                     // The archived copy of a timestampless local echo
-                    // brings the server timestamp; adopt it in place.
+                    // brings the server timestamp; adopt it in place —
+                    // including the sort key, else the echo stays pinned
+                    // at the newest edge above later-arriving messages.
                     list[existingIndex] = existing.copy(
                         item = existing.item.copy(timestamp = item.timestamp),
+                        sortInstant = parseInstant(item.timestamp),
                     )
+                    list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 }
+                recordWireInstant(conversation, item.timestamp)
                 return false
             }
             var entry = Entry(
@@ -212,6 +233,7 @@ class TimelineStore(
                 order = insertionCounter++,
                 mutations = MutationState(tombstone = initialTombstone),
             )
+            recordWireInstant(conversation, item.timestamp)
             entry = drainPendingMutationsInto(conversation, entry, isGroupchat)
             list += entry
             list.sortWith(ENTRY_ORDER)
@@ -230,14 +252,25 @@ class TimelineStore(
         isGroupchat: Boolean,
         timestamp: String?,
     ) {
-        val ranked = RankedMutation(
-            mutation = mutation,
-            rank = Rank(
-                instant = timestamp?.let { parseInstant(it) },
-                order = synchronized(lock) { insertionCounter++ },
-            ),
-            isGroupchat = isGroupchat,
-        )
+        val ranked = synchronized(lock) {
+            val instant = timestamp?.let { parseInstant(it) }
+            // Web `appliedAfterWire` anchor parity: a live (unstamped)
+            // mutation ranks AT the newest wire instant this conversation
+            // has seen, with insertion order breaking ties — an archived
+            // replay stamped LATER than everything seen so far still
+            // wins (an Instant.MAX rank would reject genuinely newer
+            // mutations replayed via MAM after a stream drop, freezing
+            // stale reactions/bodies forever).
+            recordWireInstant(conversation, timestamp)
+            RankedMutation(
+                mutation = mutation,
+                rank = Rank(
+                    instant = instant ?: newestWireInstant[conversation],
+                    order = insertionCounter++,
+                ),
+                isGroupchat = isGroupchat,
+            )
+        }
         synchronized(lock) {
             val list = entries[conversation]
             val index = list?.let { resolveTargetIndex(it, mutation.targetId) } ?: -1
@@ -368,12 +401,15 @@ class TimelineStore(
 
     /**
      * Latest-wins ordering for mutations: by timestamp when carried
-     * (archived mutations always are), with timestampless live mutations
-     * ranking newest, insertion order breaking ties.
+     * (archived mutations always are); live mutations are anchored to
+     * the newest wire instant seen at apply time (see [applyMutation]),
+     * so a null instant only means "nothing wire-stamped seen yet" and
+     * sorts oldest. Insertion order breaks ties (a live apply outranks
+     * the wire stamp it was anchored to).
      */
     private data class Rank(val instant: Instant?, val order: Long) : Comparable<Rank> {
         override fun compareTo(other: Rank): Int {
-            val byInstant = (instant ?: Instant.MAX).compareTo(other.instant ?: Instant.MAX)
+            val byInstant = (instant ?: Instant.MIN).compareTo(other.instant ?: Instant.MIN)
             return if (byInstant != 0) byInstant else order.compareTo(other.order)
         }
     }

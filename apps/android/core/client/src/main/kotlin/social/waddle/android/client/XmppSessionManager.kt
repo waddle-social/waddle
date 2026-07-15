@@ -65,6 +65,7 @@ import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSmResumeState
+import social.waddle.client.ffi.WaddleThreadTarget
 import social.waddle.client.ffi.WaddleUploadSlot
 
 /**
@@ -397,17 +398,23 @@ class XmppSessionManager(
     }
 
     /** XEP-0308: replace an own message's body; applies locally on a
-     *  successful send (no DM echo). */
+     *  successful send (no DM echo). [threadId] repeats the corrected
+     *  message's XEP-0201 `<thread/>` (web parity) so the edit stays in
+     *  its thread. */
     suspend fun sendCorrection(
         conversationJid: String,
         isGroupchat: Boolean,
         targetId: String,
         newBody: String,
+        threadId: String? = null,
     ): Boolean {
         val client = activeClient ?: return false
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val options = threadId?.let {
+            sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
+        }
         val outcome = try {
-            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, null)
+            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
@@ -456,7 +463,12 @@ class XmppSessionManager(
             }
         }
 
-    /** Seed [pinStore] with the room's current pin list (room open). */
+    /**
+     * Seed [pinStore] with the room's current pin list (room open). The
+     * snapshot is injected into the serialized event stream — applying
+     * it here would race live pin events and clobber updates that
+     * arrived while the fetch was in flight.
+     */
     suspend fun refreshRoomPins(roomJid: String) {
         val client = activeClient ?: return
         val entries = try {
@@ -466,7 +478,7 @@ class XmppSessionManager(
         } catch (_: Throwable) {
             return
         }
-        pinStore.seed(roomJid, entries)
+        currentBridge?.submit(XmppEvent.RoomPins(bareJid(roomJid), entries))
     }
 
     private fun applyOwnReaction(
@@ -549,10 +561,12 @@ class XmppSessionManager(
             displayedTargetOf(target, isGroupchat) ?: return
         }
         val client = activeClient ?: run {
-            // No live session: park the dispatch and replay it on the
-            // next ready (a notification tap during a reconnect gap must
-            // not permanently drop the read receipt).
-            pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, explicitTarget)
+            // No live session: park the RESOLVED target and replay it on
+            // the next ready (a notification tap during a reconnect gap
+            // must not permanently drop the read receipt). Parking null
+            // would re-resolve after MAM catch-up and mark messages the
+            // user never saw.
+            pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
             return
         }
         if (readCursorStore.cursor(conversation) == ids.markerId) return
@@ -644,7 +658,16 @@ class XmppSessionManager(
         val current = readCursorStore.cursor(conversation)
         val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
         if (currentIndex >= index) return
-        readCursorStore.advance(conversation, entry.stanzaId)
+        // Compare-and-advance: a local displayed dispatch (UI scope) can
+        // move the cursor between the read above and this write — a
+        // stale sibling entry must not regress it and resurrect a badge
+        // the user just cleared.
+        if (!readCursorStore.compareAndAdvance(conversation, expected = current, stanzaId = entry.stanzaId)) {
+            return
+        }
+        // The active (on-screen) conversation's badge is suppressed and
+        // owned by the local read path; don't fight it from here.
+        if (unreadStore.isActiveConversation(conversation)) return
         val unread = items.subList(index + 1, items.size).count { !it.isMine && it.tombstone == null }
         unreadStore.set(conversation, unread)
     }
@@ -1025,6 +1048,7 @@ class XmppSessionManager(
                 }
             }
             is XmppEvent.MdsEntries -> event.entries.forEach(::applyMdsEntry)
+            is XmppEvent.RoomPins -> pinStore.seed(event.roomJid, event.entries)
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
             is XmppEvent.MamResult -> {
                 timelineStore.onArchivedMessage(event.message)
@@ -1315,7 +1339,7 @@ class XmppSessionManager(
     /** A displayed dispatch waiting for a live session. */
     private data class PendingDisplayed(
         val isGroupchat: Boolean,
-        val target: DisplayedTarget?,
+        val target: DisplayedTarget,
     )
 
     companion object {

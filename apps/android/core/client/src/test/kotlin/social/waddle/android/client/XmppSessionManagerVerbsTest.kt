@@ -171,6 +171,8 @@ class XmppSessionManagerVerbsTest {
         )
 
         harness.manager.refreshRoomPins(room)
+        // The snapshot rides the serialized event stream.
+        runCurrent()
         assertEquals(setOf("s1"), harness.manager.pinStore.pinned.value[room])
 
         harness.factory.emit(

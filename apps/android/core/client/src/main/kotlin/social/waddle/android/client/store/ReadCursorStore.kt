@@ -31,6 +31,26 @@ class ReadCursorStore {
         return previous[conversation] != stanzaId
     }
 
+    /**
+     * Advance only if the cursor is still [expected] — callers that
+     * computed ordering from a snapshot use this so a concurrent local
+     * advance cannot be regressed by a stale write.
+     */
+    fun compareAndAdvance(conversationJid: String, expected: String?, stanzaId: String): Boolean {
+        val conversation = bareJid(conversationJid)
+        var swapped = false
+        _cursors.getAndUpdate { cursors ->
+            if (cursors[conversation] == expected) {
+                swapped = true
+                cursors + (conversation to stanzaId)
+            } else {
+                swapped = false
+                cursors
+            }
+        }
+        return swapped
+    }
+
     fun clear() {
         _cursors.value = emptyMap()
     }

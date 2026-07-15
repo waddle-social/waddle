@@ -70,7 +70,12 @@ sealed interface UploadState {
 sealed interface ComposerMode {
     data object Normal : ComposerMode
 
-    data class Editing(val targetId: String, val originalBody: String) : ComposerMode
+    data class Editing(
+        val targetId: String,
+        val originalBody: String,
+        /** XEP-0201: the corrected message's thread, repeated on the edit. */
+        val threadId: String? = null,
+    ) : ComposerMode
 
     data class Replying(
         val targetId: String,

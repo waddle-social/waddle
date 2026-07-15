@@ -46,8 +46,9 @@ interface ConversationIo {
     suspend fun sendReaction(targetId: String, emojis: List<String>, previousEmojis: List<String>): Boolean =
         false
 
-    /** XEP-0308: replace an own message's body. */
-    suspend fun sendCorrection(targetId: String, newBody: String): Boolean = false
+    /** XEP-0308: replace an own message's body; [threadId] repeats
+     *  the corrected message's XEP-0201 thread. */
+    suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean = false
 
     /** XEP-0424: retract an own message. */
     suspend fun sendRetraction(targetId: String): Boolean = false

@@ -25,6 +25,10 @@ class UnreadStore {
         activeConversation = conversationJid?.let(::bareJid)
     }
 
+    /** Whether [conversationJid] is the on-screen conversation. */
+    fun isActiveConversation(conversationJid: String): Boolean =
+        activeConversation == bareJid(conversationJid)
+
     /**
      * Compare-and-clear for pause/dispose hooks: Navigation 3 keeps the
      * covered entry RESUMED through the exit animation, so screen A's

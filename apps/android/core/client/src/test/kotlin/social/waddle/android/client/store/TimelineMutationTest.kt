@@ -54,12 +54,16 @@ class TimelineMutationTest {
         store.onArchivedMessage(
             testArchivedMessage(mamId = "m0", stanzaId = "s1", timestamp = "2026-07-15T09:00:00Z"),
         )
-        // Live clear (newest rank) after the original reaction...
+        // The conversation has seen wire stamps up to 10:30 when the
+        // live clear applies — the clear anchors there.
+        store.onArchivedMessage(
+            testArchivedMessage(mamId = "m2", stanzaId = "s2", timestamp = "2026-07-15T10:30:00Z", body = "later"),
+        )
         store.onLiveMessage(
             testMessage(id = "r2", body = null, reactionTargetId = "s1", reactionEmojis = emptyList()),
         )
-        // ...then a MAM page replays the OLDER reaction. The clear kept
-        // its rank, so the replay must not resurrect the chip.
+        // A MAM page replays the reaction stamped BEFORE the clear's
+        // anchor: it must not resurrect the chip.
         store.onArchivedMessage(
             testArchivedMessage(
                 mamId = "m1",
@@ -71,7 +75,37 @@ class TimelineMutationTest {
             ),
         )
 
-        assertTrue(dmTimeline()[0].reactions.isEmpty())
+        assertTrue(dmTimeline().first { it.id == "s1" }.reactions.isEmpty())
+    }
+
+    @Test
+    fun `an archived mutation stamped after everything seen beats a live apply`() {
+        // Web appliedAfterWire parity: the live apply anchors at the
+        // newest wire stamp SEEN (09:00); a reconnect replay stamped
+        // later carries genuinely newer state and must win — an
+        // absolute newest-rank for live applies would freeze stale
+        // reactions forever after a stream drop.
+        store.onArchivedMessage(
+            testArchivedMessage(mamId = "m0", stanzaId = "s1", timestamp = "2026-07-15T09:00:00Z"),
+        )
+        store.onLiveMessage(
+            testMessage(id = "r1", body = null, reactionTargetId = "s1", reactionEmojis = listOf("👍")),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m1",
+                id = "r2",
+                body = null,
+                timestamp = "2026-07-15T10:05:00Z",
+                reactionTargetId = "s1",
+                reactionEmojis = listOf("❤️"),
+            ),
+        )
+
+        assertEquals(
+            listOf(ReactionGroup("❤️", 1, mine = false)),
+            dmTimeline().first { it.id == "s1" }.reactions,
+        )
     }
 
     @Test

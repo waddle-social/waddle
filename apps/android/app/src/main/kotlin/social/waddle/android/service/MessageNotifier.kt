@@ -63,6 +63,14 @@ class MessageNotifier(
     private val postMutex = Mutex()
     private val history = HashMap<String, MutableList<NotificationCompat.MessagingStyle.Message>>()
 
+    /**
+     * Newest mark-as-read target per conversation. Every re-post
+     * (direct-reply append, reply-failed banner) rebuilds the actions
+     * with FLAG_UPDATE_CURRENT — reading the target from here keeps the
+     * process-death read dispatch intact instead of wiping the extras.
+     */
+    private val displayedTargets = HashMap<String, XmppSessionManager.DisplayedTarget>()
+
     fun start(scope: CoroutineScope) {
         scope.launch {
             events.collect { event ->
@@ -136,7 +144,10 @@ class MessageNotifier(
         // re-post a notification for the just-signed-out account after
         // the cancelAll.
         postMutex.withLock {
-            synchronized(historyLock) { history.clear() }
+            synchronized(historyLock) {
+                history.clear()
+                displayedTargets.clear()
+            }
             queuedReplies.clear()
             NotificationManagerCompat.from(context).cancelAll()
         }
@@ -145,7 +156,10 @@ class MessageNotifier(
     /** The conversation is being read in-app: retire its notification. */
     suspend fun clearConversationNotification(conversationJid: String) {
         postMutex.withLock {
-            synchronized(historyLock) { history.remove(conversationJid) }
+            synchronized(historyLock) {
+                history.remove(conversationJid)
+                displayedTargets.remove(conversationJid)
+            }
             NotificationManagerCompat.from(context)
                 .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
         }
@@ -153,7 +167,10 @@ class MessageNotifier(
 
     /** Notification dismissed: forget the conversation's history. */
     fun clearConversation(conversationJid: String) {
-        synchronized(historyLock) { history.remove(conversationJid) }
+        synchronized(historyLock) {
+            history.remove(conversationJid)
+            displayedTargets.remove(conversationJid)
+        }
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
@@ -181,15 +198,12 @@ class MessageNotifier(
             person,
         )
         postMutex.withLock {
+            displayedTargetOf(message, isGroupchat, conversationJid)?.let { target ->
+                synchronized(historyLock) { displayedTargets[conversationJid] = target }
+            }
             val messages = appendToHistory(conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
-            postNotification(
-                conversationJid,
-                isGroupchat,
-                messages,
-                silent,
-                displayedTarget = displayedTargetOf(message, isGroupchat, conversationJid),
-            )
+            postNotification(conversationJid, isGroupchat, messages, silent)
         }
     }
 
@@ -236,8 +250,8 @@ class MessageNotifier(
         messages: List<NotificationCompat.MessagingStyle.Message>,
         silent: Boolean,
         replyFailed: Boolean = false,
-        displayedTarget: XmppSessionManager.DisplayedTarget? = null,
     ) {
+        val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,

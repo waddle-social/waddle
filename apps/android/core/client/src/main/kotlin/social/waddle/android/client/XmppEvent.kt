@@ -4,6 +4,7 @@ import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSaslCondition
 
@@ -44,6 +45,13 @@ sealed interface XmppEvent {
      * live-message unread increments.
      */
     data class MdsEntries(val entries: List<WaddleMdsDisplayedEntry>) : XmppEvent
+
+    /**
+     * `urn:waddle:pin:0` room snapshot from `fetch_room_pins`, injected
+     * into the event stream so the seed serializes with live pin-event
+     * broadcasts instead of clobbering them.
+     */
+    data class RoomPins(val roomJid: String, val entries: List<WaddlePinEntry>) : XmppEvent
 
     /**
      * RFC 6120 §6.5 SASL failure: terminal for the presented token —

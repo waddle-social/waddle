@@ -125,7 +125,10 @@ private fun mutationOf(
 ): MessageMutation? {
     from ?: return null
     return when {
-        moderationTargetId != null -> MessageMutation.Moderation(
+        // XEP-0425 is a MUC feature: only a room service moderates.
+        // A DM peer's stanza claiming moderation is ignored outright
+        // (web parity: moderation is channel-only).
+        moderationTargetId != null && isGroupchat -> MessageMutation.Moderation(
             targetId = moderationTargetId,
             from = from,
             moderatedBy = moderatedBy,

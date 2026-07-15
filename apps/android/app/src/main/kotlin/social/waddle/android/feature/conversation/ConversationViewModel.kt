@@ -233,14 +233,17 @@ open class ConversationViewModel(
         if (mode is ComposerMode.Editing) {
             _composerMode.value = ComposerMode.Normal
             viewModelScope.launch {
-                val sent = runCatching { io.sendCorrection(mode.targetId, text) }.getOrDefault(false)
+                val sent = runCatching {
+                    io.sendCorrection(mode.targetId, text, mode.threadId)
+                }.getOrDefault(false)
                 if (sent) {
                     typingNotifier.onMessageSent()
                 } else {
                     // Corrections are never queued (a replayed edit could
                     // outrank a newer one) — restore edit mode with the
                     // attempted text instead of silently discarding it.
-                    _composerMode.value = ComposerMode.Editing(mode.targetId, originalBody = text)
+                    _composerMode.value =
+                        ComposerMode.Editing(mode.targetId, originalBody = text, threadId = mode.threadId)
                 }
             }
             return
@@ -397,7 +400,11 @@ open class ConversationViewModel(
     fun startEdit(item: TimelineItem) {
         if (!item.isMine || item.tombstone != null) return
         val target = correctionTargetIdOf(item) ?: return
-        _composerMode.value = ComposerMode.Editing(targetId = target, originalBody = item.body)
+        _composerMode.value = ComposerMode.Editing(
+            targetId = target,
+            originalBody = item.body,
+            threadId = item.threadId,
+        )
     }
 
     fun cancelEdit() {
