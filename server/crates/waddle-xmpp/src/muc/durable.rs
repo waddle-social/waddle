@@ -45,14 +45,10 @@ use crate::XmppError;
 pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppError>> + Send + 'a>>;
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
-/// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated): the same
-/// `(Entity, ClaimEpoch, NodeIdentity)` tuple [`MucDurableStore::check_fenced_fanout`]
-/// resolves internally via [`MucDurableStore::record_claim_fence`]'s cache,
-/// exposed here so a caller that needs to run its OWN fenced write against a
-/// DIFFERENT store (MAM's `store_message_fenced`, which cannot share a SQL
-/// transaction with this store's own `assert_fenced`) can bind the identical
-/// typed values into its own `SELECT ... FOR SHARE` check, rather than
-/// re-deriving them from a second, independent source of truth.
+/// (ADR-0017 Phase 3 Slice 7): the immutable `(Entity, ClaimEpoch,
+/// NodeIdentity)` tuple retained by an actor incarnation. Actor-owned durable
+/// load, save, and delete operations bind this exact fence instead of
+/// resolving a possibly newer cache entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoomClaimFenceContext {
     pub entity: Entity,
@@ -89,16 +85,15 @@ pub struct DurableRoomState {
 
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
 ///
-/// Every write is epoch-fenced against this node's currently-recorded claim
-/// on the room's `RoomActor` entity (see [`Self::record_claim_fence`]) —
-/// "epoch-fenced like all claimed-entity writes" per element 7.
+/// Every load, write, and delete is epoch-fenced against the exact claim
+/// retained by that `RoomActor` incarnation — "epoch-fenced like all
+/// claimed-entity writes" per element 7. The cache populated by
+/// [`Self::record_claim_fence`] is not an authority for actor-owned writes.
 ///
-/// **Fail-open contract, revised (ADR-0017 Phase 3 Slice 7 FIX 2,
-/// council-adjudicated).** This trait's `save_*` methods themselves are
-/// still fire-and-forget from a Rust-signature perspective (`Result<(),
-/// XmppError>`, not surfaced up through every intermediate layer) — a
-/// fenced write that fails still just returns `Err` to its immediate
-/// caller rather than panicking or blocking. What changed is what
+/// **Fail-closed ownership contract (ADR-0017 Phase 3 Slice 7 FIX 2).**
+/// This trait's `save_*` methods return an awaited `Result<(), XmppError>`.
+/// A fenced write that fails returns `Err` to its immediate caller; it is not
+/// fire-and-forget. What changed is what
 /// [`super::room_actor::RoomActor`] itself does with that `Err`, for every
 /// mutation handler that changes durable-relevant state (`UpdateConfig`,
 /// `RollbackConfigIfRevision`, `UpdateGroupDmConfigByMember`, `SetSubject`,
@@ -107,13 +102,15 @@ pub struct DurableRoomState {
 ///
 /// 1. **Before mutating**: the handler runs
 ///    [`super::room_actor::RoomActor::gate_mutation`] — a `SELECT ... FOR
-///    SHARE`-fenced [`Self::check_fenced_fanout`] pre-check — and refuses
-///    to mutate at all on a definitive ownership-loss result. This is new:
-///    previously every mutation applied in-memory unconditionally,
-///    regardless of whether this node's claim was still current.
-/// 2. **After mutating**: a `save_*` failure that is NOT ownership loss
-///    (a transient backend outage) is no longer silently logged and
-///    swallowed — it now surfaces as a typed error
+///    SHARE`-fenced [`Self::check_exact_claim_fence`] pre-check using the
+///    actor incarnation's retained fence. It refuses to mutate both when
+///    ownership was lost and when ownership cannot be proven.
+/// 2. **After mutating**: config and ordinary affiliation writes classify a
+///    `save_*` failure that is NOT ownership loss (a transient backend
+///    outage) as a typed error rather than silently logging and swallowing
+///    it. Subject persistence intentionally occurs before applying the
+///    `SubjectState`, so its failure is classified before mutation.
+///    The typed result surfaces as
 ///    (`RoomMutationError::PersistFailed`/the per-message error enum's
 ///    equivalent variant) to the ask's caller, which is expected to
 ///    trigger `RoomLocalClaims::demote` (on ownership loss) and/or report
@@ -129,57 +126,46 @@ pub trait MucDurableStore: Send + Sync {
     /// that has never been durably written (e.g. a brand-new persistent
     /// room's very first spawn on any node, or a non-persistent instant
     /// room, which is never durably written at all).
-    fn load_room_state<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
-
-    /// Load one authoritative room snapshot while proving that this store's
-    /// recorded claim fence is still current in the same database
+    /// Load one authoritative room snapshot while proving that the actor
+    /// incarnation's exact claim fence is still current in the same database
     /// transaction. Implementations must not split the ownership check and
     /// snapshot read across transactions: a claim steal between those reads
     /// would let a deposed actor install state owned by its successor.
     ///
-    /// The default fails closed. Clustered stores must opt in explicitly;
-    /// in-memory test stores may delegate to [`Self::load_room_state`] when
-    /// their ownership model is controlled synchronously by the test.
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
-    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-        let _ = room_jid;
-        Box::pin(async {
-            Err(XmppError::internal(
-                "durable store does not implement fenced room-state loading",
-            ))
-        })
-    }
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
 
     /// Durably upsert the room's configuration (plus the `waddle_id`/
     /// `channel_id` it travels with).
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         waddle_id: &'a str,
         channel_id: &'a str,
         config: &'a RoomConfig,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// Durably upsert (or, when `subject` is `None`, clear) the room's
     /// current subject.
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         subject: Option<&'a SubjectState>,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// Durably upsert one affiliation-list entry. `Affiliation::None`
     /// removes the row, mirroring `AffiliationList::set`'s in-memory
     /// contract.
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         entry: &'a AffiliationEntry,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// XEP-0045 §10.9 (#1261): destroy removes the room "even if it was
@@ -189,20 +175,21 @@ pub trait MucDurableStore: Send + Sync {
     /// config, subject, or ban list) on the next join. Called by the
     /// room registry's explicit-destroy path only; dormancy eviction
     /// keeps the rows because an evicted-but-live room MUST restore.
-    /// Default no-op mirrors the other optional hooks: single-node
-    /// deployments never configure a `MucDurableStore` at all.
-    fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
-        let _ = room_jid;
-        Box::pin(async { Ok(()) })
-    }
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()>;
 
-    /// Record the claim epoch this node most recently won for `room_jid`
-    /// (called by the room registry immediately after a successful
-    /// `ClaimStore::ensure_claimed`/steal — never by the store itself),
-    /// so later `save_*` calls know which epoch to bind into their
-    /// fencing SQL. Default no-op: single-node/non-clustering deployments
-    /// never configure a `MucDurableStore` at all, so this is never
-    /// called there.
+    /// Publish the claim fence alongside the matching ready room-registry
+    /// entry — never immediately after acquire/steal while restore is still
+    /// in flight. This cache is only for consumers that cannot carry an
+    /// actor snapshot. Actor-owned load/save/delete operations receive their
+    /// exact fence explicitly and must not consult this mutable room-JID cache
+    /// for authorization. The cache remains the legacy pre-fanout groupchat
+    /// dispatch/MAM backstop until #1283 replaces it. Default no-op:
+    /// single-node/non-clustering deployments never configure a
+    /// `MucDurableStore` at all, so this is never called there.
     fn record_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
         let _ = (room_jid, fence);
     }
@@ -214,12 +201,12 @@ pub trait MucDurableStore: Send + Sync {
         let _ = (room_jid, expected);
     }
 
-    /// The two-part demotion protocol's guaranteed backstop (element 7): a
-    /// fenced `SELECT ... FOR SHARE` against this room's claim (at the
-    /// fence [`Self::record_claim_fence`] last recorded), run before every
-    /// local fan-out. `Ok(true)` iff this node still holds the claim;
-    /// `Ok(false)` means a steal has committed and the caller must demote
-    /// locally and not deliver. Default `Ok(true)` (never demotes):
+    /// Cache-based ownership check for the legacy pre-fanout groupchat
+    /// dispatch/MAM path. New room actor paths must use
+    /// [`Self::check_exact_claim_fence`] with the fence retained by their actor
+    /// incarnation. `Ok(true)` iff this node still holds the published claim;
+    /// `Ok(false)` means a steal has committed.
+    /// Default `Ok(true)` (never demotes):
     /// single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests
     /// exercising the trait directly.
@@ -228,16 +215,21 @@ pub trait MucDurableStore: Send + Sync {
         Box::pin(async { Ok(true) })
     }
 
-    /// The typed `(Entity, ClaimEpoch, node_id)` context this room is
-    /// currently cached under (ADR-0017 Phase 3 Slice 7 FIX 1) — the exact
-    /// same values [`Self::check_fenced_fanout`] resolves internally, handed
-    /// out here so a caller needing its OWN fenced write (MAM's
-    /// `store_message_fenced`, which uses its own Postgres connection and
-    /// cannot share a transaction with this store) can bind them into an
-    /// equivalent `SELECT ... FOR SHARE` check without re-deriving them from
-    /// a second, independent mechanism. `None` when no epoch is cached for
-    /// this room (this node has never claimed it, or `forget_claim_fence`
-    /// ran) — callers treat that exactly like a fencing failure. Default
+    /// Check the actor incarnation's retained claim rather than whichever
+    /// claim is currently cached for the same room JID. Implementations must
+    /// validate that `fence.entity` names `room_jid` and fail closed on
+    /// backend errors.
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, bool>;
+
+    /// The typed `(Entity, ClaimEpoch, node_id)` context currently published
+    /// for a ready live room entry. This is observability/legacy support;
+    /// actor-derived work must use the immutable fence carried by its own
+    /// [`super::room_actor::RoomChainSnapshot`]. `None` while no actor is
+    /// published (or after `forget_claim_fence`). Default
     /// `None`: single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests
     /// exercising the trait directly.
@@ -246,13 +238,12 @@ pub trait MucDurableStore: Send + Sync {
         None
     }
 
-    /// Two-part demotion protocol, part (a) (element 7): best-effort,
-    /// fire-and-forget notification to the node this room's claim was
-    /// just stolen from, naming the entity and the new epoch. The
-    /// recipient tombstones the entity and NotOwner-NACKs subsequent
-    /// traffic. Never awaited for correctness — the guaranteed backstop
-    /// is the fenced pre-fan-out check the room-dispatch path runs
-    /// independently of this notification's delivery. Default no-op
+    /// Two-part demotion protocol, part (a) (element 7): an awaited
+    /// notification to the node this room's claim was just stolen from,
+    /// naming the entity and the new epoch. The recipient tombstones the
+    /// entity and NotOwner-NACKs subsequent traffic. It is not relied on as
+    /// the sole correctness mechanism: the cache-backed legacy pre-fanout
+    /// check runs independently of notification delivery. Default no-op
     /// (single-node/non-clustering deployments have no relay to notify
     /// over).
     fn notify_previous_owner_demoted<'a>(

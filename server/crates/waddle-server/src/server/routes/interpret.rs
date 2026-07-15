@@ -104,12 +104,6 @@ use waddle_xmpp::muc::room_actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RoomActor, SetSubject,
 };
-// ADR-0017 Phase 3 Slice 7: `DestroyRoom` is used by `dispatch_to_room`'s
-// fenced pre-fan-out backstop, which only exists on `clustering`-feature
-// builds (the check itself is a no-op — `ClusteringHandles::
-// muc_durable_store` is `None` — whenever clustering is disabled, but the
-// import must still be feature-gated to avoid an unused-import warning on
-// a build that lacks the `clustering` feature entirely).
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::room_registry_actor::DestroyRoom;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
@@ -201,7 +195,9 @@ use offline_delivery::queue_offline_delivery;
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
-use room_subject::persist_room_subject_event;
+use room_subject::{
+    persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
+};
 pub(crate) use route_to_connection::{fallback_reply_for_undeliverable_iq, route_to_connection};
 pub(crate) use routing::{deliver_direct_to_full, deliver_peer_to_full, FullJidDeliveryOutcome};
 use routing::{
@@ -377,16 +373,15 @@ async fn interpret_with_depth(
     let registry = deps.connection_registry;
     let mut outcome = InterpretOutcome::default();
     let mut archive_id_rewrites: Vec<ArchiveIdRewrite> = Vec::new();
-    // ADR-0017 Phase 3 Slice 7 FIX 1 (council-adjudicated): once the fenced
-    // MAM archive write observes this node has been deposed, every
-    // remaining event in THIS SAME batch (in particular the reflector's
-    // per-occupant `RouteToConnection` fan-out for the same message, which
-    // always follows the archive handler in the locked Q7 chain order) is
-    // suppressed — "the message is NOT archived and NOT fanned out."
-    let mut ownership_lost = false;
+    // Once a write-adjacent room effect rejects this batch, suppress every
+    // later effect from the same frozen chain. `ArchiveGroupchat` retains its
+    // legacy ownership backstop until #1283; subject persistence binds the
+    // exact actor fence in this PR. Both must halt later inbox/fan-out work
+    // after returning a retryable bounce.
+    let mut suppress_remaining_events = false;
 
     for mut event in events {
-        if ownership_lost {
+        if suppress_remaining_events {
             continue;
         }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
@@ -575,7 +570,7 @@ async fn interpret_with_depth(
                                 );
                             }
                         }
-                        ownership_lost = true;
+                        suppress_remaining_events = true;
                     }
                 }
             }
@@ -629,12 +624,41 @@ async fn interpret_with_depth(
             }
             OutboundEvent::PersistRoomSubject {
                 room,
+                claim_fence,
                 texts,
                 setter,
+                sender,
+                message,
                 setter_nick,
                 set_at,
             } => {
-                persist_room_subject_event(deps, room, texts, setter, setter_nick, set_at).await;
+                match persist_room_subject_event(
+                    deps,
+                    PersistRoomSubjectRequest {
+                        room,
+                        claim_fence,
+                        texts,
+                        setter,
+                        sender,
+                        message,
+                        setter_nick,
+                        set_at,
+                    },
+                )
+                .await
+                {
+                    PersistRoomSubjectEventOutcome::Committed => {}
+                    PersistRoomSubjectEventOutcome::BounceAndHalt(bounce) => {
+                        match Stanza::Message(*bounce).to_element_string() {
+                            Ok(xml) => outcome.frames.push(xml),
+                            Err(error) => warn!(
+                                %error,
+                                "PersistRoomSubject: failed to serialize retryable bounce reply"
+                            ),
+                        }
+                        suppress_remaining_events = true;
+                    }
+                }
             }
             OutboundEvent::ProjectGroupchatInbox {
                 owner,

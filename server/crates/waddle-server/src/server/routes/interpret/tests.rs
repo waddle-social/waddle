@@ -3207,6 +3207,287 @@ async fn offline_recipient_pass_skipped_for_remote_domain() {
 // XEP-0045 §8.1 — PersistRoomSubject interpreter arm
 // -----------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum SubjectMutationStoreMode {
+    Succeed = 0,
+    NotOwner = 1,
+    OwnershipUnavailable = 2,
+    PersistFailed = 3,
+    OwnershipLostDuringPersist = 4,
+}
+
+struct SubjectMutationStore {
+    mode: std::sync::atomic::AtomicU8,
+    claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>,
+}
+
+impl SubjectMutationStore {
+    fn new(claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>) -> Self {
+        Self {
+            mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
+            claim_store,
+        }
+    }
+
+    fn set_mode(&self, mode: SubjectMutationStoreMode) {
+        self.mode
+            .store(mode as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn mode(&self) -> SubjectMutationStoreMode {
+        match self.mode.load(std::sync::atomic::Ordering::SeqCst) {
+            value if value == SubjectMutationStoreMode::Succeed as u8 => {
+                SubjectMutationStoreMode::Succeed
+            }
+            value if value == SubjectMutationStoreMode::NotOwner as u8 => {
+                SubjectMutationStoreMode::NotOwner
+            }
+            value if value == SubjectMutationStoreMode::OwnershipUnavailable as u8 => {
+                SubjectMutationStoreMode::OwnershipUnavailable
+            }
+            value if value == SubjectMutationStoreMode::PersistFailed as u8 => {
+                SubjectMutationStoreMode::PersistFailed
+            }
+            value if value == SubjectMutationStoreMode::OwnershipLostDuringPersist as u8 => {
+                SubjectMutationStoreMode::OwnershipLostDuringPersist
+            }
+            value => panic!("invalid subject mutation store mode: {value}"),
+        }
+    }
+
+    async fn exact_fence_matches(
+        &self,
+        room_jid: &jid::BareJid,
+        fence: &waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> Result<bool, waddle_xmpp::XmppError> {
+        use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType};
+
+        let expected_entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        if fence.entity != expected_entity {
+            return Ok(false);
+        }
+        self.claim_store
+            .fence(&fence.entity, &fence.owner, fence.epoch)
+            .await
+            .map_err(|error| waddle_xmpp::XmppError::internal(error.to_string()))
+    }
+}
+
+impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>> {
+        Box::pin(async move {
+            if self.exact_fence_matches(room_jid, fence).await? {
+                Ok(None)
+            } else {
+                Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                })
+            }
+        })
+    }
+
+    fn save_config_fenced<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        _waddle_id: &'a str,
+        _channel_id: &'a str,
+        _config: &'a waddle_xmpp::muc::RoomConfig,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async move {
+            if self.exact_fence_matches(room_jid, fence).await? {
+                Ok(())
+            } else {
+                Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                })
+            }
+        })
+    }
+
+    fn save_subject_fenced<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        let mode = self.mode();
+        Box::pin(async move {
+            if !self.exact_fence_matches(room_jid, fence).await? {
+                return Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                });
+            }
+            match mode {
+                SubjectMutationStoreMode::PersistFailed => Err(waddle_xmpp::XmppError::internal(
+                    "subject persist failed in interpreter test",
+                )),
+                SubjectMutationStoreMode::OwnershipLostDuringPersist => {
+                    use waddle_xmpp::ownership::ClaimStore;
+
+                    self.claim_store
+                        .release_exact(&fence.entity, &fence.owner, fence.epoch)
+                        .await
+                        .map_err(|error| waddle_xmpp::XmppError::internal(error.to_string()))?;
+                    Err(waddle_xmpp::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    })
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+
+    fn save_affiliation_fenced<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async move {
+            if self.exact_fence_matches(room_jid, fence).await? {
+                Ok(())
+            } else {
+                Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                })
+            }
+        })
+    }
+
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+        Box::pin(async move {
+            if self.exact_fence_matches(room_jid, fence).await? {
+                Ok(())
+            } else {
+                Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                })
+            }
+        })
+    }
+
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        room_jid: &'a jid::BareJid,
+        fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, bool> {
+        let mode = self.mode();
+        Box::pin(async move {
+            match mode {
+                SubjectMutationStoreMode::Succeed
+                | SubjectMutationStoreMode::PersistFailed
+                | SubjectMutationStoreMode::OwnershipLostDuringPersist => {
+                    self.exact_fence_matches(room_jid, fence).await
+                }
+                SubjectMutationStoreMode::NotOwner => Ok(false),
+                SubjectMutationStoreMode::OwnershipUnavailable => Err(
+                    waddle_xmpp::XmppError::internal("ownership probe failed in interpreter test"),
+                ),
+            }
+        })
+    }
+}
+
+async fn spawn_subject_mutation_test_room() -> (
+    kameo::actor::ActorRef<RoomRegistryActor>,
+    kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    jid::BareJid,
+    Arc<waddle_xmpp::ownership::InProcessClaimStore>,
+    waddle_xmpp::muc::RoomClaimFenceContext,
+    Arc<SubjectMutationStore>,
+) {
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, WireClusteringClaims};
+    use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+
+    let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".to_string(),
+        OccupantIdSecret::new(b"subject-fail-closed-test-secret-32b".to_vec())
+            .expect("test secret meets length floor"),
+    ));
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store.clone()));
+    room_registry
+        .ask(WireClusteringClaims {
+            claim_store: claim_store.clone(),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::new(
+                "subject-test-node",
+                "subject-test-epoch",
+            )),
+            durable_store: Some(store.clone()),
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire subject mutation test store");
+    let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
+    let room_actor = room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-subject".to_string(),
+            channel_id: "c-subject".to_string(),
+            config: waddle_xmpp::muc::RoomConfig::default(),
+        })
+        .await
+        .expect("create subject mutation test room");
+    let snapshot = room_actor
+        .ask(GetRoomSnapshot {
+            sender_jid: "alice@example.com/web".parse().expect("sender full jid"),
+        })
+        .await
+        .expect("subject mutation room snapshot");
+    let claim_fence = snapshot
+        .claim_fence
+        .expect("durable subject mutation room has an exact fence");
+    (
+        room_registry,
+        room_actor,
+        room_jid,
+        claim_store,
+        claim_fence,
+        store,
+    )
+}
+
+fn subject_change_message(room: &jid::BareJid, sender: &jid::FullJid, text: &str) -> Message {
+    let mut message = Message::new(Some(jid::Jid::from(room.clone())));
+    message.from = Some(jid::Jid::from(sender.clone()));
+    message.type_ = XmppMessageType::Groupchat;
+    message
+        .subjects
+        .insert(xmpp_parsers::message::Lang::new(), text.to_string());
+    message
+}
+
+fn persist_subject_event(
+    room: &jid::BareJid,
+    sender: &jid::FullJid,
+    text: &str,
+    claim_fence: waddle_xmpp::muc::RoomClaimFenceContext,
+) -> OutboundEvent {
+    use chrono::TimeZone;
+
+    OutboundEvent::PersistRoomSubject {
+        room: room.clone(),
+        claim_fence: Some(claim_fence),
+        texts: waddle_xmpp::muc::RoomSubjectTexts::from_iter([(String::new(), text.to_string())]),
+        setter: sender.to_bare(),
+        sender: sender.clone(),
+        message: Box::new(subject_change_message(room, sender, text)),
+        setter_nick: "alice-nick".to_string(),
+        set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+    }
+}
+
 #[tokio::test]
 async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
     // Per-arm coverage for `OutboundEvent::PersistRoomSubject`
@@ -3256,6 +3537,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
     };
 
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
     let texts = waddle_xmpp::muc::RoomSubjectTexts::from_iter([
         (String::new(), "Default subject".to_string()),
         ("en".to_string(), "English subject".to_string()),
@@ -3264,8 +3546,15 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
 
     let events = vec![OutboundEvent::PersistRoomSubject {
         room: room_jid.clone(),
+        claim_fence: None,
         texts: texts.clone(),
         setter: setter.clone(),
+        sender: sender.clone(),
+        message: Box::new(subject_change_message(
+            &room_jid,
+            &sender,
+            "Default subject",
+        )),
         setter_nick: "alice-nick".to_string(),
         set_at,
     }];
@@ -3291,10 +3580,9 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
 }
 
 #[tokio::test]
-async fn xep_0045_persist_room_subject_with_no_registry_is_noop() {
-    // Defensive coverage for the `room_registry: None` skip arm —
-    // a `PersistRoomSubject` arriving in a deployment without a
-    // room registry must be logged-and-skipped, not panicked.
+async fn xep_0045_persist_room_subject_with_no_registry_bounces_and_halts_batch() {
+    // A subject effect cannot safely complete without its room registry.
+    // Reject it and suppress all later effects from the same dispatch batch.
     use chrono::TimeZone;
 
     let registry = ConnectionRegistry::new();
@@ -3302,18 +3590,255 @@ async fn xep_0045_persist_room_subject_with_no_registry_is_noop() {
 
     let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
     let setter: jid::BareJid = "alice@example.com".parse().expect("setter bare jid");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
     let texts =
         waddle_xmpp::muc::RoomSubjectTexts::from_iter([(String::new(), "ignored".to_string())]);
-    let events = vec![OutboundEvent::PersistRoomSubject {
-        room: room_jid,
-        texts,
-        setter,
-        setter_nick: "alice-nick".to_string(),
-        set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
-    }];
+    let events = vec![
+        OutboundEvent::PersistRoomSubject {
+            room: room_jid.clone(),
+            claim_fence: None,
+            texts,
+            setter,
+            sender: sender.clone(),
+            message: Box::new(subject_change_message(&room_jid, &sender, "ignored")),
+            setter_nick: "alice-nick".to_string(),
+            set_at: chrono::Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+        },
+        OutboundEvent::CloseTransport,
+    ];
     let outcome = interpret(events, &deps).await;
-    assert!(outcome.frames.is_empty());
-    assert!(!outcome.close);
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(!outcome.close, "later effects must be suppressed");
+}
+
+#[tokio::test]
+async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};
+    use waddle_xmpp::ownership::{ClaimStore, ExactReleaseOutcome};
+
+    let (room_registry, original_actor, room_jid, claim_store, original_fence, _store) =
+        spawn_subject_mutation_test_room().await;
+
+    assert_eq!(
+        claim_store
+            .release_exact(
+                &original_fence.entity,
+                &original_fence.owner,
+                original_fence.epoch,
+            )
+            .await
+            .expect("release original exact claim"),
+        ExactReleaseOutcome::Released,
+    );
+    assert!(room_registry
+        .ask(DemoteRoomIfExactActor {
+            room_jid: room_jid.clone(),
+            actor_ref: original_actor,
+        })
+        .await
+        .expect("remove original actor"));
+    let successor_actor = room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-subject-successor".to_string(),
+            channel_id: "c-subject-successor".to_string(),
+            config: waddle_xmpp::muc::RoomConfig::default(),
+        })
+        .await
+        .expect("create same-JID successor");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+    let successor_snapshot = successor_actor
+        .ask(GetRoomSnapshot {
+            sender_jid: sender.clone(),
+        })
+        .await
+        .expect("successor chain snapshot");
+    assert_ne!(
+        successor_snapshot.claim_fence.as_ref(),
+        Some(&original_fence),
+        "the replacement must have a distinct exact authority"
+    );
+
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let outcome = interpret(
+        vec![
+            persist_subject_event(
+                &room_jid,
+                &sender,
+                "stale predecessor subject",
+                original_fence,
+            ),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(!outcome.close, "later effects must be suppressed");
+    let current_actor = room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("lookup successor")
+        .expect("successor remains registered");
+    assert_eq!(current_actor.id(), successor_actor.id());
+    assert!(
+        successor_actor
+            .ask(GetSnapshot)
+            .await
+            .expect("successor state snapshot")
+            .room
+            .subject
+            .is_none(),
+        "the predecessor's subject must never reach the successor"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_subject_not_owner_bounces_demotes_exact_actor_and_halts_batch() {
+    let (room_registry, _room_actor, room_jid, _claim_store, claim_fence, store) =
+        spawn_subject_mutation_test_room().await;
+    store.set_mode(SubjectMutationStoreMode::NotOwner);
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+
+    let outcome = interpret(
+        vec![
+            persist_subject_event(&room_jid, &sender, "rejected subject", claim_fence),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(
+        !outcome.close,
+        "the event following rejected subject persistence must not be interpreted"
+    );
+    assert!(
+        room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup after demotion")
+            .is_none(),
+        "the exact actor that proved ownership loss must be demoted"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_subject_ownership_loss_during_persist_bounces_and_demotes() {
+    let (room_registry, _room_actor, room_jid, _claim_store, claim_fence, store) =
+        spawn_subject_mutation_test_room().await;
+    store.set_mode(SubjectMutationStoreMode::OwnershipLostDuringPersist);
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+    let mut subject_event =
+        persist_subject_event(&room_jid, &sender, "stale in-memory subject", claim_fence);
+    let OutboundEvent::PersistRoomSubject { message, .. } = &mut subject_event else {
+        unreachable!("helper always builds a subject event")
+    };
+    message.payloads.push(waddle_xmpp::xep::build_hint_element(
+        waddle_xmpp::xep::Hint::NoStore,
+    ));
+
+    let outcome = interpret(vec![subject_event, OutboundEvent::CloseTransport], &deps).await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(!outcome.close, "the post-subject batch must be suppressed");
+    assert!(
+        room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup after write-adjacent loss")
+            .is_none(),
+        "the actor whose write-adjacent fence failed must be demoted"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_subject_ownership_unavailable_bounces_without_demotion_and_halts_batch() {
+    let (room_registry, _room_actor, room_jid, _claim_store, claim_fence, store) =
+        spawn_subject_mutation_test_room().await;
+    store.set_mode(SubjectMutationStoreMode::OwnershipUnavailable);
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+
+    let outcome = interpret(
+        vec![
+            persist_subject_event(&room_jid, &sender, "ambiguous subject", claim_fence),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(
+        !outcome.close,
+        "the event following ambiguous subject persistence must not be interpreted"
+    );
+    assert!(
+        room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("lookup after ambiguous mutation")
+            .is_some(),
+        "an ambiguous ownership probe must not demote the actor"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_subject_persist_failure_bounces_before_apply_and_halts_batch() {
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+
+    let (room_registry, room_actor, room_jid, _claim_store, claim_fence, store) =
+        spawn_subject_mutation_test_room().await;
+    store.set_mode(SubjectMutationStoreMode::PersistFailed);
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+
+    let outcome = interpret(
+        vec![
+            persist_subject_event(&room_jid, &sender, "rejected subject", claim_fence),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(!outcome.close, "later effects must be suppressed");
+    let snapshot = room_actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert!(
+        snapshot.room.subject.is_none(),
+        "failed durable persistence must leave in-memory subject unchanged"
+    );
 }
 
 // -----------------------------------------------------------------

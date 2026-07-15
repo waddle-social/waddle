@@ -3,6 +3,8 @@
 use thiserror::Error;
 use waddle_xmpp_core::CoreError;
 
+use crate::ownership::Entity;
+
 /// XMPP server errors.
 #[derive(Debug, Error)]
 pub enum XmppError {
@@ -49,6 +51,25 @@ pub enum XmppError {
     /// Internal server error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// An exact durable ownership fence no longer authorizes work for the
+    /// named entity. Kept distinct from backend failures so actor callers can
+    /// seal and demote only on a definitive ownership result.
+    #[error("exact ownership fence no longer authorizes {entity}")]
+    OwnershipLost { entity: Entity },
+
+    /// The durable store could not establish whether the exact ownership
+    /// fence is still current. Callers must fail closed, but must not treat
+    /// this as definitive proof that another owner won.
+    #[error("exact ownership fence for {entity} is temporarily unavailable")]
+    OwnershipUnavailable { entity: Entity },
+
+    /// A fenced durable room mutation required the room's complete durable
+    /// state row, but no such row exists. Keep this distinct from ownership
+    /// loss and backend uncertainty so callers neither demote a live owner nor
+    /// flatten the invariant failure into a string diagnostic.
+    #[error("durable room state is missing for {entity}")]
+    DurableRoomStateMissing { entity: Entity },
 
     /// Stanza error (for IQ error responses)
     #[error("Stanza error: {condition}")]

@@ -74,7 +74,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
             // The durable affiliation is authoritative across actor restarts.
             // Persist first; only a successful write permits the infallible
             // in-memory transition and creation of rollback authority.
-            self.persist_affiliation(&msg.invitee, Affiliation::Member)
+            self.persist_affiliation_before_apply(&msg.invitee, Affiliation::Member)
                 .await
                 .map_err(MediatedInviteGrantError::GrantPersistFailed)?;
             let changed = self

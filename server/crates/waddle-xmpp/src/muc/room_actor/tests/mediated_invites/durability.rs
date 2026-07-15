@@ -101,7 +101,10 @@ async fn mediated_invite_authorization_fails_closed_while_durable_restore_is_pen
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
     let store = FlakyThenRecoveringStore::new(usize::MAX, invitee.clone());
     actor
-        .ask(RestoreDurableRoomState { store })
+        .ask(RestoreDurableRoomState {
+            store,
+            claim_fence: test_claim_fence(&test_room().room_jid),
+        })
         .await
         .expect("failed restore still replies");
 
@@ -133,6 +136,7 @@ async fn invite_grant_persist_failure_leaves_memory_unchanged_and_creates_no_tok
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach durable store");
@@ -182,6 +186,7 @@ async fn banned_invitee_rejection_performs_no_durable_member_write() {
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach recording durable store");
@@ -230,6 +235,7 @@ async fn invite_grant_and_rollback_persist_the_exact_room_invitee_and_affiliatio
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach recording durable store");
@@ -263,6 +269,7 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach durable store");
@@ -380,6 +387,7 @@ async fn rollback_ownership_loss_is_typed_and_keeps_the_operation_prepared() {
     actor
         .ask(RestoreDurableRoomState {
             store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
         })
         .await
         .expect("attach owned durable store");

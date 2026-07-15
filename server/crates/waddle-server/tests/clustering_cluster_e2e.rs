@@ -1857,7 +1857,9 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     };
     use waddle_server::clustering::ClusteringReadiness;
     use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
-    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    };
     use waddle_xmpp::muc::room_actor::{HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
@@ -1881,46 +1883,94 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
 
     // Initial restore succeeds so the room can be published. Its first
     // durable config mutation is the deliberate post-publication wedge.
-    struct HangingDurableStore;
-    impl MucDurableStore for HangingDurableStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a jid::BareJid,
-        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            Box::pin(async { Ok(None) })
+    struct HangingDurableStore {
+        expected_fence: RoomClaimFenceContext,
+    }
+
+    impl HangingDurableStore {
+        fn new(expected_fence: RoomClaimFenceContext) -> Self {
+            Self { expected_fence }
         }
 
+        fn validate_fence(
+            &self,
+            room_jid: &jid::BareJid,
+            fence: &RoomClaimFenceContext,
+        ) -> Result<(), waddle_xmpp::XmppError> {
+            let expected_entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+            if fence.entity == expected_entity && fence == &self.expected_fence {
+                Ok(())
+            } else {
+                Err(waddle_xmpp::XmppError::internal(
+                    "test store received an unexpected exact room claim fence",
+                ))
+            }
+        }
+    }
+
+    impl MucDurableStore for HangingDurableStore {
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a jid::BareJid,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            self.load_room_state(room_jid)
+            let validation = self.validate_fence(room_jid, fence);
+            Box::pin(async move {
+                validation?;
+                Ok(None)
+            })
         }
 
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a RoomConfig,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
+            if let Err(error) = self.validate_fence(room_jid, fence) {
+                return Box::pin(async move { Err(error) });
+            }
             Box::pin(pending()) as Pin<Box<_>>
         }
 
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = self.validate_fence(room_jid, fence);
+            Box::pin(async move { validation })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = self.validate_fence(room_jid, fence);
+            Box::pin(async move { validation })
+        }
+
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            let validation = self.validate_fence(room_jid, fence);
+            Box::pin(async move { validation })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let matches = self.validate_fence(room_jid, fence).is_ok();
+            Box::pin(async move { Ok(matches) })
         }
     }
 
@@ -1935,6 +1985,16 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         .expect("register node lease");
     let claim_store: std::sync::Arc<dyn ClaimStore> =
         std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+    let room_jid: jid::BareJid = format!("wedged-{}@muc.example.com", uuid::Uuid::new_v4())
+        .parse()
+        .expect("valid room JID");
+    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+    let expected_epoch = claim_store
+        .ensure_claimed(&entity, &identity)
+        .await
+        .expect("pre-acquire the exact room claim expected by the durable-store fake");
+    let expected_fence =
+        RoomClaimFenceContext::new(entity.clone(), identity.clone(), expected_epoch);
 
     let occupant_id_secret =
         OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
@@ -1945,7 +2005,9 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         .wire_clustering_claims(
             std::sync::Arc::clone(&claim_store),
             SharedNodeIdentity::new(identity.clone()),
-            Some(std::sync::Arc::new(HangingDurableStore)),
+            Some(std::sync::Arc::new(HangingDurableStore::new(
+                expected_fence,
+            ))),
             None,
         )
         .await;
@@ -1953,9 +2015,6 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     let room_local_claims = RoomLocalClaims::new();
     room_local_claims.wire(room_registry.clone());
 
-    let room_jid: jid::BareJid = format!("wedged-{}@muc.example.com", uuid::Uuid::new_v4())
-        .parse()
-        .expect("valid room JID");
     let actor_ref = room_registry
         .get_or_create_room(
             room_jid.clone(),
@@ -1989,7 +2048,6 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     // Seed the steal-intent (Slice 3's veto path) from a distinct
     // "reporter" identity — mirroring Slice 3's own dedicated tests, since
     // no production reporter call site exists for RoomActor claims yet.
-    let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
     let reporter = NodeIdentity::new(
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),

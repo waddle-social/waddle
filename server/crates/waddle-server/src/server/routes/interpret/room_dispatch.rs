@@ -1,5 +1,24 @@
 use super::*;
 
+/// Bind the subject mutation emitted from one frozen room snapshot to
+/// that actor incarnation's immutable ownership proof. The pure protocol
+/// chain cannot carry actor state in `RoomContext`, so the async boundary
+/// attaches it before any effect is interpreted.
+pub(super) fn bind_room_claim_fence(
+    events: &mut [OutboundEvent],
+    claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
+) {
+    for event in events {
+        if let OutboundEvent::PersistRoomSubject {
+            claim_fence: event_fence,
+            ..
+        } = event
+        {
+            *event_fence = claim_fence.cloned();
+        }
+    }
+}
+
 pub(super) async fn dispatch_to_room(
     deps: &Deps<'_>,
     room_jid: jid::BareJid,
@@ -486,6 +505,8 @@ pub(super) async fn dispatch_to_room(
     // the full `default_room_dispatcher()` here would re-run it.
     let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
     let observer_message = working.clone();
+    let mut dispatch_events = dispatch_outcome.events;
+    bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
 
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
@@ -495,12 +516,7 @@ pub(super) async fn dispatch_to_room(
     //    promotes to a headless recipient pass (depth bumped there).
     //    Bumping here would break that path for every offline
     //    occupant.
-    let nested = Box::pin(interpret_with_depth(
-        dispatch_outcome.events,
-        deps,
-        recursion_depth,
-    ))
-    .await;
+    let nested = Box::pin(interpret_with_depth(dispatch_events, deps, recursion_depth)).await;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;

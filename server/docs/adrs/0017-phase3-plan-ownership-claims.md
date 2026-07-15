@@ -1345,12 +1345,12 @@ steal a claim that a janitor might simultaneously be reaping), Slice 1 (`steal_f
 
 **Locked spec** (summarized from element 7, with one true verbatim span quoted — minor
 fix 15): new owner *"restores configuration, affiliations,
-and subject from Postgres before accepting any join."* Two-part demotion: best-effort
-acked `Demote { entity, new_epoch }`; guaranteed backstop = the same fencing SELECT
-element 4 prescribes, run before every local fan-out (MAM insert doubles as the
-backstop when archiving is on). Phase 4 GA gates (not this phase) assert outcast
-denial + password/members-only hold after steal — this phase builds the mechanism, GA
-gates its correctness.
+and subject from Postgres before accepting any join."* This narrowed #1355 work keeps
+immutable exact fences for actor-owned durable load, save, and delete operations. The
+mutable cache remains the existing legacy pre-fanout groupchat dispatch/MAM consumer
+until #1283 replaces it. Phase 4 GA gates (not this phase) assert outcast denial +
+password/members-only hold after steal — this phase builds the mechanism, GA gates its
+correctness.
 
 **Code research finding, corrected (minor fix 16)**: the previous draft attributed the
 "no room/affiliation table exists in any schema" reasoning to
@@ -1379,24 +1379,17 @@ affiliation-list read/write), `room_registry.rs` / `room_registry_actor.rs` /
 `room_registry_handle.rs` (claim acquisition on `GetOrCreateRoom`), `subject.rs`
 (durable subject read on restore).
 
-**Files, amended (FIX 1–9 pass, deviations 65–73)**: `server/crates/waddle-xmpp/
-src/muc/durable.rs` (`RoomClaimFenceContext`, `current_claim_fence`),
-`server/crates/waddle-xmpp/src/mam/storage/{traits.rs,error.rs,sqlx_store/
-{mod.rs,write.rs,impls.rs}}` (`store_message_fenced`, `with_cluster_fencing`,
-`MamStorageError::{NotOwner,ClusterColocationMismatch}`),
+**Files, amended (FIX 2–9 pass, deviations 66–73)**: `server/crates/waddle-xmpp/
+src/muc/durable.rs` (`RoomClaimFenceContext`, ready-entry cache publication),
 `server/crates/waddle-xmpp/src/ownership/mod.rs` (`Entity` hand-written
 `Deserialize`, `ENTITY_ID_MAX_LEN`), `server/crates/waddle-server/src/
-muc_durable.rs` (`current_claim_fence` impl), `server/crates/waddle-server/src/
-server/http.rs` (`create_websocket_mam_storage`'s co-location check),
+muc_durable.rs` (exact actor-owned durable fencing and legacy cache checks),
 `server/crates/waddle-server/src/server/topology.rs`
 (`seed_initial_xmpp_topology`'s `ClaimHeldByAnotherNode` continue),
 `server/crates/waddle-server/src/server/routes/websocket/cleanup.rs`
 (`get_or_create_room_actor`'s typed `Result`), `server/crates/waddle-server/src/
 server/routes/websocket/handlers/presence/muc.rs` (join-path error mapping),
-`server/crates/waddle-server/src/server/routes/interpret/{groupchat_archive.rs,
-archive_groupchat_event.rs,room_system_message.rs,interpret.rs,
-groupchat_validation.rs}` (fenced archive write + ownership-lost batch
-suppression), `server/crates/waddle-xmpp/src/muc/room_registry_actor.rs`
+`server/crates/waddle-xmpp/src/muc/room_registry_actor.rs`
 (`live_room` async + claim release), `server/crates/waddle-server/src/
 clustering/{local_claims.rs,mod.rs}` (`health_check` fix,
 `demote_room_actor`, `MucDurableStoreInit`), `server/crates/waddle-server/src/
@@ -1412,15 +1405,12 @@ first production wiring of a `RoomActor` Postgres claim, so the harness's deferr
 counterpart — a genuinely wedged, genuinely-claimed room with a live occupant socket)
 can land alongside this slice's own harness work.
 
-**Pool assignment (blocker fix 1, stated explicitly per Slice 0)**: the fenced
-pre-fan-out `SELECT ... FOR SHARE` runs inline, inside the same `Database::begin()`
-transaction as the broadcast's write (the MAM archive insert when archiving is on;
-otherwise the standalone autocommit fencing SELECT itself is the one write-adjacent
-statement), on the **main pool** — never the control-plane pool, for the same
-same-connection-same-transaction reason Slice 4 states. Room/occupant/affiliation
-durable writes (roster rows, config, affiliation lists, subject) are likewise main-pool
-statements; only `RoomActor`'s own claim acquire/steal/heartbeat traffic (via
-`ClaimStore`, Slice 1) rides the control-plane pool.
+**Pool assignment (blocker fix 1, stated explicitly per Slice 0)**: actor-owned
+durable writes (config, affiliation lists, subject, and delete) run on the **main
+pool** in the same transaction as their exact fence check — never the control-plane
+pool, for the same same-connection-same-transaction reason Slice 4 states. Only
+`RoomActor`'s own claim acquire/steal/heartbeat traffic (via `ClaimStore`, Slice 1)
+rides the control-plane pool.
 
 **Dependencies**: Slice 1 only (`ClaimStore` for `RoomActor` entities) — deliberately
 **not** dependent on Slices 4–6, so it can be worked in parallel by a separate
@@ -1428,11 +1418,8 @@ contributor/session, per the scoping map's "D5 parallel-after-D1" ordering.
 
 **As landed (deviations 56–64, see the deviation log for full detail)**: occupant-roster
 durability is deferred (56, its sole consumer needs Phase-4 cross-node presence
-fan-out); the fenced pre-fan-out backstop lands in `waddle-server`'s
-`dispatch_to_room` (57 — `RoomActor::BuildGroupchatBroadcast` is legacy/superseded,
-not the live fan-out path) — **amended by the FIX 1–9 pass below: no longer the
-sole backstop, since the MAM archive write is now independently fenced too (65,
-retracting 58's "not implementable" claim)**; `LocallyClaimedEntities::owned()`
+fan-out); the cache-backed pre-fanout backstop remains the existing legacy path (57);
+`LocallyClaimedEntities::owned()`
 widened to `async fn` for the actor-backed `RoomLocalClaims` implementor (59);
 `Entity`/`EntityType`/`ClaimEpoch` gained `Serialize`/`Deserialize` for the Demote
 ask's wire payload (60, `Entity::id` gained a matching wire-length bound in 73);
@@ -1446,13 +1433,11 @@ deposed-owner-with-live-socket `RoomActor` harness scenario lands in
 `clustering_cluster_e2e.rs`, reusing the restore-before-join mechanism itself as the
 wedge point (64).
 
-**Council-adjudicated FIX 1–9 pass, additionally landed (deviations 65–73, see the
-deviation log for full detail)**: the MAM groupchat archive insert is itself now
-fenced, atomically with a `SELECT ... FOR SHARE`, closing the residual dual-delivery
-race the original backstop design accepted (65); every durable-relevant `RoomActor`
-mutation handler gates on ownership BEFORE mutating and surfaces a non-ownership
-persist failure typed AFTER mutating, revising `MucDurableStore`'s fail-open
-contract (66); a dead/panicked `RoomActor`'s Postgres claim is released rather than
+**Council-adjudicated FIX 2–9 pass, additionally landed (deviations 66–73, see the
+deviation log for full detail)**: every durable-relevant `RoomActor`
+mutation handler fails closed on exact ownership BEFORE mutating and surfaces a
+non-ownership persist failure typed AFTER mutating (66); a dead/panicked
+`RoomActor`'s Postgres claim is released rather than
 orphaned, and `RoomLocalClaims::health_check` reports unhealthy (not healthy) when
 no live local actor exists for a claim this node believes it holds (67); a genuine
 `RestoreDurableRoomState` load failure fails closed — joins refuse until a bounded
@@ -3096,49 +3081,15 @@ same "as-landed" style, numbered onward from 43.
     per-nick, how multi-resource occupancy is modeled durably) that
     Non-goals-excluded machinery should make deliberately. Deferred to
     whichever slice first wires cross-node presence fan-out.
-57. **Code-research correction (this slice's own finding, not a
-    misattribution of an existing comment): the production groupchat
-    fan-out call site is `waddle-server`'s `routes/interpret/
-    room_dispatch.rs::dispatch_to_room`, not `RoomActor::
-    BuildGroupchatBroadcast`.** The #229 PR18 sans-I/O room-handler-chain
-    refactor superseded `BuildGroupchatBroadcast` with a `GetRoomSnapshot`-
-    based flow: `dispatch_to_room` fetches one `RoomChainSnapshot` and
-    builds/archives/routes every outbound stanza in `waddle-server` itself;
-    `BuildGroupchatBroadcast` survives only as dead-to-production code
-    exercised by `room_actor/tests.rs`'s own unit tests (confirmed by
-    `room_dispatch.rs`'s own comments: "replacing the legacy
-    `RoomActor::BuildGroupchatBroadcast` check," "avoids a second
-    `RoomActor::GetRoomSnapshot` round-trip per groupchat archive write").
-    The fenced pre-fan-out backstop (element 7, deviation 58) is therefore
-    wired into `dispatch_to_room`, immediately after its `GetRoomSnapshot`
-    ask succeeds and before the occupancy gate/archive/route pipeline runs
-    — not into `RoomActor`'s message handlers, which would guard a path no
-    live traffic takes. **Retracted/superseded by the council-adjudicated
-    FIX 1 pass (see deviation 65 below): `dispatch_to_room`'s standalone
-    check is no longer the SOLE backstop — the MAM archive write itself is
-    now also independently fenced, closing the residual race window this
-    deviation's own text originally accepted as permanent.**
-58. **RETRACTED (council-adjudicated FIX 1) — corrected below in
-    deviation 65.** This entry originally claimed "the MAM archive insert
-    doubles as the backstop when archiving is on" was not implementable
-    within Slice 7's Files list, reasoning that MAM storage
-    (`waddle-xmpp`'s `mam::storage::sqlx_store::write::store_message`)
-    "has no access to `waddle-server`'s `Database`/`Transaction` types,"
-    and therefore "cannot be made to share a transaction with a
-    `waddle-server`-side fencing SELECT." That reasoning was correct about
-    the specific mechanism it considered (sharing `waddle-server`'s
-    `Database`/`Transaction` abstraction across the crate boundary) but
-    incomplete: it did not consider that `SqlxMamStorage` already holds
-    its OWN raw `sqlx::PgPool` (in `waddle-xmpp`, the same crate the
-    `waddle_xmpp::ownership` fencing types already live in) and can run
-    its own native `sqlx::Transaction` combining a `SELECT ... FOR SHARE`
-    against `clustering_claims` with its own `INSERT` — no
-    `waddle-server`-side type ever needs to cross the boundary. FIX 1 (a
-    follow-up council-adjudicated pass over this same slice) implements
-    exactly that; see deviation 65 for the landed design. Left in place
-    (rather than deleted) so the deviation numbering stays stable and so
-    readers can see the corrected reasoning next to the original mistaken
-    claim it replaces.
+57. **Scope correction:** the production pre-fanout path retains its
+    mutable-cache `check_fenced_fanout` backstop. It is a live legacy
+    consumer for groupchat dispatch/MAM until #1283 replaces it; #1355 does
+    not make this general dispatch, archive, bot, system, or MAM path carry
+    exact actor-incarnation fence authority.
+58. **Scope correction:** MAM archive fencing and its transaction boundary
+    are #1283 work, not a #1355 completion claim. The current MAM
+    implementation performs its origin-ID dedup check inside the same fenced
+    transaction as the archive write, not on the plain pool.
 59. **`LocallyClaimedEntities::owned()` widened from a sync `fn` to an
     `async fn` (`self_fence.rs`).** Slice 5's `SmSessionLocalClaims::owned`
     reads a plain in-memory map (`InMemorySmSessionRegistry::
@@ -3263,89 +3214,27 @@ same "as-landed" style, numbered onward from 43.
 ### Council-adjudicated FIX 1–9 pass over the landed Slice 7 implementation
 
 The following deviations (65–73) record a second council-adjudicated review
-pass over Slice 7 as landed (deviations 56–64 above), fixing nine numbered
-findings (FIX 1–9) against the actual code, not a re-plan. Deviations 57/58
-above are corrected in place (see their own retraction text) rather than
-duplicated here.
+pass over Slice 7 as landed (deviations 56–64 above). Deviation 65's former
+MAM/archive claims are explicitly out of scope for #1355; deviations 66–73
+record the retained work.
 
-65. **FIX 1 (critical) — the MAM groupchat archive insert is now itself
-    fenced, closing deviation 58's residual race window.** New
-    `MamStorage::store_message_fenced(archive_jid, message, fence:
-    &RoomClaimFenceContext)` (default impl falls back to
-    `store_message`, byte-identical for the portable/in-memory/SQLite
-    backends and every non-clustering deployment). `SqlxMamStorage`
-    gains a `fencing_enabled: bool` field, set via a new
-    `with_cluster_fencing(bool)` builder (a no-op unless the backend is
-    Postgres); the co-location check itself (this storage's resolved
-    database URL must EXACT-string-match the clustering global database
-    URL) lives in `waddle-server`'s `create_websocket_mam_storage`
-    (`server/http.rs`) — not inside `SqlxMamStorage::open_for_cluster_mode`
-    as the pending_delivery/sm_persistence precedent would suggest —
-    because the redaction helper the mismatch error needs
-    (`crate::db::redact_database_url`) and the clustering global
-    database URL only exist on the `waddle-server` side of the crate
-    boundary; a mismatch fails startup with a new
-    `MamStorageError::ClusterColocationMismatch`, mirroring
-    `PendingStorageError`'s identical variant one table over.
-    `MamStorageError` also gains `NotOwner { entity: Entity }`.
-
-    The fencing SELECT and the archive `INSERT` now run inside ONE
-    `sqlx::Transaction` opened directly against `SqlxMamStorage`'s own
-    `PgPool` (`mam::storage::sqlx_store::write::store_message_fenced`) —
-    this is the correction to deviation 58's reasoning: no
-    `waddle-server`-side `Database`/`Transaction` type ever needs to
-    cross the crate boundary, because the fencing types
-    (`waddle_xmpp::ownership::{Entity, ClaimEpoch}`) already live in
-    `waddle-xmpp`, the same crate `SqlxMamStorage` lives in. The
-    origin-id dedup pre-check still runs against the plain pool exactly
-    as the unfenced path does (it only reads already-committed rows, so
-    it needs no transactional isolation from this write).
-
-    The typed `(Entity, ClaimEpoch, node_id)` fencing context is
-    threaded, not re-derived: a new
-    `MucDurableStore::current_claim_fence(room_jid) -> Option<RoomClaimFenceContext>`
-    method exposes the exact triple `check_fenced_fanout`/`assert_fenced`
-    already resolve from `PostgresMucRoomStore`'s `claim_epochs` cache.
-    `groupchat_archive.rs`'s `resolve_room_claim_fence` reads this at
-    both call sites that persist a groupchat archive write
-    (`archive_groupchat_event.rs` — the production `ArchiveGroupchat`
-    interpreter arm — and `room_system_message.rs`'s server-authored
-    system-message archive write), and threads it into
-    `store_message_fenced`.
-
-    On `NotOwner`, the message is neither archived nor fanned out: for
-    `room_system_message.rs` this is a single early return (its fan-out
-    loop is the only fan-out for that message); for the interpreter's
-    `ArchiveGroupchat` arm, `interpret_with_depth` gained an
-    `ownership_lost` flag that suppresses every remaining event in the
-    SAME dispatch batch — safe because the locked Q7 chain order always
-    runs the archive handler before the reflector fan-out handler, so
-    `ArchiveGroupchat` is always processed before any `RouteToConnection`
-    for the same message — and pushes the same
-    `<resource-constraint/>`-type=wait bounce `dispatch_to_room`'s own
-    pre-fan-out check uses (`resource_constraint_error`, ungated from
-    `#[cfg(feature = "clustering")]` since it now has a second,
-    unconditionally-compiled caller).
-
-    Tests: a Postgres-gated round-trip in `waddle-server::muc_durable`'s
-    test module (`mam_store_message_fenced_blocks_the_deposed_owners_next_archive_write`)
-    proves the current owner's fenced write succeeds, a steal is
-    observed by `current_claim_fence`, and the deposed owner's next
-    fenced write returns `NotOwner` with no row committed.
+65. **Scope correction:** the former exact-fence claims for MAM archive,
+    `ArchiveGroupchat`, system messages, bots, and general dispatch were
+    removed from #1355. Those effects continue to use the published cache's
+    legacy pre-fanout backstop until #1283 supplies their replacement. This
+    ADR makes no completion claim for that future work.
 66. **FIX 2 (critical) — every durable-relevant `RoomActor` mutation
     handler now runs a two-stage gate: verify ownership BEFORE mutating,
     surface a non-ownership persist failure typed AFTER mutating.**
-    `RoomActor::gate_mutation()` runs the same fenced
-    `check_fenced_fanout` pre-check `dispatch_to_room` uses; `Ok(true)`
-    (or no durable store configured) lets the mutation proceed
-    unchanged, `Ok(false)` returns `NotOwner` BEFORE any in-memory
-    mutation runs, and a transient fencing-check error fails OPEN (not
-    blocking), mirroring `dispatch_to_room`'s identical "only a
-    definitive 0-rows result demotes" rule. `persist_config`/
-    `persist_subject`/`persist_affiliation` now return
+    `RoomActor::gate_mutation()` runs `check_exact_claim_fence` with the
+    immutable fence installed on that actor incarnation; `Ok(true)` (or no
+    durable store configured) lets the mutation proceed unchanged,
+    `Ok(false)` returns `NotOwner` BEFORE any in-memory mutation runs, and
+    any backend uncertainty returns `OwnershipUnavailable` BEFORE mutation.
+    `persist_config` and post-apply affiliation persistence return
     `Result<(), DurablePersistError>` instead of silently swallowing a
-    failure — this is the corrected fail-open contract documented on
-    `MucDurableStore` itself (see that trait's doc comment).
+    failure. Subject persistence is intentionally before apply, so its typed
+    result classifies failure before the `SubjectState` is installed.
 
     All nine listed handlers (`UpdateConfig`, `RollbackConfigIfRevision`,
     `UpdateGroupDmConfigByMember`, `SetSubject`, `ChangeAffiliation`,
@@ -3357,7 +3246,9 @@ duplicated here.
     `UpdateGroupDmConfigByMemberError` for `UpdateGroupDmConfigByMember`)
     and gained `NotOwner`/`PersistFailed` variants plus
     `From<RoomMutationError>`/`From<DurablePersistError>` impls so the
-    handler bodies use plain `?`; the other six (previously bare
+    handler bodies use plain `?`. `SetSubject` has a phase-specific
+    `SetSubjectError` whose persistence failures are always pre-apply. The
+    other five handlers (previously bare
     `u64`/`bool`/`()`/`Vec<(FullJid, Presence)>` replies) had their
     `Reply` type wrapped in `Result<_, RoomMutationError>`. Two batch
     handlers (`ApplyAdminItems`'s affiliation-set branch,
@@ -3373,37 +3264,38 @@ duplicated here.
 
     Call-site coverage (council-adjudicated scope boundary, honestly
     recorded): every actor-side handler is gated. On the `waddle-server`
-    call-site side, ONE representative site
+    call-site side, the subject-change interpreter now distinguishes the
+    flattened Kameo handler errors: `NotOwner` exact-demotes only the actor
+    that rejected the request, `OwnershipUnavailable` and actor-transport
+    uncertainty bounce without demotion, and both cases suppress all later
+    archive/inbox/fan-out effects in that dispatch batch. Subject persistence
+    runs before installing the new `SubjectState`, so a
+    `PersistFailedBeforeApply` result follows the same bounce-and-halt path
+    without changing the local subject.
+
+    ONE additional representative site
     (`admin/channels.rs::group_dm_rename_update_error`, the
-    `UpdateGroupDmConfigByMember` rename path) is fully wired end-to-end
-    — `NotOwner` triggers `ClusteringHandles::demote_room_actor` (new
-    method, below) and bounces with a `service-unavailable`/wait
-    condition. The remaining ~20 call sites (11 for `ChangeAffiliation`
+    `UpdateGroupDmConfigByMember` rename path) is fully wired end-to-end:
+    `NotOwner` and `OwnershipLostAfterApply` exact-demote the actor; the
+    latter does not claim the mutation was never applied. The remaining
+    call sites (including those for `ChangeAffiliation`
     across `admin/channels.rs`, `session_janitors.rs`,
     `group_dm_invite.rs`, `muc_admin.rs`; the `UpdateConfig`/
-    `RollbackConfigIfRevision`/`SetSubject`/`EnforceMembersOnlyAffiliations`/
-    `ApplyAdminItems`/`ApplyAffiliationChange` sites) already route
-    through each file's generic `send_err`-style mapper, which correctly
-    surfaces `NotOwner`/`PersistFailed` as a typed `internal-server-error`
-    bounce (never silent success, never a panic) but does NOT additionally
-    call `demote_room_actor` at those sites. Wiring the demote call into
-    all ~20 remaining sites individually is flagged as follow-up
-    hardening, not landed in this pass — the correctness property this
-    fix's core mechanism guarantees (a mutation is never silently applied
-    or silently reported successful after ownership loss) holds at every
-    site regardless; only the "also hard-kill the stale actor from this
-    ask's own call site" hardening (as opposed to the actor eventually
-    being killed by its OWN health-check veto or a subsequent mutation
-    attempt) is incomplete.
+    `RollbackConfigIfRevision`/`EnforceMembersOnlyAffiliations`/
+    `ApplyAdminItems`/`ApplyAffiliationChange` sites) route through their
+    existing typed error mappers but do NOT additionally exact-demote at
+    those sites. Wiring exact demotion into all remaining callers is
+    follow-up hardening; actor-side fail-closed gating already prevents the
+    stale mutation itself.
 
-    Tests: seven new `room_actor::tests` cases (a `FakeDurableStore` test
-    double controlling `check_fenced_fanout`'s result) prove
+    Tests use a `FakeDurableStore` that controls
+    `check_exact_claim_fence` and fenced-write results to prove
     `UpdateConfig`/`ChangeAffiliation`/`SetSubject` block on `NotOwner`
     with no in-memory mutation, `UpdateConfig` applies normally when
-    owned, fails OPEN on a transient fencing error, and surfaces
-    `PersistFailed` typed while still applying in-memory (undoing it
-    would risk a worse inconsistency than leaving it applied-but-not-yet-
-    durable).
+    owned, fails CLOSED with `OwnershipUnavailable` on a transient
+    fencing error, surfaces `PersistFailed` typed while still applying
+    in-memory, and seals the actor when ownership is lost during the fenced
+    config write.
 67. **FIX 3 (high) — orphaned claim on actor panic/death, and the
     corresponding health-check blind spot, are both closed.**
     `RoomRegistryActor::live_room` is now `async` (was sync): its
@@ -3526,14 +3418,9 @@ duplicated here.
     (NOT in FIX 2's nine-handler list — it only evicts occupants based on
     already-in-memory affiliations and never itself writes durable state,
     so it was correctly out of scope) via `?`, so the loop is
-    unreachable on either ask's failure. No additional fenced-check
-    helper was needed at any of the three named sites. Deviation 57's
-    "sole backstop, unconditionally" wording is amended (in place, see
-    that deviation's own retraction text) to reflect that the MAM write
-    itself is now also fenced (deviation 65) — `dispatch_to_room`'s
-    standalone check remains a real, still-necessary backstop (it blocks
-    the ENTIRE fan-out pipeline, not just the archive write), but it is
-    no longer accurately described as the sole one.
+    unreachable on either ask's failure. No additional fenced-check helper
+    was needed at any of the three named sites. The independent legacy
+    pre-fanout cache check remains in production until #1283 replaces it.
 72. **FIX 8 (medium) — `PostgresMucRoomStore::open` failing at
     `clustering::start_if_enabled` time is now FATAL to clustering
     startup, not logged-and-continue.** New

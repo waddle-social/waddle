@@ -5,7 +5,7 @@ use kameo::message::Context;
 use xmpp_parsers::message::Message;
 
 use super::{RoomActor, RoomActorError};
-use crate::muc::{OutboundMucMessage, RoomConfig};
+use crate::muc::{OutboundMucMessage, RoomClaimFenceContext, RoomConfig};
 use crate::types::{Affiliation, Role};
 
 #[derive(Debug, Clone)]
@@ -33,6 +33,12 @@ pub struct GroupchatBroadcastResult {
 /// room config).
 #[derive(Debug, Clone)]
 pub struct RoomChainSnapshot {
+    /// Exact durable-ownership proof retained by this actor incarnation.
+    /// Dispatch and archive paths must use this immutable context rather
+    /// than looking up the room JID in the registry's mutable successor
+    /// cache, which could transplant a later actor's authority onto this
+    /// frozen snapshot.
+    pub claim_fence: Option<RoomClaimFenceContext>,
     /// One entry per active occupant session — same `nick` may appear
     /// multiple times when an occupant has joined under multiple
     /// resources.
@@ -142,6 +148,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
         durable_recipient_bare_jids.dedup();
 
         Ok(RoomChainSnapshot {
+            claim_fence: self.durable_claim_fence.clone(),
             occupants,
             sender_nick,
             sender_role,

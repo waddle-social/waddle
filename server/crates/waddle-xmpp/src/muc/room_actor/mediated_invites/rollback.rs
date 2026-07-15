@@ -93,11 +93,17 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
             Err(RoomMutationError::NotOwner) => {
                 return Err(MediatedInviteRollbackError::NotOwner);
             }
+            Err(RoomMutationError::OwnershipUnavailable) => {
+                return Err(MediatedInviteRollbackError::OwnershipUnavailable);
+            }
+            Err(RoomMutationError::OwnershipLostAfterApply) => {
+                unreachable!("the pre-mutation ownership gate never applies room state")
+            }
             Err(RoomMutationError::PersistFailed(_)) => {
                 unreachable!("the pre-mutation ownership gate never persists room state")
             }
         }
-        self.persist_affiliation(&msg.grant.invitee, msg.grant.previous_affiliation)
+        self.persist_affiliation_before_apply(&msg.grant.invitee, msg.grant.previous_affiliation)
             .await
             .map_err(MediatedInviteRollbackError::PersistFailedBeforeApply)?;
 
