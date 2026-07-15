@@ -72,14 +72,16 @@ fun MessageComposer(
             if (lastEditKey == null) stashedDraft = draft
             draft = editing.originalBody
         } else {
-            // A saved edit whose mode died with the process leaves
-            // editing == null with a stale lastEditKey on the FIRST run:
-            // keep the user's typed edit text (the restored draft) —
-            // swapping in the stash would discard it. A live transition
-            // to Normal (edit sent or cancelled) restores the stash.
-            if (!(initial && draft.isNotEmpty())) {
-                draft = stashedDraft
-            }
+            // A stale edit key with editing == null on the FIRST run of
+            // a composition means either a process death mid-edit
+            // (draft = the typed edit text) or a navigation return after
+            // the edit ended (draft already cleared by send). The
+            // process-death draft must be DISCARDED: the edit context is
+            // gone, and sending the restored text would post the old
+            // body as a brand-new message — the wrong wire shape beats
+            // losing an in-progress edit. Live transitions (and the
+            // nav-return case, whose draft is empty) restore the stash.
+            draft = if (initial && draft.isNotEmpty()) "" else stashedDraft
             stashedDraft = ""
         }
         lastEditKey = editKey

@@ -413,7 +413,11 @@ private fun SharedFileContent(file: WaddleSharedFile) {
     } else {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable { uriHandler.openUri(file.url) },
+            // Guarded: the URL is peer-controlled metadata and openUri
+            // throws when no activity handles the scheme.
+            modifier = Modifier.clickable {
+                runCatching { uriHandler.openUri(file.url) }
+            },
         ) {
             Icon(
                 Icons.Outlined.AttachFile,

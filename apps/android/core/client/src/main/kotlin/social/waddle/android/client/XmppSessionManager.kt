@@ -164,6 +164,9 @@ class XmppSessionManager(
     /** Serializes reaction send+rollback pairs (see [sendReaction]). */
     private val reactionMutex = Mutex()
 
+    /** Serializes displayed dispatches (see [markConversationDisplayed]). */
+    private val displayedMutex = Mutex()
+
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
@@ -559,16 +562,30 @@ class XmppSessionManager(
         conversationJid: String,
         isGroupchat: Boolean,
         explicitTarget: DisplayedTarget? = null,
-    ) {
+    ): Unit = displayedMutex.withLock {
+        // Serialized: unguarded concurrent dispatches (timeline
+        // collector, visibility hooks, the notification receiver) could
+        // interleave across the suspend points and let a STALE call's
+        // terminal advance/publish land last, regressing the local
+        // cursor and the published MDS node.
         val conversation = bareJid(conversationJid)
         unreadStore.clear(conversation)
+        val items = timelineStore.timeline(conversation).value
         val ids = explicitTarget ?: run {
             // Only feed-visible rows count: a thread reply the user has
             // never opened must not advance the read cursor.
-            val target = timelineStore.timeline(conversation).value.lastOrNull {
+            val target = items.lastOrNull {
                 !it.isMine && it.tombstone == null && it.isFeedVisible
             } ?: return
             displayedTargetOf(target, isGroupchat) ?: return
+        }
+        // Explicit targets (parked replays, notification actions) can be
+        // stale: never move the cursor BACKWARDS in timeline order.
+        if (explicitTarget != null) {
+            val targetIndex = items.indexOfLast { ids.markerId in it.identityIds }
+            val current = readCursorStore.cursor(conversation)
+            val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
+            if (targetIndex in 0..currentIndex) return
         }
         val client = activeClient ?: run {
             // No live session: park the RESOLVED target and replay it on

@@ -72,9 +72,8 @@ open class ConversationViewModel(
     @Volatile
     private var atNewestEdge = true
 
-    /** Latest store rows, for action-time (non-composition) reads. */
-    @Volatile
-    private var latestItems: List<TimelineItem> = emptyList()
+    /** Store handle for action-time (non-composition) reads. */
+    private val timelineState = timeline
 
     private val typingNotifier = ComposerTypingNotifier(
         scope = viewModelScope,
@@ -146,7 +145,6 @@ open class ConversationViewModel(
         // and resurrect an already-delivered send as an unconfirmed ghost.
         viewModelScope.launch {
             timeline.collect { items ->
-                latestItems = items
                 val storedIds = HashSet<String>()
                 items.forEach { item ->
                     storedIds += item.id
@@ -366,11 +364,13 @@ open class ConversationViewModel(
      */
     fun toggleReaction(item: TimelineItem, emoji: String) {
         val target = actionTargetIdOf(item) ?: return
-        // Resolve the CURRENT reaction state from the store, not the
-        // composition-captured snapshot: two rapid toggles from a stale
-        // frame would compute their sets from the same base and the
-        // second (XEP-0444 full-set replace) would drop the first.
-        val fresh = latestItems.firstOrNull { it.id == item.id } ?: item
+        // Resolve the CURRENT reaction state straight from the store
+        // (synchronously fresh — the optimistic apply writes before the
+        // send suspends), not from a composition snapshot or a collector
+        // cache that lags by a dispatch: two rapid toggles computing
+        // from the same base would drop the first (XEP-0444 replaces
+        // the full set).
+        val fresh = timelineState.value.firstOrNull { it.id == item.id } ?: item
         val own = fresh.reactions.filter { it.mine }.map { it.emoji }
         val next = if (emoji in own) own - emoji else own + emoji
         viewModelScope.launch {
