@@ -1304,30 +1304,6 @@ pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) 
     }
 }
 
-/// Atomically destroy a room via the registry `DestroyRoom` handler
-/// (#1261, #1276): it removes the in-memory registry entry AND wipes the
-/// clustering durable rows (config/subject/affiliations incl. bans)
-/// under one claim fence. On a durable-delete failure it restores the
-/// entry and reports [`DestroyRoomOutcome::DurableWipeFailed`], so the
-/// room is either fully destroyed or fully intact — never split, and
-/// with no separate pre-wipe to roll back (no fail-open window).
-///
-/// A transport-level ask failure (registry mailbox unavailable,
-/// timeout) is surfaced as `Err`, NOT coerced to `NotRegistered`: the
-/// atomic handler either fully applied or not at all, so the caller must
-/// answer with a retryable wait-class error rather than `item-not-found`.
-pub(crate) async fn destroy_room_actor(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-) -> Result<
-    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome,
-    waddle_xmpp::muc::room_registry_actor::RoomRegistryError,
-> {
-    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .destroy_room(room_jid.clone())
-        .await
-}
-
 #[cfg(test)]
 mod eviction_tests {
     use super::super::tests::create_test_websocket_state;
@@ -1591,7 +1567,9 @@ mod eviction_tests {
             tokio::task::yield_now().await;
         }
 
-        let outcome = destroy_room_actor(&state, &room_jid).await;
+        let outcome = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+            .destroy_room_with_snapshot(room_jid)
+            .await;
         assert!(
             outcome.is_err(),
             "a transport-level registry ask failure must surface as Err (→ retryable \

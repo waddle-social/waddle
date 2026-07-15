@@ -1300,9 +1300,9 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         std::collections::BTreeSet::new();
     for room_jid in &destroy_targets {
         // `NotRegistered` is fine (dormant room, no live actor);
-        // `DurableWipeFailed` means the registry kept the room because
-        // its fenced clustering wipe failed — the cascade must fail
-        // and roll back, not record the room as destroyed (#1261).
+        // `DurableWipeFailed` means the fenced clustering wipe did not
+        // converge. The registry restored or poisoned the room for an exact
+        // retry, so the cascade must fail and roll back (#1261).
         let failure = match state
             .room_registry
             .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {

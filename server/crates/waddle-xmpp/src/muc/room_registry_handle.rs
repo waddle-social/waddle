@@ -38,14 +38,14 @@ use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
     CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
     DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
-    DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
-    GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
-    IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
-    ListPendingRoomReleaseJids, ListRooms, ListRoomsOwnedBy, PendingReclaimedRoom,
-    PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog, ReapSealedRoom, ReclaimedRoomOutcome,
-    ReconcileReclaimedRoom, RememberPendingReclaimedRoom, ReservePendingReclaimedRoom,
-    RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists, RoomOwnershipDrainOutcome,
-    RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
+    DestroyRoomWithSnapshot, DestroyRoomWithSnapshotOutcome, DrainRoomOwnershipForShutdown,
+    GetOrCreateRoom, GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom,
+    IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease, IsMucJid,
+    IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids, ListRooms,
+    ListRoomsOwnedBy, PendingReclaimedRoom, PendingReclaimedRoomBacklog, PendingRoomReleaseBacklog,
+    ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom, RememberPendingReclaimedRoom,
+    ReservePendingReclaimedRoom, RetryPendingRoomReleases, RoomAcquisition, RoomCount, RoomExists,
+    RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, WireClusteringClaims,
 };
 use super::RoomConfig;
 use crate::metrics;
@@ -286,6 +286,14 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        /// XEP-0045 explicit destroy whose success carries the occupant
+        /// snapshot captured after the mailbox-serialized destroy seal.
+        destroy_room_with_snapshot(room_jid: BareJid) -> DestroyRoomWithSnapshotOutcome,
+        "destroy_room_with_snapshot",
+        DestroyRoomWithSnapshot { room_jid }
+    );
+
+    registry_method!(
         reserve_pending_reclaimed_room(room_jid: BareJid) -> bool,
         "reserve_pending_reclaimed_room",
         ReservePendingReclaimedRoom { room_jid }
@@ -386,9 +394,9 @@ impl RoomRegistry {
         /// Destroy a room, returning the typed outcome. The handler
         /// removes the registry entry and wipes the room's clustering
         /// durable rows (config/subject/affiliations incl. bans) under
-        /// one claim fence, restoring the entry and reporting
-        /// [`DestroyRoomOutcome::DurableWipeFailed`] if the durable delete
-        /// fails — the destroy is therefore all-or-nothing (#1261, #1276).
+        /// one exact claim fence. Proven retention restores the actor;
+        /// uncertainty poisons it for exact-claim redrive and reports
+        /// [`DestroyRoomOutcome::DurableWipeFailed`] (#1261, #1276).
         destroy_room(room_jid: BareJid) -> DestroyRoomOutcome,
         "destroy_room",
         DestroyRoom {

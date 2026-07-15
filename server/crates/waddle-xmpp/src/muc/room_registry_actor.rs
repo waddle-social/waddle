@@ -20,8 +20,9 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{
     DurableRestoreReadiness, DurableRoomOrigin, GetDurableRestoreReadiness, GetRoomSealState,
-    HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState, SealGuard,
-    SealIfInactive, SealIfInactiveOutcome,
+    GetSnapshot, HydrateDurableRecipients, RestoreDurableRoomState, RoomActor, RoomSealState,
+    RoomSnapshot, SealForExplicitDestroy, SealForExplicitDestroyOutcome, SealGuard, SealIfInactive,
+    SealIfInactiveOutcome, UnsealAfterFailedExplicitDestroy,
 };
 use super::{MucRoom, RoomConfig};
 use crate::metrics;
@@ -52,6 +53,13 @@ enum RoomPublicationError {
     LocalIdentityChanged,
     OwnershipUnavailable,
     ReconciliationPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmbiguousDurableDelete {
+    StateRetained,
+    StateDeleted,
+    Uncertain,
 }
 
 /// Kills a freshly spawned room actor if preparation is cancelled before the
@@ -533,6 +541,30 @@ impl RoomRegistryActor {
         self.rooms.remove(room_jid);
         self.poisoned_rooms.remove(room_jid);
         self.retire_ownership_lost_entry(room_jid, entry).await;
+    }
+
+    /// Retire a live-map entry when the explicit-destroy seal result is
+    /// uncertain. The seal may have executed even when its reply was lost;
+    /// retaining the entry could therefore strand a permanently sealed actor.
+    /// Poisoning preserves retry intent while exact-release tracking prevents
+    /// the old claim from becoming orphaned if release itself is ambiguous.
+    async fn poison_uncertain_explicit_destroy(&mut self, room_jid: &BareJid, expected: RoomEntry) {
+        let still_same_incarnation = self
+            .rooms
+            .get(room_jid)
+            .is_some_and(|entry| entry.claim_fence == expected.claim_fence);
+        if !still_same_incarnation {
+            return;
+        }
+        self.rooms.remove(room_jid);
+        expected.actor_ref.kill();
+        self.poisoned_rooms.insert(room_jid.clone());
+        self.transfer_exact_responsibility_to_pending_release(
+            room_jid.clone(),
+            expected.claim_fence.clone(),
+        );
+        self.release_room_claim(room_jid, &expected.claim_fence)
+            .await;
     }
 
     fn remember_pending_room_release(
@@ -1287,6 +1319,7 @@ impl RoomRegistryActor {
             if let Err(error) = actor_ref
                 .tell(RestoreDurableRoomState {
                     store: Arc::clone(store),
+                    claim_fence: claim_fence.clone(),
                 })
                 .await
             {
@@ -1496,7 +1529,10 @@ impl RoomRegistryActor {
                 Ok(DurableRestoreReadiness::Pending) => match durable_store {
                     Some(store) => {
                         if actor_ref
-                            .tell(RestoreDurableRoomState { store })
+                            .tell(RestoreDurableRoomState {
+                                store,
+                                claim_fence: publication_fence.clone(),
+                            })
                             .mailbox_timeout(ROOM_OWNERSHIP_CALL_TIMEOUT)
                             .await
                             .is_ok()
@@ -3057,9 +3093,12 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     .await,
             );
         };
+        // The reaper won this claim outside the demand-side acquisition
+        // path. Retain the exact generation before the first fenced read.
+        store.record_claim_fence(&msg.room_jid, claim_fence.clone());
         let snapshot = match tokio::time::timeout(
             RECLAIMED_ROOM_STORE_TIMEOUT,
-            store.load_room_state(&msg.room_jid),
+            store.load_room_state_fenced(&msg.room_jid, &claim_fence),
         )
         .await
         {
@@ -3393,8 +3432,9 @@ pub enum DestroyRoomOutcome {
     Destroyed,
     /// No live or poisoned entry for this JID existed.
     NotRegistered,
-    /// The epoch-fenced durable delete failed; the registry entry was
-    /// restored and nothing was destroyed.
+    /// The epoch-fenced durable delete did not converge. A proven-retained
+    /// room is restored; an uncertain or actor-unavailable room is poisoned
+    /// so a retry cannot mistake it for an already-completed destroy.
     DurableWipeFailed,
     /// The bounded exact-release retry set is full, so the registry kept the
     /// actor and claim intact rather than losing responsibility for the fence.
@@ -3407,30 +3447,115 @@ pub struct DestroyRoom {
     pub reason: DestroyRoomReason,
 }
 
-impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
-    type Reply = DestroyRoomOutcome;
+/// XEP-0045 §10.9 explicit destroy whose success carries the occupant
+/// snapshot captured after the actor mailbox seal. Every join ordered before
+/// the seal is therefore present in the notification set; every join ordered
+/// after it is refused.
+pub struct DestroyRoomWithSnapshot {
+    pub room_jid: BareJid,
+}
 
-    async fn handle(
+#[derive(Debug, Clone, kameo::Reply)]
+pub enum DestroyRoomWithSnapshotOutcome {
+    Destroyed(Option<Box<RoomSnapshot>>),
+    NotRegistered,
+    DurableWipeFailed,
+    ReleaseBacklogFull,
+}
+
+impl RoomRegistryActor {
+    async fn destroy_room_internal(
         &mut self,
         msg: DestroyRoom,
-        ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
+        registry_ref: ActorRef<Self>,
+        sealed_snapshot: &mut Option<RoomSnapshot>,
+    ) -> DestroyRoomOutcome {
         if msg.reason != DestroyRoomReason::DeposedEviction {
             let claim_fence = self
                 .rooms
                 .get(&msg.room_jid)
-                .map(|entry| &entry.claim_fence);
+                .map(|entry| &entry.claim_fence)
+                .or_else(|| {
+                    self.pending_room_preparations
+                        .get(&msg.room_jid)
+                        .map(|preparation| &preparation.claim_fence)
+                });
             if claim_fence.is_some_and(|claim_fence| {
                 !self.has_pending_release_capacity(&msg.room_jid, claim_fence)
             }) {
                 return DestroyRoomOutcome::ReleaseBacklogFull;
             }
         }
-        let removed_entry = self.rooms.remove(&msg.room_jid);
+
+        // Seal before removing the registry entry or touching durable state.
+        // The room actor mailbox serializes this message against joins and
+        // mutations, so no caller retaining an ActorRef can recreate the room
+        // row between the DELETE and exact-claim release. A timed-out ask may
+        // still seal later; leaving the entry registered makes a retry
+        // idempotently finish the destroy instead of publishing a new actor.
+        if msg.reason == DestroyRoomReason::Destroy {
+            if let Some(entry) = self.rooms.get(&msg.room_jid).cloned() {
+                match tokio::time::timeout(
+                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                    entry.actor_ref.ask(SealForExplicitDestroy),
+                )
+                .await
+                {
+                    Ok(Ok(SealForExplicitDestroyOutcome::Sealed)) => {
+                        match tokio::time::timeout(
+                            ROOM_OWNERSHIP_CALL_TIMEOUT,
+                            entry.actor_ref.ask(GetSnapshot),
+                        )
+                        .await
+                        {
+                            Ok(Ok(snapshot)) => *sealed_snapshot = Some(snapshot),
+                            snapshot_result => {
+                                warn!(
+                                    room = %msg.room_jid,
+                                    result = ?snapshot_result,
+                                    "Could not capture the post-seal destroy snapshot"
+                                );
+                                let restored = tokio::time::timeout(
+                                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                                    entry.actor_ref.ask(UnsealAfterFailedExplicitDestroy),
+                                )
+                                .await
+                                .is_ok_and(|result| matches!(result, Ok(true)));
+                                if !restored {
+                                    self.poison_uncertain_explicit_destroy(&msg.room_jid, entry)
+                                        .await;
+                                }
+                                return DestroyRoomOutcome::DurableWipeFailed;
+                            }
+                        }
+                    }
+                    Ok(Ok(SealForExplicitDestroyOutcome::OwnershipLost)) => {
+                        self.evict_ownership_lost_room(&msg.room_jid, entry).await;
+                        self.poisoned_rooms.insert(msg.room_jid.clone());
+                        return DestroyRoomOutcome::DurableWipeFailed;
+                    }
+                    Ok(Err(error)) => {
+                        warn!(room = %msg.room_jid, %error, "Explicit-destroy seal failed");
+                        self.poison_uncertain_explicit_destroy(&msg.room_jid, entry)
+                            .await;
+                        return DestroyRoomOutcome::DurableWipeFailed;
+                    }
+                    Err(_) => {
+                        warn!(room = %msg.room_jid, "Explicit-destroy seal timed out");
+                        self.poison_uncertain_explicit_destroy(&msg.room_jid, entry)
+                            .await;
+                        return DestroyRoomOutcome::DurableWipeFailed;
+                    }
+                }
+            }
+        }
+
+        let mut removed_entry = self.rooms.remove(&msg.room_jid);
         let removed_room = removed_entry.is_some();
-        let removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
+        let mut removed_preparation = self.pending_room_preparations.remove(&msg.room_jid);
         let removed_pending_room = removed_preparation.is_some();
         let removed_poison = self.poisoned_rooms.remove(&msg.room_jid);
+        let mut durable_room_found = false;
         // XEP-0045 §10.9 (#1261): destroy removes the room "even if it
         // was defined as persistent" — wipe the durable rows (config,
         // subject, affiliations incl. bans) so the room cannot
@@ -3440,22 +3565,125 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
         // owns the room now and this node must not wipe the new
         // owner's rows). A failed delete FAILS the destroy: the entry
         // is restored and `false` returned, so a caller never
-        // acknowledges a destruction whose durable state survived.
-        // `DeposedEviction` never wipes — the
-        // room lives on under its new owner.
-        if (removed_room || removed_pending_room || removed_poison)
-            && msg.reason == DestroyRoomReason::Destroy
+        // acknowledges a destruction whose durable state survived. A proven
+        // retained row restores the actor; an uncertain outcome kills it and
+        // leaves a poison marker so a retry must reacquire and redrive the
+        // delete rather than treating absence from the live map as success.
+        // `DeposedEviction` never wipes — the room lives on under its new
+        // owner. Poison-only retries first acquire a fresh exact claim: the
+        // dead actor's old claim was deliberately released when it was
+        // poisoned and cannot authorize a later delete.
+        if msg.reason == DestroyRoomReason::Destroy
+            && (removed_room
+                || removed_pending_room
+                || removed_poison
+                || self.durable_store.is_some())
         {
-            if let Some(store) = &self.durable_store {
-                if let Err(error) = store.delete_room_state(&msg.room_jid).await {
+            if let Some(store) = self.durable_store.clone() {
+                let mut acquired_unregistered_fence = None;
+                if removed_entry.is_none() && removed_preparation.is_none() {
+                    match self.acquire_room_claim(&msg.room_jid, &registry_ref).await {
+                        Ok(fence) => {
+                            store.record_claim_fence(&msg.room_jid, fence.clone());
+                            acquired_unregistered_fence = Some(fence);
+                        }
+                        Err(error) => {
+                            warn!(room = %msg.room_jid, %error, "Could not acquire an exact claim for poisoned-room deletion");
+                            self.poisoned_rooms.insert(msg.room_jid.clone());
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                    }
+
+                    let fence = acquired_unregistered_fence
+                        .as_ref()
+                        .expect("successful acquisition installs an exact fence");
+                    match tokio::time::timeout(
+                        ROOM_OWNERSHIP_CALL_TIMEOUT,
+                        store.load_room_state_fenced(&msg.room_jid, fence),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(state))) => {
+                            durable_room_found = true;
+                            if sealed_snapshot.is_none() {
+                                let mut room = MucRoom::new(
+                                    msg.room_jid.clone(),
+                                    state.waddle_id,
+                                    state.channel_id,
+                                    state.config,
+                                );
+                                room.subject = state.subject;
+                                room.restore_affiliations(state.affiliations);
+                                *sealed_snapshot = Some(RoomSnapshot {
+                                    room,
+                                    config_revision: 0,
+                                    admission_revision: 0,
+                                });
+                            }
+                        }
+                        Ok(Ok(None)) if !removed_poison => {
+                            self.release_room_claim(&msg.room_jid, fence).await;
+                            return DestroyRoomOutcome::NotRegistered;
+                        }
+                        Ok(Ok(None)) => {
+                            // A poison marker proves a prior incarnation or
+                            // uncertain delete existed. Run the idempotent
+                            // fenced delete once more, then report convergence.
+                            durable_room_found = true;
+                        }
+                        Ok(Err(error)) => {
+                            warn!(room = %msg.room_jid, %error, "Could not prove durable room presence or absence before explicit destroy");
+                            if removed_poison {
+                                self.poisoned_rooms.insert(msg.room_jid.clone());
+                            }
+                            self.transfer_exact_responsibility_to_pending_release(
+                                msg.room_jid.clone(),
+                                fence.clone(),
+                            );
+                            self.release_room_claim(&msg.room_jid, fence).await;
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                        Err(_) => {
+                            warn!(room = %msg.room_jid, "Durable room presence probe timed out before explicit destroy");
+                            if removed_poison {
+                                self.poisoned_rooms.insert(msg.room_jid.clone());
+                            }
+                            self.transfer_exact_responsibility_to_pending_release(
+                                msg.room_jid.clone(),
+                                fence.clone(),
+                            );
+                            self.release_room_claim(&msg.room_jid, fence).await;
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                    }
+                }
+                let Some(fence) = removed_entry
+                    .as_ref()
+                    .map(|entry| entry.claim_fence.clone())
+                    .or_else(|| {
+                        removed_preparation
+                            .as_ref()
+                            .map(|preparation| preparation.claim_fence.clone())
+                    })
+                    .or_else(|| acquired_unregistered_fence.clone())
+                else {
                     warn!(
                         room = %msg.room_jid,
-                        %error,
-                        "Failed to delete durable room state; refusing the destroy so it \
-                         can be retried instead of resurrecting from storage"
+                        "Refusing durable room deletion without the registry entry's exact fence"
                     );
-                    if let Some(entry) = removed_entry {
-                        self.rooms.insert(msg.room_jid.clone(), entry);
+                    if let Some(entry) = removed_entry.take() {
+                        let unsealed = tokio::time::timeout(
+                            ROOM_OWNERSHIP_CALL_TIMEOUT,
+                            entry.actor_ref.ask(UnsealAfterFailedExplicitDestroy),
+                        )
+                        .await
+                        .is_ok_and(|result| matches!(result, Ok(true)));
+                        if unsealed {
+                            self.rooms.insert(msg.room_jid.clone(), entry);
+                        } else {
+                            entry.actor_ref.kill();
+                            self.poisoned_rooms.insert(msg.room_jid.clone());
+                        }
                     }
                     if let Some(pending) = removed_preparation {
                         self.pending_room_preparations
@@ -3465,6 +3693,146 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                         self.poisoned_rooms.insert(msg.room_jid.clone());
                     }
                     return DestroyRoomOutcome::DurableWipeFailed;
+                };
+                let delete_classification = match tokio::time::timeout(
+                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                    store.delete_room_state_fenced(&msg.room_jid, &fence),
+                )
+                .await
+                {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => {
+                        warn!(
+                            room = %msg.room_jid,
+                            %error,
+                            "Durable room deletion returned an error; classifying the result with \
+                             an exact-fenced reload"
+                        );
+                        Some(
+                            match tokio::time::timeout(
+                                ROOM_OWNERSHIP_CALL_TIMEOUT,
+                                store.load_room_state_fenced(&msg.room_jid, &fence),
+                            )
+                            .await
+                            {
+                                Ok(Ok(Some(_))) => AmbiguousDurableDelete::StateRetained,
+                                Ok(Ok(None)) => AmbiguousDurableDelete::StateDeleted,
+                                Ok(Err(reload_error)) => {
+                                    warn!(
+                                        room = %msg.room_jid,
+                                        %reload_error,
+                                        "Exact-fenced reload failed while classifying durable deletion"
+                                    );
+                                    AmbiguousDurableDelete::Uncertain
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        room = %msg.room_jid,
+                                        "Exact-fenced reload timed out while classifying durable deletion"
+                                    );
+                                    AmbiguousDurableDelete::Uncertain
+                                }
+                            },
+                        )
+                    }
+                    Err(_) => {
+                        warn!(
+                            room = %msg.room_jid,
+                            "Durable room deletion timed out; the still-running database operation \
+                             makes the outcome uncertain"
+                        );
+                        Some(AmbiguousDurableDelete::Uncertain)
+                    }
+                };
+                if let Some(classification) = delete_classification {
+                    match classification {
+                        AmbiguousDurableDelete::StateRetained => {
+                            if let Some(entry) = removed_entry.take() {
+                                let unsealed = tokio::time::timeout(
+                                    ROOM_OWNERSHIP_CALL_TIMEOUT,
+                                    entry.actor_ref.ask(UnsealAfterFailedExplicitDestroy),
+                                )
+                                .await
+                                .is_ok_and(|result| matches!(result, Ok(true)));
+                                if unsealed && entry.actor_ref.is_alive() {
+                                    self.rooms.insert(msg.room_jid.clone(), entry);
+                                } else {
+                                    entry.actor_ref.kill();
+                                    self.poisoned_rooms.insert(msg.room_jid.clone());
+                                    self.transfer_exact_responsibility_to_pending_release(
+                                        msg.room_jid.clone(),
+                                        fence.clone(),
+                                    );
+                                    self.release_room_claim(&msg.room_jid, &fence).await;
+                                }
+                            }
+                            if let Some(pending) = removed_preparation.take() {
+                                self.pending_room_preparations
+                                    .insert(msg.room_jid.clone(), pending);
+                            }
+                            if acquired_unregistered_fence.is_some() {
+                                self.transfer_exact_responsibility_to_pending_release(
+                                    msg.room_jid.clone(),
+                                    fence.clone(),
+                                );
+                                self.release_room_claim(&msg.room_jid, &fence).await;
+                            }
+                            if removed_poison || acquired_unregistered_fence.is_some() {
+                                self.poisoned_rooms.insert(msg.room_jid.clone());
+                            }
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                        AmbiguousDurableDelete::StateDeleted => {
+                            warn!(
+                                room = %msg.room_jid,
+                                "Exact-fenced reload proved durable state absent after an \
+                                 ambiguous delete; completing destruction"
+                            );
+                        }
+                        AmbiguousDurableDelete::Uncertain => {
+                            warn!(
+                                room = %msg.room_jid,
+                                "Durable deletion remains uncertain; killing the removed actor \
+                                 and releasing its exact claim"
+                            );
+                            if let Some(entry) = removed_entry.take() {
+                                entry.actor_ref.kill();
+                                self.transfer_exact_responsibility_to_pending_release(
+                                    msg.room_jid.clone(),
+                                    entry.claim_fence.clone(),
+                                );
+                                self.release_room_claim(&msg.room_jid, &entry.claim_fence)
+                                    .await;
+                            }
+                            if let Some(pending) = removed_preparation.take() {
+                                let claim_fence = pending.claim_fence.clone();
+                                Self::reply_preparation_failure(
+                                    &msg.room_jid,
+                                    pending.waiters,
+                                    ReclaimedRoomOutcome::PendingRetry,
+                                );
+                                drop(pending.guard);
+                                self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
+                                self.transfer_exact_responsibility_to_pending_release(
+                                    msg.room_jid.clone(),
+                                    claim_fence.clone(),
+                                );
+                                self.release_room_claim(&msg.room_jid, &claim_fence).await;
+                            }
+                            if acquired_unregistered_fence.is_some() {
+                                self.transfer_exact_responsibility_to_pending_release(
+                                    msg.room_jid.clone(),
+                                    fence.clone(),
+                                );
+                                self.release_room_claim(&msg.room_jid, &fence).await;
+                            }
+                            self.poisoned_rooms.insert(msg.room_jid.clone());
+                            return DestroyRoomOutcome::DurableWipeFailed;
+                        }
+                    }
+                }
+                if acquired_unregistered_fence.is_some() {
+                    self.release_room_claim(&msg.room_jid, &fence).await;
                 }
             }
         }
@@ -3484,17 +3852,13 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
             self.start_detached_room_release(
                 msg.room_jid.clone(),
                 claim_fence,
-                ctx.actor_ref().clone(),
+                registry_ref.clone(),
             );
         }
         // ADR-0017 Phase 3 Slice 7: release the Postgres claim on every
         // terminal path (explicit destroy, dormancy-eviction sweep) —
-        // "graceful release" per element 7. A poisoned-only removal (the
-        // actor died and was already detected by `live_room`) has no
-        // known epoch to release; the claim is instead reclaimed by
-        // another node's `OwnerStale` steal once this node's own liveness
-        // lease is what it takes to look stale (bounded residual gap,
-        // same class as FIX 6e's fail-open-detach gap).
+        // "graceful release" per element 7. Poison-only durable destruction
+        // acquired and released its own exact fence in the block above.
         if let Some(entry) = removed_entry {
             if msg.reason == DestroyRoomReason::DeposedEviction {
                 // Removal from the registry is not itself a terminal signal
@@ -3503,16 +3867,65 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 // the deposed incarnation before dropping our last entry.
                 self.retire_ownership_lost_entry(&msg.room_jid, entry).await;
             } else {
+                entry.actor_ref.kill();
                 self.release_room_claim(&msg.room_jid, &entry.claim_fence)
                     .await;
             }
         }
-        if removed_room || removed_pending_room || removed_poison {
+        if removed_room || removed_pending_room || removed_poison || durable_room_found {
             info!(room = %msg.room_jid, "Destroyed room");
             DestroyRoomOutcome::Destroyed
         } else {
             warn!(room = %msg.room_jid, "Attempted to destroy non-existent room");
             DestroyRoomOutcome::NotRegistered
+        }
+    }
+}
+
+impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
+    type Reply = DestroyRoomOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoom,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut ignored_snapshot = None;
+        self.destroy_room_internal(msg, ctx.actor_ref().clone(), &mut ignored_snapshot)
+            .await
+    }
+}
+
+impl kameo::message::Message<DestroyRoomWithSnapshot> for RoomRegistryActor {
+    type Reply = DestroyRoomWithSnapshotOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: DestroyRoomWithSnapshot,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let mut snapshot = None;
+        match self
+            .destroy_room_internal(
+                DestroyRoom {
+                    room_jid: msg.room_jid,
+                    reason: DestroyRoomReason::Destroy,
+                },
+                ctx.actor_ref().clone(),
+                &mut snapshot,
+            )
+            .await
+        {
+            DestroyRoomOutcome::Destroyed => {
+                DestroyRoomWithSnapshotOutcome::Destroyed(snapshot.map(Box::new))
+            }
+            DestroyRoomOutcome::NotRegistered => DestroyRoomWithSnapshotOutcome::NotRegistered,
+            DestroyRoomOutcome::DurableWipeFailed => {
+                DestroyRoomWithSnapshotOutcome::DurableWipeFailed
+            }
+            DestroyRoomOutcome::ReleaseBacklogFull => {
+                DestroyRoomWithSnapshotOutcome::ReleaseBacklogFull
+            }
         }
     }
 }
@@ -3575,7 +3988,9 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
                     info!(room = %msg.room_jid, "Evicted deposed room during inactive-room cleanup");
                     true
                 }
-                Ok(RoomSealState::Open | RoomSealState::Inactive) => {
+                Ok(
+                    RoomSealState::Open | RoomSealState::Inactive | RoomSealState::ExplicitDestroy,
+                ) => {
                     warn!(room = %msg.room_jid, "Skipping inactive-room seal because exact-release retry backlog is full");
                     false
                 }
@@ -3715,7 +4130,7 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                 );
                 true
             }
-            Ok(RoomSealState::Open) => false,
+            Ok(RoomSealState::Open | RoomSealState::ExplicitDestroy) => false,
             Err(error) => {
                 warn!(
                     room = %msg.room_jid,

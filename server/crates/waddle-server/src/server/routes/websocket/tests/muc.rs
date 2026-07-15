@@ -162,7 +162,9 @@ async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constra
 async fn ordinary_join_coalesces_with_restoring_room_without_create_permission() {
     use std::sync::Arc;
 
-    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    };
     use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
@@ -175,17 +177,10 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
     }
 
     impl MucDurableStore for BlockingExistingRoomStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a BareJid,
-        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            let snapshot = self.snapshot.clone();
-            Box::pin(async move { Ok(Some(snapshot)) })
-        }
-
         fn load_room_state_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
             let started = Arc::clone(&self.started);
             let allow = Arc::clone(&self.allow);
@@ -197,34 +192,58 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             })
         }
 
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a waddle_xmpp::muc::RoomConfig,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
             Box::pin(async { Ok(true) })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let expected = waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            );
+            let matches = fence.entity == expected;
+            Box::pin(async move { Ok(matches) })
         }
     }
 
@@ -7076,56 +7095,90 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
 /// nobody may be told the room died while it lives on.
 #[tokio::test]
 async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
-    use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore, RoomClaimFenceContext};
     use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
 
     /// Every write succeeds except the destroy-time wipe.
-    struct FailingDeleteStore;
+    struct FailingDeleteStore {
+        delete_attempted: std::sync::atomic::AtomicBool,
+    }
     impl MucDurableStore for FailingDeleteStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a BareJid,
-        ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::DurableRoomState>> {
-            Box::pin(async { Ok(None) })
-        }
         fn load_room_state_fenced<'a>(
             &'a self,
-            room_jid: &'a BareJid,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<waddle_xmpp::muc::durable::DurableRoomState>> {
-            self.load_room_state(room_jid)
+            let delete_attempted = self
+                .delete_attempted
+                .load(std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if delete_attempted {
+                    Ok(Some(waddle_xmpp::muc::durable::DurableRoomState {
+                        waddle_id: "destroy-wipe-fails".to_string(),
+                        channel_id: "destroy-wipe-fails".to_string(),
+                        config: waddle_xmpp::muc::RoomConfig::default(),
+                        subject: None,
+                        affiliations: Vec::new(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
         }
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a waddle_xmpp::muc::RoomConfig,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
-        fn delete_room_state<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            self.delete_attempted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async {
                 Err(waddle_xmpp::XmppError::internal(
                     "destroy-time wipe refused by test store",
                 ))
             })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let expected = waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            );
+            let matches = fence.entity == expected;
+            Box::pin(async move { Ok(matches) })
         }
     }
 
@@ -7165,7 +7218,9 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
             claim_store: std::sync::Arc::new(InProcessClaimStore::new())
                 as std::sync::Arc<dyn ClaimStore>,
             node_identity: SharedNodeIdentity::new(NodeIdentity::new("test-node", "epoch-1")),
-            durable_store: Some(std::sync::Arc::new(FailingDeleteStore)),
+            durable_store: Some(std::sync::Arc::new(FailingDeleteStore {
+                delete_attempted: std::sync::atomic::AtomicBool::new(false),
+            })),
             rollout_backoff: None,
         })
         .await

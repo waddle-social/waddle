@@ -1857,7 +1857,9 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     };
     use waddle_server::clustering::ClusteringReadiness;
     use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
-    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    };
     use waddle_xmpp::muc::room_actor::{HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
@@ -1883,44 +1885,59 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     // durable config mutation is the deliberate post-publication wedge.
     struct HangingDurableStore;
     impl MucDurableStore for HangingDurableStore {
-        fn load_room_state<'a>(
+        fn load_room_state_fenced<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
             Box::pin(async { Ok(None) })
         }
 
-        fn load_room_state_fenced<'a>(
-            &'a self,
-            room_jid: &'a jid::BareJid,
-        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            self.load_room_state(room_jid)
-        }
-
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a RoomConfig,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(pending()) as Pin<Box<_>>
         }
 
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,
             _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,
             _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            _room_jid: &'a jid::BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let expected = Entity::new(EntityType::RoomActor, room_jid.to_string());
+            let matches = fence.entity == expected;
+            Box::pin(async move { Ok(matches) })
         }
     }
 

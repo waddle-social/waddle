@@ -46,9 +46,10 @@ pub type MucDurableFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, XmppErr
 
 /// Typed fencing context for a room's currently-recorded Postgres claim
 /// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated): the same
-/// `(Entity, ClaimEpoch, NodeIdentity)` tuple [`MucDurableStore::check_fenced_fanout`]
-/// resolves internally via [`MucDurableStore::record_claim_fence`]'s cache,
-/// exposed here so a caller that needs to run its OWN fenced write against a
+/// `(Entity, ClaimEpoch, NodeIdentity)` tuple retained by the actor
+/// incarnation, exposed here so every durable operation can bind its OWN
+/// exact fence rather than resolving a possibly newer cache entry. A caller
+/// that needs to run a fenced write against a
 /// DIFFERENT store (MAM's `store_message_fenced`, which cannot share a SQL
 /// transaction with this store's own `assert_fenced`) can bind the identical
 /// typed values into its own `SELECT ... FOR SHARE` check, rather than
@@ -89,12 +90,13 @@ pub struct DurableRoomState {
 
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
 ///
-/// Every write is epoch-fenced against this node's currently-recorded claim
-/// on the room's `RoomActor` entity (see [`Self::record_claim_fence`]) —
-/// "epoch-fenced like all claimed-entity writes" per element 7.
+/// Every load, write, and delete is epoch-fenced against the exact claim
+/// retained by that `RoomActor` incarnation — "epoch-fenced like all
+/// claimed-entity writes" per element 7. The cache populated by
+/// [`Self::record_claim_fence`] is not an authority for actor-owned writes.
 ///
-/// **Fail-open contract, revised (ADR-0017 Phase 3 Slice 7 FIX 2,
-/// council-adjudicated).** This trait's `save_*` methods themselves are
+/// **Fail-closed ownership contract (ADR-0017 Phase 3 Slice 7 FIX 2).**
+/// This trait's `save_*` methods themselves are
 /// still fire-and-forget from a Rust-signature perspective (`Result<(),
 /// XmppError>`, not surfaced up through every intermediate layer) — a
 /// fenced write that fails still just returns `Err` to its immediate
@@ -107,10 +109,9 @@ pub struct DurableRoomState {
 ///
 /// 1. **Before mutating**: the handler runs
 ///    [`super::room_actor::RoomActor::gate_mutation`] — a `SELECT ... FOR
-///    SHARE`-fenced [`Self::check_fenced_fanout`] pre-check — and refuses
-///    to mutate at all on a definitive ownership-loss result. This is new:
-///    previously every mutation applied in-memory unconditionally,
-///    regardless of whether this node's claim was still current.
+///    SHARE`-fenced [`Self::check_exact_claim_fence`] pre-check using the
+///    actor incarnation's retained fence. It refuses to mutate both when
+///    ownership was lost and when ownership cannot be proven.
 /// 2. **After mutating**: a `save_*` failure that is NOT ownership loss
 ///    (a transient backend outage) is no longer silently logged and
 ///    swallowed — it now surfaces as a typed error
@@ -129,57 +130,46 @@ pub trait MucDurableStore: Send + Sync {
     /// that has never been durably written (e.g. a brand-new persistent
     /// room's very first spawn on any node, or a non-persistent instant
     /// room, which is never durably written at all).
-    fn load_room_state<'a>(
-        &'a self,
-        room_jid: &'a BareJid,
-    ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
-
-    /// Load one authoritative room snapshot while proving that this store's
-    /// recorded claim fence is still current in the same database
+    /// Load one authoritative room snapshot while proving that the actor
+    /// incarnation's exact claim fence is still current in the same database
     /// transaction. Implementations must not split the ownership check and
     /// snapshot read across transactions: a claim steal between those reads
     /// would let a deposed actor install state owned by its successor.
     ///
-    /// The default fails closed. Clustered stores must opt in explicitly;
-    /// in-memory test stores may delegate to [`Self::load_room_state`] when
-    /// their ownership model is controlled synchronously by the test.
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
-    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-        let _ = room_jid;
-        Box::pin(async {
-            Err(XmppError::internal(
-                "durable store does not implement fenced room-state loading",
-            ))
-        })
-    }
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
 
     /// Durably upsert the room's configuration (plus the `waddle_id`/
     /// `channel_id` it travels with).
-    fn save_config<'a>(
+    fn save_config_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         waddle_id: &'a str,
         channel_id: &'a str,
         config: &'a RoomConfig,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// Durably upsert (or, when `subject` is `None`, clear) the room's
     /// current subject.
-    fn save_subject<'a>(
+    fn save_subject_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         subject: Option<&'a SubjectState>,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// Durably upsert one affiliation-list entry. `Affiliation::None`
     /// removes the row, mirroring `AffiliationList::set`'s in-memory
     /// contract.
-    fn save_affiliation<'a>(
+    fn save_affiliation_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
         entry: &'a AffiliationEntry,
+        fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
     /// XEP-0045 §10.9 (#1261): destroy removes the room "even if it was
@@ -189,20 +179,20 @@ pub trait MucDurableStore: Send + Sync {
     /// config, subject, or ban list) on the next join. Called by the
     /// room registry's explicit-destroy path only; dormancy eviction
     /// keeps the rows because an evicted-but-live room MUST restore.
-    /// Default no-op mirrors the other optional hooks: single-node
-    /// deployments never configure a `MucDurableStore` at all.
-    fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
-        let _ = room_jid;
-        Box::pin(async { Ok(()) })
-    }
+    fn delete_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, ()>;
 
     /// Record the claim epoch this node most recently won for `room_jid`
     /// (called by the room registry immediately after a successful
     /// `ClaimStore::ensure_claimed`/steal — never by the store itself),
-    /// so later `save_*` calls know which epoch to bind into their
-    /// fencing SQL. Default no-op: single-node/non-clustering deployments
-    /// never configure a `MucDurableStore` at all, so this is never
-    /// called there.
+    /// for cached fan-out checks and cross-store consumers. Actor-owned
+    /// load/save/delete operations receive their exact fence explicitly and
+    /// must not consult this cache for authorization. Default no-op:
+    /// single-node/non-clustering deployments never configure a
+    /// `MucDurableStore` at all, so this is never called there.
     fn record_claim_fence(&self, room_jid: &BareJid, fence: RoomClaimFenceContext) {
         let _ = (room_jid, fence);
     }
@@ -227,6 +217,16 @@ pub trait MucDurableStore: Send + Sync {
         let _ = room_jid;
         Box::pin(async { Ok(true) })
     }
+
+    /// Check the actor incarnation's retained claim rather than whichever
+    /// claim is currently cached for the same room JID. Implementations must
+    /// validate that `fence.entity` names `room_jid` and fail closed on
+    /// backend errors.
+    fn check_exact_claim_fence<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+        fence: &'a RoomClaimFenceContext,
+    ) -> MucDurableFuture<'a, bool>;
 
     /// The typed `(Entity, ClaimEpoch, node_id)` context this room is
     /// currently cached under (ADR-0017 Phase 3 Slice 7 FIX 1) — the exact

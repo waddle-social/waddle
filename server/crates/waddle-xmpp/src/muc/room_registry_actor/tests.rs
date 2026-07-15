@@ -2,6 +2,24 @@ use super::*;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
 
+struct BlockRoomActorMailboxForTest {
+    started: Arc<tokio::sync::Notify>,
+    allow: Arc<tokio::sync::Notify>,
+}
+
+impl kameo::message::Message<BlockRoomActorMailboxForTest> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: BlockRoomActorMailboxForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        msg.started.notify_one();
+        msg.allow.notified().await;
+    }
+}
+
 struct RememberOrdinaryReleaseForTest {
     room_jid: BareJid,
     claim_fence: crate::muc::RoomClaimFenceContext,
@@ -1040,8 +1058,8 @@ mod ownership_claims_tests {
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
     use crate::muc::room_actor::{
-        GetAffiliation, GetConfig, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
-        ResolverAffiliationSyncOutcome, SyncResolverAffiliation, UpdateConfig,
+        GetAffiliation, GetConfig, IsDormant, IsSealed, JoinAffiliationGrant, JoinWithAffiliation,
+        ResolverAffiliationSyncOutcome, RoomMutationError, SyncResolverAffiliation, UpdateConfig,
     };
     use crate::muc::subject::SubjectState;
     use crate::ownership::{
@@ -1050,6 +1068,7 @@ mod ownership_claims_tests {
     };
     use crate::types::Affiliation;
     use async_trait::async_trait;
+    use jid::FullJid;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -1171,6 +1190,7 @@ mod ownership_claims_tests {
         let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
         let durable_store = Arc::new(RecordingDurableStore {
             fail_deletes: true,
+            load_result: Some(restored_room_snapshot("retained")),
             ..RecordingDurableStore::default()
         });
         registry
@@ -1215,6 +1235,689 @@ mod ownership_claims_tests {
         assert!(
             still_there.is_some(),
             "the room stays registered so the destroy can be retried"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uncertain_delete_remains_poisoned_until_an_exact_retry_completes() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(restored_room_snapshot("retained-after-timeout")),
+            hang_next_delete: AtomicBool::new(true),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy-retry-after-timeout");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room")
+            .actor_ref;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("first destroy"),
+            DestroyRoomOutcome::DurableWipeFailed,
+        );
+        actor.wait_for_shutdown().await;
+        assert!(matches!(
+            registry.ask(GetRoom { room_jid: jid.clone() }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("retry destroy"),
+            DestroyRoomOutcome::Destroyed,
+            "a poison retry must reacquire and redrive deletion, never collapse to NotRegistered",
+        );
+        assert!(durable_store.durable_row_deleted.load(Ordering::SeqCst));
+        assert!(registry
+            .ask(GetRoom { room_jid: jid })
+            .await
+            .expect("lookup after converged retry")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn poison_only_explicit_destroy_reacquires_before_deleting() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("poison-only-durable-destroy");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room")
+            .actor_ref;
+        actor.kill();
+        actor.wait_for_shutdown().await;
+
+        assert!(matches!(
+            registry.ask(GetRoom { room_jid: jid.clone() }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("poison destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        assert_eq!(
+            durable_store.deleted_rooms.lock().expect("lock").as_slice(),
+            &[jid.to_string()],
+            "poison-only deletion must execute under its freshly acquired exact fence",
+        );
+        let delete_fences = durable_store.delete_fences.lock().expect("lock");
+        assert_eq!(delete_fences.len(), 1);
+        assert_eq!(delete_fences[0].0, jid);
+        assert_eq!(
+            delete_fences[0].1.entity,
+            Entity::new(EntityType::RoomActor, jid.to_string()),
+        );
+        assert_eq!(delete_fences[0].1.owner, this_identity());
+    }
+
+    #[tokio::test]
+    async fn explicit_destroy_seals_actor_before_the_durable_delete() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let delete_started = Arc::new(tokio::sync::Notify::new());
+        let allow_delete = Arc::new(tokio::sync::Notify::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            block_next_delete: AtomicBool::new(true),
+            delete_started: Some(Arc::clone(&delete_started)),
+            allow_delete: Some(Arc::clone(&allow_delete)),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("seal-before-durable-destroy");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room")
+            .actor_ref;
+        let original = actor.ask(GetConfig).await.expect("original config");
+        let destroy_registry = registry.clone();
+        let destroy_jid = jid.clone();
+        let destroy = tokio::spawn(async move {
+            destroy_registry
+                .ask(DestroyRoom {
+                    room_jid: destroy_jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+        });
+        delete_started.notified().await;
+
+        let mut changed = original.clone();
+        changed.members_only = !changed.members_only;
+        assert!(matches!(
+            actor.ask(UpdateConfig { config: changed }).await,
+            Err(SendError::HandlerError(
+                RoomMutationError::OwnershipUnavailable
+            ))
+        ));
+        assert_eq!(
+            actor.ask(GetConfig).await.expect("unchanged config"),
+            original
+        );
+        assert!(matches!(
+            actor
+                .ask(JoinWithAffiliation {
+                    sender_jid: "member@example.com/web".parse().expect("full JID"),
+                    nick: "member".to_string(),
+                    affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                    local_domain: "example.com".to_string(),
+                    admission_revision: 0,
+                })
+                .await,
+            Err(SendError::HandlerError(
+                crate::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+
+        allow_delete.notify_one();
+        assert_eq!(
+            destroy.await.expect("destroy task").expect("destroy ask"),
+            DestroyRoomOutcome::Destroyed,
+        );
+        actor.wait_for_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn saturated_release_backlog_keeps_pending_preparation_and_its_exact_fence() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("pending-destroy-under-release-saturation");
+        let (store, restore_started, allow_restore) = blocking_restore_store(jid.clone());
+        wire_recording_store(&registry, Arc::clone(&store)).await;
+
+        let demand_registry = registry.clone();
+        let demand_jid = jid.clone();
+        let demand = tokio::spawn(async move {
+            demand_registry
+                .ask(GetOrCreateRoom {
+                    room_jid: demand_jid,
+                    waddle_id: "w-1".to_string(),
+                    channel_id: "c-1".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await
+        });
+        restore_started.notified().await;
+
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let pending_jid = test_room_jid(&format!("pending-destroy-saturated-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    claim_fence: RoomClaimFenceContext::new(
+                        Entity::new(EntityType::RoomActor, pending_jid.to_string()),
+                        this_identity(),
+                        ClaimEpoch(1),
+                    ),
+                    room_jid: pending_jid,
+                })
+                .await
+                .expect("remember saturated release"));
+        }
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy pending preparation"),
+            DestroyRoomOutcome::ReleaseBacklogFull,
+        );
+        assert_eq!(
+            registry
+                .ask(PendingPreparationCountForTest)
+                .await
+                .expect("pending count"),
+            1,
+            "release saturation must not remove the preparation that retains the exact fence",
+        );
+        assert!(
+            !store.delete_attempted.load(Ordering::SeqCst),
+            "the registry must preflight pending-preparation release capacity before deleting",
+        );
+
+        allow_restore.notify_one();
+        demand
+            .await
+            .expect("demand task")
+            .expect("preparation remains able to converge");
+    }
+
+    #[tokio::test]
+    async fn dormant_durable_room_is_deleted_before_not_registered_is_reported() {
+        let registry = spawn_registry().await;
+        let mut durable_state = restored_room_snapshot("dormant-durable");
+        durable_state.affiliations.clear();
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(durable_state),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store(&registry, Arc::clone(&durable_store)).await;
+        let jid = test_room_jid("dormant-durable-explicit-destroy");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("restore durable room")
+            .actor_ref;
+        let dormancy = actor.ask(IsDormant).await.expect("dormancy probe");
+
+        assert!(registry
+            .ask(DestroyRoomIfInactive {
+                room_jid: jid.clone(),
+                expected_occupancy_revision: dormancy.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("guarded dormancy eviction"));
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("explicit destroy after dormancy"),
+            DestroyRoomOutcome::Destroyed,
+            "a missing live entry is not proof that durable room state is absent",
+        );
+        assert!(durable_store.durable_row_deleted.load(Ordering::SeqCst));
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("absence proof after deletion"),
+            DestroyRoomOutcome::NotRegistered,
+            "NotRegistered requires an exact-fenced durable absence proof",
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_registered_actor_is_poisoned_and_retryable_without_prior_lookup() {
+        let registry = spawn_registry().await;
+        let durable_store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, Arc::clone(&durable_store)).await;
+        let jid = test_room_jid("direct-destroy-dead-entry");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        actor.kill();
+        actor.wait_for_shutdown().await;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy dead entry"),
+            DestroyRoomOutcome::DurableWipeFailed,
+        );
+        assert!(matches!(
+            registry.ask(GetRoom { room_jid: jid.clone() }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("retry dead-entry destroy"),
+            DestroyRoomOutcome::Destroyed,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn seal_timeout_retires_the_possibly_sealed_actor_into_poison_retry_state() {
+        let registry = spawn_registry().await;
+        let save_started = Arc::new(tokio::sync::Notify::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            block_next_config_save: AtomicBool::new(true),
+            config_save_started: Some(Arc::clone(&save_started)),
+            allow_config_save: Some(Arc::new(tokio::sync::Notify::new())),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store(&registry, Arc::clone(&durable_store)).await;
+        let jid = test_room_jid("explicit-destroy-seal-timeout");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let mutation_actor = actor.clone();
+        let mutation = tokio::spawn(async move {
+            mutation_actor
+                .ask(UpdateConfig {
+                    config: RoomConfig {
+                        name: "blocked mutation".to_string(),
+                        ..RoomConfig::default()
+                    },
+                })
+                .await
+        });
+        save_started.notified().await;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("timed-out seal destroy"),
+            DestroyRoomOutcome::DurableWipeFailed,
+        );
+        actor.wait_for_shutdown().await;
+        assert!(mutation.await.expect("mutation task").is_err());
+        assert!(matches!(
+            registry.ask(GetRoom { room_jid: jid.clone() }).await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid,
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("retry after seal timeout"),
+            DestroyRoomOutcome::Destroyed,
+        );
+    }
+
+    #[tokio::test]
+    async fn post_seal_destroy_snapshot_includes_every_join_ordered_before_the_seal() {
+        let registry = spawn_registry().await;
+        let jid = test_room_jid("destroy-post-seal-snapshot");
+        let actor = registry
+            .ask(get_or_create(jid.clone()))
+            .await
+            .expect("create room")
+            .actor_ref;
+        let blocker_started = Arc::new(tokio::sync::Notify::new());
+        let allow_blocker = Arc::new(tokio::sync::Notify::new());
+        let blocker_actor = actor.clone();
+        let blocker_started_for_message = Arc::clone(&blocker_started);
+        let allow_for_message = Arc::clone(&allow_blocker);
+        let blocker = tokio::spawn(async move {
+            blocker_actor
+                .ask(BlockRoomActorMailboxForTest {
+                    started: blocker_started_for_message,
+                    allow: allow_for_message,
+                })
+                .await
+        });
+        blocker_started.notified().await;
+
+        let joined_session: FullJid = "member@example.com/web".parse().expect("full JID");
+        actor
+            .tell(JoinWithAffiliation {
+                sender_jid: joined_session.clone(),
+                nick: "member".to_string(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_string(),
+                admission_revision: 0,
+            })
+            .await
+            .expect("queue join before destroy seal");
+        let destroy_registry = registry.clone();
+        let destroy_jid = jid.clone();
+        let destroy = tokio::spawn(async move {
+            destroy_registry
+                .ask(DestroyRoomWithSnapshot {
+                    room_jid: destroy_jid,
+                })
+                .await
+        });
+        allow_blocker.notify_one();
+        blocker.await.expect("blocker task").expect("blocker reply");
+
+        let outcome = destroy.await.expect("destroy task").expect("destroy reply");
+        let DestroyRoomWithSnapshotOutcome::Destroyed(Some(snapshot)) = outcome else {
+            panic!("expected a post-seal snapshot, got {outcome:?}");
+        };
+        assert_eq!(
+            snapshot.room.get_occupant_sessions("member"),
+            vec![joined_session],
+            "a join ordered before the seal must be included in §10.9 notifications",
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_does_not_republish_actor_when_delete_commits_but_reply_is_lost() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(restored_room_snapshot("deleted")),
+            delete_commits_then_errors: true,
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy-ambiguous-commit");
+        registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room");
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::Destroyed,
+            "an exact-fenced reload proving absence classifies an ambiguous delete as committed"
+        );
+        assert!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await
+                .expect("lookup")
+                .is_none(),
+            "the removed actor must not be republished after committed deletion"
+        );
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_none(),
+            "the exact claim must be released after classified deletion"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn destroy_timeout_kills_actor_even_when_the_timed_out_delete_commits_later() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(restored_room_snapshot("uncertain")),
+            hang_deletes: true,
+            commit_after_delete_timeout: true,
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy-timeout");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room")
+            .actor_ref;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::DurableWipeFailed
+        );
+        assert!(matches!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+        actor.wait_for_shutdown().await;
+        assert!(!actor.is_alive(), "the uncertain actor must be killed");
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_none(),
+            "the uncertain incarnation's exact claim must be released"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            durable_store.durable_row_deleted.load(Ordering::SeqCst),
+            "the injected delete must really commit after its caller timed out"
+        );
+        assert!(matches!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn destroy_kills_actor_when_failed_delete_classification_reload_times_out() {
+        let registry = spawn_registry().await;
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(restored_room_snapshot("reload-timeout")),
+            fail_deletes: true,
+            hang_loads_after_delete: true,
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store),
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+
+        let jid = test_room_jid("durable-destroy-reload-timeout");
+        let actor = registry
+            .ask(GetOrCreateRoom {
+                room_jid: jid.clone(),
+                waddle_id: "w-1".to_string(),
+                channel_id: "c-1".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("get_or_create_room")
+            .actor_ref;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: jid.clone(),
+                    reason: DestroyRoomReason::Destroy,
+                })
+                .await
+                .expect("destroy"),
+            DestroyRoomOutcome::DurableWipeFailed
+        );
+        actor.wait_for_shutdown().await;
+        assert!(matches!(
+            registry
+                .ask(GetRoom {
+                    room_jid: jid.clone(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::RoomActorStateLost(ref room)))
+                if room == &jid
+        ));
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_none(),
+            "an unclassifiable delete must release the exact claim"
         );
     }
 
@@ -2017,6 +2720,7 @@ mod ownership_claims_tests {
         fail_load: bool,
         fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
+        block_loads_after: Option<usize>,
         block_load_for: Option<BareJid>,
         load_started: Option<Arc<tokio::sync::Notify>>,
         allow_load: Option<Arc<tokio::sync::Notify>>,
@@ -2029,35 +2733,29 @@ mod ownership_claims_tests {
         fence_lost: AtomicBool,
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
+        delete_fences: Mutex<Vec<(BareJid, RoomClaimFenceContext)>>,
         fail_deletes: bool,
+        delete_commits_then_errors: bool,
+        durable_row_deleted: Arc<AtomicBool>,
+        hang_deletes: bool,
+        hang_next_delete: AtomicBool,
+        hang_loads_after_delete: bool,
+        commit_after_delete_timeout: bool,
+        block_next_delete: AtomicBool,
+        delete_started: Option<Arc<tokio::sync::Notify>>,
+        allow_delete: Option<Arc<tokio::sync::Notify>>,
+        delete_attempted: AtomicBool,
         claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
     }
 
     impl MucDurableStore for RecordingDurableStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a BareJid,
-        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            if self.fail_load {
-                return Box::pin(async {
-                    Err(crate::XmppError::internal("load refused by test store"))
-                });
-            }
-            let result = self.load_result.clone();
-            Box::pin(async move { Ok(result) })
-        }
-
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            self.load_calls.fetch_add(1, Ordering::SeqCst);
-            if !self
-                .claim_fences
-                .lock()
-                .expect("lock")
-                .contains_key(room_jid)
-            {
+            let load_call = self.load_calls.fetch_add(1, Ordering::SeqCst);
+            if self.claim_fences.lock().expect("lock").get(room_jid) != Some(fence) {
                 return Box::pin(async {
                     Err(crate::XmppError::internal(
                         "fenced load attempted before exact claim fence was recorded",
@@ -2084,10 +2782,17 @@ mod ownership_claims_tests {
                     ))
                 });
             }
-            let should_block =
-                self.block_all_loads || self.block_load_for.as_ref() == Some(room_jid);
+            let should_block = (self.block_all_loads
+                && self
+                    .block_loads_after
+                    .is_none_or(|completed| load_call >= completed))
+                || self.block_load_for.as_ref() == Some(room_jid);
             let load_started = self.load_started.clone();
             let allow_load = self.allow_load.clone();
+            let fail_load = self.fail_load;
+            let deleted = self.durable_row_deleted.load(Ordering::SeqCst);
+            let hang = self.hang_loads_after_delete && self.delete_attempted.load(Ordering::SeqCst);
+            let result = self.load_result.clone();
             Box::pin(async move {
                 if should_block {
                     if let Some(started) = load_started {
@@ -2097,27 +2802,31 @@ mod ownership_claims_tests {
                         allow.notified().await;
                     }
                 }
-                self.load_room_state(room_jid).await
+                if hang {
+                    std::future::pending().await
+                } else if fail_load {
+                    Err(crate::XmppError::internal("load refused by test store"))
+                } else if deleted {
+                    Ok(None)
+                } else {
+                    Ok(result)
+                }
             })
         }
 
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a RoomConfig,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             self.config_save_calls.fetch_add(1, Ordering::SeqCst);
             let block = self.block_next_config_save.swap(false, Ordering::SeqCst);
             let config_save_started = self.config_save_started.clone();
             let allow_config_save = self.allow_config_save.clone();
-            let starting_fence = self
-                .claim_fences
-                .lock()
-                .expect("lock")
-                .get(room_jid)
-                .cloned();
+            let starting_fence = fence.clone();
             Box::pin(async move {
                 if block {
                     let claim_fences = Arc::clone(&self.claim_fences);
@@ -2132,7 +2841,7 @@ mod ownership_claims_tests {
                         }
                         let current_fence =
                             claim_fences.lock().expect("lock").get(&room_jid).cloned();
-                        if current_fence != starting_fence {
+                        if current_fence.as_ref() != Some(&starting_fence) {
                             stale_rejected.store(true, Ordering::SeqCst);
                         }
                     });
@@ -2147,23 +2856,82 @@ mod ownership_claims_tests {
             Box::pin(async move { Ok(owned) })
         }
 
-        fn save_subject<'a>(
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            let owned = !self.fence_lost.load(Ordering::SeqCst)
+                && self.claim_fences.lock().expect("lock").get(room_jid) == Some(fence);
+            Box::pin(async move { Ok(owned) })
+        }
+
+        fn save_subject_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _subject: Option<&'a SubjectState>,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
             _room_jid: &'a BareJid,
             _entry: &'a AffiliationEntry,
+            _fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
 
-        fn delete_room_state<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, ()> {
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            if self.claim_fences.lock().expect("lock").get(room_jid) != Some(fence) {
+                return Box::pin(async {
+                    Err(crate::XmppError::internal(
+                        "durable delete received a stale or cross-room fence",
+                    ))
+                });
+            }
+            self.delete_fences
+                .lock()
+                .expect("lock")
+                .push((room_jid.clone(), fence.clone()));
+            self.delete_attempted.store(true, Ordering::SeqCst);
+            if self.block_next_delete.swap(false, Ordering::SeqCst) {
+                let started = self.delete_started.clone();
+                let allow = self.allow_delete.clone();
+                return Box::pin(async move {
+                    if let Some(started) = started {
+                        started.notify_one();
+                    }
+                    if let Some(allow) = allow {
+                        allow.notified().await;
+                    }
+                    self.deleted_rooms
+                        .lock()
+                        .expect("lock")
+                        .push(room_jid.to_string());
+                    self.durable_row_deleted.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            }
+            if self.hang_deletes || self.hang_next_delete.swap(false, Ordering::SeqCst) {
+                if self.commit_after_delete_timeout {
+                    let deleted = Arc::clone(&self.durable_row_deleted);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(
+                            ROOM_OWNERSHIP_CALL_TIMEOUT + std::time::Duration::from_secs(1),
+                        )
+                        .await;
+                        deleted.store(true, Ordering::SeqCst);
+                    });
+                }
+                return Box::pin(std::future::pending());
+            }
             if self.fail_deletes {
                 return Box::pin(async {
                     Err(crate::XmppError::internal("delete refused by test store"))
@@ -2173,6 +2941,14 @@ mod ownership_claims_tests {
                 .lock()
                 .expect("lock")
                 .push(room_jid.to_string());
+            self.durable_row_deleted.store(true, Ordering::SeqCst);
+            if self.delete_commits_then_errors {
+                return Box::pin(async {
+                    Err(crate::XmppError::internal(
+                        "delete response lost after commit",
+                    ))
+                });
+            }
             Box::pin(async { Ok(()) })
         }
 
@@ -3058,6 +3834,11 @@ mod ownership_claims_tests {
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(reclaimed_snapshot("bounded-overlap")),
             block_all_loads: true,
+            // Reclaimed adoption now correctly exact-fences its proactive
+            // snapshot read. Let that first read complete, then block the
+            // actor's independently fenced restore so the overlap state is
+            // observable.
+            block_loads_after: Some(1),
             allow_load: Some(Arc::clone(&allow_load)),
             ..RecordingDurableStore::default()
         });

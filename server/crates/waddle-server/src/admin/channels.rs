@@ -2712,6 +2712,9 @@ async fn group_dm_rename_update_error(
                 state.clustering_claims.demote_room_actor(room_jid).await;
                 unavailable("This room's ownership recently moved to another node; please retry.")
             }
+            UpdateGroupDmConfigByMemberError::OwnershipUnavailable => {
+                unavailable("This room's ownership cannot be verified right now; please retry.")
+            }
             UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
                 "group-DM rename applied but durable persist failed: {detail}"
             )),
@@ -3397,10 +3400,10 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
     }
 
     // `NotRegistered` is fine (a dormant channel has no live actor);
-    // `DurableWipeFailed` means the registry deliberately kept the room
-    // because its fenced clustering wipe failed — the deletion must
-    // fail and roll back rather than record a destruction that will
-    // resurrect (#1261).
+    // `DurableWipeFailed` means the fenced clustering wipe did not converge.
+    // The registry either restored a proven-retained room or poisoned an
+    // uncertain one for exact-claim redrive, so the deletion must fail and
+    // roll back rather than record a destruction that can resurrect (#1261).
     let destroy_result = state
         .room_registry
         .ask(DestroyRoom {

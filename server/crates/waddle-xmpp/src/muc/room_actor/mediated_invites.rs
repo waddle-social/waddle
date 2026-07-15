@@ -118,6 +118,8 @@ pub enum MediatedInviteRollbackCommit {
 pub enum MediatedInviteRollbackError {
     #[error("this room's ownership has moved to another node")]
     NotOwner,
+    #[error("this room's ownership is temporarily unavailable")]
+    OwnershipUnavailable,
     #[error("the invite rollback could not be persisted before it was applied: {0}")]
     PersistFailedBeforeApply(#[source] DurablePersistError),
 }
