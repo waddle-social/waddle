@@ -529,7 +529,7 @@ class XmppSessionManager(
         when (event) {
             is XmppEvent.Message -> {
                 persistDmRecency(event)
-                timelineStore.onLiveMessage(event.message)
+                val newlyInserted = timelineStore.onLiveMessage(event.message)
                 dmStore.onChatMessage(ownBareJid, event.message)
                 val message = event.message
                 conversationKeyOf(
@@ -540,7 +540,12 @@ class XmppSessionManager(
                     isGroupchat = message.isMuc || message.messageType == "groupchat",
                 )?.let { key ->
                     if (message.body != null) {
-                        unreadStore.onLiveMessage(key.jid, key.isMine)
+                        // Replays the timeline deduped (XEP-0198 resume)
+                        // must not inflate the badge for a message that
+                        // renders once.
+                        if (newlyInserted) {
+                            unreadStore.onLiveMessage(key.jid, key.isMine)
+                        }
                         recordResumeCursor(
                             conversationJid = key.jid,
                             stanzaId = message.stanzaId ?: message.originId ?: message.id,

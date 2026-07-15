@@ -57,19 +57,25 @@ class TimelineStore(
     fun timeline(conversationJid: String): StateFlow<List<TimelineItem>> =
         synchronized(lock) { flowFor(bareJid(conversationJid)) }.asStateFlow()
 
-    fun onLiveMessage(message: WaddleMessage) {
-        val body = message.body ?: return
+    /**
+     * Returns true only when the message was a genuinely NEW timeline
+     * row — XEP-0198 replays and live/archive twins dedupe to false so
+     * callers (the unread counter) don't double-count what the timeline
+     * itself collapses.
+     */
+    fun onLiveMessage(message: WaddleMessage): Boolean {
+        val body = message.body ?: return false
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
             ownNick = ownNick,
             from = message.from,
             to = message.to,
             isGroupchat = message.isMuc || message.messageType == "groupchat",
-        ) ?: return
-        insert(
+        ) ?: return false
+        return insert(
             conversation = key.jid,
             item = TimelineItem(
-                id = message.stanzaId ?: message.originId ?: message.id ?: return,
+                id = message.stanzaId ?: message.originId ?: message.id ?: return false,
                 conversationJid = key.jid,
                 from = message.from,
                 body = body,
@@ -111,7 +117,7 @@ class TimelineStore(
         }
     }
 
-    private fun insert(conversation: String, item: TimelineItem) {
+    private fun insert(conversation: String, item: TimelineItem): Boolean {
         synchronized(lock) {
             val list = entries.getOrPut(conversation) { mutableListOf() }
             val existingIndex = list.indexOfFirst { it.item.id == item.id }
@@ -126,7 +132,7 @@ class TimelineStore(
                     )
                     publish(conversation, list)
                 }
-                return
+                return false
             }
             list += Entry(
                 item = item,
@@ -140,6 +146,7 @@ class TimelineStore(
             }
             publish(conversation, list)
         }
+        return true
     }
 
     private fun publish(conversation: String, list: List<Entry>) {

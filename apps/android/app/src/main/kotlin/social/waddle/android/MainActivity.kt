@@ -4,6 +4,10 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -44,6 +48,21 @@ class MainActivity : ComponentActivity() {
         setContent {
             val themeMode by graph.userPrefs.theme
                 .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+            // enableEdgeToEdge derives bar-icon contrast from the SYSTEM
+            // night mode once at onCreate; the in-app theme override is
+            // independent of it, so a Light app on a dark phone would get
+            // invisible white status icons. Track the effective theme.
+            val darkTheme = when (themeMode) {
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+            }
+            val view = LocalView.current
+            SideEffect {
+                val controller = WindowInsetsControllerCompat(window, view)
+                controller.isAppearanceLightStatusBars = !darkTheme
+                controller.isAppearanceLightNavigationBars = !darkTheme
+            }
             WaddleTheme(themeMode) {
                 CompositionLocalProvider(LocalAppGraph provides graph) {
                     AppShell(
