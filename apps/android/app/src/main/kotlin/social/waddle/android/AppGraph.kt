@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,12 +96,16 @@ class AppGraph(context: Context) {
         sessionManager.login(session)
     }
 
-    /** Server-side logout (best effort) plus full local sign-out. */
+    /** Local-first sign-out; the server logout is best-effort async. */
     suspend fun signOut() {
+        val sessionId = sessionPrefs.sessionId.first()
         messageNotifier.clearAll()
-        authApi.logout(sessionPrefs.sessionId.first())
         _currentSession.value = null
         sessionManager.logout()
+        // After local state is gone: revoking the server session may block
+        // for the full HTTP timeout and must never delay the visible
+        // sign-out.
+        applicationScope.launch { authApi.logout(sessionId) }
     }
 }
 

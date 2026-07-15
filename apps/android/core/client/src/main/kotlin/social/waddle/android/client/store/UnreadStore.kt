@@ -25,6 +25,19 @@ class UnreadStore {
         activeConversation = conversationJid?.let(::bareJid)
     }
 
+    /**
+     * Compare-and-clear for pause/dispose hooks: Navigation 3 keeps the
+     * covered entry RESUMED through the exit animation, so screen A's
+     * pause can run AFTER screen B's resume — an unconditional
+     * `setActiveConversation(null)` from A would clobber B's marker and
+     * the on-screen conversation would keep accruing unread.
+     */
+    fun clearActiveConversationIf(conversationJid: String) {
+        if (activeConversation == bareJid(conversationJid)) {
+            activeConversation = null
+        }
+    }
+
     fun onLiveMessage(conversationJid: String, isMine: Boolean) {
         val conversation = bareJid(conversationJid)
         if (isMine || conversation == activeConversation) return

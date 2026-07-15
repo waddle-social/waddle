@@ -37,4 +37,8 @@ private class DmIo(
 
     override suspend fun send(body: String): WaddleSendMessageOutcome =
         sessionManager.sendChatMessage(peerJid, body)
+
+    override fun recordConversationSeen() {
+        sessionManager.recordDmSeen(peerJid)
+    }
 }

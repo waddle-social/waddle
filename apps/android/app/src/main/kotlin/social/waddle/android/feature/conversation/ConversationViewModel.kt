@@ -134,10 +134,11 @@ open class ConversationViewModel(
     fun onConversationVisible() {
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
+        io.recordConversationSeen()
     }
 
     fun onConversationHidden() {
-        unreadStore.setActiveConversation(null)
+        unreadStore.clearActiveConversationIf(conversationJid)
     }
 
     private fun refreshHistory() {

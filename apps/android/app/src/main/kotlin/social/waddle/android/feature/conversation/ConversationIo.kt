@@ -16,4 +16,11 @@ interface ConversationIo {
 
     /** Send [body] to the conversation. */
     suspend fun send(body: String): WaddleSendMessageOutcome
+
+    /**
+     * The user is looking at the conversation: persist recency so the
+     * DM list survives restarts. No-op for channels (their list comes
+     * from the topology, not recency).
+     */
+    fun recordConversationSeen() {}
 }

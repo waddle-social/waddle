@@ -330,6 +330,7 @@ class XmppSessionManager(
     private fun fanOut(event: XmppEvent) {
         when (event) {
             is XmppEvent.Message -> {
+                persistDmRecency(event)
                 timelineStore.onLiveMessage(event.message)
                 dmStore.onChatMessage(ownBareJid, event.message)
                 conversationKeyOf(
@@ -400,6 +401,32 @@ class XmppSessionManager(
         _appState.value = WaddleAppState.SignedOut
         sessionPrefs.clear()
     }
+
+    /** UI hook: the DM conversation is on screen — persist recency. */
+    fun recordDmSeen(peerJid: String) {
+        val scope = sessionScope ?: return
+        scope.launch {
+            sessionPrefs.setLastSeen(bareJid(peerJid), nowRfc3339())
+        }
+    }
+
+    /**
+     * Persist DM-list recency for inbound 1:1 traffic; without a write
+     * the `lastSeen`-seeded DM list is empty after every restart.
+     */
+    private fun persistDmRecency(event: XmppEvent.Message) {
+        val message = event.message
+        if (message.isMuc || message.messageType != "chat") return
+        val from = message.from ?: return
+        val peer = bareJid(from)
+        if (peer == ownBareJid) return
+        val scope = sessionScope ?: return
+        scope.launch {
+            sessionPrefs.setLastSeen(peer, message.timestamp ?: nowRfc3339())
+        }
+    }
+
+    private fun nowRfc3339(): String = java.time.OffsetDateTime.now().toString()
 
     private suspend fun seedStoresFromPrefs() {
         val joinedRooms = sessionPrefs.joinedRooms.first()
