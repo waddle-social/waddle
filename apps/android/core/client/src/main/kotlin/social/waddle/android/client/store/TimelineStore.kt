@@ -167,7 +167,24 @@ class TimelineStore(
     ): Boolean {
         synchronized(lock) {
             val list = entries.getOrPut(conversation) { mutableListOf() }
-            val existingIndex = list.indexOfFirst { it.item.id == item.id }
+            // Dedupe on the collapsed primary id OR — for the SAME
+            // sender only — a shared XEP-0359 identity: the MAM copy of
+            // an own DM echo keys on the server-assigned stanza id while
+            // the echo keys on the client origin id, overlapping only
+            // through the origin id. Cross-sender id collisions are NOT
+            // merged (dropping a message because another sender reused
+            // an id would be an injection vector); they stay as distinct
+            // rows that the ambiguous-alias guard refuses to mutate.
+            val incomingUnique = uniqueWireIds(item)
+            val incomingSender = senderKeyOf(item.from, isGroupchat)
+            val existingIndex = list.indexOfFirst { entry ->
+                entry.item.id == item.id ||
+                    (
+                        incomingSender != null &&
+                            senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
+                            uniqueWireIds(entry.item).any { it in incomingUnique }
+                        )
+            }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
                 // A live record supersedes its archived twin (richer
@@ -177,6 +194,13 @@ class TimelineStore(
                 if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
                     list[existingIndex] = existing.copy(
                         item = item.copy(timestamp = item.timestamp ?: existing.item.timestamp),
+                    )
+                    publish(conversation, list)
+                } else if (existing.item.timestamp == null && item.timestamp != null) {
+                    // The archived copy of a timestampless local echo
+                    // brings the server timestamp; adopt it in place.
+                    list[existingIndex] = existing.copy(
+                        item = existing.item.copy(timestamp = item.timestamp),
                     )
                     publish(conversation, list)
                 }
@@ -401,6 +425,14 @@ class TimelineStore(
                 .sortedBy { it.value.firstRank }
                 .map { (emoji, acc) -> ReactionGroup(emoji = emoji, count = acc.count, mine = acc.mine) }
         }
+
+        /** XEP-0359 ids only — unique by construction, unlike `@id`. */
+        fun uniqueWireIds(item: TimelineItem): Set<String> =
+            setOfNotNull(item.stanzaId, item.originId)
+
+        /** Occupant JID in MUCs (bare = the room), bare JID in 1:1. */
+        fun senderKeyOf(from: String?, isGroupchat: Boolean): String? =
+            from?.let { if (isGroupchat) it else bareJid(it) }
 
         fun parseInstant(timestamp: String): Instant? =
             runCatching { Instant.parse(timestamp) }.getOrElse {

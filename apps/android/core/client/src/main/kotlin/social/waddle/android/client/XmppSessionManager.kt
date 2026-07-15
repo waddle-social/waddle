@@ -134,6 +134,14 @@ class XmppSessionManager(
     @Volatile
     private var uploadService: String? = null
 
+    /** Reads parked while offline, replayed on the next ready session. */
+    private val pendingDisplayed =
+        java.util.concurrent.ConcurrentHashMap<String, PendingDisplayed>()
+
+    /** The live attempt's bridge, for injecting locally-produced events. */
+    @Volatile
+    private var currentBridge: XmppEventBridge? = null
+
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
 
@@ -234,6 +242,7 @@ class XmppSessionManager(
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
         val bridge = XmppEventBridge(::queueResumeSnapshot)
+        currentBridge = bridge
         val config = buildConfig(session)
         val client = clientFactory.create(config, bridge)
         val hadResumeSnapshot = config.resumeState != null
@@ -539,18 +548,44 @@ class XmppSessionManager(
             } ?: return
             displayedTargetOf(target, isGroupchat) ?: return
         }
-        val client = activeClient ?: return
-        if (!readCursorStore.advance(conversation, ids.markerId)) return
+        val client = activeClient ?: run {
+            // No live session: park the dispatch and replay it on the
+            // next ready (a notification tap during a reconnect gap must
+            // not permanently drop the read receipt).
+            pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, explicitTarget)
+            return
+        }
+        if (readCursorStore.cursor(conversation) == ids.markerId) return
         val markerAllowed = when {
             !readReceiptsEnabled() -> false
             isGroupchat -> ids.stanzaIdBy == conversation && ids.markerId == ids.stanzaId
             else -> ids.markerRequested
         }
+        // The cursor (which dedupes future dispatches) is taken only
+        // when every attempted send went through — a thrown/refused
+        // dispatch stays retryable on the next timeline change.
+        var failed = false
         if (markerAllowed) {
-            runCatching { client.sendDisplayed(conversation, ids.markerId, isGroupchat) }
+            val sent = runCatching {
+                client.sendDisplayed(conversation, ids.markerId, isGroupchat)
+            }.getOrDefault(false)
+            failed = failed || !sent
         }
         if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
-            runCatching { client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy) }
+            val published = runCatching {
+                client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy)
+            }.getOrDefault(false)
+            failed = failed || !published
+        }
+        if (!failed) readCursorStore.advance(conversation, ids.markerId)
+    }
+
+    /** Replay reads parked while no session was live (see above). */
+    private suspend fun drainPendingDisplayed() {
+        val parked = pendingDisplayed.toMap()
+        pendingDisplayed.clear()
+        parked.forEach { (conversation, pending) ->
+            markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
         }
     }
 
@@ -616,10 +651,16 @@ class XmppSessionManager(
 
     /**
      * XEP-0490 connect bootstrap: seed cursors from the account's MDS
-     * node, then subscribe for live sibling-device updates.
+     * node, then subscribe for live sibling-device updates. Fetched
+     * entries are INJECTED into the event stream rather than applied
+     * here — the unread recompute must serialize with live-message
+     * increments on the single event consumer, or a concurrent arrival
+     * could have its badge erased by a stale recompute.
      */
     private suspend fun bootstrapMdsDisplayed(client: WaddleClientInterface) {
-        runCatching { client.fetchMdsDisplayed() }.getOrNull()?.forEach(::applyMdsEntry)
+        runCatching { client.fetchMdsDisplayed() }.getOrNull()?.let { entries ->
+            if (entries.isNotEmpty()) currentBridge?.submit(XmppEvent.MdsEntries(entries))
+        }
         runCatching { client.subscribeMdsDisplayed() }
     }
 
@@ -703,13 +744,32 @@ class XmppSessionManager(
         body: String,
         stanzaId: String,
         extras: MessageSendExtras? = null,
-    ): WaddleSendMessageOutcome = send { client ->
+    ): WaddleSendMessageOutcome {
         val (finalBody, options) = preparedSend(stanzaId, body, extras)
-        if (isGroupchat) {
-            client.sendGroupchatMessage(conversationJid, finalBody, options)
-        } else {
-            client.sendChatMessage(conversationJid, finalBody, options)
+        val outcome = send { client ->
+            if (isGroupchat) {
+                client.sendGroupchatMessage(conversationJid, finalBody, options)
+            } else {
+                client.sendChatMessage(conversationJid, finalBody, options)
+            }
         }
+        // A DM send has no reflection: insert the local echo so peer
+        // mutations (reactions, markers) can resolve their target and
+        // the sender can edit/retract the fresh message (see ownDmEcho).
+        if (!isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
+            ownBareJid?.let { own ->
+                timelineStore.onLiveMessage(
+                    ownDmEcho(
+                        ownJid = own,
+                        peerJid = conversationJid,
+                        stanzaId = stanzaId,
+                        body = finalBody,
+                        options = options,
+                    ),
+                )
+            }
+        }
+        return outcome
     }
 
     private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
@@ -807,6 +867,7 @@ class XmppSessionManager(
                 // After catch-up so fetched cursors can resolve against
                 // the freshly loaded newest pages.
                 bootstrapMdsDisplayed(client)
+                drainPendingDisplayed()
             }
         }
         // Auth classification is deliberately confined to the pre-ready
@@ -963,6 +1024,7 @@ class XmppSessionManager(
                     }
                 }
             }
+            is XmppEvent.MdsEntries -> event.entries.forEach(::applyMdsEntry)
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
             is XmppEvent.MamResult -> {
                 timelineStore.onArchivedMessage(event.message)
@@ -1026,9 +1088,14 @@ class XmppSessionManager(
             .distinctUntilChanged()
             .collectLatest { anyComposing ->
                 if (!anyComposing) return@collectLatest
+                // Loop exit is driven ONLY by collectLatest observing the
+                // empty state (sweep publishes it, StateFlow guarantees
+                // delivery of the latest value) — breaking on sweep()'s
+                // return raced a conflated empty→composing flip and left
+                // a live composer with no ticker.
                 while (true) {
                     delay(CHAT_STATE_SWEEP_MILLIS)
-                    if (!chatStateStore.sweep()) break
+                    chatStateStore.sweep()
                 }
             }
     }
@@ -1222,6 +1289,7 @@ class XmppSessionManager(
         chatStateStore.clear()
         readCursorStore.clear()
         pinStore.clear()
+        pendingDisplayed.clear()
         cursorTracker.clear()
     }
 
@@ -1242,6 +1310,12 @@ class XmppSessionManager(
         val stanzaId: String?,
         val stanzaIdBy: String?,
         val markerRequested: Boolean,
+    )
+
+    /** A displayed dispatch waiting for a live session. */
+    private data class PendingDisplayed(
+        val isGroupchat: Boolean,
+        val target: DisplayedTarget?,
     )
 
     companion object {

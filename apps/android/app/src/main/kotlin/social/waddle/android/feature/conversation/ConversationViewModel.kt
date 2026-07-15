@@ -63,6 +63,19 @@ open class ConversationViewModel(
     @Volatile
     private var visible = false
 
+    /**
+     * Web `isPinnedAtEdge` parity: displayed markers dispatch only
+     * while the timeline is scrolled to the newest message — a user
+     * reading old history must not mark below-the-fold arrivals read.
+     * Conversations open at the newest edge, hence the true default.
+     */
+    @Volatile
+    private var atNewestEdge = true
+
+    /** Latest store rows, for action-time (non-composition) reads. */
+    @Volatile
+    private var latestItems: List<TimelineItem> = emptyList()
+
     private val typingNotifier = ComposerTypingNotifier(
         scope = viewModelScope,
         sendState = { state -> io.sendChatState(state) },
@@ -133,6 +146,7 @@ open class ConversationViewModel(
         // and resurrect an already-delivered send as an unconfirmed ghost.
         viewModelScope.launch {
             timeline.collect { items ->
+                latestItems = items
                 val storedIds = HashSet<String>()
                 items.forEach { item ->
                     storedIds += item.id
@@ -142,10 +156,13 @@ open class ConversationViewModel(
                     list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
                 }
                 // New rows arriving while the conversation is on screen
-                // count as read (the marker path dedupes repeats). Guarded:
-                // a marker failure must not kill the pruning collector.
-                // Thread screens never mark (see onConversationVisible).
-                if (visible && threadId == null) runCatching { io.markDisplayed() }
+                // AND scrolled to the newest edge count as read (the
+                // marker path dedupes repeats). Guarded: a marker failure
+                // must not kill the pruning collector. Thread screens
+                // never mark (see onConversationVisible).
+                if (visible && atNewestEdge && threadId == null) {
+                    runCatching { io.markDisplayed() }
+                }
             }
         }
         viewModelScope.launch {
@@ -335,7 +352,12 @@ open class ConversationViewModel(
      */
     fun toggleReaction(item: TimelineItem, emoji: String) {
         val target = actionTargetIdOf(item) ?: return
-        val own = item.reactions.filter { it.mine }.map { it.emoji }
+        // Resolve the CURRENT reaction state from the store, not the
+        // composition-captured snapshot: two rapid toggles from a stale
+        // frame would compute their sets from the same base and the
+        // second (XEP-0444 full-set replace) would drop the first.
+        val fresh = latestItems.firstOrNull { it.id == item.id } ?: item
+        val own = fresh.reactions.filter { it.mine }.map { it.emoji }
         val next = if (emoji in own) own - emoji else own + emoji
         viewModelScope.launch {
             runCatching { io.sendReaction(target, next, previousEmojis = own) }
@@ -428,23 +450,26 @@ open class ConversationViewModel(
      */
     private fun threadSummariesOf(items: List<TimelineItem>): List<ThreadSummary> {
         val byThread = LinkedHashMap<String, MutableList<TimelineItem>>()
-        items.forEach { item ->
-            val thread = item.threadId ?: return@forEach
+        val lastActivityIndex = HashMap<String, Int>()
+        items.forEachIndexed { index, item ->
+            val thread = item.threadId ?: return@forEachIndexed
             byThread.getOrPut(thread) { mutableListOf() }.add(item)
+            lastActivityIndex[thread] = index
         }
         // Roots carry no <thread/> of their own (Waddle implicit-root):
         // resolve them by identity so previews show the root body.
         return byThread.map { (thread, members) ->
             val root = items.firstOrNull { thread in it.identityIds }
-            val last = members.last()
             ThreadSummary(
                 threadId = thread,
                 rootAuthor = (root ?: members.first()).let(::authorNameOf),
                 rootPreview = (root ?: members.first()).body,
                 replyCount = members.count { thread !in it.identityIds },
-                lastTimestamp = last.timestamp,
+                lastTimestamp = members.last().timestamp,
             )
-        }.sortedByDescending { it.lastTimestamp ?: "" }
+            // Newest activity first BY TIMELINE ORDER — live replies
+            // carry no timestamp and a string sort would sink them.
+        }.sortedByDescending { lastActivityIndex[it.threadId] ?: -1 }
     }
 
     /** Re-send a failed optimistic message (reply/thread extras kept). */
@@ -482,7 +507,19 @@ open class ConversationViewModel(
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
         viewModelScope.launch { runCatching { onConversationRead(conversationJid) } }
-        viewModelScope.launch { runCatching { io.markDisplayed() } }
+        if (atNewestEdge) {
+            viewModelScope.launch { runCatching { io.markDisplayed() } }
+        }
+    }
+
+    /** The list crossed the newest-edge boundary (see [atNewestEdge]). */
+    fun onAtNewestEdgeChanged(atEdge: Boolean) {
+        val was = atNewestEdge
+        atNewestEdge = atEdge
+        if (!was && atEdge && visible && threadId == null) {
+            // Scrolling back down to live reads everything above it.
+            viewModelScope.launch { runCatching { io.markDisplayed() } }
+        }
     }
 
     fun onConversationHidden() {

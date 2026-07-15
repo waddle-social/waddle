@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSaslCondition
@@ -36,6 +37,13 @@ sealed interface XmppEvent {
     data class DeliveryFailed(val stanzaId: String) : XmppEvent
 
     data class Call(val event: WaddleCallEvent) : XmppEvent
+
+    /**
+     * XEP-0490 catch-up entries from the connect bootstrap, injected
+     * into the event stream so cursor/badge recomputes serialize with
+     * live-message unread increments.
+     */
+    data class MdsEntries(val entries: List<WaddleMdsDisplayedEntry>) : XmppEvent
 
     /**
      * RFC 6120 §6.5 SASL failure: terminal for the presented token —

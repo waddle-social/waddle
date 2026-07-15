@@ -404,24 +404,82 @@ class TimelineMutationTest {
 
     @Test
     fun `mutation targeting an ambiguous alias is dropped`() {
-        // Two rows claiming the same origin id (collision): a mutation
-        // addressed to that alias must not pick either.
+        // Two rows from DIFFERENT senders claiming the same origin id
+        // (cross-sender collision — never merged): a mutation addressed
+        // to that alias must not pick either.
         store.onLiveMessage(testMessage(id = "a", stanzaId = "s1", originId = "dup", body = "one"))
-        store.onLiveMessage(testMessage(id = "b", stanzaId = "s2", originId = "dup", body = "two"))
+        store.onLiveMessage(
+            testMessage(
+                id = "b",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                stanzaId = "s2",
+                originId = "dup",
+                body = "two",
+            ),
+        )
         store.onLiveMessage(testMessage(id = "r1", body = null, retractsId = "dup"))
 
+        assertEquals(2, dmTimeline().size)
         assertTrue(dmTimeline().none { it.tombstone != null })
     }
 
     @Test
     fun `mutation matching a primary id wins even when aliases collide`() {
         store.onLiveMessage(testMessage(id = "a", stanzaId = "s1", originId = "s2", body = "one"))
-        store.onLiveMessage(testMessage(id = "b", stanzaId = "s2", body = "two"))
-        store.onLiveMessage(testMessage(id = "r1", body = null, retractsId = "s2"))
+        store.onLiveMessage(
+            testMessage(
+                id = "b",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                stanzaId = "s2",
+                body = "two",
+            ),
+        )
+        // Own retraction of the own row whose primary id is "s2".
+        store.onLiveMessage(
+            testMessage(
+                id = "r1",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                body = null,
+                retractsId = "s2",
+            ),
+        )
 
         val items = dmTimeline()
         assertEquals(MessageTombstone.Retracted, items.first { it.id == "s2" }.tombstone)
         assertNull(items.first { it.id == "s1" }.tombstone)
+    }
+
+    @Test
+    fun `same-sender wire-identity replay dedupes instead of duplicating`() {
+        // The MAM copy of an own DM echo: echo keyed by origin id, the
+        // archive copy by server stanza id, overlapping via origin id.
+        store.onLiveMessage(
+            testMessage(
+                id = "client-id",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                originId = "client-id",
+                body = "hi",
+            ),
+        )
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "mam-1",
+                id = "client-id",
+                stanzaId = "server-id",
+                originId = "client-id",
+                from = "me@waddle.test/phone",
+                to = "alice@waddle.test",
+                body = "hi",
+            ),
+        )
+
+        val items = dmTimeline()
+        assertEquals(1, items.size)
+        assertEquals("the archive timestamp is adopted", "2026-07-15T10:00:00Z", items[0].timestamp)
     }
 
     @Test

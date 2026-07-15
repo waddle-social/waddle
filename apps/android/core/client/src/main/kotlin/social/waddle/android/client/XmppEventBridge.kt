@@ -21,6 +21,16 @@ class XmppEventBridge(
     /** Single-consumer stream drained by `XmppSessionManager`. */
     val events: ReceiveChannel<XmppEvent> = channel
 
+    /**
+     * Inject a locally-produced event into the SAME serialized stream
+     * the wire events flow through — consumers that read-modify-write
+     * shared state (unread recomputes vs live increments) rely on this
+     * single-consumer ordering.
+     */
+    fun submit(event: XmppEvent) {
+        channel.trySend(event)
+    }
+
     override fun onEvent(event: WaddleClientEvent) {
         when (event) {
             is WaddleClientEvent.Connected -> channel.trySend(XmppEvent.SessionReady)

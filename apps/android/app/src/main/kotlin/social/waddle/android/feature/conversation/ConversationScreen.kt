@@ -116,6 +116,7 @@ fun ConversationScreen(
                 onOpenThread = onOpenThread?.let { open ->
                     { item -> open(viewModel.threadIdFor(item)) }
                 },
+                onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
             )
             TypingIndicator(names = typing)
             MessageComposer(

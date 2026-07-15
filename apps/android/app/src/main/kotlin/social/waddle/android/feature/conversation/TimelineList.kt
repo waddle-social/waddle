@@ -36,6 +36,7 @@ fun TimelineList(
     onLongPress: (item: TimelineItem) -> Unit = {},
     onToggleReaction: (item: TimelineItem, emoji: String) -> Unit = { _, _ -> },
     onOpenThread: ((item: TimelineItem) -> Unit)? = null,
+    onAtNewestEdgeChanged: (Boolean) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -95,6 +96,13 @@ fun TimelineList(
                 }
             }
         }
+    }
+
+    // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
+    // scrolled to the newest message. Read markers gate on this.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex == 0 }
+            .collect(onAtNewestEdgeChanged)
     }
 
     LaunchedEffect(listState, newestFirst.size) {
