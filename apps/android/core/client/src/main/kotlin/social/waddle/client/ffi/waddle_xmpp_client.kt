@@ -4571,7 +4571,7 @@ public object FfiConverterTypeWaddlePresenceHat: FfiConverterRustBuffer<WaddlePr
  * is the "no body position" sentinel used by anchor-only references.
  */
 data class WaddleReference (
-    var `refType`: kotlin.String
+    var `refType`: WaddleReferenceType
     ,
     var `uri`: kotlin.String
     ,
@@ -4600,7 +4600,7 @@ data class WaddleReference (
 public object FfiConverterTypeWaddleReference: FfiConverterRustBuffer<WaddleReference> {
     override fun read(buf: ByteBuffer): WaddleReference {
         return WaddleReference(
-            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleReferenceType.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
@@ -4609,7 +4609,7 @@ public object FfiConverterTypeWaddleReference: FfiConverterRustBuffer<WaddleRefe
     }
 
     override fun allocationSize(value: WaddleReference) = (
-            FfiConverterString.allocationSize(value.`refType`) +
+            FfiConverterTypeWaddleReferenceType.allocationSize(value.`refType`) +
             FfiConverterString.allocationSize(value.`uri`) +
             FfiConverterUInt.allocationSize(value.`begin`) +
             FfiConverterUInt.allocationSize(value.`end`) +
@@ -4617,7 +4617,7 @@ public object FfiConverterTypeWaddleReference: FfiConverterRustBuffer<WaddleRefe
     )
 
     override fun write(value: WaddleReference, buf: ByteBuffer) {
-            FfiConverterString.write(value.`refType`, buf)
+            FfiConverterTypeWaddleReferenceType.write(value.`refType`, buf)
             FfiConverterString.write(value.`uri`, buf)
             FfiConverterUInt.write(value.`begin`, buf)
             FfiConverterUInt.write(value.`end`, buf)
@@ -6311,6 +6311,98 @@ public object FfiConverterTypeWaddlePushEnvironment: FfiConverterRustBuffer<Wadd
 
     override fun write(value: WaddlePushEnvironment, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+ * values explicitly so extension references survive the boundary
+ * instead of being silently dropped or smuggled through a bare String.
+ */
+sealed class WaddleReferenceType {
+
+    object Mention : WaddleReferenceType()
+
+
+    object Data : WaddleReferenceType()
+
+
+    data class Other(
+        val `value`: kotlin.String) : WaddleReferenceType()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<WaddleReferenceType>{
+    override fun read(buf: ByteBuffer): WaddleReferenceType {
+        return when(buf.getInt()) {
+            1 -> WaddleReferenceType.Mention
+            2 -> WaddleReferenceType.Data
+            3 -> WaddleReferenceType.Other(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleReferenceType) = when(value) {
+        is WaddleReferenceType.Mention -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleReferenceType.Data -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleReferenceType.Other -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`value`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleReferenceType, buf: ByteBuffer) {
+        when(value) {
+            is WaddleReferenceType.Mention -> {
+                buf.putInt(1)
+                Unit
+            }
+            is WaddleReferenceType.Data -> {
+                buf.putInt(2)
+                Unit
+            }
+            is WaddleReferenceType.Other -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`value`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
