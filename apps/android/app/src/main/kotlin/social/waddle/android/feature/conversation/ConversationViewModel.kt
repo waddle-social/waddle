@@ -69,6 +69,22 @@ open class ConversationViewModel(
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
 
     init {
+        // Prune (not just hide) pending rows once the timeline holds their
+        // identity: the view-side filter alone let the list grow for the
+        // screen's lifetime, and a timeline trim could drop the stored row
+        // and resurrect an already-delivered send as an unconfirmed ghost.
+        viewModelScope.launch {
+            timeline.collect { items ->
+                val storedIds = HashSet<String>()
+                items.forEach { item ->
+                    storedIds += item.id
+                    storedIds += item.identityIds
+                }
+                pending.update { list ->
+                    list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
+                }
+            }
+        }
         viewModelScope.launch {
             io.ensureJoined()
             loadOlder()

@@ -433,9 +433,14 @@ class XmppSessionManager(
         // groupchat sends need the rejoin's join presence first, and the
         // bounded catch-up must not race the replay or hammer the server.
         attemptScope.launch {
-            rejoinPersistedRooms(client, session)
-            drainOutboundQueue()
-            if (freshStream) catchUpConversations()
+            // Best-effort pipeline: prefs reads and queue writes inside
+            // can raise IOException, and an escaped throw on this root
+            // coroutine would kill the process ("never throw" contract).
+            persistQuietly {
+                rejoinPersistedRooms(client, session)
+                drainOutboundQueue()
+                if (freshStream) catchUpConversations()
+            }
         }
         // Auth classification is deliberately confined to the pre-ready
         // phase: after the session is bound, "not-authorized"/"forbidden"
@@ -609,7 +614,7 @@ class XmppSessionManager(
 
     private suspend fun persistResumeCursors(writes: ReceiveChannel<Unit>) {
         for (write in writes) {
-            sessionPrefs.setResumeCursors(cursorTracker.snapshot())
+            persistQuietly { sessionPrefs.setResumeCursors(cursorTracker.snapshot()) }
         }
     }
 
@@ -632,7 +637,7 @@ class XmppSessionManager(
 
     private suspend fun persistResumeSnapshots(updates: ReceiveChannel<ResumeUpdate>) {
         for (update in updates) {
-            sessionPrefs.setSmResume(update.snapshot)
+            persistQuietly { sessionPrefs.setSmResume(update.snapshot) }
         }
     }
 

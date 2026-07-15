@@ -19,7 +19,12 @@ class BootCompletedReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
-                if (graph.sessionPrefs.sessionId.first() != null) {
+                // runCatching: a corrupted prefs blob at boot must not
+                // crash-loop the process on every BOOT_COMPLETED.
+                val hasSession =
+                    runCatching { graph.sessionPrefs.sessionId.first() != null }
+                        .getOrDefault(false)
+                if (hasSession) {
                     graph.serviceController.startService()
                 }
             } finally {
