@@ -334,11 +334,15 @@ class XmppSessionManager(
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {
         for (event in events) {
             fanOut(event)
-            when {
-                event is XmppEvent.SessionReady -> return Readiness.READY
-                event is XmppEvent.Error && isAuthShapedError(event.description) ->
-                    return Readiness.AUTH_FAILED
-                event is XmppEvent.Disconnected -> return Readiness.CLOSED
+            when (event) {
+                is XmppEvent.SessionReady -> return Readiness.READY
+                // Typed SASL failure from the FFI: the ONLY terminal auth
+                // signal. Free-text matching was removed — SASL failures
+                // never arrived as Error events, and post-ready stanza
+                // errors reusing the same vocabulary must stay recoverable.
+                is XmppEvent.AuthenticationFailed -> return Readiness.AUTH_FAILED
+                is XmppEvent.Disconnected -> return Readiness.CLOSED
+                else -> Unit
             }
         }
         return Readiness.CLOSED

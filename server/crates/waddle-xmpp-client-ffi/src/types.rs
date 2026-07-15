@@ -195,6 +195,24 @@ pub enum WaddleStanzaErrorType {
     Unknown,
 }
 
+/// RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
+/// `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleSaslCondition {
+    Aborted,
+    AccountDisabled,
+    CredentialsExpired,
+    EncryptionRequired,
+    IncorrectEncoding,
+    InvalidAuthzid,
+    InvalidMechanism,
+    MalformedRequest,
+    MechanismTooWeak,
+    NotAuthorized,
+    TemporaryAuthFailure,
+    Unknown,
+}
+
 /// XEP-0394 markup span kind. Mirrors the client crate's
 /// `MarkupSpanType`; `Link` is Waddle's `urn:waddle:markup:0` span
 /// extension (XEP-0394 defines no link span).
@@ -881,6 +899,11 @@ pub enum WaddleClientEvent {
     /// persist `Some(state)` and feed it back via
     /// `WaddleConfig.resume_state` on the next connect.
     ResumeStateChanged { state: Option<WaddleSmResumeState> },
+    /// RFC 6120 §6.5 SASL failure during connect. Terminal for the
+    /// presented credentials — apps must not blindly retry with the
+    /// same token (web #1164: surface "sign in again", never an
+    /// eternal reconnect spinner).
+    AuthenticationFailed { condition: WaddleSaslCondition },
     /// Human-readable diagnostic. Never carries protocol data.
     Error { description: String },
 }

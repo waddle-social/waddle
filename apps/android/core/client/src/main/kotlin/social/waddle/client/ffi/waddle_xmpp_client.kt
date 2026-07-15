@@ -5723,6 +5723,21 @@ sealed class WaddleClientEvent {
     }
 
     /**
+     * RFC 6120 §6.5 SASL failure during connect. Terminal for the
+     * presented credentials — apps must not blindly retry with the
+     * same token (web #1164: surface "sign in again", never an
+     * eternal reconnect spinner).
+     */
+    data class AuthenticationFailed(
+        val `condition`: social.waddle.client.ffi.WaddleSaslCondition) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    /**
      * Human-readable diagnostic. Never carries protocol data.
      */
     data class Error(
@@ -5773,7 +5788,10 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             9 -> WaddleClientEvent.ResumeStateChanged(
                 FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
                 )
-            10 -> WaddleClientEvent.Error(
+            10 -> WaddleClientEvent.AuthenticationFailed(
+                FfiConverterTypeWaddleSaslCondition.read(buf),
+                )
+            11 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -5842,6 +5860,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterOptionalTypeWaddleSmResumeState.allocationSize(value.`state`)
             )
         }
+        is WaddleClientEvent.AuthenticationFailed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleSaslCondition.allocationSize(value.`condition`)
+            )
+        }
         is WaddleClientEvent.Error -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -5896,8 +5921,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterOptionalTypeWaddleSmResumeState.write(value.`state`, buf)
                 Unit
             }
-            is WaddleClientEvent.Error -> {
+            is WaddleClientEvent.AuthenticationFailed -> {
                 buf.putInt(10)
+                FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
+                Unit
+            }
+            is WaddleClientEvent.Error -> {
+                buf.putInt(11)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -6403,6 +6433,54 @@ public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<Waddl
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
+ * `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
+ */
+
+enum class WaddleSaslCondition {
+
+    ABORTED,
+    ACCOUNT_DISABLED,
+    CREDENTIALS_EXPIRED,
+    ENCRYPTION_REQUIRED,
+    INCORRECT_ENCODING,
+    INVALID_AUTHZID,
+    INVALID_MECHANISM,
+    MALFORMED_REQUEST,
+    MECHANISM_TOO_WEAK,
+    NOT_AUTHORIZED,
+    TEMPORARY_AUTH_FAILURE,
+    UNKNOWN;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSaslCondition: FfiConverterRustBuffer<WaddleSaslCondition> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleSaslCondition.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleSaslCondition) = 4UL
+
+    override fun write(value: WaddleSaslCondition, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

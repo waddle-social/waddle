@@ -15,6 +15,7 @@ import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
@@ -164,7 +165,9 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Error("SASL failure: not-authorized"))
+        harness.factory.emit(
+            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
+        )
         runCurrent()
 
         assertEquals(ConnectionState.AuthFailed, harness.manager.connectionState.value)

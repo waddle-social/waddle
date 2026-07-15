@@ -5385,6 +5385,14 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case resumeStateChanged(state: WaddleSmResumeState?
     )
     /**
+     * RFC 6120 §6.5 SASL failure during connect. Terminal for the
+     * presented credentials — apps must not blindly retry with the
+     * same token (web #1164: surface "sign in again", never an
+     * eternal reconnect spinner).
+     */
+    case authenticationFailed(condition: WaddleSaslCondition
+    )
+    /**
      * Human-readable diagnostic. Never carries protocol data.
      */
     case error(description: String
@@ -5435,7 +5443,10 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 9: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
         )
 
-        case 10: return .error(description: try FfiConverterString.read(from: &buf)
+        case 10: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 11: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -5489,8 +5500,13 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterOptionTypeWaddleSmResumeState.write(state, into: &buf)
 
 
-        case let .error(description):
+        case let .authenticationFailed(condition):
             writeInt(&buf, Int32(10))
+            FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
+
+
+        case let .error(description):
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -6352,6 +6368,147 @@ public func FfiConverterTypeWaddleReferenceType_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceType) -> RustBuffer {
     return FfiConverterTypeWaddleReferenceType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
+ * `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
+ */
+
+public enum WaddleSaslCondition: Equatable, Hashable {
+
+    case aborted
+    case accountDisabled
+    case credentialsExpired
+    case encryptionRequired
+    case incorrectEncoding
+    case invalidAuthzid
+    case invalidMechanism
+    case malformedRequest
+    case mechanismTooWeak
+    case notAuthorized
+    case temporaryAuthFailure
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSaslCondition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSaslCondition: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSaslCondition
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSaslCondition {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .aborted
+
+        case 2: return .accountDisabled
+
+        case 3: return .credentialsExpired
+
+        case 4: return .encryptionRequired
+
+        case 5: return .incorrectEncoding
+
+        case 6: return .invalidAuthzid
+
+        case 7: return .invalidMechanism
+
+        case 8: return .malformedRequest
+
+        case 9: return .mechanismTooWeak
+
+        case 10: return .notAuthorized
+
+        case 11: return .temporaryAuthFailure
+
+        case 12: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSaslCondition, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .aborted:
+            writeInt(&buf, Int32(1))
+
+
+        case .accountDisabled:
+            writeInt(&buf, Int32(2))
+
+
+        case .credentialsExpired:
+            writeInt(&buf, Int32(3))
+
+
+        case .encryptionRequired:
+            writeInt(&buf, Int32(4))
+
+
+        case .incorrectEncoding:
+            writeInt(&buf, Int32(5))
+
+
+        case .invalidAuthzid:
+            writeInt(&buf, Int32(6))
+
+
+        case .invalidMechanism:
+            writeInt(&buf, Int32(7))
+
+
+        case .malformedRequest:
+            writeInt(&buf, Int32(8))
+
+
+        case .mechanismTooWeak:
+            writeInt(&buf, Int32(9))
+
+
+        case .notAuthorized:
+            writeInt(&buf, Int32(10))
+
+
+        case .temporaryAuthFailure:
+            writeInt(&buf, Int32(11))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(12))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSaslCondition_lift(_ buf: RustBuffer) throws -> WaddleSaslCondition {
+    return try FfiConverterTypeWaddleSaslCondition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSaslCondition_lower(_ value: WaddleSaslCondition) -> RustBuffer {
+    return FfiConverterTypeWaddleSaslCondition.lower(value)
 }
 
 
