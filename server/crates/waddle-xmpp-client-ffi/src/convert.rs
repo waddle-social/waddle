@@ -2081,7 +2081,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn dispatch_event_maps_sasl_failure_to_authentication_failed() {
         use waddle_xmpp_client::{ConnectionEvent, SaslFailure, SaslFailureCondition};
         let listener = CapturingListener::default();
@@ -2102,6 +2101,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn dispatch_event_maps_mam_results() {
         let listener = CapturingListener::default();
         let archived = parse_mam_archived(
