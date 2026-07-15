@@ -38,6 +38,8 @@ import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
+import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
@@ -79,6 +81,15 @@ class XmppSessionManager(
     val events: SharedFlow<XmppEvent> = _events.asSharedFlow()
 
     private var sessionScope: CoroutineScope? = null
+
+    /**
+     * The client of the attempt that reached `SessionReady`, while that
+     * attempt is alive — the target of the UI passthroughs below.
+     * Attempts never overlap (the connection loop is sequential), so a
+     * plain volatile set-on-ready / clear-on-teardown is race-free.
+     */
+    @Volatile
+    private var activeClient: WaddleClientInterface? = null
 
     @Volatile
     private var ownBareJid: String? = null
@@ -168,10 +179,82 @@ class XmppSessionManager(
                 end
             }
         } finally {
+            activeClient = null
             withContext(NonCancellable) {
                 runCatching { client.disconnect() }
             }
             (client as? AutoCloseable)?.close()
+        }
+    }
+
+    // UI passthroughs (M1): the app module never touches the FFI client
+    // directly — these forward to the live attempt's client and keep the
+    // stores/prefs consistent. Each returns a "not connected" shape when
+    // no session is ready instead of throwing.
+
+    /**
+     * Join a MUC room on the live connection; on success the room is
+     * marked joined in [roomStore] and the joined set is persisted.
+     */
+    suspend fun joinRoom(roomJid: String, nick: String): Boolean {
+        val client = activeClient ?: return false
+        try {
+            client.joinRoom(roomJid, nick)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return false
+        }
+        roomStore.markJoined(roomJid)
+        sessionPrefs.setJoinedRooms(roomStore.joinedRooms.value)
+        return true
+    }
+
+    /**
+     * Fetch a MAM page for a room and fan it into [timelineStore]
+     * (dedupe by stanza id keeps replays collapsed). `null` when no
+     * session is ready or the query failed.
+     */
+    suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
+        fetchHistory { client -> client.fetchRoomHistory(roomJid, maxMessages, beforeId) }
+
+    /** DM twin of [fetchRoomHistory]. */
+    suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
+        fetchHistory { client -> client.fetchDmHistory(peerJid, maxMessages, beforeId) }
+
+    /** Send a groupchat message on the live connection. */
+    suspend fun sendGroupchatMessage(roomJid: String, body: String): WaddleSendMessageOutcome =
+        send { client -> client.sendGroupchatMessage(roomJid, body, null) }
+
+    /** Send a 1:1 chat message on the live connection. */
+    suspend fun sendChatMessage(peerJid: String, body: String): WaddleSendMessageOutcome =
+        send { client -> client.sendChatMessage(peerJid, body, null) }
+
+    private suspend fun fetchHistory(
+        fetch: suspend (WaddleClientInterface) -> WaddleMamPage,
+    ): WaddleMamPage? {
+        val client = activeClient ?: return null
+        val page = try {
+            fetch(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return null
+        }
+        page.messages.forEach(timelineStore::onArchivedMessage)
+        return page
+    }
+
+    private suspend fun send(
+        op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
+    ): WaddleSendMessageOutcome {
+        val client = activeClient ?: return WaddleSendMessageOutcome.NotConnected
+        return try {
+            op(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            WaddleSendMessageOutcome.TransportError
         }
     }
 
@@ -191,6 +274,7 @@ class XmppSessionManager(
             Readiness.AUTH_FAILED -> return AttemptEnd.AUTH_FAILED
             Readiness.READY -> Unit
         }
+        activeClient = client
         _connectionState.value = ConnectionState.Ready
         attemptScope.launch { refreshTopology(client) }
         for (event in events) {

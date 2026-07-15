@@ -1,0 +1,19 @@
+package social.waddle.android.feature.conversation
+
+import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleSendMessageOutcome
+
+/** Transport seam of a conversation screen (MUC channel or 1:1 DM). */
+interface ConversationIo {
+    /** Make the conversation live (MUC join); no-op for DMs. */
+    suspend fun ensureJoined() {}
+
+    /**
+     * Fetch one MAM page ending before [beforeId] (the newest page when
+     * `null`); `null` result means "not connected / query failed".
+     */
+    suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage?
+
+    /** Send [body] to the conversation. */
+    suspend fun send(body: String): WaddleSendMessageOutcome
+}

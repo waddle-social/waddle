@@ -15,6 +15,8 @@ import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionManagerTest {
@@ -219,6 +221,121 @@ class XmppSessionManagerTest {
         assertEquals(1, harness.manager.timelineStore.timeline("alice@waddle.test").value.size)
         assertEquals(listOf("alice@waddle.test"), harness.manager.dmStore.peers.value)
         assertEquals(mapOf("alice@waddle.test" to 1), harness.manager.unreadStore.counts.value)
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `passthroughs report not connected before session ready`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        assertEquals(false, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
+        assertEquals(null, harness.manager.fetchRoomHistory("general@muc.waddle.test", 50u, null))
+        assertEquals(
+            WaddleSendMessageOutcome.NotConnected,
+            harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hi"),
+        )
+        assertEquals(
+            WaddleSendMessageOutcome.NotConnected,
+            harness.manager.sendChatMessage("alice@waddle.test", "hi"),
+        )
+        assertTrue(harness.factory.clients.single().sendCalls.isEmpty())
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `join passthrough marks and persists the joined room`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        assertTrue(harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
+        val client = harness.factory.clients.single()
+        assertEquals(listOf("general@muc.waddle.test" to "icepuma"), client.joinRoomCalls)
+        assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
+        assertEquals(setOf("general@muc.waddle.test"), harness.prefs.joinedRooms.first())
+
+        client.joinRoomFailure = IllegalStateException("boom")
+        assertEquals(false, harness.manager.joinRoom("other@muc.waddle.test", "icepuma"))
+        assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `history passthrough fans the page into the timeline store`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        client.mamPage = WaddleMamPage(
+            messages = listOf(
+                testArchivedMessage(
+                    mamId = "mam-1",
+                    stanzaId = "s1",
+                    from = "general@muc.waddle.test/alice",
+                    to = "icepuma@waddle.test",
+                    messageType = "groupchat",
+                ),
+            ),
+            firstId = "mam-1",
+            lastId = "mam-1",
+            isComplete = false,
+        )
+
+        val page = harness.manager.fetchRoomHistory("general@muc.waddle.test", 50u, "mam-9")
+        assertEquals("mam-1", page?.firstId)
+        assertEquals(
+            listOf(Triple("general@muc.waddle.test", 50u, "mam-9")),
+            client.fetchHistoryCalls,
+        )
+        assertEquals(
+            1,
+            harness.manager.timelineStore.timeline("general@muc.waddle.test").value.size,
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `send passthroughs delegate to the live client`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        client.sendOutcome = WaddleSendMessageOutcome.Sent("stanza-42")
+
+        assertEquals(
+            WaddleSendMessageOutcome.Sent("stanza-42"),
+            harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room"),
+        )
+        assertEquals(
+            WaddleSendMessageOutcome.Sent("stanza-42"),
+            harness.manager.sendChatMessage("alice@waddle.test", "hello dm"),
+        )
+        assertEquals(
+            listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
+            client.sendCalls,
+        )
+
+        // The attempt died → the passthrough must stop targeting the client.
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        assertEquals(
+            WaddleSendMessageOutcome.NotConnected,
+            harness.manager.sendChatMessage("alice@waddle.test", "late"),
+        )
 
         harness.manager.logout()
     }

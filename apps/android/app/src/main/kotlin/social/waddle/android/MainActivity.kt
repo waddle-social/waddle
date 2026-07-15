@@ -1,88 +1,57 @@
 package social.waddle.android
 
+import android.content.Intent
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.LaunchedEffect
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import social.waddle.client.ffi.WaddleClientEvent
-import social.waddle.client.ffi.WaddleConfig
-import social.waddle.client.ffi.WaddleClient
-import social.waddle.client.ffi.WaddleEventListener
-import social.waddle.client.ffi.parseJid
-
-private const val TAG = "WaddleSpike"
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.MutableStateFlow
+import social.waddle.android.client.WaddleAppState
+import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.theme.WaddleTheme
 
 /**
- * M0 toolchain spike: proves the UniFFI chain end-to-end on device —
- * `.so` loading + JNA (sync `parseJid`), the tokio async runtime behind a
- * Kotlin `suspend` call (`connect`), and Rust→Kotlin callbacks (`onEvent`
- * firing on the deliberately unauthenticated connect attempt). Replaced by
- * the real app shell in M1.
+ * The single activity: edge-to-edge, splash held until the app state
+ * leaves `Loading`, and `waddle.navigate.jid` intent extras (notification
+ * taps) funneled into the app shell for navigation.
  */
 class MainActivity : ComponentActivity() {
+    private val pendingConversationJid = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        val graph = (application as WaddleApplication).graph
+        splashScreen.setKeepOnScreenCondition {
+            graph.appState.value is WaddleAppState.Loading
+        }
+        pendingConversationJid.value = intent.getStringExtra(EXTRA_NAVIGATE_JID)
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    SpikeScreen()
+            val themeMode by graph.userPrefs.theme
+                .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+            WaddleTheme(themeMode) {
+                CompositionLocalProvider(LocalAppGraph provides graph) {
+                    AppShell(
+                        pendingConversationJid = pendingConversationJid,
+                        onConversationConsumed = { pendingConversationJid.value = null },
+                    )
                 }
             }
         }
     }
-}
 
-@androidx.compose.runtime.Composable
-private fun SpikeScreen() {
-    var jidResult by remember { mutableStateOf("parsing…") }
-    var eventLog by remember { mutableStateOf("connecting…") }
-
-    LaunchedEffect(Unit) {
-        val parts = parseJid("spike@waddle.social/android")
-        jidResult = "parseJid → local=${parts?.localpart} domain=${parts?.domain}"
-        Log.i(TAG, jidResult)
-
-        val listener = object : WaddleEventListener {
-            override fun onEvent(event: WaddleClientEvent) {
-                Log.i(TAG, "onEvent: $event")
-                eventLog = event::class.simpleName ?: event.toString()
-            }
-        }
-        val client = WaddleClient(
-            WaddleConfig(
-                serverUrl = "wss://xmpp.waddle.social/xmpp-websocket",
-                jid = "spike@waddle.social",
-                accessToken = "m0-spike-invalid-token",
-                resource = "waddle-android-spike",
-                resumeState = null,
-            ),
-            listener,
-        )
-        // Expected to fail auth — the point is watching Error/Disconnected
-        // arrive through the Rust→JNA→Kotlin callback path in logcat.
-        client.connect()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra(EXTRA_NAVIGATE_JID)?.let { pendingConversationJid.value = it }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(text = "Waddle M0 spike", style = MaterialTheme.typography.headlineMedium)
-        Text(text = jidResult, style = MaterialTheme.typography.bodyMedium)
-        Text(text = "last event: $eventLog", style = MaterialTheme.typography.bodyMedium)
+    companion object {
+        /** Notification taps carry the conversation bare JID to open. */
+        const val EXTRA_NAVIGATE_JID = "waddle.navigate.jid"
     }
 }

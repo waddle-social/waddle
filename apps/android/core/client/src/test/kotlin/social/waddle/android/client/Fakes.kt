@@ -77,6 +77,19 @@ class FakeWaddleClient : WaddleClientInterface {
     var connectCalls = 0
     var disconnectCalls = 0
 
+    /** Recorded (roomJid, nick) pairs; set [joinRoomFailure] to reject. */
+    val joinRoomCalls = mutableListOf<Pair<String, String>>()
+    var joinRoomFailure: Throwable? = null
+
+    /** Recorded (conversationJid, max, beforeId) history queries. */
+    val fetchHistoryCalls = mutableListOf<Triple<String, UInt, String?>>()
+    var mamPage: WaddleMamPage =
+        WaddleMamPage(messages = emptyList(), firstId = null, lastId = null, isComplete = true)
+
+    /** Recorded (recipientJid, body) sends and the canned outcome. */
+    val sendCalls = mutableListOf<Pair<String, String>>()
+    var sendOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("sent-1")
+
     override suspend fun connect() {
         connectCalls += 1
     }
@@ -100,14 +113,35 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun sendCallSessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, audio: Boolean, video: Boolean): Boolean = unused()
     override suspend fun sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean = unused()
     override suspend fun discoverUploadService(): String? = unused()
-    override suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage = unused()
-    override suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage = unused()
-    override suspend fun joinRoom(roomJid: String, nick: String) = unused()
+
+    override suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage {
+        fetchHistoryCalls += Triple(peerJid, maxMessages, beforeId)
+        return mamPage
+    }
+
+    override suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage {
+        fetchHistoryCalls += Triple(roomJid, maxMessages, beforeId)
+        return mamPage
+    }
+
+    override suspend fun joinRoom(roomJid: String, nick: String) {
+        joinRoomCalls += roomJid to nick
+        joinRoomFailure?.let { throw it }
+    }
+
     override suspend fun leaveRoom(roomJid: String, nick: String) = unused()
     override suspend fun requestAvatar(jid: String): WaddleAvatar? = unused()
     override suspend fun requestUploadSlot(serviceJid: String, filename: String, size: ULong, contentType: String): WaddleUploadSlot? = unused()
-    override suspend fun sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome = unused()
-    override suspend fun sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome = unused()
+
+    override suspend fun sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+        sendCalls += peerJid to body
+        return sendOutcome
+    }
+
+    override suspend fun sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+        sendCalls += roomJid to body
+        return sendOutcome
+    }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()
     override suspend fun disablePushNotifications(pushServiceJid: String, node: String?): Boolean = unused()

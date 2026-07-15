@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Brand accent (the chat `primary` token); replaced by the generated
-         token target in scripts/generate-design-tokens.mjs during M1. -->
+    <!-- Brand accent (the chat `primary` token, #14B8A6). Must stay in
+         sync with `BrandAccent` in theme/WaddleTheme.kt; both get
+         replaced by the generated design-token target later. Used for
+         the launcher icon background and the splash screen. -->
     <color name="ic_launcher_background">#14B8A6</color>
 </resources>

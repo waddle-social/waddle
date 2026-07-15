@@ -1,0 +1,40 @@
+package social.waddle.android.feature.dm
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import social.waddle.android.AppGraph
+import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.jid.localpartOf
+import social.waddle.android.viewModelFactoryOf
+
+data class DmListItem(
+    val peerJid: String,
+    val name: String,
+    val unreadCount: Int,
+)
+
+/** Recent DM peers (most recently active first) with unread badges. */
+class DmListViewModel(sessionManager: XmppSessionManager) : ViewModel() {
+    val peers: StateFlow<List<DmListItem>> = combine(
+        sessionManager.dmStore.peers,
+        sessionManager.unreadStore.counts,
+    ) { peers, counts ->
+        peers.map { peerJid ->
+            DmListItem(
+                peerJid = peerJid,
+                name = localpartOf(peerJid),
+                unreadCount = counts[peerJid] ?: 0,
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    companion object {
+        fun factory(graph: AppGraph): ViewModelProvider.Factory =
+            viewModelFactoryOf { DmListViewModel(graph.sessionManager) }
+    }
+}
