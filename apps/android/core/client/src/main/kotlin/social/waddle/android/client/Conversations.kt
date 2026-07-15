@@ -6,22 +6,27 @@ internal data class ConversationKey(val jid: String, val isMine: Boolean)
 /**
  * Conversation routing shared by the timeline, DM, and unread stores:
  * groupchat messages key on the room bare JID; chat/normal messages key
- * on the peer (the non-own side). `isMine` compares the sender bare JID
- * against the account bare JID — MUC echoes of own messages come from
- * `room/nick` and are not detected here (M1 limitation; needs the own
- * occupant JID).
+ * on the peer (the non-own side). For 1:1 chats `isMine` compares the
+ * sender bare JID against the account bare JID; MUC echoes of own
+ * messages come from `room/nick`, so they compare the occupant resource
+ * against [ownNick] (the localpart used at join).
  */
 internal fun conversationKeyOf(
     ownBareJid: String?,
+    ownNick: String?,
     from: String?,
     to: String?,
     isGroupchat: Boolean,
 ): ConversationKey? {
     val fromBare = from?.let(::bareJid)
     val toBare = to?.let(::bareJid)
-    val isMine = ownBareJid != null && fromBare == ownBareJid
+    val isMine = if (isGroupchat) {
+        ownNick != null && from != null && resourcepart(from) == ownNick
+    } else {
+        ownBareJid != null && fromBare == ownBareJid
+    }
     val conversation = when {
-        isGroupchat -> if (isMine) toBare else fromBare
+        isGroupchat -> fromBare ?: toBare
         isMine -> toBare
         else -> fromBare ?: toBare
     } ?: return null

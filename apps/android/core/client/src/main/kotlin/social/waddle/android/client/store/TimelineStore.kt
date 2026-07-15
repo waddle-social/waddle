@@ -26,9 +26,11 @@ class TimelineStore {
 
     @Volatile
     private var ownBareJid: String? = null
+    private var ownNick: String? = null
 
     fun setOwnBareJid(jid: String?) {
         ownBareJid = jid?.let(::bareJid)
+        ownNick = ownBareJid?.substringBefore('@')
     }
 
     fun timeline(conversationJid: String): StateFlow<List<TimelineItem>> =
@@ -38,6 +40,7 @@ class TimelineStore {
         val body = message.body ?: return
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
+            ownNick = ownNick,
             from = message.from,
             to = message.to,
             isGroupchat = message.isMuc || message.messageType == "groupchat",
@@ -60,6 +63,7 @@ class TimelineStore {
         val body = message.body ?: return
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
+            ownNick = ownNick,
             from = message.from,
             to = message.to,
             isGroupchat = message.messageType == "groupchat",

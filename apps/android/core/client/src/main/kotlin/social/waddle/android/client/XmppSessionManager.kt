@@ -349,6 +349,7 @@ class XmppSessionManager(
                 dmStore.onChatMessage(ownBareJid, event.message)
                 conversationKeyOf(
                     ownBareJid = ownBareJid,
+                    ownNick = ownBareJid?.substringBefore('@'),
                     from = event.message.from,
                     to = event.message.to,
                     isGroupchat = event.message.isMuc || event.message.messageType == "groupchat",
