@@ -28,9 +28,8 @@ use crate::{
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
     WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
-    WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
-    WaddleStanzaId,
+    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState,
+    WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
