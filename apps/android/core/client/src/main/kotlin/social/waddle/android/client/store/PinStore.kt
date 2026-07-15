@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddlePinAction
 import social.waddle.client.ffi.WaddlePinEntry
@@ -28,17 +29,19 @@ class PinStore {
 
     fun seed(roomJid: String, entries: List<WaddlePinEntry>) {
         val room = bareJid(roomJid)
-        _pinned.value = _pinned.value + (room to entries.map { it.targetStanzaId }.toSet())
+        _pinned.update { it + (room to entries.map { entry -> entry.targetStanzaId }.toSet()) }
     }
 
     fun onPinEvent(roomJid: String, event: WaddlePinEvent) {
         val room = bareJid(roomJid)
-        val current = _pinned.value[room].orEmpty()
-        val next = when (event.action) {
-            WaddlePinAction.PINNED -> current + event.targetStanzaId
-            WaddlePinAction.UNPINNED -> current - event.targetStanzaId
+        // CAS: pin fetches and live pin events race across coroutines.
+        _pinned.update { pinned ->
+            val next = when (event.action) {
+                WaddlePinAction.PINNED -> pinned[room].orEmpty() + event.targetStanzaId
+                WaddlePinAction.UNPINNED -> pinned[room].orEmpty() - event.targetStanzaId
+            }
+            pinned + (room to next)
         }
-        _pinned.value = _pinned.value + (room to next)
     }
 
     fun clear() {

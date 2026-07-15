@@ -275,15 +275,15 @@ class TimelineStore(
                     state
                 } else {
                     val senders = state.reactionsBySender.toMutableMap()
-                    if (mutation.emojis.isEmpty()) {
-                        senders.remove(mutation.senderKey)
-                    } else {
-                        senders[mutation.senderKey] = SenderReactions(
-                            emojis = mutation.emojis.distinct(),
-                            mine = mutation.mine,
-                            rank = ranked.rank,
-                        )
-                    }
+                    // An empty set KEEPS the sender entry (rendering
+                    // nothing) so the clear retains its rank — deleting
+                    // it would let an older MAM replay of the sender's
+                    // earlier reaction resurrect what they cleared.
+                    senders[mutation.senderKey] = SenderReactions(
+                        emojis = mutation.emojis.distinct(),
+                        mine = mutation.mine,
+                        rank = ranked.rank,
+                    )
                     state.copy(reactionsBySender = senders)
                 }
             }
@@ -322,6 +322,8 @@ class TimelineStore(
     private fun Entry.enriched(): TimelineItem {
         val state = mutations
         if (state == MutationState()) return item
+        // Cleared senders linger as empty entries (rank retention);
+        // aggregation naturally renders them as no chips.
         return item.copy(
             body = state.correctedBody ?: item.body,
             edited = state.correctedBody != null,

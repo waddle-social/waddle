@@ -152,6 +152,9 @@ class XmppSessionManager(
 
     private val lifecycleMutex = Mutex()
 
+    /** Serializes reaction send+rollback pairs (see [sendReaction]). */
+    private val reactionMutex = Mutex()
+
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
@@ -371,7 +374,10 @@ class XmppSessionManager(
         targetStanzaId: String,
         emojis: List<String>,
         previousEmojis: List<String>,
-    ): Boolean {
+    ): Boolean = reactionMutex.withLock {
+        // Serialized per manager: without the mutex a failed send's
+        // rollback (ranked newest) would clobber a LATER send's
+        // optimistic set.
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
         applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, emojis)
         val sent = clientCall {
@@ -508,25 +514,42 @@ class XmppSessionManager(
      * cursor (independent of the pref) so sibling devices retire their
      * badges. Equality-deduped per conversation; safe to call on every
      * timeline change while the conversation is visible.
+     *
+     * Ordering matters: the local badge clears unconditionally (reading
+     * offline is still reading), but the cursor dedupe is consumed ONLY
+     * once a live client will carry the dispatch — otherwise an offline
+     * read would permanently swallow the marker and the MDS publish.
+     *
+     * [explicitTarget] lets callers without a loaded timeline (the
+     * notification mark-as-read action after process death) name the
+     * message directly.
      */
-    suspend fun markConversationDisplayed(conversationJid: String, isGroupchat: Boolean) {
+    suspend fun markConversationDisplayed(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        explicitTarget: DisplayedTarget? = null,
+    ) {
         val conversation = bareJid(conversationJid)
-        val target = timelineStore.timeline(conversation).value.lastOrNull {
-            !it.isMine && it.tombstone == null
-        } ?: return
-        val ids = displayIdsOf(target) ?: return
-        if (!readCursorStore.advance(conversation, ids.stanzaId)) return
         unreadStore.clear(conversation)
+        val ids = explicitTarget ?: run {
+            // Only feed-visible rows count: a thread reply the user has
+            // never opened must not advance the read cursor.
+            val target = timelineStore.timeline(conversation).value.lastOrNull {
+                !it.isMine && it.tombstone == null && it.isFeedVisible
+            } ?: return
+            displayedTargetOf(target, isGroupchat) ?: return
+        }
         val client = activeClient ?: return
+        if (!readCursorStore.advance(conversation, ids.markerId)) return
         val markerAllowed = when {
             !readReceiptsEnabled() -> false
-            isGroupchat -> ids.stanzaIdBy == conversation
+            isGroupchat -> ids.stanzaIdBy == conversation && ids.markerId == ids.stanzaId
             else -> ids.markerRequested
         }
         if (markerAllowed) {
-            runCatching { client.sendDisplayed(conversation, ids.stanzaId, isGroupchat) }
+            runCatching { client.sendDisplayed(conversation, ids.markerId, isGroupchat) }
         }
-        if (ids.stanzaIdBy != null && supportsMdsPublish(client)) {
+        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
             runCatching { client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy) }
         }
     }
@@ -545,15 +568,31 @@ class XmppSessionManager(
         return supported
     }
 
-    private fun displayIdsOf(item: TimelineItem): DisplayIds? = when (val source = item.source) {
-        is TimelineSource.Live -> source.message.stanzaId?.let { id ->
-            DisplayIds(id, source.message.stanzaIdBy, source.message.displayedMarkerRequested)
-        }
-        is TimelineSource.Archived -> source.message.stanzaId?.let { id ->
+    /**
+     * The ids a displayed dispatch needs, per XEP-0333 id-class rules:
+     * a MUC marker targets the ROOM-assigned XEP-0359 stanza id, but a
+     * 1:1 marker must carry the AUTHOR-assigned id — the local archive
+     * stanza id was stamped by our own server and the peer never saw
+     * it. The stanza-id pair rides along strictly for the MDS publish.
+     */
+    private fun displayedTargetOf(item: TimelineItem, isGroupchat: Boolean): DisplayedTarget? {
+        val markerId = if (isGroupchat) {
+            item.stanzaId
+        } else {
+            item.originId ?: item.messageId ?: item.stanzaId
+        } ?: return null
+        val markerRequested = when (val source = item.source) {
+            is TimelineSource.Live -> source.message.displayedMarkerRequested
             // The archive does not carry `<request/>`; archived DM rows
             // sync via MDS only.
-            DisplayIds(id, source.message.stanzaIdBy, markerRequested = false)
+            is TimelineSource.Archived -> false
         }
+        return DisplayedTarget(
+            markerId = markerId,
+            stanzaId = item.stanzaId,
+            stanzaIdBy = item.stanzaIdBy,
+            markerRequested = markerRequested,
+        )
     }
 
     /**
@@ -643,6 +682,7 @@ class XmppSessionManager(
                 replyParentBody = extras?.replyParentBody,
                 threadId = extras?.threadId,
                 threadParent = extras?.threadParent,
+                sharedFiles = extras?.sharedFiles.orEmpty(),
             ),
             )
         } catch (cancellation: CancellationException) {
@@ -952,11 +992,18 @@ class XmppSessionManager(
      * XEP-0085 bookkeeping from the fan-out: a `composing` state adds
      * the sender to the conversation's typing set, anything else — a
      * different state or a real message — removes them. Sender display
-     * name is the MUC nick or the DM peer's localpart.
+     * name: the occupant nick in a MUC, the peer's LOCALPART in 1:1 —
+     * DM states arrive from the peer's full JID, whose resource is a
+     * device identifier, never a name.
      */
     private fun trackChatState(key: ConversationKey, message: WaddleMessage) {
         val from = message.from ?: return
-        val sender = resourcepart(from) ?: bareJid(from).substringBefore('@')
+        val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        val sender = if (isGroupchat) {
+            resourcepart(from) ?: bareJid(from).substringBefore('@')
+        } else {
+            bareJid(from).substringBefore('@')
+        }
         val state = message.chatState
         if (state != null) {
             chatStateStore.onChatState(key.jid, sender, state, key.isMine)
@@ -1185,9 +1232,14 @@ class XmppSessionManager(
     /** Wrapper so a conflated channel can carry a `null` (= clear) update. */
     private data class ResumeUpdate(val snapshot: SmResumeSnapshot?)
 
-    /** The identity a displayed dispatch needs off a timeline row. */
-    private data class DisplayIds(
-        val stanzaId: String,
+    /**
+     * A displayed dispatch target: [markerId] is what the XEP-0333
+     * marker carries (author-assigned in 1:1, room stanza id in MUCs);
+     * the stanza-id pair feeds only the XEP-0490 MDS publish.
+     */
+    data class DisplayedTarget(
+        val markerId: String,
+        val stanzaId: String?,
         val stanzaIdBy: String?,
         val markerRequested: Boolean,
     )

@@ -44,11 +44,17 @@ fun MessageComposer(
     onClearUpload: () -> Unit = {},
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
+    // Track the last-seen edit target across recreation: the reset must
+    // fire only on actual mode TRANSITIONS — an unconditional
+    // LaunchedEffect(editing) also runs on every initial composition
+    // (rotation, process restore) and would wipe the restored draft.
+    var lastEditTarget by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Entering edit mode loads the original body; leaving it clears the
-    // draft (both edit-sent and cancelled).
     LaunchedEffect(editing) {
-        draft = editing?.originalBody.orEmpty()
+        if (editing?.targetId != lastEditTarget) {
+            draft = editing?.originalBody.orEmpty()
+            lastEditTarget = editing?.targetId
+        }
     }
 
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth()) {

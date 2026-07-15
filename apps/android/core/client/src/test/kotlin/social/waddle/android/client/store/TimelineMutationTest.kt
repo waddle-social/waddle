@@ -50,6 +50,48 @@ class TimelineMutationTest {
     }
 
     @Test
+    fun `a cleared reaction stays cleared against an older mam replay`() {
+        store.onArchivedMessage(
+            testArchivedMessage(mamId = "m0", stanzaId = "s1", timestamp = "2026-07-15T09:00:00Z"),
+        )
+        // Live clear (newest rank) after the original reaction...
+        store.onLiveMessage(
+            testMessage(id = "r2", body = null, reactionTargetId = "s1", reactionEmojis = emptyList()),
+        )
+        // ...then a MAM page replays the OLDER reaction. The clear kept
+        // its rank, so the replay must not resurrect the chip.
+        store.onArchivedMessage(
+            testArchivedMessage(
+                mamId = "m1",
+                id = "r1",
+                body = null,
+                timestamp = "2026-07-15T10:00:00Z",
+                reactionTargetId = "s1",
+                reactionEmojis = listOf("👍"),
+            ),
+        )
+
+        assertTrue(dmTimeline()[0].reactions.isEmpty())
+    }
+
+    @Test
+    fun `a correction of a reply strips the quoted fallback prefix`() {
+        store.onLiveMessage(testMessage(stanzaId = "s1", body = "original"))
+        val prefix = "> quoted line\n\n"
+        store.onLiveMessage(
+            testMessage(
+                id = "c1",
+                body = prefix + "edited reply",
+                replacesId = "s1",
+                replyFallbackStart = 0u,
+                replyFallbackEnd = prefix.codePointCount(0, prefix.length).toUInt(),
+            ),
+        )
+
+        assertEquals("edited reply", dmTimeline().single().body)
+    }
+
+    @Test
     fun `an empty reaction set clears the sender's reactions`() {
         store.onLiveMessage(testMessage(stanzaId = "s1", body = "hi"))
         store.onLiveMessage(

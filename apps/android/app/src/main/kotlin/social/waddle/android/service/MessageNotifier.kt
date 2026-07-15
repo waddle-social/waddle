@@ -24,6 +24,7 @@ import kotlinx.coroutines.sync.withLock
 import social.waddle.android.MainActivity
 import social.waddle.android.R
 import social.waddle.android.client.XmppEvent
+import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.isTimelineMutation
@@ -182,8 +183,39 @@ class MessageNotifier(
         postMutex.withLock {
             val messages = appendToHistory(conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
-            postNotification(conversationJid, isGroupchat, messages, silent)
+            postNotification(
+                conversationJid,
+                isGroupchat,
+                messages,
+                silent,
+                displayedTarget = displayedTargetOf(message, isGroupchat, conversationJid),
+            )
         }
+    }
+
+    /**
+     * XEP-0333/0490 target for the mark-as-read action, carried in the
+     * intent so the dispatch survives process death (the in-memory
+     * timeline is empty when the receiver fires after a restart).
+     * Same id-class rules as the session manager: room stanza id in
+     * MUCs, author-assigned id in 1:1.
+     */
+    private fun displayedTargetOf(
+        message: WaddleMessage,
+        isGroupchat: Boolean,
+        conversationJid: String,
+    ): XmppSessionManager.DisplayedTarget? {
+        val markerId = if (isGroupchat) {
+            message.stanzaId?.takeIf { message.stanzaIdBy == conversationJid }
+        } else {
+            message.originId ?: message.id
+        } ?: return null
+        return XmppSessionManager.DisplayedTarget(
+            markerId = markerId,
+            stanzaId = message.stanzaId,
+            stanzaIdBy = message.stanzaIdBy,
+            markerRequested = message.displayedMarkerRequested,
+        )
     }
 
     private fun appendToHistory(
@@ -204,6 +236,7 @@ class MessageNotifier(
         messages: List<NotificationCompat.MessagingStyle.Message>,
         silent: Boolean,
         replyFailed: Boolean = false,
+        displayedTarget: XmppSessionManager.DisplayedTarget? = null,
     ) {
         val granted = ContextCompat.checkSelfPermission(
             context,
@@ -227,7 +260,7 @@ class MessageNotifier(
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(contentIntent(conversationJid))
             .addAction(replyAction(conversationJid, isGroupchat))
-            .addAction(markReadAction(conversationJid, isGroupchat))
+            .addAction(markReadAction(conversationJid, isGroupchat, displayedTarget))
             .setDeleteIntent(dismissIntent(conversationJid))
         if (replyFailed) {
             builder.setSubText(context.getString(R.string.notification_reply_failed))
@@ -299,12 +332,20 @@ class MessageNotifier(
     private fun markReadAction(
         conversationJid: String,
         isGroupchat: Boolean,
+        displayedTarget: XmppSessionManager.DisplayedTarget?,
     ): NotificationCompat.Action {
         val intent = Intent(context, MarkReadReceiver::class.java)
             .setAction(MarkReadReceiver.ACTION_MARK_READ)
             .setData(conversationUri("mark-read", conversationJid))
             .putExtra(MarkReadReceiver.EXTRA_CONVERSATION_JID, conversationJid)
             .putExtra(MarkReadReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
+        displayedTarget?.let { target ->
+            intent
+                .putExtra(MarkReadReceiver.EXTRA_MARKER_ID, target.markerId)
+                .putExtra(MarkReadReceiver.EXTRA_STANZA_ID, target.stanzaId)
+                .putExtra(MarkReadReceiver.EXTRA_STANZA_ID_BY, target.stanzaIdBy)
+                .putExtra(MarkReadReceiver.EXTRA_MARKER_REQUESTED, target.markerRequested)
+        }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
             0,

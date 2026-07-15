@@ -144,7 +144,8 @@ open class ConversationViewModel(
                 // New rows arriving while the conversation is on screen
                 // count as read (the marker path dedupes repeats). Guarded:
                 // a marker failure must not kill the pruning collector.
-                if (visible) runCatching { io.markDisplayed() }
+                // Thread screens never mark (see onConversationVisible).
+                if (visible && threadId == null) runCatching { io.markDisplayed() }
             }
         }
         viewModelScope.launch {
@@ -215,8 +216,15 @@ open class ConversationViewModel(
         if (mode is ComposerMode.Editing) {
             _composerMode.value = ComposerMode.Normal
             viewModelScope.launch {
-                runCatching { io.sendCorrection(mode.targetId, text) }
-                typingNotifier.onMessageSent()
+                val sent = runCatching { io.sendCorrection(mode.targetId, text) }.getOrDefault(false)
+                if (sent) {
+                    typingNotifier.onMessageSent()
+                } else {
+                    // Corrections are never queued (a replayed edit could
+                    // outrank a newer one) — restore edit mode with the
+                    // attempted text instead of silently discarding it.
+                    _composerMode.value = ComposerMode.Editing(mode.targetId, originalBody = text)
+                }
             }
             return
         }
@@ -356,10 +364,12 @@ open class ConversationViewModel(
 
     /**
      * The thread a "reply in thread" on [item] opens: its own thread,
-     * else a new thread rooted at the row's id (web
-     * `thread-action-target` parity).
+     * else a new thread rooted at the message (web
+     * `thread-action-target` parity). The DM root id must be
+     * author-assigned for the same reason as [actionTargetIdOf].
      */
-    fun threadIdFor(item: TimelineItem): String = item.threadId ?: item.id
+    fun threadIdFor(item: TimelineItem): String = item.threadId
+        ?: if (isGroupchat) item.id else (item.originId ?: item.messageId ?: item.id)
 
     /** Enter edit mode for an own, non-tombstoned message. */
     fun startEdit(item: TimelineItem) {
@@ -388,12 +398,16 @@ open class ConversationViewModel(
     /**
      * Reaction/retraction/pin target (web parity): in a MUC strictly
      * the room-assigned XEP-0359 stanza id (`by` must be the room — no
-     * id means the action is unavailable); in a DM any wire identity.
+     * id means the action is unavailable); in a DM strictly the
+     * AUTHOR-assigned id — the local archive stanza id was stamped by
+     * our own server and the peer's copy never carried it, so a
+     * reaction/retraction/reply targeting it silently fails to apply
+     * on the other side.
      */
     fun actionTargetIdOf(item: TimelineItem): String? = if (isGroupchat) {
         item.stanzaId?.takeIf { item.stanzaIdBy == conversationJid }
     } else {
-        item.stanzaId ?: item.originId ?: item.messageId
+        item.originId ?: item.messageId
     }
 
     /** XEP-0308 targets the AUTHOR-assigned id of the original send. */
@@ -454,18 +468,26 @@ open class ConversationViewModel(
         }
     }
 
-    /** The conversation is on screen: suppress and clear unread counts. */
+    /**
+     * The conversation is on screen: suppress and clear unread counts.
+     * Thread screens do NEITHER — they share the parent conversation's
+     * jid, so claiming the active marker would fight the feed screen
+     * underneath, and marking displayed would read messages the user
+     * has never seen in the main feed.
+     */
     fun onConversationVisible() {
         visible = true
+        io.recordConversationSeen()
+        if (threadId != null) return
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
-        io.recordConversationSeen()
         viewModelScope.launch { runCatching { onConversationRead(conversationJid) } }
         viewModelScope.launch { runCatching { io.markDisplayed() } }
     }
 
     fun onConversationHidden() {
         visible = false
+        if (threadId != null) return
         unreadStore.clearActiveConversationIf(conversationJid)
     }
 

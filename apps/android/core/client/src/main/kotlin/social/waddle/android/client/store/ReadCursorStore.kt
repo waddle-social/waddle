@@ -3,6 +3,7 @@ package social.waddle.android.client.store
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import social.waddle.android.client.bareJid
 
 /**
@@ -24,9 +25,10 @@ class ReadCursorStore {
     /** Record [stanzaId] as displayed; false when already the cursor. */
     fun advance(conversationJid: String, stanzaId: String): Boolean {
         val conversation = bareJid(conversationJid)
-        if (_cursors.value[conversation] == stanzaId) return false
-        _cursors.value = _cursors.value + (conversation to stanzaId)
-        return true
+        // CAS: writers race from the UI scope, the event consumer, and
+        // the MDS bootstrap — plain read-modify-write loses updates.
+        val previous = _cursors.getAndUpdate { it + (conversation to stanzaId) }
+        return previous[conversation] != stanzaId
     }
 
     fun clear() {

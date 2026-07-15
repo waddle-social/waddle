@@ -200,6 +200,64 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
+    fun `queued sends replay with their attachments intact`() = runTest {
+        val harness = Harness(this)
+        // Login without ever reaching ready: sends queue.
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        val result = harness.manager.sendChatMessage(
+            "alice@waddle.test",
+            body = "",
+            extras = social.waddle.android.client.MessageSendExtras(
+                sharedFiles = listOf(
+                    social.waddle.android.client.prefs.SharedFileRef(
+                        url = "https://files.waddle.test/cat.png",
+                        name = "cat.png",
+                        mediaType = "image/png",
+                        sizeBytes = 42,
+                        disposition = "inline",
+                    ),
+                ),
+            ),
+        )
+        assertTrue(result.queued)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val replayedOptions = harness.factory.clients.last().sendOptions.last()
+        assertEquals(
+            "https://files.waddle.test/cat.png",
+            replayedOptions?.sharedFiles?.single()?.url,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `dm typing indicators use the peer's localpart not their resource`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+
+        harness.factory.emit(
+            WaddleClientEvent.Message(
+                testMessage(
+                    from = "alice@waddle.test/Conversations.x8f2",
+                    body = null,
+                    chatState = social.waddle.client.ffi.WaddleChatState.COMPOSING,
+                ),
+            ),
+        )
+        runCurrent()
+
+        assertEquals(
+            listOf("alice"),
+            harness.manager.chatStateStore.composing.value["alice@waddle.test"],
+        )
+        harness.manager.logout()
+    }
+
+    @Test
     fun `pin and unpin route to the client`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)

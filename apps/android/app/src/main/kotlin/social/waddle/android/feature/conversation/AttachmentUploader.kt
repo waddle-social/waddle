@@ -64,15 +64,24 @@ class AttachmentUploader(
     }
 
     private fun resolveMeta(uri: Uri): AttachmentMeta? = runCatching {
+        var name: String? = null
+        var size = -1L
         contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            if (!cursor.moveToFirst()) return@use null
-            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-            val name = if (nameIndex >= 0) cursor.getString(nameIndex) else null
-            val size = if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) cursor.getLong(sizeIndex) else -1L
-            if (size < 0) return@use null
-            AttachmentMeta(name = name ?: DEFAULT_FILENAME, sizeBytes = size)
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (nameIndex >= 0) name = cursor.getString(nameIndex)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+            }
         }
+        if (size < 0) {
+            // OpenableColumns.SIZE is optional — several real providers
+            // (cloud documents, mail attachments) omit it while the
+            // stream opens fine. Fall back to the descriptor length.
+            size = contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        }
+        if (size < 0) return@runCatching null
+        AttachmentMeta(name = name ?: DEFAULT_FILENAME, sizeBytes = size)
     }.getOrNull()
 
     private data class AttachmentMeta(val name: String, val sizeBytes: Long)

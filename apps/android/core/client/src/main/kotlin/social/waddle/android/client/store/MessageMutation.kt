@@ -1,6 +1,7 @@
 package social.waddle.android.client.store
 
 import social.waddle.android.client.bareJid
+import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 
@@ -78,7 +79,12 @@ internal fun mutationOf(message: WaddleMessage, isGroupchat: Boolean, mine: Bool
         moderationReason = message.moderationReason,
         retractsId = message.retractsId,
         replacesId = message.replacesId,
-        body = message.body,
+        // A correction of a reply re-sends the quoted fallback prefix;
+        // strip it like the insert path does or edits render the quote
+        // twice.
+        body = message.body?.let {
+            stripReplyFallback(it, message.replyFallbackStart, message.replyFallbackEnd)
+        },
         reactionTargetId = message.reactionTargetId,
         reactionEmojis = message.reactionEmojis,
     )
@@ -97,7 +103,9 @@ internal fun mutationOf(
         moderationReason = message.moderationReason,
         retractsId = message.retractsId,
         replacesId = message.replacesId,
-        body = message.body,
+        body = message.body?.let {
+            stripReplyFallback(it, message.replyFallbackStart, message.replyFallbackEnd)
+        },
         reactionTargetId = message.reactionTargetId,
         reactionEmojis = message.reactionEmojis,
     )

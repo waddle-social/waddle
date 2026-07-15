@@ -142,7 +142,68 @@ class XmppSessionManagerReadStateTest {
         )
         runCurrent()
         harness.manager.markConversationDisplayed("alice@waddle.test", isGroupchat = false)
-        assertEquals(listOf(Triple("alice@waddle.test", "s2", false)), harness.client.displayedCalls)
+        // XEP-0333 id-class rule: the DM marker carries the AUTHOR's id
+        // ("id-2"), never the local archive stanza id — the peer never
+        // saw "s2". The MDS publish still uses the stanza-id pair.
+        assertEquals(listOf(Triple("alice@waddle.test", "id-2", false)), harness.client.displayedCalls)
+        assertEquals("s2", harness.client.mdsPublishCalls.last().second)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `reading while disconnected does not consume the marker dispatch`() = runTest {
+        val harness = Harness(this)
+        // Login but never reach ready: no live client.
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.manager.timelineStore.onLiveMessage(mucMessage("s1"))
+
+        harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+        assertNull(
+            "the cursor dedupe must not swallow an offline read",
+            harness.manager.readCursorStore.cursor("room@muc.waddle.test"),
+        )
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+        assertEquals(
+            listOf(Triple("room@muc.waddle.test", "s1", true)),
+            harness.client.displayedCalls,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `thread replies never advance the read cursor from the main feed`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1")))
+        // Newer thread reply, hidden from the feed.
+        harness.factory.emit(
+            WaddleClientEvent.Message(
+                testMessage(
+                    id = "id-s2",
+                    stanzaId = "s2",
+                    stanzaIdBy = "room@muc.waddle.test",
+                    from = "room@muc.waddle.test/alice",
+                    to = null,
+                    messageType = "groupchat",
+                    isMuc = true,
+                    body = "thread reply",
+                    thread = "s1",
+                ),
+            ),
+        )
+        runCurrent()
+
+        harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+
+        assertEquals(
+            "the marker targets the newest FEED row, not the unseen thread reply",
+            listOf(Triple("room@muc.waddle.test", "s1", true)),
+            harness.client.displayedCalls,
+        )
         harness.manager.logout()
     }
 
