@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -23,4 +24,15 @@ dependencies {
     // The android=true bindings annotate the SystemCleaner path with
     // @RequiresApi.
     implementation(libs.androidx.annotation)
+
+    // Bridge layer: REST auth client, DataStore prefs, JSON snapshots.
+    // `api` where the type appears in a public constructor/return signature.
+    api(libs.okhttp)
+    api(libs.kotlinx.serialization.json)
+    api(libs.androidx.datastore.preferences)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.turbine)
+    testImplementation(libs.okhttp.mockwebserver3)
 }
