@@ -1215,16 +1215,26 @@ pub(crate) async fn get_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> Option<ActorRef<RoomActor>> {
-    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .get_room(room_jid.clone())
-        .await
-    {
+    match get_room_actor_result(state, room_jid).await {
         Ok(actor) => actor,
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed to get room actor");
             None
         }
     }
+}
+
+/// Typed room lookup for protocol paths where an unpublished restore is not
+/// equivalent to an absent room. Callers must map reconciliation to a
+/// wait-class response or coalesce through `GetOrCreateRoom`; they must never
+/// run room-creation authorization based on that transient state.
+pub(crate) async fn get_room_actor_result(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+) -> Result<Option<ActorRef<RoomActor>>, RoomRegistryError> {
+    RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .get_room(room_jid.clone())
+        .await
 }
 
 /// Get or create the room via the registry. The returned

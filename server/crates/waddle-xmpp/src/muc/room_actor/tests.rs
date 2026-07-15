@@ -46,6 +46,42 @@ async fn current_admission_revision(actor: &ActorRef<RoomActor>) -> u64 {
         .admission_revision
 }
 
+#[test]
+fn durable_restore_only_advances_for_admission_policy_changes() {
+    let mut actor = RoomActor::new(test_room(), test_secret());
+    let cosmetic_config = RoomConfig {
+        name: "Restored room name".to_string(),
+        description: Some("Restored description".to_string()),
+        enable_logging: false,
+        ..RoomConfig::default()
+    };
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        waddle_id: "waddle-1".to_string(),
+        channel_id: "channel-1".to_string(),
+        config: cosmetic_config,
+        subject: None,
+        affiliations: Vec::new(),
+    });
+    assert_eq!(
+        actor.admission_revision, 0,
+        "cosmetic restore fields must not invalidate admission work"
+    );
+
+    let mut admission_config = actor.room.config.clone();
+    admission_config.members_only = false;
+    actor.install_durable_room_state(crate::muc::durable::DurableRoomState {
+        waddle_id: "waddle-1".to_string(),
+        channel_id: "channel-1".to_string(),
+        config: admission_config,
+        subject: None,
+        affiliations: Vec::new(),
+    });
+    assert_eq!(
+        actor.admission_revision, 1,
+        "membership policy changes must invalidate admission work"
+    );
+}
+
 async fn spawn_room_actor_with_config(mut config: RoomConfig) -> ActorRef<RoomActor> {
     let room_jid: BareJid = "testroom@muc.example.com".parse().expect("valid jid");
     config.name = "Test Room".to_string();
@@ -3467,6 +3503,14 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
         Box::pin(async { Ok(None) })
     }
 
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
+    }
+
     fn save_config<'a>(
         &'a self,
         _room_jid: &'a BareJid,
@@ -3572,6 +3616,14 @@ impl crate::muc::durable::MucDurableStore for FailNthAffiliationSaveStore {
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         Box::pin(async { Ok(None) })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
     }
 
     fn save_config<'a>(
@@ -3685,6 +3737,14 @@ impl crate::muc::durable::MucDurableStore for FlakyThenRecoveringStore {
                 }))
             }
         })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
+    {
+        self.load_room_state(room_jid)
     }
 
     fn save_config<'a>(

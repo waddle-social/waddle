@@ -1660,6 +1660,14 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>>
+        {
+            self.load_room_state(room_jid)
+        }
+
         fn save_config<'a>(
             &'a self,
             _room_jid: &'a jid::BareJid,

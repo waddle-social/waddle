@@ -17,7 +17,12 @@ use waddle_xmpp::muc::room_actor::{
     ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor, RoomActorError,
     SyncResolverAffiliation,
 };
+use waddle_xmpp::muc::room_registry_actor::{
+    CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
+    WireClusteringClaims,
+};
 use waddle_xmpp::muc::{MucRoom, RoomConfig, SubjectState};
+use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
 use waddle_xmpp::{Affiliation, Role, XmppError};
 
@@ -27,12 +32,21 @@ const UNCERTAIN: u8 = 2;
 
 struct OwnershipStore {
     state: AtomicU8,
+    restore: Option<DurableRoomState>,
 }
 
 impl OwnershipStore {
     fn new() -> Self {
         Self {
             state: AtomicU8::new(OWNED),
+            restore: None,
+        }
+    }
+
+    fn restoring(state: DurableRoomState) -> Self {
+        Self {
+            state: AtomicU8::new(OWNED),
+            restore: Some(state),
         }
     }
 
@@ -46,7 +60,15 @@ impl MucDurableStore for OwnershipStore {
         &'a self,
         _room_jid: &'a BareJid,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-        Box::pin(async { Ok(None) })
+        let restore = self.restore.clone();
+        Box::pin(async move { Ok(restore) })
+    }
+
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+        self.load_room_state(room_jid)
     }
 
     fn save_config<'a>(
@@ -264,4 +286,94 @@ async fn uncertain_room_returns_typed_resolver_sync_outcome() {
             .expect("affiliation"),
         Affiliation::None,
     );
+}
+
+fn durable_existing_room() -> DurableRoomState {
+    DurableRoomState {
+        waddle_id: "durable-waddle".to_string(),
+        channel_id: "durable-channel".to_string(),
+        config: RoomConfig {
+            name: "Existing durable room".to_string(),
+            persistent: true,
+            ..RoomConfig::default()
+        },
+        subject: None,
+        affiliations: vec![AffiliationEntry::new(
+            "owner@example.com".parse().expect("owner JID"),
+            Affiliation::Owner,
+        )],
+    }
+}
+
+async fn spawn_restore_registry(store: Arc<OwnershipStore>) -> ActorRef<RoomRegistryActor> {
+    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+        .expect("valid occupant-id secret");
+    let registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".to_string(),
+        secret,
+    ));
+    registry
+        .ask(WireClusteringClaims {
+            claim_store: Arc::new(InProcessClaimStore::new()) as Arc<dyn ClaimStore>,
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            durable_store: Some(store as Arc<dyn MucDurableStore>),
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire durable restore store");
+    registry
+}
+
+fn demand_room(room_jid: BareJid) -> GetOrCreateRoom {
+    GetOrCreateRoom {
+        room_jid,
+        waddle_id: "caller-waddle".to_string(),
+        channel_id: "caller-channel".to_string(),
+        config: RoomConfig::default(),
+    }
+}
+
+#[tokio::test]
+async fn xep0045_creator_classification_requires_absent_durable_room() {
+    let fresh_registry = spawn_restore_registry(Arc::new(OwnershipStore::new())).await;
+    let fresh_jid: BareJid = "fresh@muc.example.com".parse().expect("fresh room JID");
+    let fresh = fresh_registry
+        .ask(demand_room(fresh_jid))
+        .await
+        .expect("fresh acquisition");
+    assert_eq!(fresh.creation, RoomCreation::Created);
+
+    let restored_registry =
+        spawn_restore_registry(Arc::new(OwnershipStore::restoring(durable_existing_room()))).await;
+    let restored_jid: BareJid = "restored@muc.example.com"
+        .parse()
+        .expect("restored room JID");
+    let restored = restored_registry
+        .ask(demand_room(restored_jid))
+        .await
+        .expect("restored acquisition");
+    assert_eq!(restored.creation, RoomCreation::Existing);
+}
+
+#[tokio::test]
+async fn xep0045_exclusive_create_rejects_durable_existing_room() {
+    let registry =
+        spawn_restore_registry(Arc::new(OwnershipStore::restoring(durable_existing_room()))).await;
+    let room_jid: BareJid = "exclusive-existing@muc.example.com"
+        .parse()
+        .expect("room JID");
+
+    assert!(matches!(
+        registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "caller-waddle".to_string(),
+                channel_id: "caller-channel".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await,
+        Err(SendError::HandlerError(
+            RoomRegistryError::RoomAlreadyExists(ref existing)
+        )) if *existing == room_jid
+    ));
 }

@@ -134,6 +134,27 @@ pub trait MucDurableStore: Send + Sync {
         room_jid: &'a BareJid,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>>;
 
+    /// Load one authoritative room snapshot while proving that this store's
+    /// recorded claim fence is still current in the same database
+    /// transaction. Implementations must not split the ownership check and
+    /// snapshot read across transactions: a claim steal between those reads
+    /// would let a deposed actor install state owned by its successor.
+    ///
+    /// The default fails closed. Clustered stores must opt in explicitly;
+    /// in-memory test stores may delegate to [`Self::load_room_state`] when
+    /// their ownership model is controlled synchronously by the test.
+    fn load_room_state_fenced<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+        let _ = room_jid;
+        Box::pin(async {
+            Err(XmppError::internal(
+                "durable store does not implement fenced room-state loading",
+            ))
+        })
+    }
+
     /// Durably upsert the room's configuration (plus the `waddle_id`/
     /// `channel_id` it travels with).
     fn save_config<'a>(

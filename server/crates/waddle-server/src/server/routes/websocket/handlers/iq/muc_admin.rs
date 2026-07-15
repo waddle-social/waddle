@@ -163,13 +163,25 @@ pub(super) async fn handle_muc_admin_iq(
         Ok(query) => query,
         Err(error) => return vec![build_xmpp_error_response(&iq_with_from, error)],
     };
-    let Some(room_actor) = get_room_actor(state, &query.room_jid).await else {
-        return vec![build_iq_error_xml_typed(
-            iq.id(),
-            response_from,
-            response_to,
-            item_not_found_iq_error("Requested item not found."),
-        )];
+    let room_actor = match get_room_actor_result(state, &query.room_jid).await {
+        Ok(Some(room_actor)) => room_actor,
+        Ok(None) => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                item_not_found_iq_error("Requested item not found."),
+            )];
+        }
+        Err(error) => {
+            warn!(room = %query.room_jid, %error, "MUC admin room lookup failed");
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
     };
     let _config_guard = if query.is_get {
         None

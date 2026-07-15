@@ -692,7 +692,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             // another ownership CAS while RoomRegistry cleanup is in flight.
             let pending_room_handoffs = supervisor.shutdown_terminal().await;
             match terminal_room_registry
-                .drain_pending_reclaimed_rooms_for_shutdown(pending_room_handoffs)
+                .drain_room_ownership_for_shutdown(pending_room_handoffs)
                 .await
             {
                 Ok(outcome) if outcome.retained > 0 => {
@@ -1996,7 +1996,7 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
     let handoffs = supervisor.shutdown_terminal().await;
     assert_eq!(handoffs.len(), 1);
     let outcome = registry
-        .drain_pending_reclaimed_rooms_for_shutdown(handoffs)
+        .drain_room_ownership_for_shutdown(handoffs)
         .await
         .expect("drain transferred handoff");
 
@@ -2579,7 +2579,7 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
         .await
         .expect("wire room registry");
     room_registry
-        .drain_pending_reclaimed_rooms_for_shutdown(room_handoffs)
+        .drain_room_ownership_for_shutdown(room_handoffs)
         .await
         .expect("drain handoff after failed restart");
     assert!(room_claim_store

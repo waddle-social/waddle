@@ -77,7 +77,7 @@ impl AllowPm {
 /// timestamp) is **not** part of `RoomConfig` because it is mutated by
 /// the XEP-0045 §8.1 message-path, not by the owner-config form
 /// (§10.2). It lives on `MucRoom.subject` as `Option<SubjectState>`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomConfig {
     /// Room name (human-readable)
     pub name: String,
