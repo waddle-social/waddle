@@ -52,7 +52,7 @@ impl kameo::message::Message<PendingRoomOwnershipResponsibilityCountForTest> for
         _msg: PendingRoomOwnershipResponsibilityCountForTest,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.pending_room_ownership_responsibilities().len()
+        self.pending_room_ownership_responsibility_count_for_test()
     }
 }
 
@@ -2690,6 +2690,189 @@ mod ownership_claims_tests {
         for waiter in waiters {
             waiter.abort();
         }
+    }
+
+    #[test]
+    fn ownership_capacity_scan_stops_at_the_shared_cap() {
+        let responsibilities = (0..=MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES)
+            .map(|index| {
+                let room_jid = test_room_jid(&format!("bounded-scan-{index}"));
+                let claim_fence = room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1));
+                (room_jid, claim_fence)
+            })
+            .collect::<Vec<_>>();
+        let inspected = std::cell::Cell::new(0usize);
+        let mut pending = HashSet::with_capacity(MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES);
+
+        assert!(
+            !RoomRegistryActor::extend_pending_room_ownership_responsibilities_until_full(
+                &mut pending,
+                responsibilities.iter().map(|(room_jid, claim_fence)| {
+                    let next = inspected.get() + 1;
+                    assert!(
+                        next <= MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES,
+                        "capacity scan consumed an entry after reaching the shared cap"
+                    );
+                    inspected.set(next);
+                    PendingRoomOwnershipResponsibility::Exact {
+                        room_jid,
+                        claim_fence,
+                    }
+                }),
+            )
+        );
+        assert_eq!(inspected.get(), MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES);
+        assert_eq!(pending.len(), MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES);
+    }
+
+    #[test]
+    fn saturated_capacity_admits_existing_but_rejects_novel_responsibility() {
+        let mut registry = RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        );
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let room_jid = test_room_jid(&format!("saturated-release-{index}"));
+            let claim_fence = room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1));
+            registry.pending_room_releases.insert(
+                (room_jid, claim_fence),
+                PendingRoomReleaseState {
+                    retry_order: index as u64,
+                    first_pending_at: std::time::Instant::now(),
+                },
+            );
+        }
+        for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
+            registry
+                .pending_reclaimed_reservations
+                .insert(test_room_jid(&format!("saturated-reservation-{index}")));
+        }
+
+        assert!(!registry.can_admit_new_room_ownership_responsibility());
+        let ((existing_room_jid, existing_claim_fence), _) = registry
+            .pending_room_releases
+            .iter()
+            .next()
+            .expect("saturated release inventory is populated");
+        assert!(registry.can_admit_room_ownership_responsibility(
+            PendingRoomOwnershipResponsibility::Exact {
+                room_jid: existing_room_jid,
+                claim_fence: existing_claim_fence,
+            }
+        ));
+        let existing_reservation = registry
+            .pending_reclaimed_reservations
+            .iter()
+            .next()
+            .expect("saturated reservation inventory is populated");
+        assert!(registry.can_admit_room_ownership_responsibility(
+            PendingRoomOwnershipResponsibility::ReclaimedReservation(existing_reservation)
+        ));
+
+        let novel_room_jid = test_room_jid("saturated-novel");
+        let novel_claim_fence = room_claim_fence(&novel_room_jid, ClaimEpoch(999));
+        assert!(!registry.can_admit_room_ownership_responsibility(
+            PendingRoomOwnershipResponsibility::Exact {
+                room_jid: &novel_room_jid,
+                claim_fence: &novel_claim_fence,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn healthy_rooms_are_excluded_but_foreign_rooms_consume_capacity() {
+        let current_identity = this_identity();
+        let identity = SharedNodeIdentity::new(current_identity.clone());
+        let mut registry = RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        );
+        registry.node_identity = identity.clone();
+        for index in 0..=MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES {
+            let room_jid = test_room_jid(&format!("healthy-capacity-{index}"));
+            let actor_ref = RoomActor::spawn(RoomActor::new(
+                MucRoom::new(
+                    room_jid.clone(),
+                    "waddle".to_string(),
+                    "channel".to_string(),
+                    RoomConfig::default(),
+                ),
+                OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+            ));
+            registry.rooms.insert(
+                room_jid.clone(),
+                RoomEntry {
+                    actor_ref,
+                    claim_fence: RoomClaimFenceContext::new(
+                        Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                        current_identity.clone(),
+                        ClaimEpoch(index as i64 + 1),
+                    ),
+                },
+            );
+        }
+
+        assert!(registry.can_admit_new_room_ownership_responsibility());
+        identity.rotate(foreign_identity()).await;
+        assert!(!registry.can_admit_new_room_ownership_responsibility());
+        for entry in registry.rooms.values() {
+            entry.actor_ref.kill();
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_room_consumes_the_last_ownership_capacity_slot() {
+        let current_identity = this_identity();
+        let mut registry = RoomRegistryActor::new(
+            "muc.example.com".to_string(),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        );
+        registry.node_identity = SharedNodeIdentity::new(current_identity.clone());
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let room_jid = test_room_jid(&format!("dead-slot-release-{index}"));
+            registry.pending_room_releases.insert(
+                (
+                    room_jid.clone(),
+                    room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1)),
+                ),
+                PendingRoomReleaseState {
+                    retry_order: index as u64,
+                    first_pending_at: std::time::Instant::now(),
+                },
+            );
+        }
+        for index in 0..(MAX_PENDING_RECLAIMED_ROOMS - 1) {
+            registry
+                .pending_reclaimed_reservations
+                .insert(test_room_jid(&format!("dead-slot-reservation-{index}")));
+        }
+        let room_jid = test_room_jid("dead-slot-room");
+        let actor_ref = RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room_jid.clone(),
+                "waddle".to_string(),
+                "channel".to_string(),
+                RoomConfig::default(),
+            ),
+            OccupantIdSecret::for_testing(b"test-secret".to_vec()),
+        ));
+        registry.rooms.insert(
+            room_jid.clone(),
+            RoomEntry {
+                actor_ref: actor_ref.clone(),
+                claim_fence: RoomClaimFenceContext::new(
+                    Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                    current_identity,
+                    ClaimEpoch(999),
+                ),
+            },
+        );
+
+        assert!(registry.can_admit_new_room_ownership_responsibility());
+        actor_ref.kill();
+        actor_ref.wait_for_shutdown().await;
+        assert!(!actor_ref.is_alive());
+        assert!(!registry.can_admit_new_room_ownership_responsibility());
     }
 
     #[tokio::test]

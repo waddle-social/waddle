@@ -194,13 +194,13 @@ struct PendingRoomAcquisitionState {
     first_pending_at: std::time::Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum PendingRoomOwnershipResponsibility {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PendingRoomOwnershipResponsibility<'a> {
     Exact {
-        room_jid: BareJid,
-        claim_fence: super::RoomClaimFenceContext,
+        room_jid: &'a BareJid,
+        claim_fence: &'a super::RoomClaimFenceContext,
     },
-    ReclaimedReservation(BareJid),
+    ReclaimedReservation(&'a BareJid),
 }
 
 /// Actor that owns the mapping from room JIDs to per-room actors.
@@ -361,85 +361,128 @@ impl RoomRegistryActor {
             || (self.pending_room_releases.len() < MAX_PENDING_ROOM_RELEASES
                 && self.can_admit_room_ownership_responsibility(
                     PendingRoomOwnershipResponsibility::Exact {
-                        room_jid: room_jid.clone(),
-                        claim_fence: claim_fence.clone(),
+                        room_jid,
+                        claim_fence,
                     },
                 ))
     }
 
+    fn extend_pending_room_ownership_responsibilities_until_full<'a>(
+        pending: &mut HashSet<PendingRoomOwnershipResponsibility<'a>>,
+        responsibilities: impl IntoIterator<Item = PendingRoomOwnershipResponsibility<'a>>,
+    ) -> bool {
+        if pending.len() >= MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES {
+            return false;
+        }
+        for responsibility in responsibilities {
+            pending.insert(responsibility);
+            if pending.len() >= MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn has_pending_room_ownership_responsibility(
+        &self,
+        candidate: PendingRoomOwnershipResponsibility<'_>,
+    ) -> bool {
+        match candidate {
+            PendingRoomOwnershipResponsibility::Exact {
+                room_jid,
+                claim_fence,
+            } => {
+                let exact_key = ((*room_jid).clone(), (*claim_fence).clone());
+                self.pending_room_preparations
+                    .get(room_jid)
+                    .is_some_and(|pending| pending.claim_fence == *claim_fence)
+                    || self.pending_room_releases.contains_key(&exact_key)
+                    || self.pending_reclaimed_rooms.contains_key(&exact_key)
+                    || self.rooms.get(room_jid).is_some_and(|entry| {
+                        (!entry.actor_ref.is_alive()
+                            || entry.claim_fence.owner != self.node_identity.current())
+                            && entry.claim_fence == *claim_fence
+                    })
+            }
+            PendingRoomOwnershipResponsibility::ReclaimedReservation(room_jid) => {
+                self.pending_reclaimed_reservations.contains(room_jid)
+            }
+        }
+    }
+
     fn pending_room_ownership_responsibilities(
         &self,
-    ) -> HashSet<PendingRoomOwnershipResponsibility> {
-        let mut pending = HashSet::with_capacity(
-            self.pending_room_preparations.len()
-                + self.pending_room_releases.len()
-                + self.pending_reclaimed_rooms.len()
-                + self.pending_reclaimed_reservations.len(),
-        );
-        pending.extend(
-            self.pending_room_preparations
-                .iter()
-                .map(
-                    |(room_jid, preparation)| PendingRoomOwnershipResponsibility::Exact {
-                        room_jid: room_jid.clone(),
-                        claim_fence: preparation.claim_fence.clone(),
-                    },
-                ),
-        );
-        pending.extend(
-            self.pending_room_releases
-                .keys()
-                .map(
-                    |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
-                        room_jid: room_jid.clone(),
-                        claim_fence: claim_fence.clone(),
-                    },
-                ),
-        );
-        pending.extend(
-            self.pending_reclaimed_rooms
-                .keys()
-                .map(
-                    |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
-                        room_jid: room_jid.clone(),
-                        claim_fence: claim_fence.clone(),
-                    },
-                ),
-        );
-        pending.extend(
-            self.pending_reclaimed_reservations
-                .iter()
-                .cloned()
-                .map(PendingRoomOwnershipResponsibility::ReclaimedReservation),
-        );
+    ) -> impl Iterator<Item = PendingRoomOwnershipResponsibility<'_>> {
+        // Keep this lazy and borrowed: capacity checks stop consuming it at
+        // the shared cap instead of cloning every key or walking the rest of
+        // a saturated room inventory inside the registry mailbox turn.
         let current_identity = self.node_identity.current();
-        pending.extend(
-            self.rooms
-                .iter()
-                .filter(|(_, entry)| {
-                    !entry.actor_ref.is_alive() || entry.claim_fence.owner() != current_identity
-                })
-                .map(
-                    |(room_jid, entry)| PendingRoomOwnershipResponsibility::Exact {
-                        room_jid: room_jid.clone(),
-                        claim_fence: entry.claim_fence.clone(),
-                    },
-                ),
-        );
-        pending
+        self.pending_room_preparations
+            .iter()
+            .map(
+                |(room_jid, preparation)| PendingRoomOwnershipResponsibility::Exact {
+                    room_jid,
+                    claim_fence: &preparation.claim_fence,
+                },
+            )
+            .chain(
+                self.pending_room_releases
+                    .keys()
+                    .map(
+                        |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
+                            room_jid,
+                            claim_fence,
+                        },
+                    ),
+            )
+            .chain(
+                self.pending_reclaimed_rooms
+                    .keys()
+                    .map(
+                        |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
+                            room_jid,
+                            claim_fence,
+                        },
+                    ),
+            )
+            .chain(
+                self.pending_reclaimed_reservations
+                    .iter()
+                    .map(PendingRoomOwnershipResponsibility::ReclaimedReservation),
+            )
+            .chain(
+                self.rooms
+                    .iter()
+                    .filter(move |(_, entry)| {
+                        !entry.actor_ref.is_alive() || entry.claim_fence.owner != current_identity
+                    })
+                    .map(
+                        |(room_jid, entry)| PendingRoomOwnershipResponsibility::Exact {
+                            room_jid,
+                            claim_fence: &entry.claim_fence,
+                        },
+                    ),
+            )
+    }
+
+    fn has_room_ownership_responsibility_capacity(&self) -> bool {
+        let mut pending = HashSet::with_capacity(MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES);
+        Self::extend_pending_room_ownership_responsibilities_until_full(
+            &mut pending,
+            self.pending_room_ownership_responsibilities(),
+        )
     }
 
     fn can_admit_room_ownership_responsibility(
         &self,
-        candidate: PendingRoomOwnershipResponsibility,
+        candidate: PendingRoomOwnershipResponsibility<'_>,
     ) -> bool {
-        let pending = self.pending_room_ownership_responsibilities();
-        pending.contains(&candidate) || pending.len() < MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES
+        self.has_pending_room_ownership_responsibility(candidate)
+            || self.has_room_ownership_responsibility_capacity()
     }
 
     fn can_admit_new_room_ownership_responsibility(&self) -> bool {
-        self.pending_room_ownership_responsibilities().len()
-            < MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES
+        self.has_room_ownership_responsibility_capacity()
     }
 
     fn has_pending_preparation_capacity(
@@ -448,9 +491,16 @@ impl RoomRegistryActor {
         claim_fence: &super::RoomClaimFenceContext,
     ) -> bool {
         self.can_admit_room_ownership_responsibility(PendingRoomOwnershipResponsibility::Exact {
-            room_jid: room_jid.clone(),
-            claim_fence: claim_fence.clone(),
+            room_jid,
+            claim_fence,
         })
+    }
+
+    #[cfg(test)]
+    fn pending_room_ownership_responsibility_count_for_test(&self) -> usize {
+        self.pending_room_ownership_responsibilities()
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     fn preparation_waiter_capacity_available(pending: &PendingRoomPreparation) -> bool {
@@ -2775,7 +2825,7 @@ impl kameo::message::Message<ReservePendingReclaimedRoom> for RoomRegistryActor 
         if self.pending_reclaimed_rooms.len() + self.pending_reclaimed_reservations.len()
             >= MAX_PENDING_RECLAIMED_ROOMS
             || !self.can_admit_room_ownership_responsibility(
-                PendingRoomOwnershipResponsibility::ReclaimedReservation(msg.room_jid.clone()),
+                PendingRoomOwnershipResponsibility::ReclaimedReservation(&msg.room_jid),
             )
         {
             return false;
