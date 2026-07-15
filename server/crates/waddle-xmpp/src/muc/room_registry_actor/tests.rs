@@ -42,6 +42,20 @@ struct PendingPreparationWaitersForTest {
 
 struct PendingPreparationCountForTest;
 
+struct PendingRoomOwnershipResponsibilityCountForTest;
+
+impl kameo::message::Message<PendingRoomOwnershipResponsibilityCountForTest> for RoomRegistryActor {
+    type Reply = usize;
+
+    async fn handle(
+        &mut self,
+        _msg: PendingRoomOwnershipResponsibilityCountForTest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.pending_room_ownership_responsibilities().len()
+    }
+}
+
 impl kameo::message::Message<PendingPreparationCountForTest> for RoomRegistryActor {
     type Reply = usize;
 
@@ -2734,10 +2748,286 @@ mod ownership_claims_tests {
                 RoomRegistryError::OwnershipReconciliationPending(ref room)
             )) if *room == overflow_jid
         ));
+        assert!(!registry
+            .ask(ReservePendingReclaimedRoom {
+                room_jid: test_room_jid("bounded-reclaimed-overflow"),
+            })
+            .await
+            .expect("reclaimed admission observes the same global bound"));
+        let release_overflow_jid = test_room_jid("bounded-release-overflow");
+        assert!(!registry
+            .ask(RememberOrdinaryReleaseForTest {
+                room_jid: release_overflow_jid.clone(),
+                claim_fence: room_claim_fence(&release_overflow_jid, ClaimEpoch(999)),
+            })
+            .await
+            .expect("ordinary release admission observes the same global bound"));
         registry.kill();
         for task in pending {
             task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn reclaimed_and_release_responsibilities_exhaust_preparation_capacity() {
+        let registry = spawn_registry().await;
+        for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
+            let room_jid = test_room_jid(&format!("bounded-reclaimed-{index}"));
+            assert!(registry
+                .ask(ReservePendingReclaimedRoom {
+                    room_jid: room_jid.clone(),
+                })
+                .await
+                .expect("reserve reclaimed room"));
+            if index % 2 == 0 {
+                registry
+                    .ask(RememberPendingReclaimedRoom {
+                        room_jid: room_jid.clone(),
+                        claim_fence: room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1)),
+                        previous_owner: foreign_identity(),
+                    })
+                    .await
+                    .expect("replace reservation with exact reclaimed responsibility");
+            }
+        }
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let room_jid = test_room_jid(&format!("bounded-release-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: room_jid.clone(),
+                    claim_fence: room_claim_fence(&room_jid, ClaimEpoch(index as i64 + 1)),
+                })
+                .await
+                .expect("remember release"));
+        }
+        wire_recording_store(&registry, Arc::new(RecordingDurableStore::default())).await;
+
+        let overflow_jid = test_room_jid("reclaimed-preparation-overflow");
+        assert!(matches!(
+            registry.ask(get_or_create(overflow_jid.clone())).await,
+            Err(SendError::HandlerError(
+                RoomRegistryError::OwnershipReconciliationPending(ref room)
+            )) if *room == overflow_jid
+        ));
+        registry.kill();
+    }
+
+    #[tokio::test]
+    async fn reclaimed_preparation_overlap_counts_each_exact_fence_once() {
+        let registry = spawn_registry().await;
+        let epoch = ClaimEpoch(301);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), epoch));
+        let allow_load = Arc::new(tokio::sync::Notify::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("bounded-overlap")),
+            block_all_loads: true,
+            allow_load: Some(Arc::clone(&allow_load)),
+            ..RecordingDurableStore::default()
+        });
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: claim_store as Arc<dyn ClaimStore>,
+                node_identity: SharedNodeIdentity::new(this_identity()),
+                durable_store: Some(durable_store as Arc<dyn MucDurableStore>),
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let room_jid = test_room_jid("bounded-overlap");
+        let claim_fence = room_claim_fence(&room_jid, epoch);
+        registry
+            .ask(RememberPendingReclaimedRoom {
+                room_jid: room_jid.clone(),
+                claim_fence: claim_fence.clone(),
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("remember exact reclaimed responsibility");
+
+        let reconcile_registry = registry.clone();
+        let reconcile_jid = room_jid.clone();
+        let reconcile_fence = claim_fence.clone();
+        let reconcile = tokio::spawn(async move {
+            reconcile_registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: reconcile_jid,
+                    claim_fence: reconcile_fence,
+                    previous_owner: foreign_identity(),
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if registry
+                    .ask(PendingPreparationCountForTest)
+                    .await
+                    .expect("preparation count")
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reclaimed room reaches blocked preparation");
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("responsibility count"),
+            1,
+            "one exact fence present in reclaimed and preparation state consumes one slot"
+        );
+
+        registry
+            .ask(RememberPendingReclaimedRoom {
+                room_jid: room_jid.clone(),
+                claim_fence: room_claim_fence(&room_jid, ClaimEpoch(epoch.0 + 1)),
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("remember newer exact generation");
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("responsibility count"),
+            2,
+            "different exact fences for one room remain distinct responsibilities"
+        );
+
+        registry.kill();
+        reconcile.abort();
+    }
+
+    async fn saturated_registry_with_deposed_room(
+        name: &str,
+    ) -> (
+        ActorRef<RoomRegistryActor>,
+        Arc<DeadOwnerClaimStore>,
+        SharedNodeIdentity,
+        BareJid,
+        NodeIdentity,
+    ) {
+        let registry = spawn_registry().await;
+        let owner = this_identity();
+        let identity = SharedNodeIdentity::new(owner.clone());
+        let claim_store = Arc::new(DeadOwnerClaimStore::empty());
+        registry
+            .ask(WireClusteringClaims {
+                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+                node_identity: identity.clone(),
+                durable_store: None,
+                rollout_backoff: None,
+            })
+            .await
+            .expect("wire");
+        let room_jid = test_room_jid(name);
+        registry
+            .ask(get_or_create(room_jid.clone()))
+            .await
+            .expect("create room before saturation");
+        for index in 0..MAX_PENDING_ROOM_RELEASES {
+            let release_jid = test_room_jid(&format!("{name}-release-{index}"));
+            assert!(registry
+                .ask(RememberOrdinaryReleaseForTest {
+                    room_jid: release_jid.clone(),
+                    claim_fence: room_claim_fence(&release_jid, ClaimEpoch(index as i64 + 1),),
+                })
+                .await
+                .expect("fill release inventory"));
+        }
+        for index in 0..MAX_PENDING_RECLAIMED_ROOMS {
+            assert!(registry
+                .ask(ReservePendingReclaimedRoom {
+                    room_jid: test_room_jid(&format!("{name}-reclaimed-{index}")),
+                })
+                .await
+                .expect("fill reclaimed inventory"));
+        }
+        identity.rotate(foreign_identity()).await;
+        claim_store.fail_next_release();
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("saturated responsibility count"),
+            MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
+            "identity rotation turns the live old-identity room into one additional retained responsibility"
+        );
+        (registry, claim_store, identity, room_jid, owner)
+    }
+
+    #[tokio::test]
+    async fn saturated_demotion_retains_failed_exact_release() {
+        let (registry, claim_store, _identity, room_jid, owner) =
+            saturated_registry_with_deposed_room("saturated-demotion").await;
+
+        assert!(registry
+            .ask(DemoteRoomIfOwner {
+                room_jid: room_jid.clone(),
+                owner,
+            })
+            .await
+            .expect("demote old-identity room"));
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("deposed fence remains typed"));
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("post-demotion responsibility count"),
+            MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
+            "moving the deposed entry into release state is slot-neutral"
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, room_jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_some());
+        registry.kill();
+    }
+
+    #[tokio::test]
+    async fn saturated_deposed_eviction_retains_failed_exact_release() {
+        let (registry, claim_store, _identity, room_jid, _owner) =
+            saturated_registry_with_deposed_room("saturated-deposed-eviction").await;
+
+        assert_eq!(
+            registry
+                .ask(DestroyRoom {
+                    room_jid: room_jid.clone(),
+                    reason: DestroyRoomReason::DeposedEviction,
+                })
+                .await
+                .expect("evict deposed room"),
+            DestroyRoomOutcome::Destroyed
+        );
+        assert!(registry
+            .ask(IsPendingRoomReleaseOnly {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .expect("deposed fence remains typed"));
+        assert_eq!(
+            registry
+                .ask(PendingRoomOwnershipResponsibilityCountForTest)
+                .await
+                .expect("post-eviction responsibility count"),
+            MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES + 1,
+            "deposed eviction transfers rather than discards the saturated responsibility"
+        );
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, room_jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_some());
+        registry.kill();
     }
 
     #[tokio::test]

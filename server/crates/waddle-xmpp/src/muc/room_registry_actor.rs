@@ -194,6 +194,15 @@ struct PendingRoomAcquisitionState {
     first_pending_at: std::time::Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PendingRoomOwnershipResponsibility {
+    Exact {
+        room_jid: BareJid,
+        claim_fence: super::RoomClaimFenceContext,
+    },
+    ReclaimedReservation(BareJid),
+}
+
 /// Actor that owns the mapping from room JIDs to per-room actors.
 ///
 /// All room creation, lookup, and destruction flows through this actor,
@@ -349,12 +358,99 @@ impl RoomRegistryActor {
     ) -> bool {
         self.pending_room_releases
             .contains_key(&(room_jid.clone(), claim_fence.clone()))
-            || self.pending_room_releases.len() < MAX_PENDING_ROOM_RELEASES
+            || (self.pending_room_releases.len() < MAX_PENDING_ROOM_RELEASES
+                && self.can_admit_room_ownership_responsibility(
+                    PendingRoomOwnershipResponsibility::Exact {
+                        room_jid: room_jid.clone(),
+                        claim_fence: claim_fence.clone(),
+                    },
+                ))
     }
 
-    fn has_pending_preparation_capacity(&self) -> bool {
-        self.pending_room_preparations.len() + self.pending_room_releases.len()
+    fn pending_room_ownership_responsibilities(
+        &self,
+    ) -> HashSet<PendingRoomOwnershipResponsibility> {
+        let mut pending = HashSet::with_capacity(
+            self.pending_room_preparations.len()
+                + self.pending_room_releases.len()
+                + self.pending_reclaimed_rooms.len()
+                + self.pending_reclaimed_reservations.len(),
+        );
+        pending.extend(
+            self.pending_room_preparations
+                .iter()
+                .map(
+                    |(room_jid, preparation)| PendingRoomOwnershipResponsibility::Exact {
+                        room_jid: room_jid.clone(),
+                        claim_fence: preparation.claim_fence.clone(),
+                    },
+                ),
+        );
+        pending.extend(
+            self.pending_room_releases
+                .keys()
+                .map(
+                    |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
+                        room_jid: room_jid.clone(),
+                        claim_fence: claim_fence.clone(),
+                    },
+                ),
+        );
+        pending.extend(
+            self.pending_reclaimed_rooms
+                .keys()
+                .map(
+                    |(room_jid, claim_fence)| PendingRoomOwnershipResponsibility::Exact {
+                        room_jid: room_jid.clone(),
+                        claim_fence: claim_fence.clone(),
+                    },
+                ),
+        );
+        pending.extend(
+            self.pending_reclaimed_reservations
+                .iter()
+                .cloned()
+                .map(PendingRoomOwnershipResponsibility::ReclaimedReservation),
+        );
+        let current_identity = self.node_identity.current();
+        pending.extend(
+            self.rooms
+                .iter()
+                .filter(|(_, entry)| {
+                    !entry.actor_ref.is_alive() || entry.claim_fence.owner() != current_identity
+                })
+                .map(
+                    |(room_jid, entry)| PendingRoomOwnershipResponsibility::Exact {
+                        room_jid: room_jid.clone(),
+                        claim_fence: entry.claim_fence.clone(),
+                    },
+                ),
+        );
+        pending
+    }
+
+    fn can_admit_room_ownership_responsibility(
+        &self,
+        candidate: PendingRoomOwnershipResponsibility,
+    ) -> bool {
+        let pending = self.pending_room_ownership_responsibilities();
+        pending.contains(&candidate) || pending.len() < MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES
+    }
+
+    fn can_admit_new_room_ownership_responsibility(&self) -> bool {
+        self.pending_room_ownership_responsibilities().len()
             < MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES
+    }
+
+    fn has_pending_preparation_capacity(
+        &self,
+        room_jid: &BareJid,
+        claim_fence: &super::RoomClaimFenceContext,
+    ) -> bool {
+        self.can_admit_room_ownership_responsibility(PendingRoomOwnershipResponsibility::Exact {
+            room_jid: room_jid.clone(),
+            claim_fence: claim_fence.clone(),
+        })
     }
 
     fn preparation_waiter_capacity_available(pending: &PendingRoomPreparation) -> bool {
@@ -373,6 +469,10 @@ impl RoomRegistryActor {
     async fn retire_ownership_lost_entry(&mut self, room_jid: &BareJid, entry: RoomEntry) {
         entry.actor_ref.kill();
         if entry.claim_fence.owner() != self.node_identity.current() {
+            self.transfer_exact_responsibility_to_pending_release(
+                room_jid.clone(),
+                entry.claim_fence.clone(),
+            );
             self.release_room_claim(room_jid, &entry.claim_fence).await;
         } else if let Some(store) = &self.durable_store {
             store.forget_claim_fence(room_jid, &entry.claim_fence);
@@ -405,11 +505,11 @@ impl RoomRegistryActor {
         true
     }
 
-    /// Move an already-admitted pending preparation into exact-release
-    /// responsibility. The caller removes the preparation first, so replacing
-    /// it with this release entry cannot increase the combined bounded
-    /// ownership-responsibility inventory.
-    fn transfer_preparation_to_pending_release(
+    /// Move an already-retained exact fence from a preparation or deposed
+    /// room entry into release state. The caller removes the prior
+    /// representation in the same mailbox turn, so the transfer cannot lose
+    /// responsibility even when ordinary release admission is saturated.
+    fn transfer_exact_responsibility_to_pending_release(
         &mut self,
         room_jid: BareJid,
         claim_fence: super::RoomClaimFenceContext,
@@ -1178,7 +1278,7 @@ impl RoomRegistryActor {
         registry_ref: &ActorRef<Self>,
     ) -> Result<DemandRoomPreparation, RoomRegistryError> {
         let has_async_work = self.durable_store.is_some() || self.membership_source.is_some();
-        if has_async_work && !self.has_pending_preparation_capacity() {
+        if has_async_work && !self.can_admit_new_room_ownership_responsibility() {
             return Err(RoomRegistryError::OwnershipReconciliationPending(
                 room_jid.clone(),
             ));
@@ -1316,7 +1416,7 @@ impl RoomRegistryActor {
     ) {
         debug_assert!(
             self.pending_room_preparations.contains_key(&room_jid)
-                || self.has_pending_preparation_capacity(),
+                || self.has_pending_preparation_capacity(&room_jid, &claim_fence),
             "pending room preparation inventory must be reserved before claim acquisition"
         );
         let generation = self.next_preparation_generation();
@@ -1741,7 +1841,10 @@ impl RoomRegistryActor {
         let claim_fence = pending.claim_fence;
         drop(pending.guard);
         self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-        self.transfer_preparation_to_pending_release(room_jid.clone(), claim_fence.clone());
+        self.transfer_exact_responsibility_to_pending_release(
+            room_jid.clone(),
+            claim_fence.clone(),
+        );
         self.start_detached_room_release(room_jid.clone(), claim_fence, registry_ref);
         Self::reply_preparation_failure(
             &room_jid,
@@ -1777,7 +1880,7 @@ impl RoomRegistryActor {
                         self.rooms.remove(&room_jid);
                     }
                     actor_ref.kill();
-                    self.transfer_preparation_to_pending_release(
+                    self.transfer_exact_responsibility_to_pending_release(
                         room_jid.clone(),
                         claim_fence.clone(),
                     );
@@ -1787,7 +1890,7 @@ impl RoomRegistryActor {
             Err(error) => {
                 let reclaimed_outcome = match origin {
                     RoomPreparationOrigin::Demand { .. } => {
-                        self.transfer_preparation_to_pending_release(
+                        self.transfer_exact_responsibility_to_pending_release(
                             room_jid.clone(),
                             claim_fence.clone(),
                         );
@@ -1808,7 +1911,7 @@ impl RoomRegistryActor {
                         }
                         RoomPublicationError::LocalIdentityChanged => {
                             self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-                            self.transfer_preparation_to_pending_release(
+                            self.transfer_exact_responsibility_to_pending_release(
                                 room_jid.clone(),
                                 claim_fence.clone(),
                             );
@@ -1985,10 +2088,11 @@ impl kameo::message::Message<CompleteDetachedRoomRelease> for RoomRegistryActor 
 pub const MAX_PENDING_RECLAIMED_ROOMS: usize = 128;
 pub const MAX_PENDING_ROOM_RELEASES: usize = 128;
 pub const MAX_PENDING_ROOM_ACQUISITIONS: usize = 128;
-/// Combined cap for unpublished room preparations and exact terminal-release
-/// responsibilities. Reclaimed-reservation transfers may fill up to two
-/// ordinary release pages, so the shared cap admits that existing bounded
-/// worst case without allowing detached preparations to grow it further.
+/// Combined admission cap for unique unpublished-room, exact terminal, and
+/// unfenced reclaimed-reservation responsibilities. The same exact fence can
+/// temporarily appear in both reclaimed and preparation/release state during
+/// a representation transfer; it consumes one slot, while different fences
+/// remain distinct.
 pub const MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES: usize =
     MAX_PENDING_ROOM_RELEASES + MAX_PENDING_RECLAIMED_ROOMS;
 pub const MAX_ROOM_PREPARATION_WAITERS: usize = 64;
@@ -2369,7 +2473,7 @@ impl RoomRegistryActor {
             );
             drop(pending.guard);
             self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-            self.transfer_preparation_to_pending_release(room_jid, claim_fence);
+            self.transfer_exact_responsibility_to_pending_release(room_jid, claim_fence);
         }
         for pending in pending_handoffs {
             self.remember_pending_reclaimed_room(
@@ -2670,6 +2774,9 @@ impl kameo::message::Message<ReservePendingReclaimedRoom> for RoomRegistryActor 
         }
         if self.pending_reclaimed_rooms.len() + self.pending_reclaimed_reservations.len()
             >= MAX_PENDING_RECLAIMED_ROOMS
+            || !self.can_admit_room_ownership_responsibility(
+                PendingRoomOwnershipResponsibility::ReclaimedReservation(msg.room_jid.clone()),
+            )
         {
             return false;
         }
@@ -2936,7 +3043,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             return ctx.reply(ReclaimedRoomOutcome::PendingRetry);
         }
 
-        if !self.has_pending_preparation_capacity() {
+        if !self.has_pending_preparation_capacity(&msg.room_jid, &claim_fence) {
             self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
             return ctx.reply(ReclaimedRoomOutcome::PendingRetry);
         }
@@ -2978,7 +3085,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                 }
                 Err(RoomPublicationError::LocalIdentityChanged) => {
                     self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-                    self.transfer_preparation_to_pending_release(
+                    self.transfer_exact_responsibility_to_pending_release(
                         msg.room_jid.clone(),
                         claim_fence.clone(),
                     );
@@ -3290,7 +3397,10 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
             );
             drop(pending.guard);
             self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-            self.transfer_preparation_to_pending_release(msg.room_jid.clone(), claim_fence.clone());
+            self.transfer_exact_responsibility_to_pending_release(
+                msg.room_jid.clone(),
+                claim_fence.clone(),
+            );
             self.start_detached_room_release(
                 msg.room_jid.clone(),
                 claim_fence,
@@ -3637,7 +3747,10 @@ impl kameo::message::Message<DemoteRoomIfOwner> for RoomRegistryActor {
             );
             drop(pending.guard);
             self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-            self.transfer_preparation_to_pending_release(msg.room_jid.clone(), claim_fence.clone());
+            self.transfer_exact_responsibility_to_pending_release(
+                msg.room_jid.clone(),
+                claim_fence.clone(),
+            );
             self.start_detached_room_release(
                 msg.room_jid.clone(),
                 claim_fence,
