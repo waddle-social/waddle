@@ -1,6 +1,7 @@
 package social.waddle.android.feature.conversation
 
 import social.waddle.android.client.SendResult
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 
 /** Transport seam of a conversation screen (MUC channel or 1:1 DM). */
@@ -26,4 +27,10 @@ interface ConversationIo {
      * from the topology, not recency).
      */
     fun recordConversationSeen() {}
+
+    /**
+     * XEP-0085: best-effort, live-session-only typing notification
+     * (a stale state must never queue for replay).
+     */
+    suspend fun sendChatState(state: WaddleChatState) {}
 }

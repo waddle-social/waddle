@@ -2,11 +2,13 @@ package social.waddle.android.feature.conversation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -28,6 +30,7 @@ open class ConversationViewModel(
     events: SharedFlow<XmppEvent>,
     private val unreadStore: UnreadStore,
     private val io: ConversationIo,
+    typingNames: Flow<List<String>> = emptyFlow(),
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -44,6 +47,15 @@ open class ConversationViewModel(
     private var nextLocalId = 0L
     private val ackedIds = mutableSetOf<String>()
     private val failedIds = mutableSetOf<String>()
+
+    private val typingNotifier = ComposerTypingNotifier(
+        scope = viewModelScope,
+        sendState = { state -> io.sendChatState(state) },
+    )
+
+    /** Peers currently composing in this conversation (XEP-0085). */
+    val typing: StateFlow<List<String>> =
+        typingNames.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val uiState: StateFlow<ConversationUiState> =
         combine(timeline, pending, history) { items, unconfirmed, load ->
@@ -167,6 +179,9 @@ open class ConversationViewModel(
                 updatePending(message.localId) { it.copy(failed = true) }
                 return@launch
             }
+            // Delivered (or queued for replay): typing ended with content,
+            // not a pause — emit `active` (web parity).
+            typingNotifier.onMessageSent()
             updatePending(message.localId) {
                 it.copy(
                     stanzaId = trackedId,
@@ -178,6 +193,11 @@ open class ConversationViewModel(
                 )
             }
         }
+    }
+
+    /** The composer's text changed: drive the XEP-0085 state machine. */
+    fun onDraftChanged() {
+        typingNotifier.onTyping()
     }
 
     /** Re-send a failed optimistic message. */

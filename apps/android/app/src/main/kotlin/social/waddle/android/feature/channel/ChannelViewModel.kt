@@ -8,6 +8,7 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 
 /** MUC channel conversation: joins on open, room MAM, groupchat sends. */
@@ -22,6 +23,7 @@ class ChannelViewModel(
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
     io = ChannelIo(sessionManager, roomJid, nick),
+    typingNames = sessionManager.chatStateStore.composingNames(roomJid),
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -54,4 +56,8 @@ private class ChannelIo(
 
     override suspend fun send(body: String): SendResult =
         sessionManager.sendGroupchatMessage(roomJid, body)
+
+    override suspend fun sendChatState(state: WaddleChatState) {
+        sessionManager.sendChatState(roomJid, isGroupchat = true, state = state)
+    }
 }

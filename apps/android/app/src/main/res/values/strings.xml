@@ -42,6 +42,8 @@
 
     <!-- Conversation -->
     <string name="composer_placeholder">Message</string>
+    <string name="typing_one">%1$s is typing…</string>
+    <string name="typing_many">%1$s are typing…</string>
     <string name="composer_send">Send</string>
     <string name="message_unknown_sender">Unknown</string>
     <string name="message_author_me">You</string>

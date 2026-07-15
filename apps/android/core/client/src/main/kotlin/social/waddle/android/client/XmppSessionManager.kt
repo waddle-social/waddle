@@ -13,6 +13,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -40,15 +41,18 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
+import social.waddle.android.client.store.ChatStateStore
 import social.waddle.android.client.store.DmStore
 import social.waddle.android.client.store.PresenceStore
 import social.waddle.android.client.store.RoomStore
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.android.client.store.isTimelineMutation
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSmResumeState
@@ -76,6 +80,7 @@ class XmppSessionManager(
     val presenceStore = PresenceStore()
     val dmStore = DmStore()
     val unreadStore = UnreadStore()
+    val chatStateStore = ChatStateStore()
 
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val cursorTracker = ResumeCursorTracker()
@@ -143,6 +148,7 @@ class XmppSessionManager(
         _appState.value = WaddleAppState.Ready
         scope.launch { persistResumeSnapshots(resumeSnapshots) }
         scope.launch { persistResumeCursors(cursorWrites) }
+        scope.launch { sweepChatStates() }
         scope.launch { runConnectionLoop(session) }
     }
 
@@ -297,6 +303,22 @@ class XmppSessionManager(
     /** 1:1 chat twin of [sendGroupchatMessage]. */
     suspend fun sendChatMessage(peerJid: String, body: String): SendResult =
         sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
+
+    /**
+     * XEP-0085 typing notification: best-effort and live-session-only —
+     * a stale typing state must never replay from a queue, so a
+     * disconnected send is simply dropped (web parity).
+     */
+    suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): Boolean {
+        val client = activeClient ?: return false
+        return try {
+            client.sendChatState(conversationJid, state, isGroupchat)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     /**
      * One manager-level send: the client stanza id is generated HERE
@@ -576,6 +598,7 @@ class XmppSessionManager(
                     to = message.to,
                     isGroupchat = message.isMuc || message.messageType == "groupchat",
                 )?.let { key ->
+                    trackChatState(key, message)
                     if (message.body != null) {
                         // Replays the timeline deduped (XEP-0198 resume)
                         // must not inflate the badge for a message that
@@ -614,6 +637,35 @@ class XmppSessionManager(
             else -> Unit
         }
         _events.tryEmit(event)
+    }
+
+    /**
+     * XEP-0085 bookkeeping from the fan-out: a `composing` state adds
+     * the sender to the conversation's typing set, anything else — a
+     * different state or a real message — removes them. Sender display
+     * name is the MUC nick or the DM peer's localpart.
+     */
+    private fun trackChatState(key: ConversationKey, message: WaddleMessage) {
+        val from = message.from ?: return
+        val sender = resourcepart(from) ?: bareJid(from).substringBefore('@')
+        val state = message.chatState
+        if (state != null) {
+            chatStateStore.onChatState(key.jid, sender, state, key.isMine)
+        }
+        if (message.body != null && !key.isMine) {
+            chatStateStore.onLiveMessage(key.jid, sender)
+        }
+    }
+
+    /**
+     * 1s expiry ticker for incoming typing indicators, alive for the
+     * session; skips work (and publishes nothing) while nobody types.
+     */
+    private suspend fun sweepChatStates() {
+        while (true) {
+            delay(CHAT_STATE_SWEEP_MILLIS)
+            chatStateStore.sweep()
+        }
     }
 
     /**
@@ -802,6 +854,7 @@ class XmppSessionManager(
         presenceStore.clear()
         dmStore.clear()
         unreadStore.clearAll()
+        chatStateStore.clear()
         cursorTracker.clear()
     }
 
@@ -818,6 +871,9 @@ class XmppSessionManager(
 
         /** Newest page per conversation on fresh-stream catch-up. */
         const val CATCHUP_PAGE_SIZE = 50u
+
+        /** Incoming-typing expiry tick (XEP-0085 indicator sweep). */
+        const val CHAT_STATE_SWEEP_MILLIS = 1_000L
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = 3

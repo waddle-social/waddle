@@ -25,7 +25,11 @@ import social.waddle.android.R
 
 /** Text input row + send button (send clears the draft optimistically). */
 @Composable
-fun MessageComposer(onSend: (String) -> Unit, modifier: Modifier = Modifier) {
+fun MessageComposer(
+    onSend: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    onDraftChanged: () -> Unit = {},
+) {
     var draft by rememberSaveable { mutableStateOf("") }
 
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth()) {
@@ -38,7 +42,10 @@ fun MessageComposer(onSend: (String) -> Unit, modifier: Modifier = Modifier) {
         ) {
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it },
+                onValueChange = { value ->
+                    if (value != draft) onDraftChanged()
+                    draft = value
+                },
                 modifier = Modifier.weight(1f),
                 placeholder = { Text(text = stringResource(R.string.composer_placeholder)) },
                 maxLines = 5,

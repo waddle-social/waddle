@@ -7,6 +7,7 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 
 /** 1:1 DM conversation: DM MAM paging and chat sends (no join step). */
@@ -20,6 +21,7 @@ class DmViewModel(
     events = sessionManager.events,
     unreadStore = sessionManager.unreadStore,
     io = DmIo(sessionManager, peerJid),
+    typingNames = sessionManager.chatStateStore.composingNames(peerJid),
     onConversationRead = onConversationRead,
 ) {
     companion object {
@@ -46,5 +48,9 @@ private class DmIo(
 
     override fun recordConversationSeen() {
         sessionManager.recordDmSeen(peerJid)
+    }
+
+    override suspend fun sendChatState(state: WaddleChatState) {
+        sessionManager.sendChatState(peerJid, isGroupchat = false, state = state)
     }
 }

@@ -35,6 +35,7 @@ fun ConversationScreen(
     onBack: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val typing by viewModel.typing.collectAsStateWithLifecycle()
 
     LifecycleResumeEffect(viewModel) {
         viewModel.onConversationVisible()
@@ -72,7 +73,11 @@ fun ConversationScreen(
                 onRetry = viewModel::retry,
                 modifier = Modifier.weight(1f),
             )
-            MessageComposer(onSend = viewModel::send)
+            TypingIndicator(names = typing)
+            MessageComposer(
+                onSend = viewModel::send,
+                onDraftChanged = viewModel::onDraftChanged,
+            )
         }
     }
 }
