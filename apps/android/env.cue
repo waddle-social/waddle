@@ -236,16 +236,17 @@ schema.#Project & {
 				  --title "Android debug ${sha}" \
 				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (stable URL: releases/latest/download/waddle-android-debug.apk; shared debug signature, no uninstall needed)" \
 				  "${apk}#waddle-android-debug.apk"
-				# Prune older rolling releases beyond the newest 10 (their
-				# tags stay reserved by immutable releases, which is fine —
-				# we never reuse a tag). Wrapped so a transient list/delete
-				# error can never fail the build after a successful publish.
+				# Prune older rolling releases beyond the newest 10, tag and
+				# all (--cleanup-tag): the tags are never reused, so there
+				# is no downside to deleting them and it keeps the ref list
+				# bounded. Wrapped so a transient list/delete error can
+				# never fail the build after a successful publish.
 				{
 				  gh release list --limit 100 --json tagName,createdAt \
 				    --jq '[.[] | select(.tagName | startswith("android-b"))]
 				          | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' \
 				  | while read -r old; do
-				      [ -n "${old}" ] && gh release delete "${old}" --yes || true
+				      [ -n "${old}" ] && gh release delete "${old}" --yes --cleanup-tag || true
 				    done
 				} || true
 				"""#]
