@@ -5,7 +5,8 @@
 //! issue #720) with their XEP-0492 fallback notification mode; set
 //! verbs delegate to the shared read/modify/write flows in
 //! `waddle_xmpp_client::notification_settings`, driving them with the
-//! connected [`ClientHandle`] (its `CommandDriver` impl). The wire
+//! connected [`ClientHandle`] behind a timeout-bounding
+//! [`CommandDriver`] adapter. The wire
 //! semantics — §3-preserving merges, sparse DM retract, publish-option
 //! preconditions — live entirely in the core crate; this module only
 //! parses untyped FFI inputs into typed values and maps the typed core
@@ -21,6 +22,7 @@ use waddle_xmpp_client::notification_settings::{
     SetDmNotificationMode, SetDmNotificationModeOutcome, SetRoomNotificationMode,
     SetRoomNotificationModeOutcome,
 };
+use waddle_xmpp_client::push::CommandDriver;
 use waddle_xmpp_client::xep::xep0402::{
     build_fetch_bookmarks_iq, parse_bookmarks_response, BookmarkItem,
 };
@@ -28,11 +30,27 @@ use waddle_xmpp_client::xep::xep0492::{
     build_fetch_dm_bookmarks_iq, read_dm_bookmark_notify, surface_bookmark_notify,
     surface_dm_notify, NotifyMode,
 };
-use waddle_xmpp_client::{ClientError, ClientResult};
+use waddle_xmpp_client::{ClientError, ClientHandle, ClientResult};
 
 use crate::error::client_error_to_waddle;
 use crate::messaging_verbs::send_iq_with_timeout;
 use crate::{WaddleClient, WaddleError};
+
+/// [`CommandDriver`] adapter that bounds every IQ round-trip of the
+/// core read/modify/write flows with the crate's fetch-style timeout.
+/// `ClientHandle::send_iq` has no request-level timeout, and the set
+/// verbs issue two-to-three sequential IQs — a server that accepts
+/// but never answers would otherwise suspend the caller forever
+/// (same invariant as `messaging_verbs::send_iq_with_timeout`).
+struct TimeoutCommandDriver {
+    handle: ClientHandle,
+}
+
+impl CommandDriver for TimeoutCommandDriver {
+    async fn send_iq(&self, iq: Element) -> ClientResult<Element> {
+        send_iq_with_timeout(&self.handle, iq).await
+    }
+}
 
 /// XEP-0492 §2.1 fallback notification setting (no `identity-*`
 /// attrs). FFI mirror of [`NotifyMode`].
@@ -336,7 +354,8 @@ impl WaddleClient {
             mode: mode.into(),
             rich_payload_opt_in,
         };
-        match set_room_notification_mode(&handle, options).await {
+        let driver = TimeoutCommandDriver { handle };
+        match set_room_notification_mode(&driver, options).await {
             Ok(outcome) => Ok(room_outcome_to_ffi(outcome)),
             Err(e) => Err(client_error_to_waddle(&e)),
         }
@@ -362,7 +381,8 @@ impl WaddleClient {
             mode: mode.into(),
             rich_payload_opt_in,
         };
-        match set_dm_notification_mode(&handle, options).await {
+        let driver = TimeoutCommandDriver { handle };
+        match set_dm_notification_mode(&driver, options).await {
             Ok(outcome) => Ok(dm_outcome_to_ffi(outcome)),
             Err(e) => Err(client_error_to_waddle(&e)),
         }
