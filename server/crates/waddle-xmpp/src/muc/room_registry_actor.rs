@@ -530,6 +530,34 @@ impl RoomRegistryActor {
         }
     }
 
+    /// Retire an unpublished fence after a terminal ownership result.
+    ///
+    /// A same-identity database miss proves the exact tuple is already gone.
+    /// A different current identity only proves this process can no longer
+    /// serve the old incarnation; its exact tuple may still need a safe,
+    /// conditional release. Preserve that responsibility until release
+    /// succeeds or proves the tuple no longer exists.
+    fn finish_unpublished_ownership_loss(
+        &mut self,
+        room_jid: BareJid,
+        claim_fence: super::RoomClaimFenceContext,
+        registry_ref: ActorRef<Self>,
+    ) -> ReclaimedRoomOutcome {
+        if claim_fence.owner() != self.node_identity.current() {
+            self.transfer_exact_responsibility_to_pending_release(
+                room_jid.clone(),
+                claim_fence.clone(),
+            );
+            self.start_detached_room_release(room_jid, claim_fence, registry_ref);
+            ReclaimedRoomOutcome::PendingRetry
+        } else {
+            if let Some(store) = &self.durable_store {
+                store.forget_claim_fence(&room_jid, &claim_fence);
+            }
+            ReclaimedRoomOutcome::LostRace
+        }
+    }
+
     async fn evict_ownership_lost_room(&mut self, room_jid: &BareJid, entry: RoomEntry) {
         self.rooms.remove(room_jid);
         self.poisoned_rooms.remove(room_jid);
@@ -556,7 +584,7 @@ impl RoomRegistryActor {
         true
     }
 
-    /// Move an already-retained exact fence from a preparation or deposed
+    /// Move an already-retained exact fence from a preparation or non-serving
     /// room entry into release state. The caller removes the prior
     /// representation in the same mailbox turn, so the transfer cannot lose
     /// responsibility even when ordinary release admission is saturated.
@@ -1989,16 +2017,17 @@ impl RoomRegistryActor {
             Err(error) => {
                 let reclaimed_outcome = match origin {
                     RoomPreparationOrigin::Demand { .. } => match error {
-                        // The actor's fenced load proved this exact claim is
-                        // already gone. Forget the cache and the acquisition
-                        // reservation; releasing this stale tuple would add a
-                        // redundant, potentially misleading retry.
+                        // A same-identity database miss proves the tuple is
+                        // gone. Local identity supersession is also terminal
+                        // for the actor, but the old exact row may still need
+                        // a conditional release.
                         RoomPublicationError::ClaimLost => {
-                            if let Some(store) = &self.durable_store {
-                                store.forget_claim_fence(&room_jid, &claim_fence);
-                            }
                             self.clear_pending_room_acquisition(&room_jid, &claim_fence.owner());
-                            ReclaimedRoomOutcome::LostRace
+                            self.finish_unpublished_ownership_loss(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                                registry_ref.clone(),
+                            )
                         }
                         RoomPublicationError::LocalIdentityChanged
                         | RoomPublicationError::OwnershipUnavailable
@@ -2017,11 +2046,12 @@ impl RoomRegistryActor {
                     },
                     RoomPreparationOrigin::Reclaimed { previous_owner } => match error {
                         RoomPublicationError::ClaimLost => {
-                            if let Some(store) = &self.durable_store {
-                                store.forget_claim_fence(&room_jid, &claim_fence);
-                            }
                             self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
-                            ReclaimedRoomOutcome::LostRace
+                            self.finish_unpublished_ownership_loss(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                                registry_ref.clone(),
+                            )
                         }
                         RoomPublicationError::LocalIdentityChanged => {
                             self.clear_pending_reclaimed_room(&room_jid, &claim_fence);
@@ -3127,9 +3157,13 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     %entity,
                     "proactively reclaimed room-state load lost the exact claim"
                 );
-                store.forget_claim_fence(&msg.room_jid, &claim_fence);
                 self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
-                return ctx.reply(ReclaimedRoomOutcome::LostRace);
+                let outcome = self.finish_unpublished_ownership_loss(
+                    msg.room_jid,
+                    claim_fence,
+                    ctx.actor_ref().clone(),
+                );
+                return ctx.reply(outcome);
             }
             Ok(Err(error)) => {
                 debug!(
@@ -3422,7 +3456,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
 }
 
 /// Why a room is being removed from the registry — decides whether the
-/// durable rows go with it (#1261 vs. the deposed-node eviction race).
+/// durable rows go with it (#1261 vs. non-serving actor eviction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestroyRoomReason {
     /// XEP-0045 §10.9 destroy or an administrative deletion: the room
@@ -3431,7 +3465,7 @@ pub enum DestroyRoomReason {
     Destroy,
     /// A write-adjacent fence proved this process can no longer serve the
     /// room, either because the database claim moved or the local node
-    /// identity rotated. Bypass release-backlog admission so the deposed
+    /// identity rotated. Bypass release-backlog admission so the non-serving
     /// actor cannot remain registered, preserve durable state, and still
     /// attempt exact release of the old fence.
     DeposedEviction,
@@ -3579,7 +3613,7 @@ impl kameo::message::Message<DestroyRoom> for RoomRegistryActor {
                 // Removal from the registry is not itself a terminal signal
                 // to a RoomActor. A caller may still hold an ActorRef and the
                 // best-effort Demote notification may never arrive, so kill
-                // the deposed incarnation before dropping our last entry.
+                // the non-serving incarnation before dropping our last entry.
                 self.retire_ownership_lost_entry(&msg.room_jid, entry).await;
             } else {
                 self.release_room_claim(&msg.room_jid, &entry.claim_fence)
@@ -3639,9 +3673,10 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
         };
         if !self.has_pending_release_capacity(&msg.room_jid, &entry.claim_fence) {
             // Ordinary inactivity must remain open when there is nowhere to
-            // retain an uncertain release. A previously deposed actor is
-            // different: its negative fence is already terminal, so evict it
-            // without issuing another release even under saturation.
+            // retain an uncertain release. A terminally non-serving actor is
+            // different: evict it immediately, while owner-sensitive cleanup
+            // retains an exact release only when local identity supersession
+            // means the old tuple may still exist.
             let seal_state = entry
                 .actor_ref
                 .ask(GetRoomSealState)
@@ -3651,7 +3686,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
             return match seal_state {
                 Ok(RoomSealState::OwnershipLost) => {
                     self.evict_ownership_lost_room(&msg.room_jid, entry).await;
-                    info!(room = %msg.room_jid, "Evicted deposed room during inactive-room cleanup");
+                    info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
                     true
                 }
                 Ok(RoomSealState::Open | RoomSealState::Inactive) => {
@@ -3676,7 +3711,7 @@ impl kameo::message::Message<DestroyRoomIfInactive> for RoomRegistryActor {
         match sealed {
             Ok(SealIfInactiveOutcome::OwnershipLost) => {
                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
-                info!(room = %msg.room_jid, "Evicted deposed room during inactive-room cleanup");
+                info!(room = %msg.room_jid, "Evicted non-serving room during inactive-room cleanup");
                 true
             }
             Ok(SealIfInactiveOutcome::Inactive) => {
@@ -3766,15 +3801,16 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
             .await;
         match seal_state {
             Ok(RoomSealState::OwnershipLost) => {
-                // A definitive join fence proved this actor is deposed. Its
-                // local registration is no longer safe to serve. Remove and
-                // kill locally, preserve durable room state, and do not issue
-                // a redundant release that could become an untracked late
-                // delete while the retry inventory is saturated.
+                // A terminal ownership result made this actor non-serving.
+                // Remove and kill it locally while preserving durable room
+                // state. Owner-sensitive cleanup skips a redundant release
+                // after a same-identity database miss, but retains one exact
+                // release when local identity supersession may have left the
+                // old tuple behind.
                 self.evict_ownership_lost_room(&msg.room_jid, entry).await;
                 info!(
                     room = %msg.room_jid,
-                    "Evicted room actor after join fence proved ownership loss"
+                    "Evicted room actor after a terminal ownership result"
                 );
                 true
             }

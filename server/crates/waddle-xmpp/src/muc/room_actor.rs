@@ -178,17 +178,17 @@ pub enum AdminApplyError {
     /// pre-mutation fencing gate ([`RoomActor::gate_mutation`]) observed
     /// that this node no longer holds the room's ownership claim. The
     /// mutation this ask requested was NEVER APPLIED. The caller MUST
-    /// trigger `RoomLocalClaims::demote` for this room so the deposed
+    /// trigger `RoomLocalClaims::demote` for this room so the non-serving
     /// actor stops serving, and surface a conformant, recoverable error
     /// to the requester (mirroring `dispatch_to_room`'s
     /// `<resource-constraint/>` bounce).
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    /// The pre-mutation gate passed, but ownership moved before the
+    /// The pre-mutation gate passed, but this actor became non-serving before the
     /// following durable write committed. The mutation exists only in this
     /// now-stale actor incarnation; callers must demote it and retry against
     /// the current owner.
-    #[error("this room's ownership moved after the in-memory mutation was applied")]
+    #[error("this actor became non-serving after the in-memory mutation was applied")]
     OwnershipLostAfterApply,
     /// The exact ownership check could not establish either ownership or
     /// loss. The requested mutation was never applied and may be retried.
@@ -256,9 +256,9 @@ impl From<DurablePersistError> for AdminApplyError {
 ///    reporting bare success.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RoomMutationError {
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this room's ownership moved after the in-memory mutation was applied")]
+    #[error("this actor became non-serving after the in-memory mutation was applied")]
     OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
@@ -270,7 +270,7 @@ pub enum RoomMutationError {
 /// persistence or post-apply ownership outcomes because no mutation has run.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 enum PreMutationOwnershipError {
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
@@ -289,9 +289,9 @@ impl From<PreMutationOwnershipError> for RoomMutationError {
 /// in-progress mediated-invite compensation.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum AffiliationMutationError {
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this room's ownership moved after the in-memory mutation was applied")]
+    #[error("this actor became non-serving after the in-memory mutation was applied")]
     OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
@@ -334,9 +334,9 @@ impl From<DurablePersistError> for AffiliationMutationError {
 /// protocol payload.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DurablePersistError {
-    #[error("this room's ownership moved before the in-memory mutation was applied")]
+    #[error("this actor became non-serving before the in-memory mutation was applied")]
     NotOwner,
-    #[error("this room's ownership moved after the in-memory mutation was applied")]
+    #[error("this actor became non-serving after the in-memory mutation was applied")]
     OwnershipLostAfterApply,
     #[error("this room's exact ownership fence is unavailable")]
     OwnershipUnavailable,
@@ -403,7 +403,7 @@ pub struct RoomActor {
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
-    /// ownership-loss seal, whose deposed local actor must be evicted even
+    /// ownership-loss seal, whose non-serving local actor must be evicted even
     /// when that backlog is full.
     seal_state: RoomSealState,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
@@ -470,7 +470,7 @@ enum DurableRestoreState {
     Ready(DurableRoomOrigin),
     Pending,
     /// A fenced durable load definitively proved this actor incarnation was
-    /// deposed. This terminal state must never retry with the stale fence.
+    /// non-serving. This terminal state must never retry with the stale fence.
     OwnershipLost,
 }
 
@@ -488,7 +488,7 @@ pub enum RoomSealState {
     Open,
     /// The registry sealed an inactive actor before a terminal local removal.
     Inactive,
-    /// The durable ownership gate proved this incarnation is deposed.
+    /// The durable ownership gate proved this incarnation is non-serving.
     OwnershipLost,
 }
 
@@ -673,14 +673,14 @@ impl RoomActor {
     /// still holds the claim. `Err(RoomMutationError::NotOwner)` when the
     /// fenced check observes 0 rows — the caller MUST NOT mutate.
     ///
-    /// Backend failures fail closed without marking the actor deposed: the
+    /// Backend failures fail closed without marking the actor non-serving: the
     /// exact fence could not be proven, so applying an in-memory mutation
     /// would let state diverge from its durable authority.
     async fn gate_pre_mutation_ownership(&mut self) -> Result<(), PreMutationOwnershipError> {
         // A definitive ownership-loss observation is monotonic for this
         // actor incarnation. Do not let a later transient store failure
         // override that proof through a later uncertain probe while the
-        // registry is still converging the deposed actor's removal.
+        // registry is still converging the non-serving actor's removal.
         if self.seal_state == RoomSealState::OwnershipLost {
             return Err(PreMutationOwnershipError::NotOwner);
         }
@@ -785,7 +785,7 @@ impl RoomActor {
     }
 
     /// A join does not naturally pass through the mutation fence before it
-    /// admits an occupant. Fail closed here to keep a deposed but
+    /// admits an occupant. Fail closed here to keep a non-serving but
     /// still-referenced actor from admitting either a returning occupant or
     /// the creator whose registry acquisition raced an ownership change.
     async fn gate_join_ownership(&mut self) -> Result<(), RoomActorError> {
@@ -1247,7 +1247,7 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
         }
         // Retain this incarnation's exact authority before awaiting the
         // fenced load. A terminal result must leave a coherent sealed actor,
-        // rather than one whose deposed state lacks its identifying fence.
+        // rather than one whose non-serving state lacks its identifying fence.
         self.durable_store = Some(std::sync::Arc::clone(&msg.store));
         self.durable_claim_fence = Some(msg.claim_fence.clone());
         match msg
@@ -1318,7 +1318,7 @@ impl kameo::message::Message<Join> for RoomActor {
         // still reachable by internal callers holding an ActorRef. Apply the
         // same fail-closed restore and ownership gates as
         // `JoinWithAffiliation`; otherwise a stale reference could admit an
-        // occupant after this room's durable claim moved to another node.
+        // occupant after this actor's durable fence became non-serving.
         self.ensure_restored_before_join().await?;
         self.gate_join_ownership().await?;
         if self.invite_rollback_pending(&msg.real_jid.to_bare()) {
@@ -1498,9 +1498,9 @@ pub enum UpdateGroupDmConfigByMemberError {
     NotOccupant,
     /// ADR-0017 Phase 3 Slice 7 FIX 2: see [`AdminApplyError::NotOwner`]'s
     /// doc comment — identical contract, one message type over.
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
-    #[error("this room's ownership moved after the in-memory mutation was applied")]
+    #[error("this actor became non-serving after the in-memory mutation was applied")]
     OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
@@ -1595,7 +1595,7 @@ pub struct SetSubject {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SetSubjectError {
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
@@ -1926,8 +1926,9 @@ pub struct SealIfInactive {
 ///
 /// The registry must retain the distinction between ordinary inactivity and
 /// a prior ownership-loss seal: both refuse admission, but only the latter
-/// requires immediate deposed-actor teardown without releasing a claim this
-/// incarnation has already proven it does not own.
+/// requires immediate non-serving actor teardown. Registry cleanup then uses
+/// the retained fence to distinguish an already-missing tuple from a locally
+/// superseded tuple that still needs one conditional exact release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
 pub enum SealIfInactiveOutcome {
     Refused,

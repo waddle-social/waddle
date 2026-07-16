@@ -3359,12 +3359,17 @@ record the retained work.
     for the next join attempt to retry again. A definitive
     `XmppError::OwnershipLost` from either the initial load or that retry
     instead sets terminal `OwnershipLost`, seals the actor, and returns
-    `RoomSealed`: it never retries the stale fence. The registry does not
-    publish that actor, enqueue retry work, or release the already-lost
-    stale claim tuple. A local node-identity rotation is not proof that the
-    database row moved: it remains typed as `OwnershipUnavailable`, so demand
-    cleanup releases the old exact tuple and reclaimed cleanup retains that
-    release responsibility across retries. New disco/join-error mapping in
+    `RoomSealed`: the actor itself never retries the stale fence. When the
+    current local identity still matches the fence owner, the registry treats
+    that result as an authoritative database miss: it does not publish the
+    actor, enqueue release work, or release the already-lost tuple. A local
+    node-identity rotation also definitively makes the actor's immutable fence
+    non-serving, so the durable store reports `OwnershipLost` and the actor
+    becomes terminal instead of retrying. That result does not by itself prove
+    the old database tuple disappeared: demand and reclaimed cleanup compare
+    the fence owner with the current local identity and retain one conditional
+    exact-release responsibility when the identities differ. New
+    disco/join-error mapping in
     `handlers/presence/muc.rs`: `RestorePending` bounces `<error
     type='wait'><resource-constraint/></error>`, matching FIX 6's shape.
 

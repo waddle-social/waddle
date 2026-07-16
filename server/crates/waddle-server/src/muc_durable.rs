@@ -216,14 +216,16 @@ impl PostgresMucRoomStore {
 
     async fn guard_fence_identity(
         &self,
+        room_jid: &BareJid,
         fence: &RoomClaimFenceContext,
     ) -> Result<CurrentNodeIdentityGuard, XmppError> {
-        self.node_identity
-            .guard_if_current(&fence.owner)
-            .await
-            .ok_or_else(|| XmppError::OwnershipUnavailable {
+        let Some(identity_guard) = self.node_identity.guard_if_current(&fence.owner).await else {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Err(XmppError::OwnershipLost {
                 entity: fence.entity.clone(),
-            })
+            });
+        };
+        Ok(identity_guard)
     }
 
     /// Take the fencing lock inside `tx` — the exact `SELECT ... FOR SHARE`
@@ -244,7 +246,7 @@ impl PostgresMucRoomStore {
         }
         if self.node_identity.current() != fence.owner {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
-            return Err(XmppError::OwnershipUnavailable {
+            return Err(XmppError::OwnershipLost {
                 entity: expected_entity,
             });
         }
@@ -413,7 +415,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
         Box::pin(async move {
-            let _identity_guard = self.guard_fence_identity(fence).await?;
+            let _identity_guard = self.guard_fence_identity(room_jid, fence).await?;
             let mut tx = self
                 .db
                 .begin()
@@ -438,7 +440,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let _identity_guard = self.guard_fence_identity(fence).await?;
+            let _identity_guard = self.guard_fence_identity(room_jid, fence).await?;
             let config_json = serde_json::to_string(config).map_err(|error| {
                 XmppError::internal(format!("durable room config encode failed: {error}"))
             })?;
@@ -479,7 +481,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let _identity_guard = self.guard_fence_identity(fence).await?;
+            let _identity_guard = self.guard_fence_identity(room_jid, fence).await?;
             let subject_json = subject
                 .map(serde_json::to_string)
                 .transpose()
@@ -521,7 +523,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let _identity_guard = self.guard_fence_identity(fence).await?;
+            let _identity_guard = self.guard_fence_identity(room_jid, fence).await?;
             let mut tx = self
                 .db
                 .begin()
@@ -570,7 +572,7 @@ impl MucDurableStore for PostgresMucRoomStore {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()> {
         Box::pin(async move {
-            let _identity_guard = self.guard_fence_identity(fence).await?;
+            let _identity_guard = self.guard_fence_identity(room_jid, fence).await?;
             let mut tx = self
                 .db
                 .begin()
@@ -759,12 +761,25 @@ mod tests {
         assert!(store.current_claim_fence(&jid).is_some());
 
         live_identity.rotate(node_identity()).await;
+        let config = RoomConfig::default();
 
         assert!(matches!(
-            store.guard_fence_identity(&fence).await,
-            Err(XmppError::OwnershipUnavailable {
-                entity: unavailable_entity
-            }) if unavailable_entity == entity
+            store
+                .save_config_fenced(&jid, "waddle", "channel", &config, &fence)
+                .await,
+            Err(XmppError::OwnershipLost { entity: lost_entity })
+                if lost_entity == entity
+        ));
+        assert!(
+            store.claim_fences.get(&jid).is_none(),
+            "the first fenced actor operation must evict the stale published fence"
+        );
+
+        let mut tx = store.db.begin().await.expect("begin mismatch assertion");
+        assert!(matches!(
+            store.assert_fenced(&mut tx, &jid, &fence).await,
+            Err(XmppError::OwnershipLost { entity: lost_entity })
+                if lost_entity == entity
         ));
 
         assert!(!store

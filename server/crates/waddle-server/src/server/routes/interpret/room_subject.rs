@@ -127,7 +127,7 @@ pub(super) async fn persist_room_subject_event(
             &message,
             &room,
             &sender,
-            "This room's ownership recently moved to another node; please retry.",
+            "This room is temporarily unavailable; please retry.",
         );
     }
 
@@ -169,7 +169,7 @@ pub(super) async fn persist_room_subject_event(
                 &message,
                 &room,
                 &sender,
-                "This room's ownership recently moved to another node; please retry.",
+                "This room is temporarily unavailable; please retry.",
             )
         }
         Err(SendError::HandlerError(

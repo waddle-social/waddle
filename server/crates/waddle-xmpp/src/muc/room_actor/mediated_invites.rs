@@ -116,7 +116,7 @@ pub enum MediatedInviteRollbackCommit {
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum MediatedInviteRollbackError {
-    #[error("this room's ownership has moved to another node")]
+    #[error("this room is no longer serviceable by this actor")]
     NotOwner,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,

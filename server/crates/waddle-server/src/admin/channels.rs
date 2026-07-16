@@ -2721,7 +2721,7 @@ async fn group_dm_rename_update_error(
                         },
                     )
                     .await;
-                unavailable("This room's ownership recently moved to another node; please retry.")
+                unavailable("This room is temporarily unavailable; please retry.")
             }
             UpdateGroupDmConfigByMemberError::OwnershipUnavailable => {
                 unavailable("This room's ownership cannot be verified right now; please retry.")

@@ -2199,7 +2199,7 @@ mod ownership_claims_tests {
                 }
                 if let Some((identity, successor)) = &store.rotate_identity_during_load {
                     identity.rotate(successor.clone()).await;
-                    return Err(crate::XmppError::OwnershipUnavailable {
+                    return Err(crate::XmppError::OwnershipLost {
                         entity: fence.entity.clone(),
                     });
                 }
@@ -4147,9 +4147,16 @@ mod ownership_claims_tests {
         ));
         assert_eq!(
             durable_store.load_calls.load(Ordering::SeqCst),
-            2,
-            "identity uncertainty receives only the bounded restore retry"
+            1,
+            "local identity supersession is terminal for the old actor fence"
         );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while claim_store.exact_release_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the old exact tuple receives terminal cleanup");
         assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
         assert!(claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
@@ -4699,7 +4706,7 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
-    async fn identity_rotation_during_reclaimed_restore_retains_then_releases_old_fence() {
+    async fn identity_rotation_during_reclaimed_restore_terminally_releases_old_fence() {
         let registry = spawn_registry().await;
         let old_owner = this_identity();
         let new_identity = foreign_identity();
@@ -4727,31 +4734,28 @@ mod ownership_claims_tests {
         let first = registry
             .ask(ReconcileReclaimedRoom {
                 room_jid: jid.clone(),
-                claim_fence: fence.clone(),
+                claim_fence: fence,
                 previous_owner: foreign_identity(),
             })
             .await
             .expect("restore interrupted by identity rotation");
         assert_eq!(first, ReclaimedRoomOutcome::PendingRetry);
-        assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            registry
-                .ask(ListPendingReclaimedRooms { limit: 8 })
-                .await
-                .expect("retained old-fence responsibility")
-                .len(),
-            1
-        );
-
-        let retried = registry
-            .ask(ReconcileReclaimedRoom {
-                room_jid: jid.clone(),
-                claim_fence: fence,
-                previous_owner: foreign_identity(),
-            })
-            .await
-            .expect("retry releases the old identity's exact fence");
-        assert_eq!(retried, ReclaimedRoomOutcome::Released);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let pending_releases = registry
+                    .ask(ListPendingRoomReleaseJids)
+                    .await
+                    .expect("pending exact releases");
+                if claim_store.exact_release_calls.load(Ordering::SeqCst) == 1
+                    && pending_releases.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the locally superseded exact tuple is released once");
         assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
         assert!(claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
@@ -7627,10 +7631,10 @@ mod ownership_claims_tests {
     }
 
     /// A join fence can be the first component to prove that this actor's
-    /// durable ownership moved. That seal is materially different from an
-    /// inactivity seal: the deposed actor must leave the registry even when
-    /// the bounded exact-release inventory is already full, while the ordinary
-    /// seal must retain its capacity guard.
+    /// durable fence became non-serving. That seal is materially different
+    /// from an inactivity seal: the non-serving actor must leave the registry
+    /// even when the bounded exact-release inventory is already full, while
+    /// the ordinary seal must retain its capacity guard.
     #[tokio::test]
     async fn reap_sealed_room_forces_deposed_eviction_without_weakening_inactive_fence() {
         let registry = spawn_registry().await;
