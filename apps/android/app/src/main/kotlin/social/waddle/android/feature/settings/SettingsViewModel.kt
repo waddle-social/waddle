@@ -3,12 +3,15 @@ package social.waddle.android.feature.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
+import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
@@ -29,12 +32,29 @@ class SettingsViewModel(
     private val userPrefs: UserPrefs,
     session: WaddleSessionInfo?,
     private val performSignOut: suspend () -> Unit,
+    sessionManager: XmppSessionManager? = null,
 ) : ViewModel() {
     private val accountState = SettingsUiState(
         username = session?.username,
         jid = session?.jid,
         avatarUrl = session?.avatarUrl,
     )
+
+    private val _isCommunityOwner = MutableStateFlow(false)
+
+    /**
+     * Best-effort community-owner probe gating the admin section
+     * entry (web `AdminView` parity: any failure hides the surface).
+     * Not an authorization boundary — every admin command is
+     * re-checked server-side.
+     */
+    val isCommunityOwner: StateFlow<Boolean> = _isCommunityOwner.asStateFlow()
+
+    init {
+        sessionManager?.let { manager ->
+            viewModelScope.launch { _isCommunityOwner.value = manager.isCommunityOwner() }
+        }
+    }
 
     val uiState: StateFlow<SettingsUiState> = combine(
         userPrefs.theme,
@@ -77,6 +97,7 @@ class SettingsViewModel(
                 userPrefs = graph.userPrefs,
                 session = graph.currentSession.value,
                 performSignOut = graph::signOut,
+                sessionManager = graph.sessionManager,
             )
         }
     }

@@ -21,11 +21,16 @@ import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddleRoomConfig
+import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleUploadSlot
+import social.waddle.client.ffi.WaddleUserSearchEntry
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -60,6 +65,7 @@ class XmppSessionManager(
     val readCursorStore = stores.readCursorStore
     val pinStore = stores.pinStore
     val notifySettingsStore = stores.notifySettingsStore
+    val roomMembersStore = stores.roomMembersStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -85,6 +91,8 @@ class XmppSessionManager(
     private val messenger = OutboundMessenger(activeSession, stores, sessionPrefs, router::dispatch)
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
+
+    private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
@@ -245,6 +253,57 @@ class XmppSessionManager(
     /** XEP-0492 DM twin of [setRoomNotificationMode]. */
     suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult =
         verbs.setDmNotificationMode(peerJid, mode)
+
+    /** XEP-0425: ask the room to moderate (remove) another user's message. */
+    suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String? = null): VerbResult =
+        verbs.sendModeration(roomJid, targetStanzaId, reason)
+
+    /** Refresh a room's §9.5 member list into [roomMembersStore]. */
+    suspend fun refreshRoomMembers(roomJid: String) = roomAdmin.refreshRoomMembers(roomJid)
+
+    /** XEP-0045 §5.2 affiliation change (ban = outcast, remove = none). */
+    suspend fun setRoomAffiliation(
+        roomJid: String,
+        targetJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String? = null,
+    ): RoomAdminResult = roomAdmin.setRoomAffiliation(roomJid, targetJid, affiliation, reason)
+
+    /** XEP-0045 §8.2 kick by nick (role → none; affiliation kept). */
+    suspend fun kickOccupant(roomJid: String, nick: String, reason: String? = null): RoomAdminResult =
+        roomAdmin.kickOccupant(roomJid, nick, reason)
+
+    /** XEP-0045 §10.2 owner config fetch; `null` offline / not owner. */
+    suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig? = roomAdmin.fetchRoomConfig(roomJid)
+
+    /** XEP-0045 §10.2 GET-merge-SET owner config submit. */
+    suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch): RoomAdminResult =
+        roomAdmin.submitRoomConfig(roomJid, patch)
+
+    /** XEP-0045 §10.1: create + configure a channel; refreshes topology. */
+    suspend fun createRoom(
+        name: String,
+        nick: String,
+        description: String? = null,
+        forum: Boolean = false,
+    ): CreateRoomResult = roomAdmin.createRoom(name, nick, description, forum)
+
+    /** XEP-0045 §10.9: destroy a room (owner only); refreshes topology. */
+    suspend fun destroyRoom(roomJid: String, reason: String? = null): RoomAdminResult =
+        roomAdmin.destroyRoom(roomJid, reason)
+
+    /** XEP-0055 user directory search backing the add-member flow. */
+    suspend fun searchUsers(query: String): List<WaddleUserSearchEntry>? = roomAdmin.searchUsers(query)
+
+    /** Best-effort community-owner probe gating the admin UI entry. */
+    suspend fun isCommunityOwner(): Boolean = roomAdmin.isCommunityOwner()
+
+    /** `urn:waddle:admin:users:list:0` page; `null` offline / refused. */
+    suspend fun adminUsersList(
+        prefix: String? = null,
+        pageSize: UInt? = null,
+        afterCursor: String? = null,
+    ): WaddleAdminUsersPage? = roomAdmin.adminUsersList(prefix, pageSize, afterCursor)
 
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {

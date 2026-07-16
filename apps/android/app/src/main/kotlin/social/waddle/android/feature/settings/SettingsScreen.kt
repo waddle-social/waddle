@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,10 +60,11 @@ import social.waddle.android.client.prefs.ThemeMode
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onOpenCommunityUsers: () -> Unit = {}) {
     val graph = LocalAppGraph.current
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val isCommunityOwner by viewModel.isCommunityOwner.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -107,6 +110,27 @@ fun SettingsScreen(onBack: () -> Unit) {
                 onCheckedChange = viewModel::setReadReceiptsEnabled,
                 toggleTestTag = SettingsScreenTestTags.READ_RECEIPTS_TOGGLE,
             )
+            // Reduced-scope community admin (web admin console has 6
+            // desktop operator panels; mobile ships the V1 users list
+            // only). Entry hidden unless the owner probe succeeds; the
+            // server re-authorizes every admin command regardless.
+            if (isCommunityOwner) {
+                SectionHeader(text = stringResource(R.string.settings_community_admin))
+                ListItem(
+                    headlineContent = {
+                        Text(text = stringResource(R.string.community_users_title))
+                    },
+                    supportingContent = {
+                        Text(text = stringResource(R.string.community_users_subtitle))
+                    },
+                    leadingContent = {
+                        Icon(Icons.Outlined.Group, contentDescription = null)
+                    },
+                    modifier = Modifier
+                        .clickable(onClick = onOpenCommunityUsers)
+                        .testTag(SettingsScreenTestTags.COMMUNITY_USERS_ROW),
+                )
+            }
             SectionHeader(text = stringResource(R.string.settings_battery))
             BatteryOptimizationRow()
             Button(
@@ -198,6 +222,7 @@ object SettingsScreenTestTags {
     const val NOTIFICATIONS_TOGGLE = "settings-notifications-toggle"
     const val MESSAGE_SOUNDS_TOGGLE = "settings-message-sounds-toggle"
     const val READ_RECEIPTS_TOGGLE = "settings-read-receipts-toggle"
+    const val COMMUNITY_USERS_ROW = "settings-community-users-row"
 }
 
 @Composable

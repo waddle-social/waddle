@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Settings
@@ -27,14 +28,21 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -43,6 +51,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.client.CreateRoomResult
+import social.waddle.android.jid.localpartOf
 
 /**
  * Home: spaces→channels drawer + channel list body, unread badges, DM
@@ -58,8 +68,14 @@ fun HomeScreen(
     val graph = LocalAppGraph.current
     val viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val canCreateChannel by viewModel.canCreateChannel.collectAsStateWithLifecycle()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var createDialogOpen by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val createFailedText = stringResource(R.string.create_channel_failed)
+    val createNotPermittedText = stringResource(R.string.create_channel_not_permitted)
 
     fun closeDrawerAnd(action: () -> Unit) {
         scope.launch { drawerState.close() }
@@ -69,6 +85,22 @@ fun HomeScreen(
     fun openChannel(channel: ChannelListItem) {
         viewModel.openChannel(channel.roomJid)
         onOpenChannel(channel.roomJid, channel.name)
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.createEvents.collect { result ->
+            creating = false
+            when (result) {
+                is CreateRoomResult.Created -> {
+                    createDialogOpen = false
+                    viewModel.openChannel(result.roomJid)
+                    onOpenChannel(result.roomJid, localpartOf(result.roomJid))
+                }
+                CreateRoomResult.NotPermitted ->
+                    snackbarHostState.showSnackbar(createNotPermittedText)
+                else -> snackbarHostState.showSnackbar(createFailedText)
+            }
+        }
     }
 
     ModalNavigationDrawer(
@@ -85,6 +117,7 @@ fun HomeScreen(
         },
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 TopAppBar(
                     title = { Text(text = stringResource(R.string.app_name)) },
@@ -94,6 +127,22 @@ fun HomeScreen(
                                 Icons.Default.Menu,
                                 contentDescription = stringResource(R.string.home_open_menu),
                             )
+                        }
+                    },
+                    actions = {
+                        // Web parity: the "+" is owner-gated
+                        // (canManageChannels); creation is also
+                        // re-authorized server-side.
+                        if (canCreateChannel) {
+                            IconButton(
+                                onClick = { createDialogOpen = true },
+                                modifier = Modifier.testTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION),
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Add,
+                                    contentDescription = stringResource(R.string.create_channel_title),
+                                )
+                            }
                         }
                     },
                 )
@@ -109,6 +158,22 @@ fun HomeScreen(
             }
         }
     }
+
+    if (createDialogOpen) {
+        CreateChannelDialog(
+            onDismiss = { createDialogOpen = false },
+            onCreate = { name, description, forum ->
+                creating = true
+                viewModel.createChannel(name, description, forum)
+            },
+            creating = creating,
+        )
+    }
+}
+
+/** Semantics tags shared with instrumented tests. */
+object HomeScreenTestTags {
+    const val CREATE_CHANNEL_ACTION = "home-create-channel-action"
 }
 
 @Composable

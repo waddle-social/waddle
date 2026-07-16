@@ -6,11 +6,13 @@ import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
+import social.waddle.android.feature.admin.CommunityUsersScreen
 import social.waddle.android.feature.channel.ChannelScreen
 import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.home.HomeScreen
+import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.settings.SettingsScreen
 
 /**
@@ -49,7 +51,20 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             ),
                         )
                     },
+                    onOpenMembers = {
+                        backStack.add(WaddleNavKey.Members(roomJid = key.roomJid, name = key.name))
+                    },
                 )
+            }
+            entry<WaddleNavKey.Members> { key ->
+                MembersScreen(
+                    roomJid = key.roomJid,
+                    name = key.name,
+                    onBack = { backStack.popSafely() },
+                )
+            }
+            entry<WaddleNavKey.CommunityUsers> {
+                CommunityUsersScreen(onBack = { backStack.popSafely() })
             }
             entry<WaddleNavKey.Dm> { key ->
                 DmScreen(
@@ -84,7 +99,10 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                 )
             }
             entry<WaddleNavKey.Settings> {
-                SettingsScreen(onBack = { backStack.popSafely() })
+                SettingsScreen(
+                    onBack = { backStack.popSafely() },
+                    onOpenCommunityUsers = { backStack.add(WaddleNavKey.CommunityUsers) },
+                )
             }
         },
     )

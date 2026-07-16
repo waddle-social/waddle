@@ -52,6 +52,13 @@ open class ConversationViewModel(
     mentionCandidates: Flow<List<MentionCandidate>> = flowOf(emptyList()),
     /** XEP-0492 effective mode (store fallback resolved to §3 default). */
     notifyMode: Flow<WaddleNotifyMode> = flowOf(WaddleNotifyMode.ALWAYS),
+    /**
+     * XEP-0425 gating: whether the own occupant may moderate others'
+     * messages (rooms feed this from the self-presence affiliation/
+     * role; DMs never emit true). UI gating only — the server
+     * re-checks moderator privileges on every request.
+     */
+    canModerate: Flow<Boolean> = flowOf(false),
     private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
@@ -94,13 +101,20 @@ open class ConversationViewModel(
         mentionCandidates.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val uiState: StateFlow<ConversationUiState> =
-        combine(timeline, tracker.pending, history, pinnedIds) { items, unconfirmed, load, pins ->
+        combine(
+            timeline,
+            tracker.pending,
+            history,
+            pinnedIds,
+            canModerate,
+        ) { items, unconfirmed, load, pins, moderate ->
             ConversationUiState(
                 rows = visibleRows(items, unconfirmed, threadId),
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
                 pinnedIds = pins,
                 canPin = io.canPin,
+                canModerate = moderate,
                 threadReplyCounts = if (threadId == null) replyCountsOf(items) else emptyMap(),
                 threads = if (threadId == null) {
                     threadSummariesOf(items) { authorNameOf(it, isGroupchat) }
@@ -303,6 +317,19 @@ open class ConversationViewModel(
         if (!item.isMine || item.tombstone != null) return
         val target = actionTargetIdOf(item) ?: return
         launchVerb { io.sendRetraction(target) }
+    }
+
+    /**
+     * XEP-0425: ask the room to moderate (remove) ANOTHER user's
+     * message. Own messages go through [retract] instead; the sheet
+     * offers this action only when [ConversationUiState.canModerate]
+     * (self-presence owner/admin/moderator), and the server enforces
+     * moderator privileges regardless.
+     */
+    fun moderate(item: TimelineItem) {
+        if (item.isMine || item.tombstone != null) return
+        val target = actionTargetIdOf(item) ?: return
+        launchVerb { io.sendModeration(target, null) }
     }
 
     /**
