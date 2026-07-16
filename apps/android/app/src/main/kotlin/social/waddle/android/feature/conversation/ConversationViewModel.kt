@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -331,8 +332,13 @@ open class ConversationViewModel(
      */
     fun setNotificationMode(mode: WaddleNotifyMode) {
         viewModelScope.launch {
-            val result = runCatching { io.setNotificationMode(mode) }
-                .getOrDefault(NotifySettingsResult.Rejected)
+            val result = try {
+                io.setNotificationMode(mode)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                NotifySettingsResult.Rejected
+            }
             when (result) {
                 NotifySettingsResult.Ok -> Unit
                 NotifySettingsResult.NodeConfigMismatch -> _notifySettingsMismatch.tryEmit(Unit)
