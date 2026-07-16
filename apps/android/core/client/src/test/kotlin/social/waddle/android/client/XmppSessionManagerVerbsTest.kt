@@ -309,6 +309,46 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
+    fun `search verbs route to the client and stay out of the timeline`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.mamPage = testMamPage(
+            messages = listOf(testArchivedMessage(mamId = "m1", body = "penguin facts")),
+        )
+
+        val roomPage = harness.manager.searchRoomHistory(room, "penguin", 20u)
+        val dmPage = harness.manager.searchDmHistory("alice@waddle.test", "penguin", 10u)
+
+        assertEquals("m1", roomPage?.messages?.single()?.mamId)
+        assertEquals("m1", dmPage?.messages?.single()?.mamId)
+        assertEquals(
+            listOf(
+                SearchCall(room, "penguin", 20u, isRoom = true),
+                SearchCall("alice@waddle.test", "penguin", 10u, isRoom = false),
+            ),
+            harness.client.searchCalls,
+        )
+        // Search results are ephemeral: unlike fetch*History they must
+        // never fan into the timeline store (a search page is a disjoint
+        // archive slice, not conversation-adjacent history).
+        assertTrue(harness.manager.timelineStore.timeline(room).value.isEmpty())
+        assertTrue(harness.manager.timelineStore.timeline("alice@waddle.test").value.isEmpty())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `search verbs report null before session ready`() = runTest {
+        val harness = Harness(this)
+        // Login without ever reaching ready: no live client exists.
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        assertNull(harness.manager.searchRoomHistory(room, "penguin", 20u))
+        assertNull(harness.manager.searchDmHistory("alice@waddle.test", "penguin", 20u))
+        harness.manager.logout()
+    }
+
+    @Test
     fun `verbs report not connected before session ready`() = runTest {
         val harness = Harness(this)
         // Login without ever reaching ready: no live client exists.
