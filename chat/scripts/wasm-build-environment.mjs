@@ -72,9 +72,9 @@ export function assertHermeticWasmBuildEnvironment(environment) {
 }
 
 /// Cargo walks `.cargo/config{,.toml}` from the crate working directory to
-/// the filesystem root. Repository locations are canonical hashed inputs;
-/// any matching ancestor above the repository would be ambient and must make
-/// the build fail closed even when CARGO_HOME itself is clean.
+/// the filesystem root. Repository configurations are rejected separately;
+/// any matching ancestor above the repository is ambient and must make the
+/// build fail closed even when CARGO_HOME itself is clean.
 export function assertNoAmbientCargoAncestorConfig(repoRoot) {
 	let directory = dirname(resolve(repoRoot));
 	while (true) {
