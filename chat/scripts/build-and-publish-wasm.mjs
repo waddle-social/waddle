@@ -13,43 +13,73 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalWasmBuildIdentity } from "./wasm-build-inputs.mjs";
 import {
+	assertWasmArtifactSetsEqual,
 	createIsolatedWasmBuildPaths,
 	runPinnedWasmBuild,
 } from "./wasm-build-executor.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(scriptDir, "..", "..");
-const buildScriptPath = resolve(scriptDir, "build-xmpp-wasm.mjs");
+const defaultRepoRoot = resolve(scriptDir, "..", "..");
+const defaultBuildScriptPath = resolve(scriptDir, "build-xmpp-wasm.mjs");
 
-if (!process.env.NODE_AUTH_TOKEN) {
-	console.error(
-		"[wasm] NODE_AUTH_TOKEN is required to publish to GitHub Packages.",
-	);
-	process.exit(1);
-}
-const { contract } = canonicalWasmBuildIdentity(repoRoot);
-const runRoot = mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-publish-"));
-try {
-	const build = createIsolatedWasmBuildPaths(runRoot, "package");
-	console.log(
-		"[wasm] Building @waddle/xmpp-client-wasm through the pinned repository flake...",
-	);
-	runPinnedWasmBuild({
-		repoRoot,
-		scriptPath: buildScriptPath,
-		outDir: build.outDir,
-		paths: build,
-		contract,
-	});
-
-	console.log("[wasm] Publishing @waddle/xmpp-client-wasm to GitHub Packages...");
+function publishPackage(outDir, environment) {
 	execFileSync("bun", ["publish", "--access", "public"], {
-		cwd: build.outDir,
+		cwd: outDir,
 		stdio: "inherit",
-		env: { ...process.env },
+		env: { ...environment },
 	});
+}
 
-	console.log("[wasm] Published successfully.");
-} finally {
-	rmSync(runRoot, { recursive: true, force: true });
+export function buildAndPublishWasm({
+	repoRoot = defaultRepoRoot,
+	buildScriptPath = defaultBuildScriptPath,
+	environment = process.env,
+	loadIdentity = canonicalWasmBuildIdentity,
+	createBuildPaths = createIsolatedWasmBuildPaths,
+	runBuild = runPinnedWasmBuild,
+	compareArtifacts = assertWasmArtifactSetsEqual,
+	publish = publishPackage,
+	createRunRoot = () =>
+		mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-publish-")),
+	removeRunRoot = (path) => rmSync(path, { recursive: true, force: true }),
+	log = console.log,
+} = {}) {
+	if (!environment.NODE_AUTH_TOKEN) {
+		throw new Error(
+			"NODE_AUTH_TOKEN is required to publish to GitHub Packages.",
+		);
+	}
+	const { buildId, contract } = loadIdentity(repoRoot);
+	const runRoot = createRunRoot();
+	try {
+		const firstBuild = createBuildPaths(runRoot, "first");
+		const secondBuild = createBuildPaths(runRoot, "second");
+		log(
+			"[wasm] Building two isolated @waddle/xmpp-client-wasm packages through the pinned repository flake...",
+		);
+		for (const build of [firstBuild, secondBuild]) {
+			runBuild({
+				repoRoot,
+				scriptPath: buildScriptPath,
+				outDir: build.outDir,
+				paths: build,
+				contract,
+				buildId,
+				environment,
+			});
+		}
+
+		compareArtifacts(firstBuild.outDir, secondBuild.outDir);
+		log(
+			"[wasm] Two isolated six-artifact builds match; publishing the attested first package...",
+		);
+		publish(firstBuild.outDir, environment);
+		log("[wasm] Published successfully.");
+	} finally {
+		removeRunRoot(runRoot);
+	}
+}
+
+if (import.meta.main) {
+	buildAndPublishWasm();
 }

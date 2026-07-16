@@ -1,4 +1,4 @@
-const WASM_PACK_ARGS_V2 = Object.freeze([
+const WASM_PACK_ARGS_V3 = Object.freeze([
 	"build",
 	"--target",
 	"bundler",
@@ -10,18 +10,13 @@ const WASM_PACK_ARGS_V2 = Object.freeze([
 ]);
 
 export function validateWasmBuildContract(contract) {
-	if (contract?.schemaVersion !== 2) {
+	if (contract?.schemaVersion !== 3) {
 		throw new Error(
 			"unsupported WASM build contract schemaVersion; update the validator explicitly",
 		);
 	}
-	if (
-		typeof contract.digestFormat !== "string" ||
-		!contract.digestFormat.startsWith(
-			"waddle:xmpp-client-wasm:canonical-inputs:v",
-		)
-	) {
-		throw new Error("invalid WASM build digest format tag");
+	if (contract.digestFormat !== "waddle:xmpp-client-wasm:canonical-inputs:v3") {
+		throw new Error("unsupported WASM build digest format tag");
 	}
 	if (contract.packageScript !== "bun run scripts/build-xmpp-wasm.mjs") {
 		throw new Error("unsupported WASM package-script contract");
@@ -44,13 +39,13 @@ export function validateWasmBuildContract(contract) {
 	if (
 		contract.wasmPack?.command !== "wasm-pack" ||
 		!Array.isArray(contract.wasmPack?.args) ||
-		contract.wasmPack.args.length !== WASM_PACK_ARGS_V2.length ||
+		contract.wasmPack.args.length !== WASM_PACK_ARGS_V3.length ||
 		contract.wasmPack.args.some(
-			(argument, index) => argument !== WASM_PACK_ARGS_V2[index],
+			(argument, index) => argument !== WASM_PACK_ARGS_V3[index],
 		)
 	) {
 		throw new Error(
-			"unsupported v2 wasm-pack invocation contract; update the versioned validator explicitly",
+			"unsupported v3 wasm-pack invocation contract; update the versioned validator explicitly",
 		);
 	}
 	if (

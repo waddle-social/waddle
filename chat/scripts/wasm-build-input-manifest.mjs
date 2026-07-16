@@ -4,6 +4,8 @@ import {
 	bytewiseCompare,
 	canonicalRelativePath,
 } from "./wasm-build-input-digest.mjs";
+import { loadPinnedWasmCargoMetadata } from "./wasm-cargo-metadata-executor.mjs";
+import { resolveWasmCargoInputs } from "./wasm-cargo-metadata.mjs";
 import { validateWasmBuildModuleClosure } from "./wasm-build-module-closure.mjs";
 import { validateWasmRustSourceClosure } from "./wasm-rust-source-closure.mjs";
 
@@ -15,6 +17,8 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		"chat/scripts/build-and-publish-wasm.mjs",
 		"chat/scripts/build-xmpp-wasm.mjs",
 		CONTRACT_PATH,
+		"chat/scripts/wasm-cargo-metadata-executor.mjs",
+		"chat/scripts/wasm-cargo-metadata.mjs",
 		"chat/scripts/wasm-build-contract.mjs",
 		"chat/scripts/wasm-build-environment.mjs",
 		"chat/scripts/wasm-build-executor.mjs",
@@ -28,22 +32,11 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		"flake.nix",
 		"server/Cargo.lock",
 		"server/Cargo.toml",
-		"server/crates/waddle-xmpp-client-wasm/Cargo.toml",
-		"server/crates/waddle-xmpp-client/Cargo.toml",
-		"server/crates/waddle-xmpp-core/Cargo.toml",
 		"server/rust-toolchain.toml",
 	]),
 	optionalFiles: Object.freeze([
 		"server/.cargo/config",
 		"server/.cargo/config.toml",
-		"server/crates/waddle-xmpp-client-wasm/build.rs",
-		"server/crates/waddle-xmpp-client/build.rs",
-		"server/crates/waddle-xmpp-core/build.rs",
-	]),
-	sourceRoots: Object.freeze([
-		"server/crates/waddle-xmpp-client-wasm/src",
-		"server/crates/waddle-xmpp-client/src",
-		"server/crates/waddle-xmpp-core/src",
 	]),
 });
 
@@ -143,7 +136,13 @@ function isIgnoredFile(name) {
 	);
 }
 
-function walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries) {
+function walkSourceRoot(
+	repoRoot,
+	sourceRoot,
+	entryPoints,
+	declaredFiles,
+	entries,
+) {
 	const canonicalRoot = canonicalRelativePath(sourceRoot);
 	const rootPath = absolutePath(repoRoot, canonicalRoot);
 	assertDirectoryAncestors(repoRoot, `${canonicalRoot}/placeholder`);
@@ -186,18 +185,23 @@ function walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries) {
 	}
 
 	visit(canonicalRoot, rootPath);
-	if (!entries.has(`${canonicalRoot}/lib.rs`)) {
-		throw new Error(
-			`missing required WASM crate entry point: ${canonicalRoot}/lib.rs`,
-		);
+	for (const entryPoint of entryPoints) {
+		if (!entries.has(entryPoint)) {
+			throw new Error(`missing required WASM crate entry point: ${entryPoint}`);
+		}
 	}
 }
-export function collectDeclaredWasmBuildInputs(repoRoot) {
+export function collectDeclaredWasmBuildInputs(
+	repoRoot,
+	{ cargoMetadata = loadPinnedWasmCargoMetadata(repoRoot) } = {},
+) {
 	assertRepositoryRoot(repoRoot);
 	const entries = new Map();
+	const cargoInputs = resolveWasmCargoInputs(repoRoot, cargoMetadata);
 	const declaredFiles = new Set([
 		...WASM_BUILD_INPUT_MANIFEST.requiredFiles,
 		...WASM_BUILD_INPUT_MANIFEST.optionalFiles,
+		...cargoInputs.requiredFiles,
 	]);
 
 	for (const path of WASM_BUILD_INPUT_MANIFEST.requiredFiles) {
@@ -207,8 +211,19 @@ export function collectDeclaredWasmBuildInputs(repoRoot) {
 		const bytes = readWasmBuildInputFile(repoRoot, path, false);
 		if (bytes !== undefined) addEntry(entries, path, bytes);
 	}
-	for (const sourceRoot of WASM_BUILD_INPUT_MANIFEST.sourceRoots) {
-		walkSourceRoot(repoRoot, sourceRoot, declaredFiles, entries);
+	for (const path of cargoInputs.requiredFiles) {
+		addEntry(entries, path, readWasmBuildInputFile(repoRoot, path, true));
+	}
+
+	const sourceRoots = new Map();
+	for (const entryPoint of cargoInputs.sourceEntries) {
+		const sourceRoot = entryPoint.slice(0, entryPoint.lastIndexOf("/"));
+		const entryPoints = sourceRoots.get(sourceRoot) ?? [];
+		entryPoints.push(entryPoint);
+		sourceRoots.set(sourceRoot, entryPoints);
+	}
+	for (const [sourceRoot, entryPoints] of sourceRoots) {
+		walkSourceRoot(repoRoot, sourceRoot, entryPoints, declaredFiles, entries);
 	}
 
 	validateWasmRustSourceClosure(entries);

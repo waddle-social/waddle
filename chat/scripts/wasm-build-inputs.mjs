@@ -21,8 +21,8 @@ export {
 } from "./wasm-build-environment.mjs";
 export { WASM_BUILD_INPUT_MANIFEST };
 
-export function collectWasmBuildInputs(repoRoot) {
-	const inputMap = collectDeclaredWasmBuildInputs(repoRoot);
+export function collectWasmBuildInputs(repoRoot, options = {}) {
+	const inputMap = collectDeclaredWasmBuildInputs(repoRoot, options);
 	const contract = parseWasmBuildContract(inputMap.get(CONTRACT_PATH));
 	const packageBytes = readWasmBuildInputFile(repoRoot, PACKAGE_PATH, true);
 	validateWasmPackageScript(packageBytes, PACKAGE_PATH, contract);
@@ -32,8 +32,8 @@ export function collectWasmBuildInputs(repoRoot) {
 	};
 }
 
-export function canonicalWasmBuildIdentity(repoRoot) {
-	const { contract, entries } = collectWasmBuildInputs(repoRoot);
+export function canonicalWasmBuildIdentity(repoRoot, options = {}) {
+	const { contract, entries } = collectWasmBuildInputs(repoRoot, options);
 	return {
 		buildId: digestCanonicalInputs(entries, contract.digestFormat),
 		contract,

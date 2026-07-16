@@ -1,6 +1,6 @@
 {
-	"schemaVersion": 2,
-	"digestFormat": "waddle:xmpp-client-wasm:canonical-inputs:v2",
+	"schemaVersion": 3,
+	"digestFormat": "waddle:xmpp-client-wasm:canonical-inputs:v3",
 	"packageScript": "bun run scripts/build-xmpp-wasm.mjs",
 	"crate": "server/crates/waddle-xmpp-client-wasm",
 	"cargo": {

@@ -15,6 +15,7 @@ import {
 
 export const PINNED_WASM_EXECUTOR_PROTOCOL =
 	"waddle:xmpp-client-wasm:pinned-flake-executor:v1";
+const CANONICAL_BUILD_ID = /^[0-9a-f]{64}$/u;
 const ENCODED_RUSTFLAG_SEPARATOR = "\u001f";
 
 export const WASM_PACKAGE_ARTIFACTS = Object.freeze([
@@ -40,7 +41,9 @@ function assertContained(root, path, description) {
 		relativePath.startsWith(`..${sep}`) ||
 		isAbsolute(relativePath)
 	) {
-		throw new Error(`${description} must be an isolated child of ${root}: ${path}`);
+		throw new Error(
+			`${description} must be an isolated child of ${root}: ${path}`,
+		);
 	}
 }
 
@@ -87,7 +90,9 @@ function expectedToolchain(environment) {
 
 export function assertPinnedWasmBuildFilesystem(environment, outDir) {
 	if (!environment.WADDLE_WASM_BUILD_ROOT) {
-		throw new Error("WADDLE_WASM_BUILD_ROOT is required in the pinned WASM build");
+		throw new Error(
+			"WADDLE_WASM_BUILD_ROOT is required in the pinned WASM build",
+		);
 	}
 	const root = realpathSync(environment.WADDLE_WASM_BUILD_ROOT);
 	assertContained(root, realpathSync(outDir), "canonical WASM output");
@@ -110,10 +115,16 @@ export function assertPinnedWasmBuildFilesystem(environment, outDir) {
 	}
 }
 
-export function canonicalEncodedRustFlags(repoRoot, buildRoot, remapPathPrefixes) {
+export function canonicalEncodedRustFlags(
+	repoRoot,
+	buildRoot,
+	remapPathPrefixes,
+) {
 	for (const [name, path] of Object.entries({ repoRoot, buildRoot })) {
 		if (!isAbsolute(path) || path.includes(ENCODED_RUSTFLAG_SEPARATOR)) {
-			throw new Error(`${name} cannot be encoded as a canonical rustc path prefix`);
+			throw new Error(
+				`${name} cannot be encoded as a canonical rustc path prefix`,
+			);
 		}
 	}
 	return [
@@ -127,29 +138,54 @@ export function assertPinnedWasmBuildProcess(
 	contract,
 	outDir,
 	repoRoot,
+	expectedBuildId,
 ) {
 	const protocol = contract.executor.protocol;
 	if (
 		protocol !== PINNED_WASM_EXECUTOR_PROTOCOL ||
 		environment.WADDLE_WASM_EXECUTOR_PROTOCOL !== protocol
 	) {
-		throw new Error("canonical WASM build did not enter through the versioned flake executor");
+		throw new Error(
+			"canonical WASM build did not enter through the versioned flake executor",
+		);
 	}
 	if (environment.WADDLE_WASM_REPO_ROOT !== repoRoot) {
-		throw new Error("canonical WASM build repository root does not match the executor");
+		throw new Error(
+			"canonical WASM build repository root does not match the executor",
+		);
 	}
+	assertWasmBuildIdentityHandoff(environment, expectedBuildId);
 	const expectedRustFlags = canonicalEncodedRustFlags(
 		repoRoot,
 		environment.WADDLE_WASM_BUILD_ROOT,
 		contract.executor.remapPathPrefixes,
 	);
 	if (environment.CARGO_ENCODED_RUSTFLAGS !== expectedRustFlags) {
-		throw new Error("canonical WASM build rustc path remapping does not match the contract");
+		throw new Error(
+			"canonical WASM build rustc path remapping does not match the contract",
+		);
 	}
 	assertPinnedWasmBuildFilesystem(environment, outDir);
 
 	const expected = expectedToolchain(environment);
 	resolvePinnedNixToolchain(expected.executables, expected.versions);
+}
+
+export function assertCanonicalWasmBuildId(buildId) {
+	if (typeof buildId !== "string" || !CANONICAL_BUILD_ID.test(buildId)) {
+		throw new Error(
+			"canonical WASM build identity must be exactly 64 lowercase hex characters",
+		);
+	}
+}
+
+export function assertWasmBuildIdentityHandoff(environment, expectedBuildId) {
+	assertCanonicalWasmBuildId(expectedBuildId);
+	if (environment.WADDLE_WASM_BUILD_ID !== expectedBuildId) {
+		throw new Error(
+			"canonical WASM build identity handoff does not match the executor",
+		);
+	}
 }
 
 export function pinnedFlakeBuildArgs({
@@ -158,7 +194,9 @@ export function pinnedFlakeBuildArgs({
 	outDir,
 	paths,
 	executor,
+	buildId,
 }) {
+	assertCanonicalWasmBuildId(buildId);
 	const encodedRustFlags = canonicalEncodedRustFlags(
 		repoRoot,
 		paths.root,
@@ -174,6 +212,7 @@ export function pinnedFlakeBuildArgs({
 		"env",
 		`WADDLE_WASM_EXECUTOR_PROTOCOL=${executor.protocol}`,
 		`WADDLE_WASM_BUILD_ROOT=${paths.root}`,
+		`WADDLE_WASM_BUILD_ID=${buildId}`,
 		`WADDLE_WASM_REPO_ROOT=${repoRoot}`,
 		`CARGO_HOME=${paths.cargoHome}`,
 		`CARGO_TARGET_DIR=${paths.cargoTarget}`,
@@ -184,6 +223,7 @@ export function pinnedFlakeBuildArgs({
 		scriptPath,
 		"--internal-pinned-build",
 		outDir,
+		buildId,
 	];
 }
 
@@ -193,6 +233,7 @@ export function runPinnedWasmBuild({
 	outDir,
 	paths,
 	contract,
+	buildId,
 	environment = process.env,
 }) {
 	assertHermeticWasmBuildEnvironment(environment);
@@ -202,6 +243,7 @@ export function runPinnedWasmBuild({
 		outDir,
 		paths,
 		executor: contract.executor,
+		buildId,
 	});
 	execFileSync("nix", args, {
 		cwd: repoRoot,

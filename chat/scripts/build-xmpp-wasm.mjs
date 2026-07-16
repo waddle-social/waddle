@@ -14,11 +14,13 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	canonicalWasmBuildIdentity,
+	parseWasmBuildContract,
 	wasmPackBuildArgs,
-} from "./wasm-build-inputs.mjs";
+} from "./wasm-build-contract.mjs";
+import { canonicalWasmBuildIdentity } from "./wasm-build-inputs.mjs";
 import {
 	TRACKED_WASM_ARTIFACTS,
+	assertCanonicalWasmBuildId,
 	assertPinnedWasmBuildProcess,
 	assertWasmArtifactSetsEqual,
 	createIsolatedWasmBuildPaths,
@@ -41,34 +43,49 @@ const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
 const internalIndex = args.indexOf("--internal-pinned-build");
 const internalOutDir = internalIndex >= 0 ? args[internalIndex + 1] : undefined;
-if (internalIndex >= 0 && (!internalOutDir || checkOnly)) {
+const internalBuildId =
+	internalIndex >= 0 ? args[internalIndex + 2] : undefined;
+if (
+	internalIndex >= 0 &&
+	(internalIndex !== 0 || args.length !== 3 || !internalOutDir || checkOnly)
+) {
 	throw new Error("invalid internal pinned WASM build invocation");
 }
-const {
-	buildId,
-	contract,
-	entries: buildInputs,
-} = canonicalWasmBuildIdentity(repoRoot);
-const crateDir = resolve(repoRoot, ...contract.crate.split("/"));
 const scriptPath = fileURLToPath(import.meta.url);
 
 if (internalOutDir) {
+	assertCanonicalWasmBuildId(internalBuildId);
+	const contract = parseWasmBuildContract(
+		readFileSync(resolve(scriptDir, "wasm-build-contract.json")),
+	);
 	assertPinnedWasmBuildProcess(
 		process.env,
 		contract,
 		internalOutDir,
 		repoRoot,
+		internalBuildId,
 	);
-	execFileSync(contract.wasmPack.command, wasmPackBuildArgs(contract, internalOutDir), {
-		cwd: crateDir,
-		stdio: "inherit",
-		env: { ...process.env },
-	});
+	const crateDir = resolve(repoRoot, ...contract.crate.split("/"));
+	execFileSync(
+		contract.wasmPack.command,
+		wasmPackBuildArgs(contract, internalOutDir),
+		{
+			cwd: crateDir,
+			stdio: "inherit",
+			env: { ...process.env },
+		},
+	);
 	// The cache-bust identity remains source-only. Compiled bytes are compared
 	// separately by the outer drift verifier and never enter this wrapper ID.
-	finalizeWasmPackage(internalOutDir, buildId);
+	finalizeWasmPackage(internalOutDir, internalBuildId);
 	process.exit(0);
 }
+
+const {
+	buildId,
+	contract,
+	entries: buildInputs,
+} = canonicalWasmBuildIdentity(repoRoot);
 
 function newestBuildInputMtime() {
 	return Math.max(
@@ -125,6 +142,7 @@ try {
 		outDir: firstBuild.outDir,
 		paths: firstBuild,
 		contract,
+		buildId,
 	});
 
 	if (checkOnly) {
@@ -135,6 +153,7 @@ try {
 			outDir: secondBuild.outDir,
 			paths: secondBuild,
 			contract,
+			buildId,
 		});
 		assertWasmArtifactSetsEqual(firstBuild.outDir, secondBuild.outDir);
 		const drifted = TRACKED_WASM_ARTIFACTS.filter((file) => {

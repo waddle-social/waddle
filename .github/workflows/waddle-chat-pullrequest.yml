@@ -46,6 +46,10 @@ on:
     - chat/scripts/wasm-build-inputs.mjs/**
     - chat/scripts/wasm-build-module-closure.mjs
     - chat/scripts/wasm-build-module-closure.mjs/**
+    - chat/scripts/wasm-cargo-metadata-executor.mjs
+    - chat/scripts/wasm-cargo-metadata-executor.mjs/**
+    - chat/scripts/wasm-cargo-metadata.mjs
+    - chat/scripts/wasm-cargo-metadata.mjs/**
     - chat/scripts/wasm-package-bindings.mjs
     - chat/scripts/wasm-package-bindings.mjs/**
     - chat/scripts/wasm-rust-source-closure.mjs
@@ -74,21 +78,7 @@ on:
     - server/Cargo.lock/**
     - server/Cargo.toml
     - server/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml
-    - server/crates/waddle-xmpp-client-wasm/Cargo.toml/**
-    - server/crates/waddle-xmpp-client-wasm/build.rs
-    - server/crates/waddle-xmpp-client-wasm/build.rs/**
-    - server/crates/waddle-xmpp-client-wasm/src/**
-    - server/crates/waddle-xmpp-client/Cargo.toml
-    - server/crates/waddle-xmpp-client/Cargo.toml/**
-    - server/crates/waddle-xmpp-client/build.rs
-    - server/crates/waddle-xmpp-client/build.rs/**
-    - server/crates/waddle-xmpp-client/src/**
-    - server/crates/waddle-xmpp-core/Cargo.toml
-    - server/crates/waddle-xmpp-core/Cargo.toml/**
-    - server/crates/waddle-xmpp-core/build.rs
-    - server/crates/waddle-xmpp-core/build.rs/**
-    - server/crates/waddle-xmpp-core/src/**
+    - server/crates/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
     - server/wasm-pkg/waddle-xmpp-client-wasm/package.json
