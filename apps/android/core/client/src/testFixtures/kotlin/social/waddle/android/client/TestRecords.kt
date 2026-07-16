@@ -12,6 +12,7 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
+import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSmResumeState
 
@@ -173,17 +174,20 @@ fun testPresence(
     mucAffiliation: WaddleMucAffiliation? = null,
     mucRole: WaddleMucRole? = null,
     mucJid: String? = null,
+    /** `110` marks the recipient's own presence (XEP-0045 §7.2.2). */
+    mucStatusCodes: List<UShort> = emptyList(),
+    hats: List<WaddlePresenceHat> = emptyList(),
 ): WaddlePresence = WaddlePresence(
     from = from,
     to = "me@waddle.test",
     presenceType = presenceType,
     show = null,
     status = null,
-    hats = emptyList(),
+    hats = hats,
     mucAffiliation = mucAffiliation,
     mucRole = mucRole,
     mucJid = mucJid,
-    mucStatusCodes = emptyList(),
+    mucStatusCodes = mucStatusCodes,
     vcardAvatar = null,
     idleSince = null,
     errorCondition = null,

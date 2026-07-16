@@ -30,14 +30,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
 import social.waddle.client.ffi.WaddlePinPermission
 
-/** Semantics tags shared with instrumented tests. */
-object RoomSettingsTestTags {
-    const val NAME_FIELD = "room-settings-name"
-    const val DESCRIPTION_FIELD = "room-settings-description"
-    const val SAVE_BUTTON = "room-settings-save"
-    const val DESTROY_BUTTON = "room-settings-destroy"
-}
-
 /**
  * Owner room-settings sheet (web `EditChannelDialog` parity): name,
  * description, pin-permission policy, and the destructive destroy
@@ -194,4 +186,12 @@ private fun PinPermissionSelector(
             }
         }
     }
+}
+
+/** Semantics tags shared with instrumented tests. */
+object RoomSettingsTestTags {
+    const val NAME_FIELD = "room-settings-name"
+    const val DESCRIPTION_FIELD = "room-settings-description"
+    const val SAVE_BUTTON = "room-settings-save"
+    const val DESTROY_BUTTON = "room-settings-destroy"
 }

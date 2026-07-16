@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleAdminChannelRef
 import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsArgs
 import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsPage
 import social.waddle.client.ffi.WaddleAdminChannelsCreateArgs
@@ -18,7 +19,6 @@ import social.waddle.client.ffi.WaddleAdminChannelsListPage
 import social.waddle.client.ffi.WaddleAdminChannelsOccupantsArgs
 import social.waddle.client.ffi.WaddleAdminChannelsSetAffiliationResult
 import social.waddle.client.ffi.WaddleAdminChannelsUpdateArgs
-import social.waddle.client.ffi.WaddleAdminChannelRef
 import social.waddle.client.ffi.WaddleAdminSpaceRef
 import social.waddle.client.ffi.WaddleAdminSpacesCreateArgs
 import social.waddle.client.ffi.WaddleAdminSpacesListArgs

@@ -164,7 +164,7 @@
     <string name="members_ban_confirm_body">%1$s will be banned from the room and cannot rejoin.</string>
     <string name="members_remove_confirm_title">Remove member?</string>
     <string name="members_remove_confirm_body">%1$s will lose membership of this room.</string>
-    <string name="members_action_not_permitted">You don't have permission to do that.</string>
+    <string name="members_action_not_permitted">You don\'t have permission to do that.</string>
     <string name="affiliation_owner">Owner</string>
     <string name="affiliation_admin">Admin</string>
     <string name="affiliation_member">Member</string>
@@ -176,7 +176,7 @@
     <string name="room_settings_pin_permission">Who can pin messages</string>
     <string name="room_pin_admins_only">Admins only</string>
     <string name="room_pin_anyone">Anyone</string>
-    <string name="room_settings_load_failed">Couldn't load the room settings.</string>
+    <string name="room_settings_load_failed">Couldn\'t load the room settings.</string>
     <string name="room_destroy_action">Delete channel</string>
     <string name="room_destroy_confirm_title">Delete this channel?</string>
     <string name="room_destroy_confirm_body">The channel and its history will be destroyed for everyone. This cannot be undone.</string>
@@ -188,13 +188,13 @@
     <string name="create_channel_type_text">Text</string>
     <string name="create_channel_type_forum">Forum</string>
     <string name="create_channel_submit">Create</string>
-    <string name="create_channel_failed">Couldn't create the channel.</string>
-    <string name="create_channel_not_permitted">You don't have permission to create channels.</string>
+    <string name="create_channel_failed">Couldn\'t create the channel.</string>
+    <string name="create_channel_not_permitted">You don\'t have permission to create channels.</string>
     <string name="settings_community_admin">Community admin</string>
     <string name="community_users_title">Users</string>
     <string name="community_users_subtitle">Browse and search community members</string>
     <string name="community_users_search_hint">Search by username prefix</string>
     <string name="community_users_owner_pill">Owner</string>
     <string name="community_users_load_more">Load more</string>
-    <string name="community_users_failed">Couldn't load the user list.</string>
+    <string name="community_users_failed">Couldn\'t load the user list.</string>
 </resources>

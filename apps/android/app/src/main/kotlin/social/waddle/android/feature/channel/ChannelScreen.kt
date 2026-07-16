@@ -23,12 +23,6 @@ import social.waddle.android.feature.room.RoomSettingsViewModel
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
 
-/** Semantics tags shared with instrumented tests. */
-object ChannelScreenTestTags {
-    const val MEMBERS_ACTION = "channel-members-action"
-    const val ROOM_SETTINGS_ACTION = "channel-room-settings-action"
-}
-
 /** Channel timeline + composer over the shared conversation scaffold. */
 @Composable
 fun ChannelScreen(
@@ -95,4 +89,10 @@ fun ChannelScreen(
             },
         )
     }
+}
+
+/** Semantics tags shared with instrumented tests. */
+object ChannelScreenTestTags {
+    const val MEMBERS_ACTION = "channel-members-action"
+    const val ROOM_SETTINGS_ACTION = "channel-room-settings-action"
 }

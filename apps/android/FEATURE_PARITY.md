@@ -53,7 +53,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
 | Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
 | Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
-| Room create / configure | 0045 | ✅ | ❌ | Android FFI has only `join_room`/`leave_room`; web has create + edit dialogs |
+| Room create / configure | 0045 | ✅ | ✅ | Android: create-channel dialog (owner-gated) + owner settings sheet over `create_room`/`fetch_room_config`/`submit_room_config`/`destroy_room` (§10 GET-merge-SET in Rust). Space intents deferred (need XEP-0060 spaces-node builders) |
 
 ## Presence & profile
 
@@ -107,11 +107,11 @@ compares user-facing capability per area, verified against both codebases as of
 
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
-| Message moderation (remove others' messages) | 0425 | ✅ | ✅ | Android: `send_moderation` FFI verb wired to action sheet |
-| Affiliation management (kick/ban/roles) | 0045 | ✅ | 🟡 | Android has read-only affiliation models; no management actions or UI |
-| Hats (role badges) | 0317 | ✅ | 🟡 | FFI exposes `WaddlePresenceHat`; not shown in Android UI |
-| Ad-hoc commands | 0050 | ✅ | ❌ | Web: extension-commands infrastructure |
-| Server admin pages | — | ✅ | ❌ | Web: `chat/src/pages/admin/[panel].astro` |
+| Message moderation (remove others' messages) | 0425 | ✅ | ✅ | Android: "Delete for everyone" in the message action sheet, gated on self-presence owner/admin/moderator, with confirm dialog |
+| Affiliation management (kick/ban/roles) | 0045 | ✅ | ✅ | Android: members screen (four-tier §9.5 lists merged with live presence) with promote/demote/remove/ban (§9.1) and true §8.2 kick (role→none), owner/admin-gated; XEP-0055 add-member search |
+| Hats (role badges) | 0317 | ✅ | 🟡 | Android shows hat titles on member rows in the members screen; no hats in the timeline yet |
+| Ad-hoc commands | 0050 | ✅ | 🟡 | Android drives typed 0050 commands (push register/disable, `urn:waddle:admin:*`); no generic command palette/form renderer (follow-up) |
+| Server admin pages | — | ✅ | 🟡 | Android ships a reduced-scope "Community admin" users list (V1) in settings, gated on the `is_community_owner` probe; the six-panel web console (spaces/channels CRUD, audit, push-health, settings) stays desktop-only by design — the V2 FFI commands exist for a follow-up |
 
 ## Platform
 
@@ -133,7 +133,6 @@ In flight in the current improvement sweep:
 Biggest remaining gaps after that, in priority order:
 
 1. **Voice/video calls** — the FFI signaling layer is complete; Android needs a call UI and media stack. Largest single capability gap.
-2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), hats display, ad-hoc commands.
 3. **Rich content rendering** — markup spans (0394), markdown, link previews, sticker/GIF pickers; most of the data already arrives typed over FFI.
 4. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
 5. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.

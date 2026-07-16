@@ -22,14 +22,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 
-/** Semantics tags shared with instrumented tests. */
-object CreateChannelDialogTestTags {
-    const val NAME_FIELD = "create-channel-name"
-    const val DESCRIPTION_FIELD = "create-channel-description"
-    const val CREATE_BUTTON = "create-channel-submit"
-    const val FORUM_OPTION = "create-channel-type-forum"
-}
-
 /**
  * Standalone-channel create dialog (web `CreateChannelDialog` `muc`
  * intent parity): name, description, and the text-vs-forum subtype.
@@ -115,4 +107,12 @@ private fun ChannelTypeSelector(forum: Boolean, onSelect: (Boolean) -> Unit) {
             Text(text = stringResource(R.string.create_channel_type_forum))
         }
     }
+}
+
+/** Semantics tags shared with instrumented tests. */
+object CreateChannelDialogTestTags {
+    const val NAME_FIELD = "create-channel-name"
+    const val DESCRIPTION_FIELD = "create-channel-description"
+    const val CREATE_BUTTON = "create-channel-submit"
+    const val FORUM_OPTION = "create-channel-type-forum"
 }

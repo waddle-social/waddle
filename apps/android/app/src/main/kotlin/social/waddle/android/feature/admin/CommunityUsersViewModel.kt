@@ -103,7 +103,7 @@ class CommunityUsersViewModel(
         private const val SEARCH_DEBOUNCE_MS = 200L
 
         /** Web AdminView parity; the server clamps to 1..200. */
-        private val PAGE_SIZE = 50u
+        private const val PAGE_SIZE = 50u
 
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             CommunityUsersViewModel(sessionManager = graph.sessionManager)

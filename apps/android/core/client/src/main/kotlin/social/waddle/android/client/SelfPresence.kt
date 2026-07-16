@@ -5,7 +5,7 @@ import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePresence
 
 /** XEP-0045 §7.2.2 status code marking the recipient's own presence. */
-private val SELF_PRESENCE_STATUS: UShort = 110u
+private const val SELF_PRESENCE_STATUS: UShort = 110u
 
 /**
  * The account's own occupant presence in a room, identified by MUC

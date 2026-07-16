@@ -140,7 +140,8 @@ fun MessageActionSheet(
             }
             // XEP-0425: moderators remove OTHERS' messages; own rows
             // use the retract action above instead.
-            if (canModerate && !item.isMine && actionable && item.tombstone == null) {
+            val moderatable = canModerate && !item.isMine
+            if (moderatable && actionable && item.tombstone == null) {
                 SheetAction(
                     icon = {
                         Icon(

@@ -48,12 +48,6 @@ import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.client.store.MemberListStatus
 import social.waddle.client.ffi.WaddleMucAffiliation
 
-/** Semantics tags shared with instrumented tests. */
-object MembersScreenTestTags {
-    const val SEARCH_FIELD = "members-search-field"
-    const val MEMBER_ROW_PREFIX = "member-row:"
-}
-
 /** A pending destructive member action awaiting confirmation. */
 private sealed interface PendingAction {
     val row: MemberRow
@@ -391,4 +385,10 @@ private fun ConfirmActionDialog(
             }
         },
     )
+}
+
+/** Semantics tags shared with instrumented tests. */
+object MembersScreenTestTags {
+    const val SEARCH_FIELD = "members-search-field"
+    const val MEMBER_ROW_PREFIX = "member-row:"
 }

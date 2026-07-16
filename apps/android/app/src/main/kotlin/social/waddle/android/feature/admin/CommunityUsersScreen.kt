@@ -33,11 +33,6 @@ import social.waddle.android.R
 import social.waddle.android.jid.localpartOf
 import social.waddle.client.ffi.WaddleAdminUserEntry
 
-/** Semantics tags shared with instrumented tests. */
-object CommunityUsersTestTags {
-    const val SEARCH_FIELD = "community-users-search"
-}
-
 /**
  * Read-only community-admin Users list (web `UsersPanel.vue` parity):
  * display name, JID, and the owner pill for `has_owner_hat` rows.
@@ -120,4 +115,9 @@ private fun UserRow(entry: WaddleAdminUserEntry) {
             }
         },
     )
+}
+
+/** Semantics tags shared with instrumented tests. */
+object CommunityUsersTestTags {
+    const val SEARCH_FIELD = "community-users-search"
 }
