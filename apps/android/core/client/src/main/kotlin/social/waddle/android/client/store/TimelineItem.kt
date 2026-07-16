@@ -2,6 +2,7 @@ package social.waddle.android.client.store
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleStanzaId
 
 /** One emoji's aggregated reaction state on a timeline row. */
@@ -161,6 +162,15 @@ sealed interface TimelineSource {
     /** `urn:waddle:call-thread:0` anchor riding this message. */
     val hasCallThread: Boolean
 
+    /** XEP-0372 references; offsets are code points over the WIRE body. */
+    val references: List<WaddleReference>
+
+    /** XEP-0372 mention URIs, flattened from [references]. */
+    val mentionUris: List<String>
+
+    /** `@everyone`/`@here` broadcast mention URI, when present. */
+    val broadcastMention: String?
+
     data class Live(val message: WaddleMessage) : TimelineSource {
         override val from: String? get() = message.from
         override val body: String? get() = message.body
@@ -182,6 +192,9 @@ sealed interface TimelineSource {
         override val reactionTargetId: String? get() = message.reactionTargetId
         override val reactionEmojis: List<String> get() = message.reactionEmojis
         override val hasCallThread: Boolean get() = message.callThread != null
+        override val references: List<WaddleReference> get() = message.references
+        override val mentionUris: List<String> get() = message.mentionUris
+        override val broadcastMention: String? get() = message.broadcastMention
     }
 
     data class Archived(val message: WaddleArchivedMessage) : TimelineSource {
@@ -205,5 +218,8 @@ sealed interface TimelineSource {
         override val reactionTargetId: String? get() = message.reactionTargetId
         override val reactionEmojis: List<String> get() = message.reactionEmojis
         override val hasCallThread: Boolean get() = message.callThread != null
+        override val references: List<WaddleReference> get() = message.references
+        override val mentionUris: List<String> get() = message.mentionUris
+        override val broadcastMention: String? get() = message.broadcastMention
     }
 }

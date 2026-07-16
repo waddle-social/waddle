@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.android.jid.bareJidOf
@@ -29,6 +30,8 @@ class NotificationPolicy(
         val isGroupchat: Boolean,
         val body: String,
         val displayedTarget: XmppSessionManager.DisplayedTarget?,
+        /** XEP-0372: broadcast or self-mention — post at high priority. */
+        val isMention: Boolean = false,
     )
 
     /** `null` means the message must not raise a notification. */
@@ -50,6 +53,11 @@ class NotificationPolicy(
             isGroupchat = isGroupchat,
             body = body,
             displayedTarget = displayedTargetOf(message, isGroupchat, conversationJid),
+            isMention = messageMentionsBareJid(
+                broadcastMention = message.broadcastMention,
+                mentionUris = message.mentionUris,
+                selfBareJid = bareJidOf(session.jid),
+            ),
         )
     }
 

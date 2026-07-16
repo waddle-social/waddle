@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import social.waddle.android.client.MentionCandidate
+import social.waddle.android.client.MentionRef
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.prefs.SharedFileRef
@@ -42,6 +44,8 @@ open class ConversationViewModel(
      * feed, which hides thread replies behind reply-count chips.
      */
     private val threadId: String? = null,
+    /** `@` popover candidates; empty (the default) hides mention UI. */
+    mentionCandidates: Flow<List<MentionCandidate>> = flowOf(emptyList()),
     private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
@@ -78,6 +82,10 @@ open class ConversationViewModel(
     /** Peers currently composing in this conversation (XEP-0085). */
     val typing: StateFlow<List<String>> =
         typingNames.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** XEP-0372 `@` autocomplete candidates for the composer popover. */
+    val mentionCandidates: StateFlow<List<MentionCandidate>> =
+        mentionCandidates.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val uiState: StateFlow<ConversationUiState> =
         combine(timeline, tracker.pending, history, pinnedIds) { items, unconfirmed, load, pins ->
@@ -169,17 +177,23 @@ open class ConversationViewModel(
         }
     }
 
-    /** Optimistic send: append a pending row and dispatch it. */
-    fun send(body: String) {
+    /**
+     * Optimistic send: append a pending row and dispatch it. [mentions]
+     * carry code-point offsets over `body.trim()` (the composer computes
+     * them against the same trim).
+     */
+    fun send(body: String, mentions: List<MentionRef> = emptyList()) {
         val text = body.trim()
         if (text.isEmpty()) return
         val mode = composer.mode.value
         if (mode is ComposerMode.Editing) {
+            // XEP-0308 corrections don't carry mention refs (parity with
+            // the correction path, which has no extras seam).
             composer.cancelEdit()
             viewModelScope.launch { sendCorrection(mode, text) }
             return
         }
-        val extras = composer.extrasFor(mode)
+        val extras = composer.extrasFor(mode, mentions = mentions)
         if (mode is ComposerMode.Replying) composer.cancelReply()
         val message = tracker.append(text, extras, clock())
         viewModelScope.launch { dispatch(message) }

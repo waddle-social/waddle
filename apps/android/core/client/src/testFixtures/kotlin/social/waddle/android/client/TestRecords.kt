@@ -8,8 +8,11 @@ import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleMucAffiliation
+import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
+import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -51,6 +54,9 @@ fun testMessage(
     thread: String? = null,
     replyFallbackStart: UInt? = null,
     replyFallbackEnd: UInt? = null,
+    broadcastMention: String? = null,
+    mentionUris: List<String> = emptyList(),
+    references: List<WaddleReference> = emptyList(),
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -79,9 +85,9 @@ fun testMessage(
     thread = thread,
     parentThreadId = null,
     markupSpans = emptyList(),
-    broadcastMention = null,
-    mentionUris = emptyList(),
-    references = emptyList(),
+    broadcastMention = broadcastMention,
+    mentionUris = mentionUris,
+    references = references,
     forumPostKind = null,
     forumTitle = null,
     isSticker = false,
@@ -164,6 +170,9 @@ fun testArchivedMessage(
 fun testPresence(
     from: String? = "room@muc.waddle.test/alice",
     presenceType: String = "available",
+    mucAffiliation: WaddleMucAffiliation? = null,
+    mucRole: WaddleMucRole? = null,
+    mucJid: String? = null,
 ): WaddlePresence = WaddlePresence(
     from = from,
     to = "me@waddle.test",
@@ -171,9 +180,9 @@ fun testPresence(
     show = null,
     status = null,
     hats = emptyList(),
-    mucAffiliation = null,
-    mucRole = null,
-    mucJid = null,
+    mucAffiliation = mucAffiliation,
+    mucRole = mucRole,
+    mucJid = mucJid,
     mucStatusCodes = emptyList(),
     vcardAvatar = null,
     idleSince = null,

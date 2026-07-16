@@ -3,6 +3,8 @@ package social.waddle.android.client
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.client.ffi.WaddleFallbackRange
+import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleReplyTarget
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSharedFile
@@ -10,9 +12,9 @@ import social.waddle.client.ffi.WaddleThreadTarget
 
 /**
  * Structured annotations of an outbound send: an XEP-0461 reply target
- * (with the parent body for the XEP-0428 fallback quote) and/or an
- * XEP-0201 thread target. Persisted with queued sends so an offline
- * reply replays with its full wire shape.
+ * (with the parent body for the XEP-0428 fallback quote), an XEP-0201
+ * thread target, and/or XEP-0372 mentions. Persisted with queued sends
+ * so an offline reply replays with its full wire shape.
  */
 data class MessageSendExtras(
     /** Id of the message being replied to (MUC: room stanza id). */
@@ -25,21 +27,25 @@ data class MessageSendExtras(
     val threadParent: String? = null,
     /** Completed XEP-0363 uploads to attach (XEP-0447 metadata). */
     val sharedFiles: List<SharedFileRef> = emptyList(),
+    /** XEP-0372 mentions, offsets over the pre-fallback send body. */
+    val mentions: List<MentionRef> = emptyList(),
 ) {
     val hasReply: Boolean get() = replyToId != null && replyToAuthorJid != null
 }
 
 /** Rebuild the extras a queued send was persisted with (replay path). */
 internal fun QueuedOutboundMessage.sendExtras(): MessageSendExtras? {
-    if (replyToId == null && threadId == null && sharedFiles.isEmpty()) return null
-    return MessageSendExtras(
+    val extras = MessageSendExtras(
         replyToId = replyToId,
         replyToAuthorJid = replyToAuthorJid,
         replyParentBody = replyParentBody,
         threadId = threadId,
         threadParent = threadParent,
         sharedFiles = sharedFiles,
+        mentions = mentions,
     )
+    // A plain queued body carries no annotations at all.
+    return extras.takeIf { it != MessageSendExtras() }
 }
 
 /**
@@ -103,8 +109,29 @@ internal fun preparedSend(
         fallback = fallback,
         thread = thread,
         sharedFiles = files,
+        references = mentionReferences(extras.mentions, shiftBy = fallback?.end ?: 0u),
     )
 }
+
+/**
+ * XEP-0372 references for the accepted mentions, rebased onto the FINAL
+ * wire body: when a reply fallback quote was prepended, every offset
+ * shifts right by the prefix's code-point length (web
+ * `shiftReferenceOffsets` parity). Empty or inverted spans are dropped —
+ * `(0, 0)` is the wire's anchor-only sentinel and must not be emitted
+ * for a body-positioned mention.
+ */
+private fun mentionReferences(mentions: List<MentionRef>, shiftBy: UInt): List<WaddleReference> =
+    mentions.mapNotNull { mention ->
+        if (mention.end <= mention.begin) return@mapNotNull null
+        WaddleReference(
+            refType = WaddleReferenceType.Mention,
+            uri = mention.uri,
+            begin = mention.begin + shiftBy,
+            end = mention.end + shiftBy,
+            anchor = null,
+        )
+    }
 
 /**
  * Inbound twin of the fallback marking: drop the code-point range

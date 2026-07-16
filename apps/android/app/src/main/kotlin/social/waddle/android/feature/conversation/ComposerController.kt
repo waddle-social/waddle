@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.TimelineItem
@@ -87,10 +88,15 @@ class ComposerController(
     /**
      * The wire extras of a send dispatched under [mode]. A reply echoes
      * the parent's thread (web parity), falling back to the screen's
-     * thread; [files] ride the same stanza — a file sent while replying
-     * IS the reply (web parity: files and replyTo share one stanza).
+     * thread; [files] and [mentions] ride the same stanza — a file sent
+     * while replying IS the reply (web parity: files and replyTo share
+     * one stanza).
      */
-    fun extrasFor(mode: ComposerMode, files: List<SharedFileRef> = emptyList()): MessageSendExtras? =
+    fun extrasFor(
+        mode: ComposerMode,
+        files: List<SharedFileRef> = emptyList(),
+        mentions: List<MentionRef> = emptyList(),
+    ): MessageSendExtras? =
         when {
             mode is ComposerMode.Replying -> MessageSendExtras(
                 replyToId = mode.targetId,
@@ -98,9 +104,15 @@ class ComposerController(
                 replyParentBody = mode.previewBody,
                 threadId = mode.threadId ?: screenThreadId,
                 sharedFiles = files,
+                mentions = mentions,
             )
-            files.isNotEmpty() -> MessageSendExtras(threadId = screenThreadId, sharedFiles = files)
-            screenThreadId != null -> MessageSendExtras(threadId = screenThreadId)
+            files.isNotEmpty() -> MessageSendExtras(
+                threadId = screenThreadId,
+                sharedFiles = files,
+                mentions = mentions,
+            )
+            screenThreadId != null -> MessageSendExtras(threadId = screenThreadId, mentions = mentions)
+            mentions.isNotEmpty() -> MessageSendExtras(mentions = mentions)
             else -> null
         }
 }

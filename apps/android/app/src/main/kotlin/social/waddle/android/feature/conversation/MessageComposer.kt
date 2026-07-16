@@ -20,19 +20,29 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
+import social.waddle.android.client.MentionCandidate
+import social.waddle.android.client.MentionRef
 
-/** Text input row + send button (send clears the draft optimistically). */
+/**
+ * Text input row + send button (send clears the draft optimistically).
+ * Group chats pass [mentionCandidates]: an active `@token` under the
+ * cursor opens [MentionPopover], and accepted mentions travel with the
+ * send as XEP-0372 refs.
+ */
 @Composable
 fun MessageComposer(
-    onSend: (String) -> Unit,
+    onSend: (body: String, mentions: List<MentionRef>) -> Unit,
     modifier: Modifier = Modifier,
     onDraftChanged: () -> Unit = {},
     editing: ComposerMode.Editing? = null,
@@ -42,8 +52,21 @@ fun MessageComposer(
     onAttach: (() -> Unit)? = null,
     uploadState: UploadState = UploadState.Idle,
     onClearUpload: () -> Unit = {},
+    mentionCandidates: List<MentionCandidate> = emptyList(),
 ) {
-    var draft by rememberSaveable { mutableStateOf("") }
+    var draft by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
+    // Mention spans survive edits via the tracker, not saveable state: a
+    // process death keeps the draft TEXT but demotes its mentions to
+    // plain `@Nick` text (a resent label without its span is just text —
+    // never a mislabelled reference).
+    val mentionTracker = remember { MentionSpanTracker() }
+
+    fun updateDraft(value: TextFieldValue) {
+        mentionTracker.onTextChanged(value.text)
+        draft = value
+    }
     // Track the last-seen edit CONTENT across recreation: the reset must
     // fire only on actual transitions — an unconditional
     // LaunchedEffect(editing) also runs on every initial composition
@@ -61,8 +84,8 @@ fun MessageComposer(
     LaunchedEffect(editKey) {
         if (editKey == lastEditKey) return@LaunchedEffect
         if (editing != null) {
-            if (lastEditKey == null) stashedDraft = draft
-            draft = editing.originalBody
+            if (lastEditKey == null) stashedDraft = draft.text
+            updateDraft(TextFieldValue(editing.originalBody, TextRange(editing.originalBody.length)))
         } else {
             // Editing ended (live send/cancel), or the composition is
             // fresh with a stale edit key — a process death mid-edit or
@@ -71,11 +94,21 @@ fun MessageComposer(
             // itself is DISCARDED, because with the edit context gone a
             // send would post the old body as a brand-new message (the
             // wrong wire shape beats losing an in-progress edit).
-            draft = stashedDraft
+            updateDraft(TextFieldValue(stashedDraft, TextRange(stashedDraft.length)))
             stashedDraft = ""
         }
         lastEditKey = editKey
     }
+
+    // Mention autocomplete arms on a collapsed cursor inside an `@token`
+    // (never in edit mode — XEP-0308 corrections drop mention refs, so
+    // offering the popover there would lie about the wire shape).
+    val mentionToken = if (editing == null && mentionCandidates.isNotEmpty() && draft.selection.collapsed) {
+        activeMentionToken(draft.text, draft.selection.start)
+    } else {
+        null
+    }
+    val mentionResults = mentionToken?.let { filterMentionCandidates(mentionCandidates, it.query) }.orEmpty()
 
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.navigationBarsPadding()) {
@@ -113,6 +146,19 @@ fun MessageComposer(
                     isError = true,
                 )
             }
+            if (mentionToken != null && mentionResults.isNotEmpty()) {
+                MentionPopover(
+                    candidates = mentionResults,
+                    onSelect = { candidate ->
+                        mentionTracker.insertMention(draft.text, mentionToken, candidate)?.let { insertion ->
+                            // The tracker already synced to the inserted
+                            // text; going through updateDraft would
+                            // re-diff the same change.
+                            draft = TextFieldValue(insertion.text, TextRange(insertion.cursor))
+                        }
+                    },
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -136,8 +182,8 @@ fun MessageComposer(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { value ->
-                        if (value != draft) onDraftChanged()
-                        draft = value
+                        if (value.text != draft.text) onDraftChanged()
+                        updateDraft(value)
                     },
                     modifier = Modifier.weight(1f),
                     placeholder = { Text(text = stringResource(R.string.composer_placeholder)) },
@@ -145,10 +191,10 @@ fun MessageComposer(
                 )
                 IconButton(
                     onClick = {
-                        onSend(draft)
-                        draft = ""
+                        onSend(draft.text, mentionTracker.mentionRefs())
+                        updateDraft(TextFieldValue(""))
                     },
-                    enabled = draft.isNotBlank(),
+                    enabled = draft.text.isNotBlank(),
                     modifier = Modifier
                         .padding(start = 4.dp)
                         .size(48.dp),
