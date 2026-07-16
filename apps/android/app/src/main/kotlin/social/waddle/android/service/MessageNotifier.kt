@@ -195,7 +195,13 @@ class MessageNotifier(
             }
             val messages = appendToHistory(decision.conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
-            postNotification(decision.conversationJid, decision.isGroupchat, messages, silent)
+            postNotification(
+                decision.conversationJid,
+                decision.isGroupchat,
+                messages,
+                silent,
+                mention = decision.isMention,
+            )
         }
     }
 
@@ -217,6 +223,7 @@ class MessageNotifier(
         messages: List<NotificationCompat.MessagingStyle.Message>,
         silent: Boolean,
         replyFailed: Boolean = false,
+        mention: Boolean = false,
     ) {
         val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
         val granted = ContextCompat.checkSelfPermission(
@@ -239,6 +246,11 @@ class MessageNotifier(
             .setAutoCancel(true)
             .setSilent(silent)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            // XEP-0372: broadcast/self-mentions outrank plain traffic in
+            // the shade (pre-O ranking; O+ ranking is channel-driven).
+            .setPriority(
+                if (mention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
+            )
             .setContentIntent(contentIntent(conversationJid))
             .addAction(replyAction(conversationJid, isGroupchat))
             .addAction(markReadAction(conversationJid, isGroupchat, displayedTarget))

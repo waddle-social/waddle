@@ -19,8 +19,13 @@ class PendingSendTracker {
     val pending: StateFlow<List<PendingMessage>> = _pending
 
     private var nextLocalId = 0L
-    private val ackedIds = mutableSetOf<String>()
-    private val failedIds = mutableSetOf<String>()
+
+    // Delivery events can beat the send continuation, so ids are kept
+    // until their row is pruned as stored — and bounded (oldest-evicted)
+    // so ids that never match a row cannot accumulate for the screen's
+    // lifetime.
+    private val ackedIds = linkedSetOf<String>()
+    private val failedIds = linkedSetOf<String>()
 
     /** Append an optimistic row for a send about to dispatch. */
     fun append(body: String, extras: MessageSendExtras?, timestampMillis: Long): PendingMessage {
@@ -75,7 +80,7 @@ class PendingSendTracker {
      * when the stored echo matches an identity id.
      */
     fun onDeliveryAcked(stanzaId: String) {
-        ackedIds += stanzaId
+        remember(ackedIds, stanzaId)
         _pending.update { list ->
             list.map {
                 if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false, queued = false) else it
@@ -84,7 +89,7 @@ class PendingSendTracker {
     }
 
     fun onDeliveryFailed(stanzaId: String) {
-        failedIds += stanzaId
+        remember(failedIds, stanzaId)
         _pending.update { list ->
             list.map {
                 if (it.stanzaId == stanzaId) it.copy(failed = true, queued = false) else it
@@ -99,6 +104,12 @@ class PendingSendTracker {
      * resurrect an already-delivered send as an unconfirmed ghost.
      */
     fun pruneAgainst(storedIds: Set<String>) {
+        // A stored row's races are settled: its delivery ids are done.
+        // Removal happens OUTSIDE the update lambda (CAS retries must
+        // stay side-effect free).
+        val settled = _pending.value.mapNotNull { it.stanzaId }.filter { it in storedIds }.toSet()
+        ackedIds -= settled
+        failedIds -= settled
         _pending.update { list ->
             list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
         }
@@ -119,5 +130,16 @@ class PendingSendTracker {
         _pending.update { list ->
             list.map { if (it.localId == localId) transform(it) else it }
         }
+    }
+
+    private fun remember(ids: LinkedHashSet<String>, id: String) {
+        ids.remove(id)
+        ids.add(id)
+        while (ids.size > MAX_TRACKED_DELIVERY_IDS) ids.remove(ids.first())
+    }
+
+    private companion object {
+        /** Far above any realistic in-flight send count. */
+        const val MAX_TRACKED_DELIVERY_IDS = 256
     }
 }

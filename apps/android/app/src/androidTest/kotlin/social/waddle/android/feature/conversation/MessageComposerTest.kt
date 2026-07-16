@@ -29,7 +29,7 @@ class MessageComposerTest {
     fun typingAndSendInvokesCallbackAndClearsTheDraft() {
         val sent = mutableListOf<String>()
         composeRule.setContent {
-            MessageComposer(onSend = { sent += it })
+            MessageComposer(onSend = { body, _ -> sent += body })
         }
         composeRule.onNodeWithContentDescription("Send").assertIsNotEnabled()
         composeRule.onNode(hasSetTextAction()).performTextInput("hello penguins")
@@ -46,7 +46,7 @@ class MessageComposerTest {
         val editing = mutableStateOf<ComposerMode.Editing?>(null)
         composeRule.setContent {
             MessageComposer(
-                onSend = {},
+                onSend = { _, _ -> },
                 editing = editing.value,
                 onCancelEdit = { editing.value = null },
             )
@@ -77,7 +77,7 @@ class MessageComposerTest {
         )
         composeRule.setContent {
             MessageComposer(
-                onSend = {},
+                onSend = { _, _ -> },
                 replying = replying.value,
                 onCancelReply = { replying.value = null },
             )

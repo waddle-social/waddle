@@ -1,12 +1,14 @@
 package social.waddle.android.feature.channel
 
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.flow.map
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.mentionCandidatesOf
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
@@ -30,6 +32,8 @@ class ChannelViewModel(
     io = ChannelIo(sessionManager, roomJid, nick),
     typingNames = sessionManager.chatStateStore.composingNames(roomJid),
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
+    mentionCandidates = sessionManager.presenceStore.occupants
+        .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
     uploader = uploader,
     onConversationRead = onConversationRead,
 ) {

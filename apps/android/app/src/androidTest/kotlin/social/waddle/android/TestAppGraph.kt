@@ -19,6 +19,7 @@ import social.waddle.android.client.testSessionInfo
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddlePresence
 
 /**
  * Scriptable [LoginAuthGateway]: tests preset each call's result. The
@@ -81,7 +82,7 @@ class TestAppGraph {
         sessionStore = InMemoryPreferencesDataStore(),
         userStore = InMemoryPreferencesDataStore(),
         networkSignal = networkSignal,
-        loginGateway = { loginGateway },
+        loginGatewayFactory = { loginGateway },
     )
 
     /** Flip the shell to SignedOut without touching the network. */
@@ -107,6 +108,11 @@ class TestAppGraph {
     /** Inject a live FFI message into the current attempt's event stream. */
     fun emitLiveMessage(message: WaddleMessage) {
         clientFactory.emit(WaddleClientEvent.Message(message))
+    }
+
+    /** Inject a live FFI presence (e.g. to seed MUC occupants). */
+    fun emitPresence(presence: WaddlePresence) {
+        clientFactory.emit(WaddleClientEvent.Presence(presence))
     }
 
     /** The current attempt's fake client (records sends and queries). */

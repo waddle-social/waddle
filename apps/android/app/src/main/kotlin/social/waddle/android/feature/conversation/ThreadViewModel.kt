@@ -1,9 +1,12 @@
 package social.waddle.android.feature.conversation
 
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.mentionCandidatesOf
 import social.waddle.android.feature.channel.ChannelIo
 import social.waddle.android.feature.dm.DmIo
 import social.waddle.android.viewModelFactoryOf
@@ -34,6 +37,12 @@ class ThreadViewModel(
     },
     typingNames = sessionManager.chatStateStore.composingNames(conversationJid),
     pinnedIds = sessionManager.pinStore.pinnedIds(conversationJid),
+    mentionCandidates = if (isGroupchat) {
+        sessionManager.presenceStore.occupants
+            .map { rooms -> mentionCandidatesOf(rooms[conversationJid].orEmpty()) }
+    } else {
+        flowOf(emptyList())
+    },
     threadId = threadId,
     uploader = uploader,
     onConversationRead = onConversationRead,

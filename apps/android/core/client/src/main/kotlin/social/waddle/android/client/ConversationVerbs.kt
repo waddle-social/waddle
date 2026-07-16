@@ -256,7 +256,7 @@ internal class ConversationVerbs(
         isGroupchat: Boolean,
         state: WaddleChatState,
     ): VerbResult =
-        activeSession.verbCall { it.sendChatState(conversationJid, state, isGroupchat) }
+        activeSession.verbCall { it.sendChatState(bareJid(conversationJid), state, isGroupchat) }
 
     /** The account's current reaction set on a row, from the store. */
     private fun ownReactionSet(conversationJid: String, targetId: String): List<String>? {
