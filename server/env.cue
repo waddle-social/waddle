@@ -248,14 +248,21 @@ schema.#Project & {
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
-					cuenv sync --check -p ..
-					git diff --exit-code -- ../.gitignore ../cuenv.lock
+					bun test scripts/check-root-sync-drift.test.ts
+					bun scripts/check-root-sync-drift.mjs
 				"""#]
 			inputs: [
+				"../.github/workflows/**",
 				"../env.cue",
+				"../**/env.cue",
 				"../cuenv.lock",
+				"../cue.mod/**",
+				"../flake.lock",
+				"../flake.nix",
 				"../.rules.cue",
 				"../.gitignore",
+				"scripts/check-root-sync-drift.mjs",
+				"scripts/check-root-sync-drift.test.ts",
 			]
 		}
 

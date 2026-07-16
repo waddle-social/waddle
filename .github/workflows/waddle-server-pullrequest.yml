@@ -65,6 +65,10 @@ on:
     - server/scripts/check-ci-drift.mjs/**
     - server/scripts/check-ci-drift.test.ts
     - server/scripts/check-ci-drift.test.ts/**
+    - server/scripts/check-root-sync-drift.mjs
+    - server/scripts/check-root-sync-drift.mjs/**
+    - server/scripts/check-root-sync-drift.test.ts
+    - server/scripts/check-root-sync-drift.test.ts/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml

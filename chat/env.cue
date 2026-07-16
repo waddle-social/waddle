@@ -55,18 +55,13 @@ let _WasmBuildInputs = [
 	"package.json",
 	"scripts/build-and-publish-wasm.mjs",
 	"scripts/build-xmpp-wasm.mjs",
-	"scripts/wasm-cargo-metadata-executor.mjs",
-	"scripts/wasm-cargo-metadata.mjs",
-	"scripts/wasm-build-contract.mjs",
-	"scripts/wasm-build-contract.json",
-	"scripts/wasm-build-environment.mjs",
-	"scripts/wasm-build-executor.mjs",
-	"scripts/wasm-build-input-digest.mjs",
-	"scripts/wasm-build-input-manifest.mjs",
-	"scripts/wasm-build-inputs.mjs",
-	"scripts/wasm-build-module-closure.mjs",
-	"scripts/wasm-package-bindings.mjs",
-	"scripts/wasm-rust-source-closure.mjs",
+	"scripts/wasm-*",
+]
+
+let _WasmTrackedBindings = [
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
 ]
 
 schema.#Project & {
@@ -124,7 +119,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck, tasks.checkWasmDrift]
+			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
 		}
 	}
 
@@ -137,28 +132,20 @@ schema.#Project & {
 			inputs: _WasmBuildInputs
 		}
 
-		// Builds WASM from Rust source for the PR lint/build pipelines.
-		// Always rebuilds (REBUILD_WASM=1) so CI never needs committed artifacts.
+		// Fails on committed binding drift before rebuilding WASM for the PR
+		// lint/build pipelines. Strict sequencing prevents the rebuild from
+		// repairing the evidence that the read-only drift check must inspect.
 		buildWasm: schema.#Task & {
 			command: "bash"
-			args: ["-c", "REBUILD_WASM=1 bun run wasm:build"]
-			dependsOn: [checkWasmDrift]
-			inputs: _WasmBuildInputs
+			args: ["-c", #"""
+					set -euo pipefail
+					bun run scripts/build-xmpp-wasm.mjs --check
+					REBUILD_WASM=1 bun run wasm:build
+				"""#]
+			inputs: list.Concat([_WasmBuildInputs, _WasmTrackedBindings])
 			outputs: [
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 			]
-		}
-
-		// Rebuilds into an isolated temporary directory and compares only the
-		// tracked bindings. It never repairs drift or mutates generated outputs.
-		checkWasmDrift: schema.#Task & {
-			command: "bun"
-			args: ["run", "scripts/build-xmpp-wasm.mjs", "--check"]
-			inputs: list.Concat([_WasmBuildInputs, [
-				"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
-				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
-				"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
-			]])
 		}
 
 		generateTypes: schema.#Task & {
