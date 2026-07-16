@@ -177,7 +177,7 @@ class LoginViewModel(
 
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             LoginViewModel(
-                gateway = WaddleLoginAuthGateway(graph.authApi),
+                gateway = graph.loginGateway(),
                 signIn = graph::signIn,
             )
         }

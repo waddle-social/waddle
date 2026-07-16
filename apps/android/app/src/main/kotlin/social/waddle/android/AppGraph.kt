@@ -3,6 +3,8 @@ package social.waddle.android
 import android.content.Context
 import android.net.ConnectivityManager
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -12,7 +14,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
+import social.waddle.android.client.ClientFactory
 import social.waddle.android.client.ConnectivityNetworkSignal
+import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.RustClientFactory
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.XmppSessionManager
@@ -23,6 +27,8 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
 import social.waddle.android.feature.conversation.AttachmentUploader
+import social.waddle.android.feature.login.LoginAuthGateway
+import social.waddle.android.feature.login.WaddleLoginAuthGateway
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
 
@@ -30,8 +36,22 @@ import social.waddle.android.service.MessageNotifier
  * Single manual-DI composition root, created once by [WaddleApplication].
  * Everything the UI, service, and receivers need hangs off this graph —
  * no Hilt.
+ *
+ * Every parameter defaults to the production wiring; instrumentation
+ * tests construct a second graph with fakes (in-memory DataStores are
+ * mandatory there — a second graph on the real preference delegates
+ * crashes with "multiple DataStores active for the same file").
  */
-class AppGraph(context: Context) {
+class AppGraph(
+    context: Context,
+    clientFactory: ClientFactory = RustClientFactory(),
+    /** REST auth + session base URL (BuildConfig, `-PwaddleServerUrl` override). */
+    val serverUrl: String = BuildConfig.WADDLE_SERVER_URL,
+    sessionStore: DataStore<Preferences>? = null,
+    userStore: DataStore<Preferences>? = null,
+    networkSignal: NetworkSignal? = null,
+    loginGateway: (() -> LoginAuthGateway)? = null,
+) {
     private val appContext: Context = context.applicationContext
 
     /** Process-lifetime scope for restore, service control, notifications. */
@@ -39,21 +59,20 @@ class AppGraph(context: Context) {
 
     val okHttpClient: OkHttpClient = OkHttpClient()
 
-    /** REST auth + session base URL (BuildConfig, `-PwaddleServerUrl` override). */
-    val serverUrl: String = BuildConfig.WADDLE_SERVER_URL
-
-    val sessionPrefs: SessionPrefs = SessionPrefs(appContext.sessionPreferencesDataStore)
-    val userPrefs: UserPrefs = UserPrefs(appContext.userPreferencesDataStore)
+    val sessionPrefs: SessionPrefs = SessionPrefs(sessionStore ?: appContext.sessionPreferencesDataStore)
+    val userPrefs: UserPrefs = UserPrefs(userStore ?: appContext.userPreferencesDataStore)
     val authApi: WaddleAuthApi = WaddleAuthApi(serverUrl, okHttpClient)
 
-    private val networkSignal = ConnectivityNetworkSignal(
-        appContext.getSystemService(ConnectivityManager::class.java),
-    )
+    val loginGateway: () -> LoginAuthGateway =
+        loginGateway ?: { WaddleLoginAuthGateway(authApi) }
+
+    private val networkSignal: NetworkSignal = networkSignal
+        ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))
 
     val sessionManager: XmppSessionManager = XmppSessionManager(
         sessionPrefs = sessionPrefs,
-        clientFactory = RustClientFactory(),
-        networkSignal = networkSignal,
+        clientFactory = clientFactory,
+        networkSignal = this.networkSignal,
         userPrefs = userPrefs,
     )
 
@@ -68,7 +87,7 @@ class AppGraph(context: Context) {
         signIn = ::signIn,
         signOutLocally = { sessionManager.logout() },
         managerAppState = sessionManager.appState,
-        networkSignal = networkSignal,
+        networkSignal = this.networkSignal,
         scope = applicationScope,
     )
 
