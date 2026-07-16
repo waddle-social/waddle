@@ -6,7 +6,6 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,11 +13,13 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.MessageTombstone
 import social.waddle.android.client.store.ReactionGroup
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddlePinAction
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePinPreview
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /** Messaging action verbs (react/edit/retract/pin) through the manager. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -63,14 +64,14 @@ class XmppSessionManagerVerbsTest {
         harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1")))
         runCurrent()
 
-        val sent = harness.manager.toggleReaction(
+        val result = harness.manager.toggleReaction(
             room,
             isGroupchat = true,
             targetStanzaId = "s1",
             emoji = "👍",
         )
 
-        assertTrue(sent)
+        assertEquals(VerbResult.Ok, result)
         assertEquals(listOf(Triple(room, "s1", listOf("👍"))), harness.client.reactionCalls)
         assertEquals(
             listOf(ReactionGroup("👍", 1, mine = true)),
@@ -92,14 +93,14 @@ class XmppSessionManagerVerbsTest {
         runCurrent()
         harness.client.reactionResult = false
 
-        val sent = harness.manager.toggleReaction(
+        val result = harness.manager.toggleReaction(
             room,
             isGroupchat = true,
             targetStanzaId = "s1",
             emoji = "👍",
         )
 
-        assertFalse(sent)
+        assertEquals(VerbResult.Rejected, result)
         assertTrue(harness.manager.timelineStore.timeline(room).value.single().reactions.isEmpty())
         harness.manager.logout()
     }
@@ -112,9 +113,9 @@ class XmppSessionManagerVerbsTest {
         harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1", nick = "icepuma")))
         runCurrent()
 
-        val sent = harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1")
+        val result = harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1")
 
-        assertTrue(sent)
+        assertEquals(VerbResult.Ok, result)
         assertEquals(listOf(room to "s1"), harness.client.retractionCalls)
         // Stream-accept is not room-accept: the room may still reject,
         // so the tombstone waits for the reflected retraction.
@@ -139,13 +140,13 @@ class XmppSessionManagerVerbsTest {
         )
         runCurrent()
 
-        val sent = harness.manager.sendRetraction(
+        val result = harness.manager.sendRetraction(
             "alice@waddle.test",
             isGroupchat = false,
             targetStanzaId = "orig-1",
         )
 
-        assertTrue(sent)
+        assertEquals(VerbResult.Ok, result)
         assertEquals(
             MessageTombstone.Retracted,
             harness.manager.timelineStore.timeline("alice@waddle.test").value.single().tombstone,
@@ -171,14 +172,14 @@ class XmppSessionManagerVerbsTest {
         )
         runCurrent()
 
-        val sent = harness.manager.sendCorrection(
+        val result = harness.manager.sendCorrection(
             "alice@waddle.test",
             isGroupchat = false,
             targetId = "orig-1",
             newBody = "hello",
         )
 
-        assertTrue(sent)
+        assertEquals(VerbResult.Ok, result)
         val item = harness.manager.timelineStore.timeline("alice@waddle.test").value.single()
         assertEquals("hello", item.body)
         assertTrue(item.edited)
@@ -251,7 +252,7 @@ class XmppSessionManagerVerbsTest {
                         name = "cat.png",
                         mediaType = "image/png",
                         sizeBytes = 42,
-                        disposition = "inline",
+                        disposition = FileDisposition.INLINE,
                     ),
                 ),
             ),
@@ -279,7 +280,7 @@ class XmppSessionManagerVerbsTest {
                 testMessage(
                     from = "alice@waddle.test/Conversations.x8f2",
                     body = null,
-                    chatState = social.waddle.client.ffi.WaddleChatState.COMPOSING,
+                    chatState = WaddleChatState.COMPOSING,
                 ),
             ),
         )
@@ -297,12 +298,83 @@ class XmppSessionManagerVerbsTest {
         val harness = Harness(this)
         harness.loginReady(this)
 
-        assertTrue(harness.manager.pinRoomMessage(room, "s1", pin = true))
-        assertTrue(harness.manager.pinRoomMessage(room, "s1", pin = false))
+        assertEquals(VerbResult.Ok, harness.manager.pinRoomMessage(room, "s1", pin = true))
+        assertEquals(VerbResult.Ok, harness.manager.pinRoomMessage(room, "s1", pin = false))
 
         assertEquals(
             listOf(Triple(room, "s1", true), Triple(room, "s1", false)),
             harness.client.pinCalls,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `verbs report not connected before session ready`() = runTest {
+        val harness = Harness(this)
+        // Login without ever reaching ready: no live client exists.
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        assertEquals(VerbResult.NotConnected, harness.manager.joinRoom(room, "icepuma"))
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.toggleReaction(room, isGroupchat = true, targetStanzaId = "s1", emoji = "👍"),
+        )
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.sendCorrection(room, isGroupchat = true, targetId = "s1", newBody = "x"),
+        )
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1"),
+        )
+        assertEquals(VerbResult.NotConnected, harness.manager.pinRoomMessage(room, "s1", pin = true))
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.sendChatState(room, isGroupchat = true, state = WaddleChatState.COMPOSING),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `identity-gated verbs report not ready after logout`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.manager.logout()
+
+        // Both resolve the account's mutation identity before touching
+        // the client, so a signed-out account reports NotReady.
+        assertEquals(
+            VerbResult.NotReady,
+            harness.manager.toggleReaction(room, isGroupchat = true, targetStanzaId = "s1", emoji = "👍"),
+        )
+        assertEquals(
+            VerbResult.NotReady,
+            harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1"),
+        )
+        // sendCorrection checks the client first: post-logout that is
+        // gone too, so NotConnected wins; its NotReady branch guards the
+        // signed-out-mid-flight race behind a still-live client.
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.sendCorrection(room, isGroupchat = true, targetId = "s1", newBody = "x"),
+        )
+    }
+
+    @Test
+    fun `refused retraction and non-sent correction report rejected`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.retractionResult = false
+        harness.client.correctionOutcome = WaddleSendMessageOutcome.StanzaError
+
+        assertEquals(
+            VerbResult.Rejected,
+            harness.manager.sendRetraction(room, isGroupchat = true, targetStanzaId = "s1"),
+        )
+        assertEquals(
+            VerbResult.Rejected,
+            harness.manager.sendCorrection(room, isGroupchat = true, targetId = "s1", newBody = "x"),
         )
         harness.manager.logout()
     }

@@ -92,7 +92,9 @@ internal fun preparedSend(
             // Web-parity: dimensions are not probed on send.
             width = null,
             height = null,
-            disposition = ref.disposition,
+            // The generated FFI record keeps its String field (wire
+            // contract); typed → wire happens only at this boundary.
+            disposition = ref.disposition.wire,
             encrypted = null,
         )
     }
@@ -102,14 +104,6 @@ internal fun preparedSend(
         thread = thread,
         sharedFiles = files,
     )
-}
-
-/** Web `inferredFileDisposition` parity. */
-fun dispositionFor(mediaType: String?): String {
-    val type = mediaType.orEmpty()
-    val inline = type.startsWith("image/") || type.startsWith("video/") ||
-        type.startsWith("audio/") || type == "application/pdf"
-    return if (inline) "inline" else "attachment"
 }
 
 /**

@@ -66,6 +66,7 @@
     <string name="upload_failed">Upload failed.</string>
     <string name="upload_dismiss">Dismiss</string>
     <string name="action_failed">Action failed — you may not have permission.</string>
+    <string name="action_failed_offline">You\'re offline — that didn\'t send.</string>
     <string name="threads_overview_title">Threads</string>
     <plurals name="thread_replies_count">
         <item quantity="one">%1$d reply · started by %2$s</item>

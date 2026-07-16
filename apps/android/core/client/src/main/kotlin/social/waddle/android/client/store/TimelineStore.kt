@@ -344,52 +344,70 @@ class TimelineStore(
     }
 
     private fun Entry.applying(ranked: RankedMutation): Entry {
-        val state = mutations
         val next = when (val mutation = ranked.mutation) {
-            is MessageMutation.Reaction -> {
-                val existing = state.reactionsBySender[mutation.senderKey]
-                if (existing != null && existing.rank > ranked.rank) {
-                    state
-                } else {
-                    val senders = state.reactionsBySender.toMutableMap()
-                    // An empty set KEEPS the sender entry (rendering
-                    // nothing) so the clear retains its rank — deleting
-                    // it would let an older MAM replay of the sender's
-                    // earlier reaction resurrect what they cleared.
-                    senders[mutation.senderKey] = SenderReactions(
-                        emojis = mutation.emojis.distinct(),
-                        mine = mutation.mine,
-                        rank = ranked.rank,
-                    )
-                    state.copy(reactionsBySender = senders)
-                }
-            }
-            is MessageMutation.Correction -> when {
-                state.tombstone != null -> state
-                !sameSender(mutation.from, item.from, ranked.isGroupchat) -> state
-                state.correctionRank != null && state.correctionRank > ranked.rank -> state
-                else -> state.copy(correctedBody = mutation.newBody, correctionRank = ranked.rank)
-            }
-            is MessageMutation.Retraction -> when {
-                state.tombstone != null -> state
-                !sameSender(mutation.from, item.from, ranked.isGroupchat) -> state
-                else -> state.copy(tombstone = MessageTombstone.Retracted)
-            }
-            is MessageMutation.Moderation -> when {
-                state.tombstone != null -> state
-                // XEP-0425 authenticity: only the room service itself
-                // (the bare room JID, no occupant resource) may moderate —
-                // an occupant stanza claiming moderation is a spoof.
-                mutation.from != item.conversationJid -> state
-                else -> state.copy(
-                    tombstone = MessageTombstone.Moderated(
-                        moderatedBy = mutation.moderatedBy,
-                        reason = mutation.reason,
-                    ),
-                )
-            }
+            is MessageMutation.Reaction -> mutations.applyingReaction(mutation, ranked.rank)
+            is MessageMutation.Correction -> mutations.applyingCorrection(mutation, ranked, item)
+            is MessageMutation.Retraction -> mutations.applyingRetraction(mutation, ranked, item)
+            is MessageMutation.Moderation -> mutations.applyingModeration(mutation, item)
         }
-        return if (next == state) this else copy(mutations = next)
+        return if (next == mutations) this else copy(mutations = next)
+    }
+
+    private fun MutationState.applyingReaction(
+        mutation: MessageMutation.Reaction,
+        rank: Rank,
+    ): MutationState {
+        val existing = reactionsBySender[mutation.senderKey]
+        if (existing != null && existing.rank > rank) return this
+        val senders = reactionsBySender.toMutableMap()
+        // An empty set KEEPS the sender entry (rendering nothing) so the
+        // clear retains its rank — deleting it would let an older MAM
+        // replay of the sender's earlier reaction resurrect what they
+        // cleared.
+        senders[mutation.senderKey] = SenderReactions(
+            emojis = mutation.emojis.distinct(),
+            mine = mutation.mine,
+            rank = rank,
+        )
+        return copy(reactionsBySender = senders)
+    }
+
+    private fun MutationState.applyingCorrection(
+        mutation: MessageMutation.Correction,
+        ranked: RankedMutation,
+        item: TimelineItem,
+    ): MutationState = when {
+        tombstone != null -> this
+        !sameSender(mutation.from, item.from, ranked.isGroupchat) -> this
+        correctionRank != null && correctionRank > ranked.rank -> this
+        else -> copy(correctedBody = mutation.newBody, correctionRank = ranked.rank)
+    }
+
+    private fun MutationState.applyingRetraction(
+        mutation: MessageMutation.Retraction,
+        ranked: RankedMutation,
+        item: TimelineItem,
+    ): MutationState = when {
+        tombstone != null -> this
+        !sameSender(mutation.from, item.from, ranked.isGroupchat) -> this
+        else -> copy(tombstone = MessageTombstone.Retracted)
+    }
+
+    private fun MutationState.applyingModeration(
+        mutation: MessageMutation.Moderation,
+        item: TimelineItem,
+    ): MutationState = when {
+        tombstone != null -> this
+        // XEP-0425 authenticity: only the room service itself (the bare
+        // room JID, no occupant resource) may moderate — an occupant
+        // stanza claiming moderation is a spoof.
+        mutation.from != item.conversationJid -> this
+        else -> copy(
+            tombstone = MessageTombstone.Moderated(
+                moderatedBy = mutation.moderatedBy,
+                reason = mutation.reason,
+            ),
+        )
     }
 
     private fun publish(conversation: String, list: List<Entry>) {

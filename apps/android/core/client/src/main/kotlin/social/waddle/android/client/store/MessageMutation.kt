@@ -60,70 +60,37 @@ sealed interface MessageMutation {
  * such a message must never notify, bump unread, or reorder DM recency
  * as if it were new content.
  */
-fun WaddleMessage.isTimelineMutation(): Boolean =
-    moderationTargetId != null || retractsId != null || replacesId != null ||
-        reactionTargetId != null
+fun WaddleMessage.isTimelineMutation(): Boolean = TimelineSource.Live(this).isTimelineMutation()
 
 /** Archived twin of [WaddleMessage.isTimelineMutation]. */
 fun WaddleArchivedMessage.isTimelineMutation(): Boolean =
+    TimelineSource.Archived(this).isTimelineMutation()
+
+private fun TimelineSource.isTimelineMutation(): Boolean =
     moderationTargetId != null || retractsId != null || replacesId != null ||
         reactionTargetId != null
 
 internal fun mutationOf(message: WaddleMessage, isGroupchat: Boolean, mine: Boolean): MessageMutation? =
-    mutationOf(
-        from = message.from,
-        isGroupchat = isGroupchat,
-        mine = mine,
-        moderationTargetId = message.moderationTargetId,
-        moderatedBy = message.moderatedBy,
-        moderationReason = message.moderationReason,
-        retractsId = message.retractsId,
-        replacesId = message.replacesId,
-        // A correction of a reply re-sends the quoted fallback prefix;
-        // strip it like the insert path does or edits render the quote
-        // twice.
-        body = message.body?.let {
-            stripReplyFallback(it, message.replyFallbackStart, message.replyFallbackEnd)
-        },
-        reactionTargetId = message.reactionTargetId,
-        reactionEmojis = message.reactionEmojis,
-    )
+    mutationOf(TimelineSource.Live(message), isGroupchat = isGroupchat, mine = mine)
 
 internal fun mutationOf(
     message: WaddleArchivedMessage,
     isGroupchat: Boolean,
     mine: Boolean,
 ): MessageMutation? =
-    mutationOf(
-        from = message.from,
-        isGroupchat = isGroupchat,
-        mine = mine,
-        moderationTargetId = message.moderationTargetId,
-        moderatedBy = message.moderatedBy,
-        moderationReason = message.moderationReason,
-        retractsId = message.retractsId,
-        replacesId = message.replacesId,
-        body = message.body?.let {
-            stripReplyFallback(it, message.replyFallbackStart, message.replyFallbackEnd)
-        },
-        reactionTargetId = message.reactionTargetId,
-        reactionEmojis = message.reactionEmojis,
-    )
+    mutationOf(TimelineSource.Archived(message), isGroupchat = isGroupchat, mine = mine)
 
-private fun mutationOf(
-    from: String?,
-    isGroupchat: Boolean,
-    mine: Boolean,
-    moderationTargetId: String?,
-    moderatedBy: String?,
-    moderationReason: String?,
-    retractsId: String?,
-    replacesId: String?,
-    body: String?,
-    reactionTargetId: String?,
-    reactionEmojis: List<String>,
-): MessageMutation? {
-    from ?: return null
+private fun mutationOf(source: TimelineSource, isGroupchat: Boolean, mine: Boolean): MessageMutation? {
+    val from = source.from ?: return null
+    val moderationTargetId = source.moderationTargetId
+    val retractsId = source.retractsId
+    val replacesId = source.replacesId
+    val reactionTargetId = source.reactionTargetId
+    // A correction of a reply re-sends the quoted fallback prefix; strip
+    // it like the insert path does or edits render the quote twice.
+    val body = source.body?.let {
+        stripReplyFallback(it, source.replyFallbackStart, source.replyFallbackEnd)
+    }
     return when {
         // XEP-0425 is a MUC feature: only a room service moderates.
         // A DM peer's stanza claiming moderation is ignored outright
@@ -131,8 +98,8 @@ private fun mutationOf(
         moderationTargetId != null && isGroupchat -> MessageMutation.Moderation(
             targetId = moderationTargetId,
             from = from,
-            moderatedBy = moderatedBy,
-            reason = moderationReason,
+            moderatedBy = source.moderatedBy,
+            reason = source.moderationReason,
         )
         retractsId != null -> MessageMutation.Retraction(targetId = retractsId, from = from)
         replacesId != null && body != null -> MessageMutation.Correction(
@@ -145,7 +112,7 @@ private fun mutationOf(
             from = from,
             senderKey = if (isGroupchat) from else bareJid(from),
             mine = mine,
-            emojis = reactionEmojis,
+            emojis = source.reactionEmojis,
         )
         else -> null
     }

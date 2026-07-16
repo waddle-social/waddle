@@ -14,18 +14,17 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import social.waddle.android.client.MessageSendExtras
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
+import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
-import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
- * Shared timeline/composer logic for channels and DMs: store-backed
- * rows plus optimistic pending sends (deduped against echoes by stanza
- * id), single-flight budgeted MAM paging, delivery-failed and
- * offline-queued markers, and unread clearing while the conversation is
- * on screen.
+ * Shared timeline/composer wiring for channels and DMs: store-backed
+ * rows plus optimistic pending sends ([PendingSendTracker]), the
+ * composer mode machine ([ComposerController]), single-flight budgeted
+ * MAM paging, and unread clearing while the conversation is on screen.
  */
 open class ConversationViewModel(
     private val conversationJid: String,
@@ -55,11 +54,9 @@ open class ConversationViewModel(
      */
     private val onConversationRead: suspend (String) -> Unit = {},
 ) : ViewModel() {
-    private val pending = MutableStateFlow<List<PendingMessage>>(emptyList())
+    private val tracker = PendingSendTracker()
+    private val composer = ComposerController(conversationJid, isGroupchat, threadId)
     private val history = MutableStateFlow(HistoryState())
-    private var nextLocalId = 0L
-    private val ackedIds = mutableSetOf<String>()
-    private val failedIds = mutableSetOf<String>()
 
     @Volatile
     private var visible = false
@@ -83,65 +80,29 @@ open class ConversationViewModel(
         typingNames.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val uiState: StateFlow<ConversationUiState> =
-        combine(timeline, pending, history, pinnedIds) { items, unconfirmed, load, pins ->
-            // Union of every stored identity: the MUC reflection is keyed
-            // by the room-assigned XEP-0359 stanza-id, but the id the send
-            // returned is the client origin-id — matching only the
-            // collapsed key would leave every sent channel message
-            // duplicated (unconfirmed bubble + stored echo).
-            val storedIds = HashSet<String>()
-            items.forEach { item ->
-                storedIds += item.id
-                storedIds += item.identityIds
-            }
-            val visiblePending = unconfirmed.filter { message ->
-                message.stanzaId == null || message.stanzaId !in storedIds
-            }.filter { message ->
-                // Feed mode hides thread-targeted pending rows (their
-                // stored echo will be feed-hidden); a thread screen shows
-                // only its own thread's sends.
-                val pendingThread = message.extras?.threadId
-                if (threadId == null) pendingThread == null else pendingThread == threadId
-            }
-            val visibleItems = if (threadId != null) {
-                items.filter { it.threadId == threadId || threadId in it.identityIds }
-            } else {
-                items.filter { it.isFeedVisible }
-            }
-            // Reply-count chips on feed roots: replies grouped by the
-            // thread they carry, matched to the root via its identities.
-            val replyCounts = if (threadId == null) {
-                val byThread = HashMap<String, Int>()
-                items.forEach { item ->
-                    val thread = item.threadId ?: return@forEach
-                    if (item.hasCallThread) return@forEach
-                    if (thread !in item.identityIds) byThread.merge(thread, 1, Int::plus)
-                }
-                byThread
-            } else {
-                emptyMap()
-            }
+        combine(timeline, tracker.pending, history, pinnedIds) { items, unconfirmed, load, pins ->
             ConversationUiState(
-                rows = visibleItems.map { ConversationRow.Stored(it) } +
-                    visiblePending.map { ConversationRow.Unconfirmed(it) },
+                rows = visibleRows(items, unconfirmed, threadId),
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
                 pinnedIds = pins,
                 canPin = io.canPin,
-                threadReplyCounts = replyCounts,
-                threads = if (threadId == null) threadSummariesOf(items) else emptyList(),
+                threadReplyCounts = if (threadId == null) replyCountsOf(items) else emptyMap(),
+                threads = if (threadId == null) {
+                    threadSummariesOf(items) { authorNameOf(it, isGroupchat) }
+                } else {
+                    emptyList()
+                },
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
 
-    private val _composerMode = MutableStateFlow<ComposerMode>(ComposerMode.Normal)
-
     /** Normal sends vs editing an existing own message (XEP-0308). */
-    val composerMode: StateFlow<ComposerMode> = _composerMode
+    val composerMode: StateFlow<ComposerMode> = composer.mode
 
-    private val _actionFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    private val _actionFailures = MutableSharedFlow<VerbResult.Failure>(extraBufferCapacity = 4)
 
-    /** Fired when a room-gated action (pin/unpin) is refused. */
-    val actionFailures: SharedFlow<Unit> = _actionFailures
+    /** Fired when a conversation action (reaction, retraction, pin/unpin) is refused. */
+    val actionFailures: SharedFlow<VerbResult.Failure> = _actionFailures
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
 
@@ -149,20 +110,9 @@ open class ConversationViewModel(
     val uploadState: StateFlow<UploadState> = _uploadState
 
     init {
-        // Prune (not just hide) pending rows once the timeline holds their
-        // identity: the view-side filter alone let the list grow for the
-        // screen's lifetime, and a timeline trim could drop the stored row
-        // and resurrect an already-delivered send as an unconfirmed ghost.
         viewModelScope.launch {
             timeline.collect { items ->
-                val storedIds = HashSet<String>()
-                items.forEach { item ->
-                    storedIds += item.id
-                    storedIds += item.identityIds
-                }
-                pending.update { list ->
-                    list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
-                }
+                tracker.pruneAgainst(storedIdentityIdsOf(items))
                 // New rows arriving while the conversation is on screen
                 // AND scrolled to the newest edge count as read (the
                 // marker path dedupes repeats). Guarded: a marker failure
@@ -177,29 +127,23 @@ open class ConversationViewModel(
             io.ensureJoined()
             loadOlder()
         }
-        viewModelScope.launch {
-            events.collect { event ->
-                when (event) {
-                    // The 0198 ack carries the client-generated id the
-                    // send returned. The row is only MARKED acked, never
-                    // removed: a DM has no reflection back to the sending
-                    // resource, so deleting here would vanish the message
-                    // until the next MAM refetch. MUC rows disappear when
-                    // the stored echo matches an identity id.
-                    is XmppEvent.DeliveryAcked -> markAcked(event.stanzaId)
-                    is XmppEvent.DeliveryFailed -> markFailed(event.stanzaId)
-                    // Reconnect catch-up: refetch the newest page.
-                    XmppEvent.SessionReady -> {
-                        // A join tapped before the first Ready only
-                        // persisted its intent; re-ensure it here so the
-                        // open screen goes live without waiting for a
-                        // reconnect (no-op when already joined).
-                        io.ensureJoined()
-                        refreshHistory()
-                    }
-                    else -> Unit
-                }
+        viewModelScope.launch { events.collect(::onEvent) }
+    }
+
+    private suspend fun onEvent(event: XmppEvent) {
+        when (event) {
+            is XmppEvent.DeliveryAcked -> tracker.onDeliveryAcked(event.stanzaId)
+            is XmppEvent.DeliveryFailed -> tracker.onDeliveryFailed(event.stanzaId)
+            // Reconnect catch-up: refetch the newest page.
+            XmppEvent.SessionReady -> {
+                // A join tapped before the first Ready only persisted
+                // its intent; re-ensure it here so the open screen goes
+                // live without waiting for a reconnect (no-op when
+                // already joined).
+                io.ensureJoined()
+                refreshHistory()
             }
+            else -> Unit
         }
     }
 
@@ -225,100 +169,34 @@ open class ConversationViewModel(
         }
     }
 
-    /**
-     * Optimistic send: append a pending row. A `Sent` outcome adopts the
-     * returned stanza id; a QUEUED failure (the manager persisted the
-     * message for replay — [SendResult.queuedId]) adopts the queue id,
-     * which the replay reuses as its XEP-0359 origin-id, so the eventual
-     * echo collapses this row and delivery events target it, exactly
-     * like a live send. Only non-queued (permanent) outcomes mark the
-     * row failed.
-     */
+    /** Optimistic send: append a pending row and dispatch it. */
     fun send(body: String) {
         val text = body.trim()
         if (text.isEmpty()) return
-        val mode = _composerMode.value
+        val mode = composer.mode.value
         if (mode is ComposerMode.Editing) {
-            _composerMode.value = ComposerMode.Normal
-            viewModelScope.launch {
-                val sent = runCatching {
-                    io.sendCorrection(mode.targetId, text, mode.threadId)
-                }.getOrDefault(false)
-                if (sent) {
-                    typingNotifier.onMessageSent()
-                } else {
-                    // Corrections are never queued (a replayed edit could
-                    // outrank a newer one) — restore edit mode with the
-                    // attempted text instead of silently discarding it.
-                    // CAS: only when the composer is still Normal — the
-                    // user may have started another edit or a reply while
-                    // this send was in flight, and clobbering that state
-                    // would destroy their newer intent.
-                    _composerMode.compareAndSet(
-                        ComposerMode.Normal,
-                        ComposerMode.Editing(
-                            mode.targetId,
-                            originalBody = text,
-                            threadId = mode.threadId,
-                            attempt = mode.attempt + 1,
-                        ),
-                    )
-                }
-            }
+            composer.cancelEdit()
+            viewModelScope.launch { sendCorrection(mode, text) }
             return
         }
-        val extras = when {
-            mode is ComposerMode.Replying -> MessageSendExtras(
-                replyToId = mode.targetId,
-                replyToAuthorJid = mode.authorJid,
-                replyParentBody = mode.previewBody,
-                // A reply echoes the parent's thread (web parity); a
-                // thread-screen reply targets the screen's thread.
-                threadId = mode.threadId ?: threadId,
-            )
-            threadId != null -> MessageSendExtras(threadId = threadId)
-            else -> null
-        }
-        if (mode is ComposerMode.Replying) _composerMode.value = ComposerMode.Normal
-        val message = PendingMessage(
-            localId = nextLocalId++,
-            stanzaId = null,
-            body = text,
-            timestampMillis = clock(),
-            failed = false,
-            extras = extras,
-        )
-        pending.update { it + message }
-        viewModelScope.launch { dispatch(message, extras) }
+        val extras = composer.extrasFor(mode)
+        if (mode is ComposerMode.Replying) composer.cancelReply()
+        val message = tracker.append(text, extras, clock())
+        viewModelScope.launch { dispatch(message) }
     }
 
-    private suspend fun dispatch(
-        message: PendingMessage,
-        extras: MessageSendExtras?,
-        wireBody: String = message.body,
-    ) {
-        val result = io.send(wireBody, extras)
-        val trackedId = when (val outcome = result.outcome) {
-            is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
-            else -> result.queuedId
-        }
-        if (trackedId == null) {
-            updatePending(message.localId) { it.copy(failed = true) }
-            return
-        }
+    private suspend fun sendCorrection(mode: ComposerMode.Editing, text: String) {
+        val result = runCatching {
+            io.sendCorrection(mode.targetId, text, mode.threadId)
+        }.getOrDefault(VerbResult.Rejected)
+        if (result is VerbResult.Ok) typingNotifier.onMessageSent() else composer.restoreFailedEdit(mode, text)
+    }
+
+    private suspend fun dispatch(message: PendingMessage, wireBody: String = message.body) {
+        val result = io.send(wireBody, message.extras)
         // Delivered (or queued for replay): typing ended with content,
         // not a pause — emit `active` (web parity).
-        typingNotifier.onMessageSent()
-        updatePending(message.localId) {
-            it.copy(
-                stanzaId = trackedId,
-                queued = result.queued && trackedId !in failedIds,
-                // Both the ack AND the failure event can beat this
-                // continuation; failure wins.
-                acked = trackedId in ackedIds && trackedId !in failedIds,
-                failed = trackedId in failedIds,
-            )
-        }
+        if (tracker.onSendResult(message.localId, result)) typingNotifier.onMessageSent()
     }
 
     /** The composer's text changed: drive the XEP-0085 state machine. */
@@ -336,43 +214,21 @@ open class ConversationViewModel(
         if (_uploadState.value == UploadState.Uploading) return
         _uploadState.value = UploadState.Uploading
         viewModelScope.launch {
-            val result = runCatching { up.upload(uri) }.getOrElse { UploadResult.Failed }
-            when (result) {
-                is UploadResult.Done -> {
-                    _uploadState.value = UploadState.Idle
-                    // A file sent while replying IS the reply (web
-                    // parity: files and replyTo ride the same stanza).
-                    val mode = _composerMode.value
-                    val extras = if (mode is ComposerMode.Replying) {
-                        MessageSendExtras(
-                            replyToId = mode.targetId,
-                            replyToAuthorJid = mode.authorJid,
-                            replyParentBody = mode.previewBody,
-                            threadId = mode.threadId ?: threadId,
-                            sharedFiles = listOf(result.file),
-                        )
-                    } else {
-                        MessageSendExtras(
-                            threadId = threadId,
-                            sharedFiles = listOf(result.file),
-                        )
-                    }
-                    if (mode is ComposerMode.Replying) _composerMode.value = ComposerMode.Normal
-                    val message = PendingMessage(
-                        localId = nextLocalId++,
-                        stanzaId = null,
-                        body = result.file.name ?: result.file.url,
-                        timestampMillis = clock(),
-                        failed = false,
-                        extras = extras,
-                    )
-                    pending.update { it + message }
-                    dispatch(message, extras, wireBody = "")
-                }
+            when (val result = runCatching { up.upload(uri) }.getOrElse { UploadResult.Failed }) {
+                is UploadResult.Done -> dispatchUploaded(result.file)
                 UploadResult.TooLarge -> _uploadState.value = UploadState.TooLarge
                 UploadResult.Failed -> _uploadState.value = UploadState.Failed
             }
         }
+    }
+
+    private suspend fun dispatchUploaded(file: SharedFileRef) {
+        _uploadState.value = UploadState.Idle
+        val mode = composer.mode.value
+        val extras = composer.extrasFor(mode, files = listOf(file))
+        if (mode is ComposerMode.Replying) composer.cancelReply()
+        val message = tracker.append(file.name ?: file.url, extras, clock())
+        dispatch(message, wireBody = "")
     }
 
     /** Dismiss a failed-upload banner. */
@@ -390,64 +246,27 @@ open class ConversationViewModel(
      */
     fun toggleReaction(item: TimelineItem, emoji: String) {
         val target = actionTargetIdOf(item) ?: return
-        viewModelScope.launch {
-            runCatching { io.toggleReaction(target, emoji) }
-        }
+        launchVerb { io.toggleReaction(target, emoji) }
     }
 
     /** Enter reply mode targeting [item] (XEP-0461). */
-    fun startReply(item: TimelineItem) {
-        if (item.tombstone != null) return
-        val target = actionTargetIdOf(item) ?: return
-        val author = item.from?.let { if (isGroupchat) it else bareJidOf(it) } ?: return
-        _composerMode.value = ComposerMode.Replying(
-            targetId = target,
-            authorJid = author,
-            authorName = authorNameOf(item) ?: author,
-            previewBody = item.body,
-            // DM replies root an implicit thread at the parent when none
-            // exists (web chat-send parity: every DM reply carries a
-            // <thread/>); channels only thread explicit replies.
-            threadId = item.threadId
-                ?: if (isGroupchat) null else (item.originId ?: item.messageId),
-        )
-    }
+    fun startReply(item: TimelineItem) = composer.startReply(item)
 
-    fun cancelReply() {
-        if (_composerMode.value is ComposerMode.Replying) {
-            _composerMode.value = ComposerMode.Normal
-        }
-    }
+    fun cancelReply() = composer.cancelReply()
 
-    /**
-     * The thread a "reply in thread" on [item] opens: its own thread,
-     * else a new thread rooted at the message (web
-     * `thread-action-target` parity). The DM root id must be
-     * author-assigned for the same reason as [actionTargetIdOf].
-     */
-    fun threadIdFor(item: TimelineItem): String = item.threadId
-        ?: if (isGroupchat) item.id else (item.originId ?: item.messageId ?: item.id)
+    /** See the top-level [threadIdFor]. */
+    fun threadIdFor(item: TimelineItem): String = threadIdFor(item, isGroupchat)
 
     /** Enter edit mode for an own, non-tombstoned message. */
-    fun startEdit(item: TimelineItem) {
-        if (!item.isMine || item.tombstone != null) return
-        val target = correctionTargetIdOf(item) ?: return
-        _composerMode.value = ComposerMode.Editing(
-            targetId = target,
-            originalBody = item.body,
-            threadId = item.threadId,
-        )
-    }
+    fun startEdit(item: TimelineItem) = composer.startEdit(item)
 
-    fun cancelEdit() {
-        _composerMode.value = ComposerMode.Normal
-    }
+    fun cancelEdit() = composer.cancelEdit()
 
     /** XEP-0424 retraction of an own message. */
     fun retract(item: TimelineItem) {
         if (!item.isMine || item.tombstone != null) return
         val target = actionTargetIdOf(item) ?: return
-        viewModelScope.launch { runCatching { io.sendRetraction(target) } }
+        launchVerb { io.sendRetraction(target) }
     }
 
     /**
@@ -458,95 +277,30 @@ open class ConversationViewModel(
      */
     fun setPinned(item: TimelineItem, pinned: Boolean) {
         val target = actionTargetIdOf(item) ?: return
+        launchVerb { io.setPinned(target, pinned) }
+    }
+
+    /** Fire a conversation verb; refusals surface via [actionFailures]. */
+    private fun launchVerb(verb: suspend () -> VerbResult) {
         viewModelScope.launch {
-            val ok = runCatching { io.setPinned(target, pinned) }.getOrDefault(false)
-            if (!ok) _actionFailures.tryEmit(Unit)
+            val result = runCatching { verb() }.getOrDefault(VerbResult.Rejected)
+            if (result is VerbResult.Failure) _actionFailures.tryEmit(result)
         }
     }
 
-    /**
-     * Reaction/retraction/pin target (web parity): in a MUC strictly
-     * the room-assigned XEP-0359 stanza id (`by` must be the room — no
-     * id means the action is unavailable); in a DM strictly the
-     * AUTHOR-assigned id — the local archive stanza id was stamped by
-     * our own server and the peer's copy never carried it, so a
-     * reaction/retraction/reply targeting it silently fails to apply
-     * on the other side.
-     */
-    fun actionTargetIdOf(item: TimelineItem): String? = if (isGroupchat) {
-        // Authority scan, never the first stanza-id (sender-controlled):
-        // an occupant-injected foreign id must not disable actions on
-        // the message.
-        item.assignedStanzaId(conversationJid)?.id
-    } else {
-        item.originId ?: item.messageId
-    }
-
-    /** XEP-0308 targets the AUTHOR-assigned id of the original send. */
-    private fun correctionTargetIdOf(item: TimelineItem): String? =
-        item.originId ?: item.messageId
-
-    private fun authorNameOf(item: TimelineItem): String? {
-        val from = item.from ?: return null
-        return if (isGroupchat) from.substringAfter('/', from) else bareJidOf(from).substringBefore('@')
-    }
-
-    private fun bareJidOf(jid: String): String = jid.substringBefore('/')
-
-    /**
-     * Loaded-history threads overview, newest activity first. Purely
-     * client-side (the FFI exposes no server thread listing yet): only
-     * threads whose messages are in the loaded window appear.
-     */
-    private fun threadSummariesOf(items: List<TimelineItem>): List<ThreadSummary> {
-        val byThread = LinkedHashMap<String, MutableList<TimelineItem>>()
-        val lastActivityIndex = HashMap<String, Int>()
-        items.forEachIndexed { index, item ->
-            val thread = item.threadId ?: return@forEachIndexed
-            // Call anchors carry a thread id (the call sid) but are feed
-            // rows, not thread members.
-            if (item.hasCallThread) return@forEachIndexed
-            byThread.getOrPut(thread) { mutableListOf() }.add(item)
-            lastActivityIndex[thread] = index
-        }
-        // Roots carry no <thread/> of their own (Waddle implicit-root):
-        // resolve them by identity so previews show the root body.
-        return byThread.map { (thread, members) ->
-            val root = items.firstOrNull { thread in it.identityIds }
-            val previewSource = root ?: members.first()
-            ThreadSummary(
-                threadId = thread,
-                rootAuthor = previewSource.let(::authorNameOf),
-                // Tombstoned content must never leak through previews
-                // (XEP-0424/0425); the UI substitutes the placeholder.
-                rootPreview = if (previewSource.tombstone != null) "" else previewSource.body,
-                rootTombstoned = previewSource.tombstone != null,
-                replyCount = members.count { thread !in it.identityIds },
-                lastTimestamp = members.last().timestamp,
-            )
-            // Newest activity first BY TIMELINE ORDER — live replies
-            // carry no timestamp and a string sort would sink them.
-        }.sortedByDescending { lastActivityIndex[it.threadId] ?: -1 }
-    }
+    /** See the top-level [actionTargetIdOf]. */
+    fun actionTargetIdOf(item: TimelineItem): String? =
+        actionTargetIdOf(item, isGroupchat, conversationJid)
 
     /** Re-send a failed optimistic message (reply/thread extras kept). */
     fun retry(localId: Long) {
-        val message = pending.value.firstOrNull { it.localId == localId && it.failed } ?: return
-        pending.update { list -> list.filterNot { it.localId == localId } }
-        val retried = PendingMessage(
-            localId = nextLocalId++,
-            stanzaId = null,
-            body = message.body,
-            timestampMillis = clock(),
-            failed = false,
-            extras = message.extras,
-        )
-        pending.update { it + retried }
+        val message = tracker.takeRetry(localId) ?: return
+        val retried = tracker.append(message.body, message.extras, clock())
         viewModelScope.launch {
             // Files-only sends carry an empty wire body (the row shows
             // the file name); everything else resends its body.
             val wireBody = if (message.extras?.sharedFiles.orEmpty().isNotEmpty()) "" else retried.body
-            dispatch(retried, message.extras, wireBody)
+            dispatch(retried, wireBody)
         }
     }
 
@@ -589,30 +343,6 @@ open class ConversationViewModel(
         if (history.value.inFlight) return
         history.value = HistoryState()
         loadOlder()
-    }
-
-    private fun markAcked(stanzaId: String) {
-        ackedIds += stanzaId
-        pending.update { list ->
-            list.map {
-                if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false, queued = false) else it
-            }
-        }
-    }
-
-    private fun markFailed(stanzaId: String) {
-        failedIds += stanzaId
-        pending.update { list ->
-            list.map {
-                if (it.stanzaId == stanzaId) it.copy(failed = true, queued = false) else it
-            }
-        }
-    }
-
-    private fun updatePending(localId: Long, transform: (PendingMessage) -> PendingMessage) {
-        pending.update { list ->
-            list.map { if (it.localId == localId) transform(it) else it }
-        }
     }
 
     private data class HistoryState(

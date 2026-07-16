@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.VerbResult
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 
@@ -43,18 +44,19 @@ interface ConversationIo {
     suspend fun markDisplayed() {}
 
     /** XEP-0444: toggle [emoji] on the account's set for [targetId]. */
-    suspend fun toggleReaction(targetId: String, emoji: String): Boolean = false
+    suspend fun toggleReaction(targetId: String, emoji: String): VerbResult = VerbResult.Rejected
 
     /** XEP-0308: replace an own message's body; [threadId] repeats
      *  the corrected message's XEP-0201 thread. */
-    suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean = false
+    suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): VerbResult =
+        VerbResult.Rejected
 
     /** XEP-0424: retract an own message. */
-    suspend fun sendRetraction(targetId: String): Boolean = false
+    suspend fun sendRetraction(targetId: String): VerbResult = VerbResult.Rejected
 
     /** Whether this conversation supports pinning (rooms only). */
     val canPin: Boolean get() = false
 
     /** `urn:waddle:pin:0` pin/unpin (rooms only). */
-    suspend fun setPinned(targetId: String, pinned: Boolean): Boolean = false
+    suspend fun setPinned(targetId: String, pinned: Boolean): VerbResult = VerbResult.Rejected
 }

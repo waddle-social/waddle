@@ -353,7 +353,7 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        assertEquals(false, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
+        assertEquals(VerbResult.NotConnected, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
         assertEquals(null, harness.manager.fetchRoomHistory("general@muc.waddle.test", 50u, null))
         val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hi")
         assertEquals(WaddleSendMessageOutcome.NotConnected, roomSend.outcome)
@@ -374,14 +374,14 @@ class XmppSessionManagerTest {
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
 
-        assertTrue(harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
+        assertEquals(VerbResult.Ok, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
         val client = harness.factory.clients.single()
         assertEquals(listOf("general@muc.waddle.test" to "icepuma"), client.joinRoomCalls)
         assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
         assertEquals(setOf("general@muc.waddle.test"), harness.prefs.joinedRooms.first())
 
         client.joinRoomFailure = IllegalStateException("boom")
-        assertEquals(false, harness.manager.joinRoom("other@muc.waddle.test", "icepuma"))
+        assertEquals(VerbResult.Rejected, harness.manager.joinRoom("other@muc.waddle.test", "icepuma"))
         assertEquals(setOf("general@muc.waddle.test"), harness.manager.roomStore.joinedRooms.value)
 
         harness.manager.logout()

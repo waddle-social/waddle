@@ -5,6 +5,7 @@ import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
@@ -73,10 +74,10 @@ internal class ChannelIo(
         sessionManager.markConversationDisplayed(roomJid, isGroupchat = true)
     }
 
-    override suspend fun toggleReaction(targetId: String, emoji: String): Boolean =
+    override suspend fun toggleReaction(targetId: String, emoji: String): VerbResult =
         sessionManager.toggleReaction(roomJid, isGroupchat = true, targetStanzaId = targetId, emoji = emoji)
 
-    override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean =
+    override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): VerbResult =
         sessionManager.sendCorrection(
             roomJid,
             isGroupchat = true,
@@ -85,11 +86,11 @@ internal class ChannelIo(
             threadId = threadId,
         )
 
-    override suspend fun sendRetraction(targetId: String): Boolean =
+    override suspend fun sendRetraction(targetId: String): VerbResult =
         sessionManager.sendRetraction(roomJid, isGroupchat = true, targetStanzaId = targetId)
 
     override val canPin: Boolean get() = true
 
-    override suspend fun setPinned(targetId: String, pinned: Boolean): Boolean =
+    override suspend fun setPinned(targetId: String, pinned: Boolean): VerbResult =
         sessionManager.pinRoomMessage(roomJid, targetId, pinned)
 }

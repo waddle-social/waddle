@@ -1,6 +1,7 @@
 package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
+import social.waddle.android.client.FileDisposition
 
 /**
  * A completed XEP-0363 upload attached to an outbound send (XEP-0447
@@ -14,7 +15,7 @@ data class SharedFileRef(
     val mediaType: String? = null,
     val sizeBytes: Long? = null,
     /** `inline` (image/video/audio/pdf) or `attachment` (web parity). */
-    val disposition: String = "attachment",
+    val disposition: FileDisposition = FileDisposition.ATTACHMENT,
 )
 
 /**

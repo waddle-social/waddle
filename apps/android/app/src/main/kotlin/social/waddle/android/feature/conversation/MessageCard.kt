@@ -50,6 +50,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import social.waddle.android.R
+import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.store.ReactionGroup
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
@@ -390,7 +391,7 @@ private fun SharedFileContent(file: WaddleSharedFile) {
     val uriHandler = LocalUriHandler.current
     var viewerOpen by remember { mutableStateOf(false) }
     val isInlineImage = file.encrypted == null &&
-        file.disposition == "inline" &&
+        FileDisposition.fromWire(file.disposition) == FileDisposition.INLINE &&
         file.mediaType?.startsWith("image/") == true
     if (isInlineImage) {
         AsyncImage(

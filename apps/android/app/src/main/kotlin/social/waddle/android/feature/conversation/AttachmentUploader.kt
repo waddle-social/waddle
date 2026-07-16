@@ -6,9 +6,9 @@ import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.SlotUploader
 import social.waddle.android.client.XmppSessionManager
-import social.waddle.android.client.dispositionFor
 import social.waddle.android.client.prefs.SharedFileRef
 
 /** Outcome of one attachment upload attempt. */
@@ -58,7 +58,7 @@ class AttachmentUploader(
                 name = meta.name,
                 mediaType = contentType,
                 sizeBytes = meta.sizeBytes,
-                disposition = dispositionFor(contentType),
+                disposition = FileDisposition.forMediaType(contentType),
             ),
         )
     }

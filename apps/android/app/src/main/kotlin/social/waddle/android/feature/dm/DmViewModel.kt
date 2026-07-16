@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModelProvider
 import social.waddle.android.AppGraph
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
@@ -64,10 +65,10 @@ internal class DmIo(
         sessionManager.markConversationDisplayed(peerJid, isGroupchat = false)
     }
 
-    override suspend fun toggleReaction(targetId: String, emoji: String): Boolean =
+    override suspend fun toggleReaction(targetId: String, emoji: String): VerbResult =
         sessionManager.toggleReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emoji = emoji)
 
-    override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean =
+    override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): VerbResult =
         sessionManager.sendCorrection(
             peerJid,
             isGroupchat = false,
@@ -76,6 +77,6 @@ internal class DmIo(
             threadId = threadId,
         )
 
-    override suspend fun sendRetraction(targetId: String): Boolean =
+    override suspend fun sendRetraction(targetId: String): VerbResult =
         sessionManager.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)
 }

@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.store.TimelineItem
 
 /**
@@ -71,10 +72,13 @@ fun ConversationScreen(
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val actionFailedText = stringResource(R.string.action_failed)
+    val actionFailedOfflineText = stringResource(R.string.action_failed_offline)
 
     LaunchedEffect(viewModel) {
-        viewModel.actionFailures.collect {
-            snackbarHostState.showSnackbar(actionFailedText)
+        viewModel.actionFailures.collect { failure ->
+            snackbarHostState.showSnackbar(
+                if (failure is VerbResult.NotConnected) actionFailedOfflineText else actionFailedText,
+            )
         }
     }
 
