@@ -886,6 +886,10 @@ export class BrowserXmppClient {
     this.persistResumeStateForPageHide();
   }
 
+  resumeAfterPageShow(): void {
+    this.resume.reclaimAfterPageShow();
+  }
+
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}

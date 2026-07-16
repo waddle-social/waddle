@@ -12,6 +12,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	assertHermeticWasmBuildEnvironment,
 	assertNoAmbientCargoAncestorConfig,
+	assertNoRepositoryCargoConfig,
 	resolvePinnedNixToolchain,
 } from "./wasm-build-environment.mjs";
 import {
@@ -73,6 +74,7 @@ export function assertPinnedCargoMetadataProcess(
 	}
 	assertContained(runRoot, outputPath, "Cargo metadata output");
 	assertHermeticWasmBuildEnvironment(environment);
+	assertNoRepositoryCargoConfig(repoRoot);
 	const expected = expectedToolchain(environment);
 	resolvePinnedNixToolchain(expected.executables, expected.versions);
 }
@@ -117,6 +119,7 @@ export function loadPinnedWasmCargoMetadata(
 		),
 	} = {},
 ) {
+	assertNoRepositoryCargoConfig(repoRoot);
 	assertNoAmbientCargoAncestorConfig(repoRoot);
 	const cargoHome = resolve(
 		environment.CARGO_HOME ?? resolve(environment.HOME ?? homedir(), ".cargo"),

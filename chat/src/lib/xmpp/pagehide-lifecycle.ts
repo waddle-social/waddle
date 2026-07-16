@@ -1,7 +1,8 @@
-type PagehideTarget = Pick<Window, "addEventListener" | "removeEventListener">;
+type PageLifecycleTarget = Pick<Window, "addEventListener" | "removeEventListener">;
 
 export type PagehideXmppClient = {
   prepareForPageHide: () => void;
+  resumeAfterPageShow: () => void;
 };
 
 /**
@@ -10,16 +11,22 @@ export type PagehideXmppClient = {
  * still needs a best-effort acknowledgement request and synchronous snapshot.
  */
 export function installXmppPagehideLifecycle(
-  target: PagehideTarget,
+  target: PageLifecycleTarget,
   currentClient: () => PagehideXmppClient | null,
   suspendCall: () => void,
 ): () => void {
   const handlePageHide = (event: PageTransitionEvent): void => {
-    if (event.persisted) return;
     currentClient()?.prepareForPageHide();
-    suspendCall();
+    if (!event.persisted) suspendCall();
+  };
+  const handlePageShow = (event: PageTransitionEvent): void => {
+    if (event.persisted) currentClient()?.resumeAfterPageShow();
   };
 
   target.addEventListener("pagehide", handlePageHide as EventListener);
-  return () => target.removeEventListener("pagehide", handlePageHide as EventListener);
+  target.addEventListener("pageshow", handlePageShow as EventListener);
+  return () => {
+    target.removeEventListener("pagehide", handlePageHide as EventListener);
+    target.removeEventListener("pageshow", handlePageShow as EventListener);
+  };
 }

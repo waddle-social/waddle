@@ -1121,6 +1121,7 @@ describe("client send readiness", () => {
       saveSm: () => undefined,
       clearSm: () => undefined,
       preparePagehideHandoff: () => undefined,
+      reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [roomJid],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,
@@ -1417,7 +1418,8 @@ describe("client send readiness", () => {
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))
+      .toEqual(["dm-live-1"]);
   });
 });
 

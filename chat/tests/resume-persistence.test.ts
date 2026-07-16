@@ -14,6 +14,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { BrowserXmppClient } from "../src/lib/xmpp/client";
 import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
+import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle";
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
@@ -105,6 +106,7 @@ function inMemoryPersistence(): ResumePersistence & {
     saveSm: (state) => { sm = state; },
     clearSm: () => { smClears += 1; sm = null; },
     preparePagehideHandoff: () => undefined,
+    reclaimPagehideOwnership: () => undefined,
     loadJoinedRooms: () => [...joinedRooms],
     saveJoinedRooms: (rooms) => { joinedRooms = [...rooms]; },
     clearJoinedRooms: () => { joinedRooms = []; },
@@ -502,6 +504,71 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(reloadedPage.consumeSm()).toEqual(state);
   });
 
+  test("BFCache pagehide persists before eviction and pageshow reclaims owner handoff", () => {
+    const ownerId = "bfcache-owner";
+    const persistence = createLocalStorageResumePersistence("alice@example.com", ownerId);
+    const client = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      persistence,
+    );
+    const activeResource = (client as unknown as { resource: string }).resource;
+    (client as unknown as {
+      xmpp: {
+        request_stream_management_ack: () => Promise<void>;
+        get_resume_state: () => PersistedSmResumeState & { hasUnackedOutbound: boolean };
+      };
+    }).xmpp = {
+      request_stream_management_ack: async () => undefined,
+      get_resume_state: () => ({
+        previd: "bfcache-stream",
+        inboundH: 12,
+        outboundH: 8,
+        maxResumeSeconds: 300,
+        resource: "web-bfcache",
+        hasUnackedOutbound: false,
+      }),
+    };
+
+    const listeners = new Map<string, EventListener>();
+    const target = {
+      addEventListener: (type: string, listener: EventListener) => listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    };
+    const remove = installXmppPagehideLifecycle(
+      target as unknown as Window,
+      () => client,
+      () => {
+        throw new Error("BFCache pagehide must not suspend call media");
+      },
+    );
+    const dispatch = (type: "pagehide" | "pageshow") => {
+      listeners.get(type)?.({ persisted: true } as PageTransitionEvent);
+    };
+
+    dispatch("pagehide");
+    expect(persistence.loadSm()).toMatchObject({
+      previd: "bfcache-stream",
+      inboundH: 12,
+      outboundH: 8,
+    });
+    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
+      .not.toBeNull();
+
+    dispatch("pageshow");
+    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
+      .toBeNull();
+
+    // A later BFCache eviction creates a fresh JS context. The synchronous
+    // pagehide snapshot remains consumable and preserves the bound resource.
+    dispatch("pagehide");
+    const reloaded = new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      createLocalStorageResumePersistence("alice@example.com", ownerId),
+    );
+    expect((reloaded as unknown as { resource: string }).resource).toBe(activeResource);
+    remove();
+  });
+
   test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
     const realNow = Date.now;
     let now = 1_000_000;
@@ -662,7 +729,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
-  test("BrowserXmppClient removes restored SM queue entries when native fallback retry owns resend", () => {
+  test("BrowserXmppClient retains restored SM queue entries while native fallback retry owns resend", () => {
     const persistence = inMemoryPersistence();
     persistence.saveSm({
       previd: "live-sm-id",
@@ -688,7 +755,8 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
 
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))
+      .toEqual(["dm-live-1"]);
   });
 
   test("BrowserXmppClient persists SM state when the native replay queue is empty", () => {

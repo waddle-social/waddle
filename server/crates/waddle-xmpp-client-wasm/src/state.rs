@@ -208,11 +208,15 @@ impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
 #[wasm_bindgen]
 pub struct WaddleClient {
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
+    /// The JavaScript wrapper is the sole strong owner of command input.
+    /// Driver/event tasks retain only the weak reference in `inner`, so the
+    /// final wrapper drop closes the channel and self-fences the old socket.
+    pub(crate) _command_owner: Rc<RefCell<Option<mpsc::Sender<WasmCommand>>>>,
 }
 
 pub(crate) struct WaddleClientInner {
     pub(crate) config: StoredConfig,
-    pub(crate) cmd_tx: Option<mpsc::Sender<WasmCommand>>,
+    pub(crate) command_owner: Weak<RefCell<Option<mpsc::Sender<WasmCommand>>>>,
     pub(crate) on_message: Option<Function>,
     pub(crate) on_presence: Option<Function>,
     pub(crate) on_connected: Option<Function>,

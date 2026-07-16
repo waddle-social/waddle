@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use futures::channel::{mpsc, oneshot};
 use futures::{pin_mut, select, FutureExt, SinkExt, StreamExt};

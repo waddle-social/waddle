@@ -49,6 +49,7 @@ describe("DM call activity hydration", () => {
         sm = null;
       },
       preparePagehideHandoff: () => undefined,
+      reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,
@@ -83,6 +84,7 @@ describe("DM call activity hydration", () => {
         sm = null;
       },
       preparePagehideHandoff: () => undefined,
+      reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,
@@ -130,6 +132,7 @@ describe("DM call activity hydration", () => {
       preparePagehideHandoff: () => {
         pagehideOrder.push("prepare-handoff");
       },
+      reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [],
       saveJoinedRooms: () => undefined,
       clearJoinedRooms: () => undefined,

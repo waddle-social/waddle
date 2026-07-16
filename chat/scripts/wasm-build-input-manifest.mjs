@@ -8,6 +8,7 @@ import { loadPinnedWasmCargoMetadata } from "./wasm-cargo-metadata-executor.mjs"
 import { resolveWasmCargoInputs } from "./wasm-cargo-metadata.mjs";
 import { validateWasmBuildModuleClosure } from "./wasm-build-module-closure.mjs";
 import { validateWasmRustSourceClosure } from "./wasm-rust-source-closure.mjs";
+import { assertNoRepositoryCargoConfig } from "./wasm-build-environment.mjs";
 
 export const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
 export const PACKAGE_PATH = "chat/package.json";
@@ -34,16 +35,7 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		"server/Cargo.toml",
 		"server/rust-toolchain.toml",
 	]),
-	optionalFiles: Object.freeze([
-		".cargo/config",
-		".cargo/config.toml",
-		"server/.cargo/config",
-		"server/.cargo/config.toml",
-		"server/crates/.cargo/config",
-		"server/crates/.cargo/config.toml",
-		"server/crates/waddle-xmpp-client-wasm/.cargo/config",
-		"server/crates/waddle-xmpp-client-wasm/.cargo/config.toml",
-	]),
+	optionalFiles: Object.freeze([]),
 });
 
 const BUILD_MODULE_PATHS = Object.freeze(
@@ -197,11 +189,12 @@ function walkSourceRoot(
 		}
 	}
 }
-export function collectDeclaredWasmBuildInputs(
-	repoRoot,
-	{ cargoMetadata = loadPinnedWasmCargoMetadata(repoRoot) } = {},
-) {
+export function collectDeclaredWasmBuildInputs(repoRoot, options = {}) {
 	assertRepositoryRoot(repoRoot);
+	assertNoRepositoryCargoConfig(repoRoot);
+	const cargoMetadata =
+		options.cargoMetadata ??
+		(options.loadCargoMetadata ?? loadPinnedWasmCargoMetadata)(repoRoot);
 	const entries = new Map();
 	const cargoInputs = resolveWasmCargoInputs(repoRoot, cargoMetadata);
 	const declaredFiles = new Set([

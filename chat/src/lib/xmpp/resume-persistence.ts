@@ -111,6 +111,7 @@ export interface ResumePersistence {
   saveSm(state: PersistedSmResumeState): void;
   clearSm(): void;
   preparePagehideHandoff(): void;
+  reclaimPagehideOwnership(): void;
   loadJoinedRooms(): string[];
   saveJoinedRooms(roomJids: readonly string[]): void;
   clearJoinedRooms(): void;
@@ -126,6 +127,7 @@ export const nullResumePersistence: ResumePersistence = {
   saveSm: () => undefined,
   clearSm: () => undefined,
   preparePagehideHandoff: () => undefined,
+  reclaimPagehideOwnership: () => undefined,
   loadJoinedRooms: () => [],
   saveJoinedRooms: () => undefined,
   clearJoinedRooms: () => undefined,
@@ -189,6 +191,9 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
     },
     preparePagehideHandoff() {
       markOwnerHandoff(owner);
+    },
+    reclaimPagehideOwnership() {
+      reclaimOwnerAfterPageShow(owner);
     },
     loadJoinedRooms() {
       const stored = readJson<string[]>(joinedRoomsKey, isStringArray, "joined-rooms") ?? [];
@@ -349,6 +354,14 @@ function markOwnerHandoff(owner: ResumeOwner): void {
     instanceId: owner.instanceId,
     expiresAt: Date.now() + OWNER_HANDOFF_TTL_MS,
   }, "owner-handoff");
+}
+
+function reclaimOwnerAfterPageShow(owner: ResumeOwner): void {
+  if (owner.explicit) {
+    removeKey(ownerHandoffKey(owner.ownerId), "owner-handoff");
+    return;
+  }
+  claimOwnerLease(owner);
 }
 
 function ownerLeaseKey(ownerId: string): string {

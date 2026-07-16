@@ -235,7 +235,8 @@ pub(crate) async fn send_inbox_query_command(
 pub(crate) async fn disconnect_client(
     inner: Rc<RefCell<WaddleClientInner>>,
 ) -> Result<(), JsValue> {
-    let mut cmd_tx = match inner.borrow().cmd_tx.clone() {
+    let command_owner = command_owner(&inner)?;
+    let mut cmd_tx = match command_owner.borrow().clone() {
         Some(cmd_tx) => cmd_tx,
         None => return Ok(()),
     };
@@ -245,7 +246,7 @@ pub(crate) async fn disconnect_client(
         .send(WasmCommand::Disconnect { responder })
         .await
         .map_err(|_| js_error("client is disconnected"))?;
-    inner.borrow_mut().cmd_tx = None;
+    command_owner.borrow_mut().take();
     rx.await
         .map_err(|_| js_error("client is disconnected"))?
         .map_err(|err| js_error(err.to_string()))
@@ -254,11 +255,23 @@ pub(crate) async fn disconnect_client(
 pub(crate) fn command_sender(
     inner: &Rc<RefCell<WaddleClientInner>>,
 ) -> Result<mpsc::Sender<WasmCommand>, JsValue> {
+    let command_owner = command_owner(inner)?;
+    let sender = command_owner
+        .borrow()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| js_error("client is not connected"));
+    sender
+}
+
+pub(crate) fn command_owner(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+) -> Result<Rc<RefCell<Option<mpsc::Sender<WasmCommand>>>>, JsValue> {
     inner
         .borrow()
-        .cmd_tx
-        .clone()
-        .ok_or_else(|| js_error("client is not connected"))
+        .command_owner
+        .upgrade()
+        .ok_or_else(|| js_error("client wrapper was released"))
 }
 
 #[cfg(test)]
@@ -271,6 +284,7 @@ mod tests {
     fn public_disconnect_hides_sender_but_preserves_resume_until_clean_completion() {
         block_on(async {
             let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+            let command_owner = Rc::new(RefCell::new(Some(cmd_tx)));
             let resume_state = waddle_xmpp_client::SmResumeState::new("public-disconnect", 2, 3)
                 .expect("resume state");
             let inner = Rc::new(RefCell::new(WaddleClientInner {
@@ -281,7 +295,7 @@ mod tests {
                     resource: "web".to_string(),
                     resume_state: Some(resume_state.clone()),
                 },
-                cmd_tx: Some(cmd_tx),
+                command_owner: Rc::downgrade(&command_owner),
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
@@ -306,7 +320,7 @@ mod tests {
             let (result, ()) = futures::join!(disconnect_client(inner.clone()), acknowledge_driver);
 
             assert!(result.is_ok());
-            assert!(inner.borrow().cmd_tx.is_none());
+            assert!(command_owner.borrow().is_none());
             assert_eq!(inner.borrow().resume_state, Some(resume_state));
             assert!(disconnect_client(inner.clone()).await.is_ok());
         });

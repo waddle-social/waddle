@@ -364,7 +364,7 @@ impl XmppRuntime {
             TransportEvent::MessageReceived(TransportMessage::Close(_)) => {
                 self.stream_close.received = true;
                 self.set_phase(SessionPhase::Disconnecting)?;
-                if !self.stream_close.sent_confirmed {
+                if !self.stream_close.requested {
                     self.stream_close.requested = true;
                     events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                         TransportMessage::Close(StreamClose),
@@ -401,7 +401,6 @@ impl XmppRuntime {
     }
 
     fn begin_local_stream_close(&mut self, events: &mut Vec<ClientEvent>) -> ClientResult<()> {
-        self.bootstrap = BootstrapState::Idle;
         self.set_phase(SessionPhase::Disconnecting)?;
         if self.stream_close.requested || self.stream_close.sent_confirmed {
             return Ok(());
@@ -495,15 +494,34 @@ impl XmppRuntime {
             return Ok(());
         }
 
-        // Track inbound stanzas for SM once enabled.
-        if self.sm_state.enabled && matches!(element.name(), "iq" | "message" | "presence") {
-            self.sm_state.record_received(1);
-        }
-
         // Once bootstrap is complete, route to the app-level stanza dispatcher.
         if matches!(self.bootstrap, BootstrapState::Ready) {
-            events.extend(self.handle_app_stanza(&element));
+            let app_events = self.handle_app_stanza(&element);
+            // A stanza that requires a response cannot be accepted after our
+            // confirmed RFC 7395 close half: emitting the response would put
+            // XML after `<close/>`, while advancing SM h without it would lie
+            // about handled work. Preserve it for server replay instead.
+            if self.stream_close_sent_confirmed()
+                && app_events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientEvent::Connection(ConnectionEvent::OutboundMessage(_))
+                    )
+                })
+            {
+                return Ok(());
+            }
+            if self.sm_state.enabled && matches!(element.name(), "iq" | "message" | "presence") {
+                self.sm_state.record_received(1);
+            }
+            events.extend(app_events);
             return Ok(());
+        }
+
+        // Track any countable bootstrap stanza only after deciding that it is
+        // not application work fenced by the local close half above.
+        if self.sm_state.enabled && matches!(element.name(), "iq" | "message" | "presence") {
+            self.sm_state.record_received(1);
         }
 
         let Some(parsed) = BootstrapElement::parse(&element) else {

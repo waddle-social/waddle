@@ -12,7 +12,10 @@ pub(crate) async fn event_dispatch_loop(
             }
             DriverEvent::Error(description) => emit_error_callback(&inner, &description),
             DriverEvent::Disconnected => {
-                inner.borrow_mut().cmd_tx = None;
+                let command_owner = inner.borrow().command_owner.upgrade();
+                if let Some(command_owner) = command_owner {
+                    command_owner.borrow_mut().take();
+                }
                 // Clone the callback before invoking it so a JS handler that
                 // synchronously re-enters the WaddleClient via a `send_*`
                 // method (which takes `borrow_mut`) does not panic on an

@@ -12,6 +12,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	assertHermeticWasmBuildEnvironment,
 	assertNoAmbientCargoAncestorConfig,
+	assertNoRepositoryCargoConfig,
 	resolvePinnedNixToolchain,
 } from "./wasm-build-environment.mjs";
 
@@ -168,6 +169,7 @@ export function assertPinnedWasmBuildProcess(
 		);
 	}
 	assertPinnedWasmBuildFilesystem(environment, outDir);
+	assertNoRepositoryCargoConfig(repoRoot);
 	assertNoAmbientCargoAncestorConfig(repoRoot);
 
 	const expected = expectedToolchain(environment);
@@ -239,6 +241,7 @@ export function runPinnedWasmBuild({
 	buildId,
 	environment = process.env,
 }) {
+	assertNoRepositoryCargoConfig(repoRoot);
 	assertHermeticWasmBuildEnvironment(environment);
 	const args = pinnedFlakeBuildArgs({
 		repoRoot,

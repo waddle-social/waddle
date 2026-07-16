@@ -4,10 +4,11 @@ use super::*;
 impl WaddleClient {
     #[wasm_bindgen(constructor)]
     pub fn new(config: WaddleConfig) -> WaddleClient {
+        let command_owner = Rc::new(RefCell::new(None));
         WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
-                cmd_tx: None,
+                command_owner: Rc::downgrade(&command_owner),
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
@@ -22,6 +23,7 @@ impl WaddleClient {
                 on_call: None,
                 resume_state: None,
             })),
+            _command_owner: command_owner,
         }
     }
 
@@ -106,7 +108,8 @@ impl WaddleClient {
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            if inner.borrow().cmd_tx.is_some() {
+            let command_owner = command_owner(&inner)?;
+            if command_owner.borrow().is_some() {
                 return Err(js_error("client is already connected"));
             }
 
@@ -117,7 +120,7 @@ impl WaddleClient {
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
             let (event_tx, event_rx) = mpsc::channel(256);
 
-            inner.borrow_mut().cmd_tx = Some(cmd_tx);
+            *command_owner.borrow_mut() = Some(cmd_tx);
 
             spawn_local(event_dispatch_loop(inner.clone(), event_rx));
             spawn_local(driver_loop(config, ws, cmd_rx, event_tx, inner.clone()));

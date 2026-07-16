@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { X_OK } from "node:constants";
-import { accessSync, existsSync, realpathSync } from "node:fs";
+import { accessSync, existsSync, lstatSync, realpathSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { bytewiseCompare } from "./wasm-build-input-digest.mjs";
 
@@ -29,6 +29,16 @@ const PINNED_TOOL_NAMES = Object.freeze([
 	"wasmBindgen",
 ]);
 const CARGO_CONFIG_NAMES = Object.freeze(["config", "config.toml"]);
+export const REPOSITORY_CARGO_CONFIG_PATHS = Object.freeze([
+	".cargo/config",
+	".cargo/config.toml",
+	"server/.cargo/config",
+	"server/.cargo/config.toml",
+	"server/crates/.cargo/config",
+	"server/crates/.cargo/config.toml",
+	"server/crates/waddle-xmpp-client-wasm/.cargo/config",
+	"server/crates/waddle-xmpp-client-wasm/.cargo/config.toml",
+]);
 
 function isForbiddenEnvironmentName(name) {
 	if (
@@ -79,6 +89,24 @@ export function assertNoAmbientCargoAncestorConfig(repoRoot) {
 		const parent = dirname(directory);
 		if (parent === directory) return;
 		directory = parent;
+	}
+}
+
+/// Cargo configuration is executable build policy rather than ordinary source
+/// input. The canonical WASM pipeline owns every output-affecting setting, so
+/// all repository locations Cargo would discover must stay absent.
+export function assertNoRepositoryCargoConfig(repoRoot) {
+	for (const relativePath of REPOSITORY_CARGO_CONFIG_PATHS) {
+		const path = resolve(repoRoot, ...relativePath.split("/"));
+		try {
+			lstatSync(path);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			throw error;
+		}
+		throw new Error(
+			`repository Cargo configuration is not allowed for the canonical WASM build: ${relativePath}`,
+		);
 	}
 }
 

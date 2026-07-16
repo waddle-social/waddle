@@ -807,6 +807,55 @@ async fn repeated_native_disconnects_coalesce_to_one_xml_and_websocket_close() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn native_driver_keeps_one_close_when_peer_arrives_before_write_confirmation() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+
+    let requested = task.runtime.request_stream_close().unwrap();
+    let close = requested
+        .into_iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                message @ TransportMessage::Close(_),
+            )) => Some(message),
+            _ => None,
+        })
+        .expect("one claimed close");
+    let sent_before_peer_close = shared.sent_messages().len();
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .await
+    );
+    assert_eq!(shared.sent_messages().len(), sent_before_peer_close);
+    assert!(!task.runtime.stream_close_complete());
+
+    task.send_transport_message(close).await.unwrap();
+    assert_eq!(
+        shared
+            .sent_messages()
+            .iter()
+            .filter(|message| matches!(message, TransportMessage::Close(_)))
+            .count(),
+        1
+    );
+    assert!(task.runtime.stream_close_complete());
+    assert_eq!(shared.close_count(), 1);
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .await
+    );
+    assert_eq!(shared.close_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn native_command_channel_loss_before_close_aborts_and_preserves_resume_state() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, _events) =

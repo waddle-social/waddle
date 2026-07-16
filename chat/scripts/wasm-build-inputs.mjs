@@ -15,6 +15,8 @@ export { wasmPackBuildArgs } from "./wasm-build-contract.mjs";
 export {
 	assertHermeticWasmBuildEnvironment,
 	assertNoAmbientCargoAncestorConfig,
+	assertNoRepositoryCargoConfig,
+	REPOSITORY_CARGO_CONFIG_PATHS,
 	assertPinnedNixToolchain,
 	assertPinnedToolVersions,
 	resolveExecutableOnPath,

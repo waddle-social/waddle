@@ -471,6 +471,100 @@ describe("OfflineSendQueue drain ordering", () => {
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
   });
+
+  test("failed resume transfers retry ownership without deleting or browser-flushing the durable row", async () => {
+    const sent: string[] = [];
+    const { queue, events } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    const failures: string[] = [];
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+
+    queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native-fallback" });
+    queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-native-fallback" to="bob@example.com"><body>native fallback</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+
+    queue.handleFailed("dm-native-fallback");
+    queue.clearInflight();
+    await queue.flushDirect();
+
+    expect(sent).toEqual([]);
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
+    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
+
+    queue.handleAck("dm-native-fallback");
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+  });
+
+  test("a plain fresh bind releases an unattempted resume replay claim to the durable browser queue", async () => {
+    const sent: string[] = [];
+    const { queue } = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    queue.queueDirectMessage("bob@example.com", "fresh without SM", { id: "dm-no-resume" });
+    queue.seedFromResumeState({
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-no-resume" to="bob@example.com"><body>fresh without SM</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+
+    queue.clearInflight();
+    await queue.flushDirect();
+
+    expect(sent).toEqual(["dm-no-resume"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-no-resume"]);
+  });
+
+  test("a reconstructed queue reclaims a retained failed-resume row after an immediate or mid-write crash", async () => {
+    const original = createQueue().queue;
+    original.queueDirectMessage("bob@example.com", "survive fallback crash", { id: "dm-crash-fallback" });
+    original.seedFromResumeState({
+      previd: "p",
+      inboundH: 3,
+      outboundH: 4,
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-crash-fallback" to="bob@example.com"><body>survive fallback crash</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
+    });
+    original.handleFailed("dm-crash-fallback");
+
+    const reclaimed: string[] = [];
+    const reconstructed = createQueue({
+      sendDirect: async (_peer, _body, opts) => {
+        reclaimed.push(opts.id);
+        return opts.id;
+      },
+    }).queue;
+
+    await reconstructed.flushDirect();
+
+    expect(reclaimed).toEqual(["dm-crash-fallback"]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-crash-fallback"]);
+    reconstructed.handleAck("dm-crash-fallback");
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
 });
 
 describe("ReconnectScheduler", () => {
@@ -566,6 +660,7 @@ function createRecordingPersistence() {
       saved = null;
     },
     preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
+    reclaimPagehideOwnership: () => calls.push("reclaimPagehideOwnership"),
     loadJoinedRooms: () => [],
     saveJoinedRooms: () => undefined,
     clearJoinedRooms: () => calls.push("clearJoinedRooms"),

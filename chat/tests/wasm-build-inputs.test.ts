@@ -17,7 +17,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { buildAndPublishWasm } from "../scripts/build-and-publish-wasm.mjs";
+import {
+	GITHUB_PACKAGES_REGISTRY,
+	buildAndPublishWasm,
+} from "../scripts/build-and-publish-wasm.mjs";
 import {
 	PINNED_CARGO_METADATA_PROTOCOL,
 	pinnedCargoMetadataArgs,
@@ -28,8 +31,10 @@ import {
 } from "../scripts/wasm-build-input-digest.mjs";
 import {
 	WASM_BUILD_INPUT_MANIFEST,
+	REPOSITORY_CARGO_CONFIG_PATHS,
 	assertHermeticWasmBuildEnvironment,
 	assertNoAmbientCargoAncestorConfig,
+	assertNoRepositoryCargoConfig,
 	assertPinnedNixToolchain,
 	assertPinnedToolVersions,
 	canonicalWasmBuildIdentity,
@@ -51,6 +56,7 @@ import {
 import {
 	finalizeWasmPackage,
 	renderWasmWrapper,
+	wasmPackageVersion,
 } from "../scripts/wasm-package-bindings.mjs";
 
 const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
@@ -313,22 +319,43 @@ describe("canonical WASM build identity", () => {
 		const beforeContent = buildId(contentRoot);
 		write(contentRoot, "flake.lock", "different locked toolchain\n");
 		expect(buildId(contentRoot)).not.toBe(beforeContent);
+	});
 
-		for (const configPath of [
-			".cargo/config",
-			".cargo/config.toml",
-			"server/.cargo/config",
-			"server/.cargo/config.toml",
-			"server/crates/.cargo/config",
-			"server/crates/.cargo/config.toml",
-			"server/crates/waddle-xmpp-client-wasm/.cargo/config",
-			"server/crates/waddle-xmpp-client-wasm/.cargo/config.toml",
-		]) {
+	test("rejects all eight in-repository Cargo config locations before metadata or build execution", () => {
+		const configContents = [
+			"[alias]\nwasm = 'build --release'\n",
+			"[build]\nrustc-wrapper = '/tmp/wrapper'\n",
+			"[target.wasm32-unknown-unknown]\nlinker = '/tmp/linker'\n",
+			"[target.wasm32-unknown-unknown]\nrustflags = ['-Ctarget-feature=+simd128']\n",
+			"[source.crates-io]\nreplace-with = 'vendored'\n",
+			"[source.vendored]\ndirectory = '/tmp/vendor'\n",
+			"[patch.crates-io]\nfixture = { path = '/tmp/fixture' }\n",
+			"[build]\ntarget = 'wasm32-unknown-unknown'\n",
+		];
+		expect(REPOSITORY_CARGO_CONFIG_PATHS).toHaveLength(8);
+		for (const [index, configPath] of REPOSITORY_CARGO_CONFIG_PATHS.entries()) {
 			const configRoot = fixtureRoot();
-			const beforeConfig = buildId(configRoot);
-			write(configRoot, configPath, `[build]\ntarget-dir = "${configPath}"\n`);
-			expect(buildId(configRoot)).not.toBe(beforeConfig);
+			write(configRoot, configPath, configContents[index]);
+			let metadataCalls = 0;
+			expect(() =>
+				canonicalWasmBuildIdentity(configRoot, {
+					loadCargoMetadata: () => {
+						metadataCalls += 1;
+						return cargoMetadataByRoot.get(configRoot);
+					},
+				}),
+			).toThrow(`repository Cargo configuration is not allowed for the canonical WASM build: ${configPath}`);
+			expect(metadataCalls).toBe(0);
+			expect(() => assertNoRepositoryCargoConfig(configRoot)).toThrow(configPath);
 		}
+
+		const brokenLinkRoot = fixtureRoot();
+		const brokenConfig = resolve(brokenLinkRoot, ".cargo/config.toml");
+		mkdirSync(dirname(brokenConfig), { recursive: true });
+		symlinkSync("missing-config.toml", brokenConfig);
+		expect(() => assertNoRepositoryCargoConfig(brokenLinkRoot)).toThrow(
+			".cargo/config.toml",
+		);
 	});
 
 	test("discovers every resolved local path dependency from Cargo metadata", () => {
@@ -1070,6 +1097,25 @@ describe("canonical WASM build execution policy", () => {
 		expect(readdirSync(root).sort()).toEqual(
 			[...WASM_PACKAGE_ARTIFACTS].sort(),
 		);
+		expect(JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")))
+			.toMatchObject({
+				name: "@waddle/xmpp-client-wasm",
+				version: `0.0.0-wasm-${"a".repeat(64)}`,
+				publishConfig: {
+					registry: GITHUB_PACKAGES_REGISTRY,
+					access: "public",
+				},
+			});
+	});
+
+	test("derives a deterministic unique valid SemVer prerelease from the full build identity", () => {
+		const firstBuild = "0".repeat(64);
+		const secondBuild = "f".repeat(64);
+		const firstVersion = wasmPackageVersion(firstBuild);
+		expect(wasmPackageVersion(firstBuild)).toBe(firstVersion);
+		expect(wasmPackageVersion(secondBuild)).not.toBe(firstVersion);
+		expect(firstVersion).toMatch(/^0\.0\.0-wasm-[0-9a-f]{64}$/u);
+		expect(firstVersion.endsWith(firstBuild)).toBe(true);
 	});
 
 	test("renders all wrapper cache-bust references from one full digest", () => {
@@ -1083,19 +1129,81 @@ describe("canonical WASM build execution policy", () => {
 		expect(wrapper.match(new RegExp(id, "gu"))).toHaveLength(4);
 	});
 
-	test("publisher authentication matches the generated workflow and npmrc", () => {
+	test("default publisher uses GitHub Packages, idempotent retry, and a sanitized token environment", () => {
 		const workflow = readFileSync(
 			resolve(REAL_REPO_ROOT, ".github/workflows/waddle-chat-publishwasm.yml"),
 			"utf8",
 		);
-		const npmrc = readFileSync(resolve(REAL_REPO_ROOT, ".npmrc"), "utf8");
 		expect(workflow).toContain("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}");
-		expect(npmrc).toContain("_authToken=${GITHUB_TOKEN}");
 		expect(() =>
 			buildAndPublishWasm({
 				environment: { NODE_AUTH_TOKEN: "legacy-token" },
 			}),
 		).toThrow("GITHUB_TOKEN is required");
+
+		const secret = "publisher-secret-must-not-leak";
+		const built: string[] = [];
+		const logs: string[] = [];
+		let invocation:
+			| { command: string; args: string[]; options: { cwd: string; env: Record<string, string> }; packageJson: string }
+			| undefined;
+		buildAndPublishWasm({
+			environment: {
+				GITHUB_TOKEN: secret,
+				NODE_AUTH_TOKEN: "legacy-node-token",
+				NPM_TOKEN: "legacy-npm-token",
+				NPM_CONFIG_TOKEN: "legacy-config-token",
+				NPM_CONFIG_REGISTRY: "https://registry.example.invalid",
+				PATH: "/tools",
+			},
+			loadIdentity: () => ({ buildId: "d".repeat(64), contract }),
+			runBuild: ({ outDir }: { outDir: string }) => {
+				built.push(outDir);
+				for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+					writeFileSync(
+						resolve(outDir, artifact),
+						artifact === "package.json"
+							? JSON.stringify({ name: "@waddle/xmpp-client-wasm", version: wasmPackageVersion("d".repeat(64)) })
+							: `same:${artifact}`,
+					);
+				}
+			},
+			publishExecute: (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => {
+				invocation = {
+					command,
+					args,
+					options,
+					packageJson: readFileSync(resolve(options.cwd, "package.json"), "utf8"),
+				};
+			},
+			log: (message: string) => logs.push(message),
+		});
+
+		expect(invocation?.command).toBe("bun");
+		expect(invocation?.args).toEqual([
+			"publish",
+			"--access",
+			"public",
+			"--registry",
+			GITHUB_PACKAGES_REGISTRY,
+			"--tolerate-republish",
+		]);
+		expect(invocation?.options.cwd).toBe(built[0]);
+		expect(invocation?.options.env).toMatchObject({
+			PATH: "/tools",
+			NPM_CONFIG_TOKEN: secret,
+		});
+		for (const removed of [
+			"GITHUB_TOKEN",
+			"NODE_AUTH_TOKEN",
+			"NPM_TOKEN",
+			"NPM_CONFIG_REGISTRY",
+		]) {
+			expect(invocation?.options.env).not.toHaveProperty(removed);
+		}
+		expect(JSON.stringify(invocation?.args)).not.toContain(secret);
+		expect(invocation?.packageJson).not.toContain(secret);
+		expect(logs.join("\n")).not.toContain(secret);
 	});
 
 	test("publishes only after two isolated artifact sets match", () => {

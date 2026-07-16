@@ -222,6 +222,11 @@ impl WasmDriverTask {
             }
         }
 
+        self.run_input_loop().await;
+        self.finish().await;
+    }
+
+    async fn run_input_loop(&mut self) {
         loop {
             let now_ms = waddle_xmpp_client::runtime::monotonic_now_ms();
             let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
@@ -253,8 +258,6 @@ impl WasmDriverTask {
                 break;
             }
         }
-
-        self.finish().await;
     }
 
     async fn handle_driver_timer(&mut self, close_deadline_scheduled: bool) -> bool {
@@ -1101,16 +1104,18 @@ mod tests {
     }
 
     struct FakeWire {
+        _event_sender: mpsc::Sender<WasmTransportEvent>,
         events: mpsc::Receiver<WasmTransportEvent>,
         state: FakeWireState,
     }
 
     impl FakeWire {
         fn new() -> (Self, FakeWireState) {
-            let (_sender, events) = mpsc::channel(16);
+            let (event_sender, events) = mpsc::channel(16);
             let state = FakeWireState::default();
             (
                 Self {
+                    _event_sender: event_sender,
                     events,
                     state: state.clone(),
                 },
@@ -1223,7 +1228,7 @@ mod tests {
                 resource: "web".to_string(),
                 resume_state: None,
             },
-            cmd_tx: None,
+            command_owner: Weak::new(),
             on_message: None,
             on_presence: None,
             on_connected: None,
@@ -1852,6 +1857,51 @@ mod tests {
     }
 
     #[test]
+    fn wasm_driver_keeps_one_close_when_peer_arrives_before_write_confirmation() {
+        block_on(async {
+            let (mut task, wire, _events, _inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+
+            let requested = task.runtime.request_stream_close().unwrap();
+            let close = requested
+                .into_iter()
+                .find_map(|event| match event {
+                    ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        message @ TransportMessage::Close(_),
+                    )) => Some(message),
+                    _ => None,
+                })
+                .expect("one claimed close");
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+            assert!(wire.take_messages().is_empty());
+            assert!(!task.runtime.stream_close_complete());
+
+            task.send_transport_message(close).await.unwrap();
+            assert!(matches!(
+                wire.take_messages().as_slice(),
+                [TransportMessage::Close(_)]
+            ));
+            assert!(task.runtime.stream_close_complete());
+            assert_eq!(wire.close_count.get(), 1);
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+            assert_eq!(wire.close_count.get(), 1);
+        });
+    }
+
+    #[test]
     fn wasm_command_channel_loss_before_close_aborts_and_preserves_resume_state() {
         block_on(async {
             let (mut task, wire, _events, inner) = test_driver(test_config(None));
@@ -1877,6 +1927,54 @@ mod tests {
             assert!(task.commands_closed);
             assert_eq!(wire.close_count.get(), 1);
             assert_eq!(inner.borrow().resume_state, resume_before);
+        });
+    }
+
+    #[test]
+    fn dropping_last_waddle_client_wrapper_aborts_live_socket_once_and_preserves_resume() {
+        block_on(async {
+            let client = WaddleClient::new(WaddleConfig::new(
+                "wss://xmpp.example.test/ws".to_string(),
+                "alice@example.test".to_string(),
+                "token".to_string(),
+                "web".to_string(),
+            ));
+            let inner = client.inner.clone();
+            let (command_sender, command_receiver) = mpsc::channel(16);
+            *client._command_owner.borrow_mut() = Some(command_sender);
+            let (event_sender, mut event_receiver) = mpsc::channel(256);
+            let (wire, wire_state) = FakeWire::new();
+            let mut task = WasmDriverTask::new_with_dependencies(
+                test_config(None),
+                Box::new(wire),
+                Rc::new(ManualTimerBackend::default()),
+                command_receiver,
+                event_sender,
+                inner.clone(),
+            )
+            .expect("driver task");
+
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire_state.take_messages();
+            let resume_before = inner
+                .borrow()
+                .resume_state
+                .clone()
+                .expect("live resumable session");
+
+            drop(client);
+            assert!(inner.borrow().command_owner.upgrade().is_none());
+
+            task.run_input_loop().await;
+            task.finish().await;
+
+            assert!(task.commands_closed);
+            assert_eq!(wire_state.close_count.get(), 1);
+            assert_eq!(inner.borrow().resume_state.as_ref(), Some(&resume_before));
+            let disconnected = std::iter::from_fn(|| event_receiver.try_recv().ok())
+                .filter(|event| matches!(event, DriverEvent::Disconnected))
+                .count();
+            assert_eq!(disconnected, 1);
         });
     }
 

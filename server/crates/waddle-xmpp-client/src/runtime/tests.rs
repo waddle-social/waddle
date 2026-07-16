@@ -61,6 +61,203 @@ fn local_stream_close_request_is_idempotent_across_runtime_entrypoints() {
 }
 
 #[test]
+fn local_close_claim_survives_peer_close_before_transport_confirmation() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.bootstrap = BootstrapState::Ready;
+
+    let requested = runtime.request_stream_close().unwrap();
+    assert_eq!(outbound_close_count(&requested), 1);
+
+    let peer = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Close(StreamClose)),
+            100,
+        )
+        .unwrap();
+    assert_eq!(outbound_close_count(&peer), 0);
+    assert!(!runtime.stream_close_complete());
+
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+            200,
+        )
+        .unwrap();
+    assert!(runtime.stream_close_complete());
+
+    let repeated = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Close(StreamClose)),
+            300,
+        )
+        .unwrap();
+    assert_eq!(outbound_close_count(&repeated), 0);
+}
+
+#[test]
+fn peer_first_close_claims_exactly_one_reciprocal_close() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.bootstrap = BootstrapState::Ready;
+
+    let first = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Close(StreamClose)),
+            100,
+        )
+        .unwrap();
+    let repeated = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Close(StreamClose)),
+            150,
+        )
+        .unwrap();
+
+    assert_eq!(outbound_close_count(&first), 1);
+    assert_eq!(outbound_close_count(&repeated), 0);
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+            200,
+        )
+        .unwrap();
+    assert!(runtime.stream_close_complete());
+}
+
+#[test]
+fn late_countable_stanza_during_local_half_close_is_dispatched_and_resumed_truthfully() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.bootstrap = BootstrapState::Ready;
+    runtime.snapshot.binding = Some(SessionBinding {
+        jid: FullJid::from_str("alice@example.com/macbook").unwrap(),
+        stream_id: Some(StreamId::new("late-inbound-session")),
+        resumable: true,
+    });
+    runtime.sm_state.enabled = true;
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.previd = Some("late-inbound-session".to_string());
+
+    runtime.request_stream_close().unwrap();
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+            100,
+        )
+        .unwrap();
+
+    let late = Element::builder("message", crate::NS_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "late-countable",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "bob@example.com/phone",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "alice@example.com/macbook",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+        .append(
+            Element::builder("body", crate::NS_CLIENT)
+                .append("late but handled")
+                .build(),
+        )
+        .build();
+    let events = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Element(late)),
+            200,
+        )
+        .unwrap();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::Messaging(_)))
+            .count(),
+        1,
+        "a stanza included in inbound h must be dispatched exactly once"
+    );
+
+    let response_required = Element::builder("iq", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            "late-response-required",
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("from").to_owned(),
+            "bob@example.com/phone",
+        )
+        .append(
+            Element::builder("query", crate::discovery::DISCO_INFO_NS)
+                .attr(
+                    minidom::rxml::xml_ncname!("node").to_owned(),
+                    crate::caps::client_caps_node_ver(),
+                )
+                .build(),
+        )
+        .build();
+    let fenced = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Element(response_required)),
+            250,
+        )
+        .unwrap();
+    assert!(
+        !fenced.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(_))
+        )),
+        "no XML may follow our confirmed close"
+    );
+
+    assert!(runtime.stream_close_timed_out_at(5_100));
+    let resume_state = runtime
+        .resume_state()
+        .expect("unfinished close stays resumable");
+    assert_eq!(resume_state.inbound_h(), 1);
+
+    let mut next_config = config();
+    next_config.session.stream_management.resume_state = Some(resume_state);
+    let mut next_runtime = XmppRuntime::new(next_config).unwrap();
+    drive_to_authenticated_stream(&mut next_runtime);
+    let resume_events = next_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let resume = resume_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "resume" => Some(element),
+            _ => None,
+        })
+        .expect("resume request");
+    assert_eq!(resume.attr("h"), Some("1"));
+}
+
+fn outbound_close_count(events: &[ClientEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(
+                    _
+                )))
+            )
+        })
+        .count()
+}
+
+#[test]
 fn confirmed_local_close_fences_sm_xml_but_accepts_final_ack_progress() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.snapshot.phase = SessionPhase::Established;

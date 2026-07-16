@@ -356,6 +356,10 @@ export class ResumeStateStore {
     }
     persistJoinedRooms();
   }
+
+  reclaimAfterPageShow(): void {
+    this.persistence.reclaimPagehideOwnership();
+  }
 }
 
 type OfflineSendQueueDeps = {
@@ -381,6 +385,10 @@ type OfflineSendQueueDeps = {
   ) => Promise<string | null>;
 };
 
+type NativeQueueOwnership =
+  | { kind: "resume-replay" }
+  | { kind: "fresh-fallback" };
+
 /**
  * Persisted offline outbound queue + drain logic. Owns in-flight and
  * resume-replay id tracking, the pending-send latency map behind the
@@ -389,7 +397,12 @@ type OfflineSendQueueDeps = {
  */
 export class OfflineSendQueue {
   private readonly inflightQueuedIds = new Set<string>();
-  private readonly resumeReplayQueuedIds = new Set<string>();
+  /**
+   * Stanzas whose next wire attempt is owned by the native XEP-0198 runtime.
+   * A failed resume transfers them to the runtime's fresh-stream fallback;
+   * the browser must retain the durable row without racing a second send.
+   */
+  private readonly nativeQueueOwnership = new Map<string, NativeQueueOwnership>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
@@ -428,7 +441,18 @@ export class OfflineSendQueue {
     const hadInflight = this.inflightQueuedIds.size > 0;
     this.inflightQueuedIds.clear();
     this.pendingSendAt.clear();
-    if (hadInflight) this.emitQueueDepth();
+    let releasedResumeReplay = false;
+    // A plain fresh bind (for example when the new server advertises no SM)
+    // never emits a resume `<failed/>`; release only those never-transferred
+    // replay claims so the durable browser queue can recover them. Explicit
+    // fresh-fallback ownership remains fenced until the native retry settles.
+    for (const [id, ownership] of this.nativeQueueOwnership) {
+      if (ownership.kind === "resume-replay") {
+        this.nativeQueueOwnership.delete(id);
+        releasedResumeReplay = true;
+      }
+    }
+    if (hadInflight || releasedResumeReplay) this.emitQueueDepth();
   }
 
   /**
@@ -440,14 +464,14 @@ export class OfflineSendQueue {
       const id = messageStanzaIdFromSerializedXml(entry.stanza);
       if (id) {
         this.inflightQueuedIds.add(id);
-        this.resumeReplayQueuedIds.add(id);
+        this.nativeQueueOwnership.set(id, { kind: "resume-replay" });
       }
     }
   }
 
   handleAck(id: string): void {
     const wasQueued = this.inflightQueuedIds.delete(id);
-    const wasResumeReplay = this.resumeReplayQueuedIds.delete(id);
+    const wasNativeOwned = this.nativeQueueOwnership.delete(id);
     // The callback can arrive after a reload or synchronously inside the
     // awaited send. Persisted identity is authoritative; ephemeral Set
     // membership is never a prerequisite for deleting the durable copy.
@@ -458,25 +482,35 @@ export class OfflineSendQueue {
       this.pendingSendAt.delete(id);
       this.deps.events.emitSafe("messageAcked", id, { kind: pending.kind, latencyMs: performance.now() - pending.at });
     }
-    if (wasQueued || wasResumeReplay || wasPersisted) this.emitQueueDepth();
+    if (wasQueued || wasNativeOwned || wasPersisted) this.emitQueueDepth();
   }
 
   handleFailed(id: string): void {
     const wasQueued = this.inflightQueuedIds.delete(id);
-    const wasResumeReplay = this.resumeReplayQueuedIds.delete(id);
-    if (wasResumeReplay) removeQueuedMessage(this.deps.queueScope(), id);
+    const nativeOwnership = this.nativeQueueOwnership.get(id);
+    if (nativeOwnership?.kind === "resume-replay") {
+      // `<failed/>` ends only the resume attempt. The native runtime now owns
+      // the same stanza id on its conformant fresh-stream fallback. Keep the
+      // browser row crash-durable and keep browser flushing fenced off until
+      // the native path acks it or reports a subsequent terminal failure.
+      this.nativeQueueOwnership.set(id, { kind: "fresh-fallback" });
+      this.deps.events.emit("queuedMessageStatus", id, "sending");
+      if (wasQueued) this.emitQueueDepth();
+      return;
+    }
+    const wasNativeOwned = this.nativeQueueOwnership.delete(id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
       this.pendingSendAt.delete(id);
       this.deps.events.emitSafe("messageDeliveryFailed", id, { kind: pending.kind });
     }
-    if (wasQueued || wasResumeReplay) this.emitQueueDepth();
+    if (wasQueued || wasNativeOwned) this.emitQueueDepth();
   }
 
   discardNonRetryable(id: string): void {
     this.inflightQueuedIds.delete(id);
-    this.resumeReplayQueuedIds.delete(id);
+    this.nativeQueueOwnership.delete(id);
     removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
@@ -586,7 +620,7 @@ export class OfflineSendQueue {
       const entries = listQueuedMessages(this.deps.queueScope()).filter((entry): entry is PersistedQueuedDmMessage => entry.kind === "dm");
       for (const entry of entries) {
         if (!this.deps.canUseConnectedSession()) break;
-        if (this.inflightQueuedIds.has(entry.id)) continue;
+        if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
         this.beginAttempt(entry.id, "dm");
         let messageId: string | null;
@@ -623,7 +657,7 @@ export class OfflineSendQueue {
       const entries = listQueuedRoomMessages(this.deps.queueScope(), roomJid);
       for (const entry of entries) {
         if (!this.deps.roomIsReady(roomJid)) break;
-        if (this.inflightQueuedIds.has(entry.id)) continue;
+        if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
         this.beginAttempt(entry.id, "room");
         let messageId: string | null;
@@ -664,7 +698,10 @@ export class OfflineSendQueue {
       this.deps.events.emitSafe("queueDepthChange", {
         kind,
         persisted: kindEntries.length,
-        inflight: kindEntries.filter((entry) => this.inflightQueuedIds.has(entry.id)).length,
+        inflight: kindEntries.filter(
+          (entry) =>
+            this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id),
+        ).length,
         ...(oldestCreatedAt === undefined
           ? {}
           : { oldestAgeMs: Math.max(0, Date.now() - oldestCreatedAt) }),

@@ -1,10 +1,17 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-export function renderWasmWrapper(buildId) {
-	if (!/^[0-9a-f]{64}$/u.test(buildId)) {
+const CANONICAL_BUILD_ID = /^[0-9a-f]{64}$/u;
+
+export function wasmPackageVersion(buildId) {
+	if (!CANONICAL_BUILD_ID.test(buildId)) {
 		throw new Error("WASM build ID must be a full lowercase SHA-256 digest");
 	}
+	return `0.0.0-wasm-${buildId}`;
+}
+
+export function renderWasmWrapper(buildId) {
+	wasmPackageVersion(buildId);
 	return `/* @ts-self-types="./waddle_xmpp_client_wasm.d.ts" */
 import wasmUrl from "./waddle_xmpp_client_wasm_bg.wasm?url&b=${buildId}";
 import * as bgModule from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
@@ -50,6 +57,7 @@ export function finalizeWasmPackage(outDir, buildId) {
 	const pkgJsonPath = resolve(outDir, "package.json");
 	const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
 	pkg.name = "@waddle/xmpp-client-wasm";
+	pkg.version = wasmPackageVersion(buildId);
 	pkg.publishConfig = {
 		registry: "https://npm.pkg.github.com",
 		access: "public",

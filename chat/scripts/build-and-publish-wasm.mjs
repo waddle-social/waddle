@@ -21,13 +21,47 @@ import {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const defaultRepoRoot = resolve(scriptDir, "..", "..");
 const defaultBuildScriptPath = resolve(scriptDir, "build-xmpp-wasm.mjs");
+export const GITHUB_PACKAGES_REGISTRY = "https://npm.pkg.github.com";
+const PUBLISH_AUTH_ENVIRONMENT_NAMES = new Set([
+	"bun_config_token",
+	"github_token",
+	"node_auth_token",
+	"npm_auth_token",
+	"npm_config_registry",
+	"npm_config_token",
+	"npm_token",
+]);
 
-function publishPackage(outDir, environment) {
-	execFileSync("bun", ["publish", "--access", "public"], {
-		cwd: outDir,
-		stdio: "inherit",
-		env: { ...environment },
-	});
+function publisherEnvironment(environment) {
+	const sanitized = Object.fromEntries(
+		Object.entries(environment).filter(
+			([name]) => !PUBLISH_AUTH_ENVIRONMENT_NAMES.has(name.toLowerCase()),
+		),
+	);
+	sanitized.NPM_CONFIG_TOKEN = environment.GITHUB_TOKEN;
+	return sanitized;
+}
+
+export function publishPackage(outDir, environment, execute = execFileSync) {
+	if (!environment.GITHUB_TOKEN) {
+		throw new Error("GITHUB_TOKEN is required to publish to GitHub Packages.");
+	}
+	execute(
+		"bun",
+		[
+			"publish",
+			"--access",
+			"public",
+			"--registry",
+			GITHUB_PACKAGES_REGISTRY,
+			"--tolerate-republish",
+		],
+		{
+			cwd: outDir,
+			stdio: "inherit",
+			env: publisherEnvironment(environment),
+		},
+	);
 }
 
 export function buildAndPublishWasm({
@@ -38,7 +72,9 @@ export function buildAndPublishWasm({
 	createBuildPaths = createIsolatedWasmBuildPaths,
 	runBuild = runPinnedWasmBuild,
 	compareArtifacts = assertWasmArtifactSetsEqual,
-	publish = publishPackage,
+	publishExecute = execFileSync,
+	publish = (outDir, publishEnvironment) =>
+		publishPackage(outDir, publishEnvironment, publishExecute),
 	createRunRoot = () =>
 		mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-publish-")),
 	removeRunRoot = (path) => rmSync(path, { recursive: true, force: true }),
