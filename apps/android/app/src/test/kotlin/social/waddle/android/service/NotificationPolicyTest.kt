@@ -12,6 +12,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testMessage
 import social.waddle.android.client.testSessionInfo
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleStanzaId
 
 class NotificationPolicyTest {
@@ -19,10 +20,14 @@ class NotificationPolicyTest {
     private val session = MutableStateFlow<WaddleSessionInfo?>(testSessionInfo())
     private var appVisible = false
 
+    /** XEP-0492 mode snapshot; unlisted JIDs resolve to `always`. */
+    private val notifyModes = mutableMapOf<String, WaddleNotifyMode>()
+
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
         currentSession = session,
         isAppVisible = { appVisible },
+        notifyModeFor = { jid, _ -> notifyModes[jid] ?: WaddleNotifyMode.ALWAYS },
     )
 
     @Test
@@ -235,5 +240,75 @@ class NotificationPolicyTest {
         )
 
         assertEquals(false, decision?.isMention)
+    }
+
+    // ── XEP-0492 per-conversation gating ─────────────────────────────
+
+    private fun mucMessage(
+        mentionUris: List<String> = emptyList(),
+        broadcastMention: String? = null,
+    ) = testMessage(
+        from = "general@muc.waddle.test/alice",
+        messageType = "groupchat",
+        isMuc = true,
+        mentionUris = mentionUris,
+        broadcastMention = broadcastMention,
+    )
+
+    @Test
+    fun `a muted room never notifies, mentions included`() = runTest {
+        notifyModes["general@muc.waddle.test"] = WaddleNotifyMode.NEVER
+
+        assertNull(policy.decide(mucMessage()))
+        assertNull(policy.decide(mucMessage(mentionUris = listOf("xmpp:icepuma@waddle.test"))))
+        assertNull(policy.decide(mucMessage(broadcastMention = "xmpp:@everyone")))
+    }
+
+    @Test
+    fun `a muted dm never notifies`() = runTest {
+        notifyModes["alice@waddle.test"] = WaddleNotifyMode.NEVER
+
+        assertNull(policy.decide(testMessage(from = "alice@waddle.test/phone")))
+    }
+
+    @Test
+    fun `on-mention suppresses plain room traffic`() = runTest {
+        notifyModes["general@muc.waddle.test"] = WaddleNotifyMode.ON_MENTION
+
+        assertNull(policy.decide(mucMessage()))
+        assertNull(policy.decide(mucMessage(mentionUris = listOf("xmpp:carol@waddle.test"))))
+    }
+
+    @Test
+    fun `on-mention notifies self and broadcast mentions`() = runTest {
+        notifyModes["general@muc.waddle.test"] = WaddleNotifyMode.ON_MENTION
+
+        val selfMention = policy.decide(mucMessage(mentionUris = listOf("xmpp:icepuma@waddle.test")))
+        assertEquals(true, selfMention?.isMention)
+
+        val broadcast = policy.decide(mucMessage(broadcastMention = "xmpp:@everyone"))
+        assertEquals(true, broadcast?.isMention)
+    }
+
+    @Test
+    fun `on-mention gates dms on a self mention too`() = runTest {
+        notifyModes["alice@waddle.test"] = WaddleNotifyMode.ON_MENTION
+
+        assertNull(policy.decide(testMessage(from = "alice@waddle.test/phone")))
+        assertNotNull(
+            policy.decide(
+                testMessage(
+                    from = "alice@waddle.test/phone",
+                    mentionUris = listOf("xmpp:icepuma@waddle.test"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `always keeps current behavior for plain traffic`() = runTest {
+        notifyModes["general@muc.waddle.test"] = WaddleNotifyMode.ALWAYS
+
+        assertNotNull(policy.decide(mucMessage()))
     }
 }

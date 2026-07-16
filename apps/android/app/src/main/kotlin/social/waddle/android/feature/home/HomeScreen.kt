@@ -1,8 +1,10 @@
 package social.waddle.android.feature.home
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -10,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material3.Badge
@@ -128,7 +131,9 @@ private fun DrawerContent(
                     selected = false,
                     onClick = { onChannelClick(channel) },
                     icon = { Icon(Icons.Outlined.Tag, contentDescription = null) },
-                    badge = { UnreadBadge(count = channel.unreadCount) },
+                    badge = {
+                        ChannelRowBadges(isMuted = channel.isMuted, unreadCount = channel.unreadCount)
+                    },
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
             }
@@ -191,7 +196,9 @@ private fun ChannelListBody(
                         Text(text = stringResource(R.string.home_channel_label, channel.name))
                     },
                     leadingContent = { Icon(Icons.Outlined.Tag, contentDescription = null) },
-                    trailingContent = { UnreadBadge(count = channel.unreadCount) },
+                    trailingContent = {
+                        ChannelRowBadges(isMuted = channel.isMuted, unreadCount = channel.unreadCount)
+                    },
                     modifier = Modifier.clickable { onChannelClick(channel) },
                 )
             }
@@ -213,5 +220,23 @@ private fun SectionHeader(name: String) {
 private fun UnreadBadge(count: Int) {
     if (count > 0) {
         Badge { Text(text = count.toString()) }
+    }
+}
+
+/** XEP-0492 mute glyph next to the unread badge on muted rows. */
+@Composable
+private fun ChannelRowBadges(isMuted: Boolean, unreadCount: Int) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (isMuted) {
+            Icon(
+                Icons.Outlined.NotificationsOff,
+                contentDescription = stringResource(R.string.notify_muted_badge),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        UnreadBadge(count = unreadCount)
     }
 }

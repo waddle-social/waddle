@@ -119,4 +119,16 @@
     <string name="notification_reply_failed">Reply not sent — open Waddle to retry</string>
     <string name="connection_retry">Retry</string>
     <string name="notification_self_fallback">You</string>
+
+    <!-- XEP-0492 per-conversation notification settings (labels/hints: web parity) -->
+    <string name="notify_settings_title">Notifications</string>
+    <string name="notify_mode_always_label">All messages</string>
+    <string name="notify_mode_always_hint">Notify me for every new message in this chat.</string>
+    <string name="notify_mode_on_mention_label">Mentions only</string>
+    <string name="notify_mode_on_mention_hint">Notify me only when I\'m mentioned.</string>
+    <string name="notify_mode_never_label">Muted</string>
+    <string name="notify_mode_never_hint">Don\'t notify me. Messages still appear in the chat.</string>
+    <string name="notify_mismatch_room">This room\'s settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.</string>
+    <string name="notify_mismatch_dm">Your direct-message notification settings couldn\'t be saved — their storage was created by an incompatible older client.</string>
+    <string name="notify_muted_badge">Muted</string>
 </resources>

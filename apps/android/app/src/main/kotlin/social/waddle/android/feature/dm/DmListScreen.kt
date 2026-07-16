@@ -1,13 +1,16 @@
 package social.waddle.android.feature.dm
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -79,8 +82,20 @@ fun DmListScreen(onOpenDm: (peerJid: String, name: String) -> Unit, onBack: () -
                         Icon(Icons.Outlined.Person, contentDescription = null)
                     },
                     trailingContent = {
-                        if (peer.unreadCount > 0) {
-                            Badge { Text(text = peer.unreadCount.toString()) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (peer.isMuted) {
+                                Icon(
+                                    Icons.Outlined.NotificationsOff,
+                                    contentDescription = stringResource(R.string.notify_muted_badge),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (peer.unreadCount > 0) {
+                                Badge { Text(text = peer.unreadCount.toString()) }
+                            }
                         }
                     },
                     modifier = Modifier.clickable { onOpenDm(peer.peerJid, peer.name) },

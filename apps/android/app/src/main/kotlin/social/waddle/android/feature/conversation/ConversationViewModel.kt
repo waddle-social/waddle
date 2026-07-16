@@ -16,11 +16,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
+import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * Shared timeline/composer wiring for channels and DMs: store-backed
@@ -30,7 +32,8 @@ import social.waddle.android.client.store.UnreadStore
  */
 open class ConversationViewModel(
     private val conversationJid: String,
-    private val isGroupchat: Boolean,
+    /** Public: the screen picks carrier-specific copy (room vs DM). */
+    val isGroupchat: Boolean,
     timeline: StateFlow<List<TimelineItem>>,
     events: SharedFlow<XmppEvent>,
     private val unreadStore: UnreadStore,
@@ -46,6 +49,8 @@ open class ConversationViewModel(
     private val threadId: String? = null,
     /** `@` popover candidates; empty (the default) hides mention UI. */
     mentionCandidates: Flow<List<MentionCandidate>> = flowOf(emptyList()),
+    /** XEP-0492 effective mode (store fallback resolved to §3 default). */
+    notifyMode: Flow<WaddleNotifyMode> = flowOf(WaddleNotifyMode.ALWAYS),
     private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
@@ -111,6 +116,19 @@ open class ConversationViewModel(
 
     /** Fired when a conversation action (reaction, retraction, pin/unpin) is refused. */
     val actionFailures: SharedFlow<VerbResult.Failure> = _actionFailures
+
+    /** XEP-0492: the conversation's current effective notification mode. */
+    val notifyMode: StateFlow<WaddleNotifyMode> =
+        notifyMode.stateIn(viewModelScope, SharingStarted.Eagerly, WaddleNotifyMode.ALWAYS)
+
+    private val _notifySettingsMismatch = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * XEP-0060 `precondition-not-met` on a mode publish: the bookmark
+     * node exists with an incompatible config. Distinct from
+     * [actionFailures] so the screen can show a specific message.
+     */
+    val notifySettingsMismatch: SharedFlow<Unit> = _notifySettingsMismatch
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
 
@@ -299,6 +317,25 @@ open class ConversationViewModel(
         viewModelScope.launch {
             val result = runCatching { verb() }.getOrDefault(VerbResult.Rejected)
             if (result is VerbResult.Failure) _actionFailures.tryEmit(result)
+        }
+    }
+
+    /**
+     * XEP-0492: publish [mode] for this conversation. The store
+     * reconciles on success (so [notifyMode] updates); refusals map
+     * onto the shared failure snackbars, except the node-config
+     * mismatch which gets its own signal.
+     */
+    fun setNotificationMode(mode: WaddleNotifyMode) {
+        viewModelScope.launch {
+            val result = runCatching { io.setNotificationMode(mode) }
+                .getOrDefault(NotifySettingsResult.Rejected)
+            when (result) {
+                NotifySettingsResult.Ok -> Unit
+                NotifySettingsResult.NodeConfigMismatch -> _notifySettingsMismatch.tryEmit(Unit)
+                NotifySettingsResult.NotConnected -> _actionFailures.tryEmit(VerbResult.NotConnected)
+                NotifySettingsResult.Rejected -> _actionFailures.tryEmit(VerbResult.Rejected)
+            }
         }
     }
 

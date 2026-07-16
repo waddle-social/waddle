@@ -44,11 +44,35 @@ internal class SessionCatchup(
         persistQuietly {
             rejoinPersistedRooms(client, session)
             messenger.drainOutboundQueue()
-            if (freshStream) catchUpConversations()
+            if (freshStream) {
+                catchUpConversations()
+                hydrateNotifySettings(client)
+            }
             // After catch-up so fetched cursors can resolve against
             // the freshly loaded newest pages.
             readState.bootstrapMdsDisplayed(client)
             readState.drainPendingDisplayed()
+        }
+    }
+
+    /**
+     * XEP-0492 hydrate (web `runSessionBootstrap` parity): re-fetch
+     * both bookmark carriers on every FRESH stream only — a XEP-0198
+     * resume preserves the session, and there is no PEP `+notify`
+     * subscription yet, so the fresh-stream refetch is the sync point.
+     * Best-effort: a failed fetch keeps the previous entries (the §3
+     * defaults cover conversations that never hydrated).
+     */
+    private suspend fun hydrateNotifySettings(client: WaddleClientInterface) {
+        try {
+            stores.notifySettingsStore.hydrate(
+                fetchRoomBookmarks = { client.fetchUserBookmarks() },
+                fetchDmBookmarks = { client.fetchDmBookmarks() },
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Keep the pipeline going: notification defaults still apply.
         }
     }
 

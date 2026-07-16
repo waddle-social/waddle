@@ -5,16 +5,19 @@ import kotlinx.coroutines.flow.map
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.MessageSendExtras
+import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.mentionCandidatesOf
+import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /** MUC channel conversation: joins on open, room MAM, groupchat sends. */
 class ChannelViewModel(
@@ -34,6 +37,9 @@ class ChannelViewModel(
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
     mentionCandidates = sessionManager.presenceStore.occupants
         .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
+    // No public/private discriminator on the topology yet (web
+    // parity): every MUC resolves as a private group (§3: always).
+    notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
     uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
@@ -97,4 +103,7 @@ internal class ChannelIo(
 
     override suspend fun setPinned(targetId: String, pinned: Boolean): VerbResult =
         sessionManager.pinRoomMessage(roomJid, targetId, pinned)
+
+    override suspend fun setNotificationMode(mode: WaddleNotifyMode): NotifySettingsResult =
+        sessionManager.setRoomNotificationMode(roomJid, mode)
 }

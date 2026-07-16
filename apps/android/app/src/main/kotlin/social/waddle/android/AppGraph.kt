@@ -26,6 +26,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
+import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
@@ -111,6 +112,14 @@ class AppGraph(
         events = sessionManager.events,
         userPrefs = userPrefs,
         currentSession = currentSession,
+        notifyModeFor = { conversationJid, isGroupchat ->
+            sessionManager.notifySettingsStore.modeFor(
+                conversationJid,
+                // No public/private room discriminator yet (web parity):
+                // every MUC resolves as a private group (§3 default: always).
+                if (isGroupchat) ConversationKind.PRIVATE_GROUP else ConversationKind.DIRECT_CHAT,
+            )
+        },
     )
 
     /** Wire the long-lived collectors and kick off session restore. */

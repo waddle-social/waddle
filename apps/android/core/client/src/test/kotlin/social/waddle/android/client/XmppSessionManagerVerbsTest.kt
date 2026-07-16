@@ -11,15 +11,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.client.store.MessageTombstone
 import social.waddle.android.client.store.ReactionGroup
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePinAction
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePinPreview
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 
 /** Messaging action verbs (react/edit/retract/pin) through the manager. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -377,5 +381,102 @@ class XmppSessionManagerVerbsTest {
             harness.manager.sendCorrection(room, isGroupchat = true, targetId = "s1", newBody = "x"),
         )
         harness.manager.logout()
+    }
+
+    // ── XEP-0492 notification-mode verbs ─────────────────────────────
+
+    @Test
+    fun `setting a room notification mode publishes and reconciles the store`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+
+        val result = harness.manager.setRoomNotificationMode(room, WaddleNotifyMode.NEVER)
+
+        assertEquals(NotifySettingsResult.Ok, result)
+        assertEquals(
+            listOf(Triple(room, WaddleNotifyMode.NEVER, false)),
+            harness.client.roomNotifyCalls,
+        )
+        assertEquals(
+            WaddleNotifyMode.NEVER,
+            harness.manager.notifySettingsStore.modeFor(room, ConversationKind.PRIVATE_GROUP),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `returning a dm to the default drops its override entry`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val peer = "bob@waddle.test"
+
+        assertEquals(
+            NotifySettingsResult.Ok,
+            harness.manager.setDmNotificationMode(peer, WaddleNotifyMode.NEVER),
+        )
+        assertEquals(
+            WaddleNotifyMode.NEVER,
+            harness.manager.notifySettingsStore.modeFor(peer, ConversationKind.DIRECT_CHAT),
+        )
+
+        // The fake mirrors the sparse carrier: `always` without the
+        // rich opt-in retracts the item (`Removed`), and the store
+        // resolves back to the §3 direct-chat default.
+        assertEquals(
+            NotifySettingsResult.Ok,
+            harness.manager.setDmNotificationMode(peer, WaddleNotifyMode.ALWAYS),
+        )
+        assertEquals(
+            WaddleNotifyMode.ALWAYS,
+            harness.manager.notifySettingsStore.modeFor(peer, ConversationKind.DIRECT_CHAT),
+        )
+        assertTrue(harness.manager.notifySettingsStore.entries.value.isEmpty())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a node config mismatch surfaces its own result and leaves the store untouched`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomNotifyOutcome = WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch
+        harness.client.dmNotifyOutcome = WaddleSetDmNotificationModeOutcome.NodeConfigMismatch
+
+        assertEquals(
+            NotifySettingsResult.NodeConfigMismatch,
+            harness.manager.setRoomNotificationMode(room, WaddleNotifyMode.NEVER),
+        )
+        assertEquals(
+            NotifySettingsResult.NodeConfigMismatch,
+            harness.manager.setDmNotificationMode("bob@waddle.test", WaddleNotifyMode.NEVER),
+        )
+        assertTrue(harness.manager.notifySettingsStore.entries.value.isEmpty())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `stanza-level errors report rejected`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.roomNotifyOutcome = WaddleSetRoomNotificationModeOutcome.Error
+
+        assertEquals(
+            NotifySettingsResult.Rejected,
+            harness.manager.setRoomNotificationMode(room, WaddleNotifyMode.NEVER),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `notification mode verbs report not connected without a session`() = runTest {
+        val harness = Harness(this)
+
+        assertEquals(
+            NotifySettingsResult.NotConnected,
+            harness.manager.setRoomNotificationMode(room, WaddleNotifyMode.NEVER),
+        )
+        assertEquals(
+            NotifySettingsResult.NotConnected,
+            harness.manager.setDmNotificationMode("bob@waddle.test", WaddleNotifyMode.NEVER),
+        )
     }
 }

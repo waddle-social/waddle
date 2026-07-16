@@ -3,15 +3,18 @@ package social.waddle.android.feature.dm
 import androidx.lifecycle.ViewModelProvider
 import social.waddle.android.AppGraph
 import social.waddle.android.client.MessageSendExtras
+import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
 import social.waddle.android.feature.conversation.ConversationViewModel
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /** 1:1 DM conversation: DM MAM paging and chat sends (no join step). */
 class DmViewModel(
@@ -27,6 +30,7 @@ class DmViewModel(
     unreadStore = sessionManager.unreadStore,
     io = DmIo(sessionManager, peerJid),
     typingNames = sessionManager.chatStateStore.composingNames(peerJid),
+    notifyMode = sessionManager.notifySettingsStore.modeFlow(peerJid, ConversationKind.DIRECT_CHAT),
     uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
@@ -79,4 +83,7 @@ internal class DmIo(
 
     override suspend fun sendRetraction(targetId: String): VerbResult =
         sessionManager.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)
+
+    override suspend fun setNotificationMode(mode: WaddleNotifyMode): NotifySettingsResult =
+        sessionManager.setDmNotificationMode(peerJid, mode)
 }

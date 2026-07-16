@@ -14,6 +14,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.store.TimelineItem
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * Shared conversation scaffold (channel + DM + thread): top bar,
@@ -73,15 +76,29 @@ fun ConversationScreen(
     ) { uri -> uri?.let(viewModel::sendAttachment) }
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
+    var notifySheetOpen by remember { mutableStateOf(false) }
+    val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val actionFailedText = stringResource(R.string.action_failed)
     val actionFailedOfflineText = stringResource(R.string.action_failed_offline)
+    // Carrier-aware XEP-0060 precondition-not-met copy (web parity):
+    // a room's shared bookmark node needs a server admin, a DM's
+    // personal PEP node does not.
+    val notifyMismatchText = stringResource(
+        if (viewModel.isGroupchat) R.string.notify_mismatch_room else R.string.notify_mismatch_dm,
+    )
 
     LaunchedEffect(viewModel) {
         viewModel.actionFailures.collect { failure ->
             snackbarHostState.showSnackbar(
                 if (failure is VerbResult.NotConnected) actionFailedOfflineText else actionFailedText,
             )
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.notifySettingsMismatch.collect {
+            snackbarHostState.showSnackbar(notifyMismatchText)
         }
     }
 
@@ -111,6 +128,20 @@ fun ConversationScreen(
                             Icon(
                                 Icons.AutoMirrored.Outlined.Chat,
                                 contentDescription = stringResource(R.string.threads_overview_title),
+                            )
+                        }
+                    }
+                    // XEP-0492 bell: parent conversations only — a thread
+                    // (onOpenThread == null) shares its parent's setting.
+                    if (onOpenThread != null) {
+                        IconButton(onClick = { notifySheetOpen = true }) {
+                            Icon(
+                                if (notifyMode == WaddleNotifyMode.NEVER) {
+                                    Icons.Outlined.NotificationsOff
+                                } else {
+                                    Icons.Outlined.Notifications
+                                },
+                                contentDescription = stringResource(R.string.notify_settings_title),
                             )
                         }
                     }
@@ -178,6 +209,14 @@ fun ConversationScreen(
             onRetract = { viewModel.retract(item) },
             onCopy = { clipboard.setText(AnnotatedString(item.body)) },
             onSetPinned = { pinned -> viewModel.setPinned(item, pinned) },
+        )
+    }
+
+    if (notifySheetOpen) {
+        NotifySettingsSheet(
+            currentMode = notifyMode,
+            onDismiss = { notifySheetOpen = false },
+            onSelect = viewModel::setNotificationMode,
         )
     }
 

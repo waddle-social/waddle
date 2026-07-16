@@ -10,7 +10,10 @@ import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleThreadTarget
 import social.waddle.client.ffi.WaddleUploadSlot
 
@@ -229,6 +232,66 @@ internal class ConversationVerbs(
             return
         }
         activeSession.bridge?.submit(XmppEvent.RoomPins(room, entries, fetchedAtVersion))
+    }
+
+    /**
+     * XEP-0492: set the per-room notification mode by merging into the
+     * room's XEP-0402 bookmark. The current rich-payload opt-in from
+     * the store is repeated so the merge never clobbers it; the store
+     * reconciles from the returned item on success (no refetch).
+     */
+    suspend fun setRoomNotificationMode(
+        roomJid: String,
+        mode: WaddleNotifyMode,
+        name: String? = null,
+    ): NotifySettingsResult {
+        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
+        val room = bareJid(roomJid)
+        val outcome = try {
+            client.setRoomNotificationMode(room, mode, name, stores.notifySettingsStore.richPayloadOptIn(room))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return NotifySettingsResult.Rejected
+        }
+        return when (outcome) {
+            is WaddleSetRoomNotificationModeOutcome.Ok -> {
+                stores.notifySettingsStore.applyRoomUpdate(outcome.item)
+                NotifySettingsResult.Ok
+            }
+            WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
+            WaddleSetRoomNotificationModeOutcome.Error -> NotifySettingsResult.Rejected
+        }
+    }
+
+    /**
+     * XEP-0492 DM twin of [setRoomNotificationMode], over the sparse
+     * `urn:waddle:dm-bookmarks:0` carrier: returning the DM to the §3
+     * direct-chat default retracts its item (`Removed`), which the
+     * store reconciles by dropping the entry.
+     */
+    suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult {
+        val client = activeSession.client ?: return NotifySettingsResult.NotConnected
+        val peer = bareJid(peerJid)
+        val outcome = try {
+            client.setDmNotificationMode(peer, mode, stores.notifySettingsStore.richPayloadOptIn(peer))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return NotifySettingsResult.Rejected
+        }
+        return when (outcome) {
+            is WaddleSetDmNotificationModeOutcome.Ok -> {
+                stores.notifySettingsStore.applyDmUpdate(outcome.item)
+                NotifySettingsResult.Ok
+            }
+            is WaddleSetDmNotificationModeOutcome.Removed -> {
+                stores.notifySettingsStore.applyDmRemoved(outcome.jid)
+                NotifySettingsResult.Ok
+            }
+            WaddleSetDmNotificationModeOutcome.NodeConfigMismatch -> NotifySettingsResult.NodeConfigMismatch
+            WaddleSetDmNotificationModeOutcome.Error -> NotifySettingsResult.Rejected
+        }
     }
 
     /**

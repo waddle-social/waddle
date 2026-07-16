@@ -11,17 +11,24 @@ import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * The should-this-message-notify decision for [MessageNotifier], free of
  * notification plumbing: own-JID filtering, prefs gating, app
- * visibility, message-type classification, and the XEP-0333/0490
- * displayed-target resolution.
+ * visibility, message-type classification, XEP-0492 per-conversation
+ * mode gating, and the XEP-0333/0490 displayed-target resolution.
+ *
+ * [notifyModeFor] is the XEP-0492 store's effective-mode snapshot
+ * (conversation bare JID + kind → mode), injected as a function so the
+ * policy stays pure and testable.
  */
 class NotificationPolicy(
     private val userPrefs: UserPrefs,
     private val currentSession: StateFlow<WaddleSessionInfo?>,
     private val isAppVisible: () -> Boolean,
+    private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
+        { _, _ -> WaddleNotifyMode.ALWAYS },
 ) {
     /** A message that must notify, with everything the poster needs. */
     data class Notify(
@@ -47,17 +54,25 @@ class NotificationPolicy(
         if (!isGroupchat && message.messageType != MESSAGE_TYPE_CHAT) return null
         val (conversationJid, sender) =
             foreignSenderOf(message.from, isGroupchat, session) ?: return null
+        val isMention = messageMentionsBareJid(
+            broadcastMention = message.broadcastMention,
+            mentionUris = message.mentionUris,
+            selfBareJid = bareJidOf(session.jid),
+        )
+        // XEP-0492 per-conversation gate: `never` mutes outright,
+        // `on-mention` requires a XEP-0372 broadcast or self mention.
+        when (notifyModeFor(conversationJid, isGroupchat)) {
+            WaddleNotifyMode.NEVER -> return null
+            WaddleNotifyMode.ON_MENTION -> if (!isMention) return null
+            WaddleNotifyMode.ALWAYS -> Unit
+        }
         return Notify(
             conversationJid = conversationJid,
             sender = sender,
             isGroupchat = isGroupchat,
             body = body,
             displayedTarget = displayedTargetOf(message, isGroupchat, conversationJid),
-            isMention = messageMentionsBareJid(
-                broadcastMention = message.broadcastMention,
-                mentionUris = message.mentionUris,
-                selfBareJid = bareJidOf(session.jid),
-            ),
+            isMention = isMention,
         )
     }
 
