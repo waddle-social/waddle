@@ -136,6 +136,27 @@ pub trait MamExt {
         max: u32,
         before: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
+
+    /// Full-text search of a MUC room archive via the XEP-0313 extended
+    /// form field `{urn:xmpp:fulltext:0}fulltext` (Clark notation per
+    /// XEP-0068). Returns the newest matching page first.
+    fn search_room_history<'a>(
+        &'a self,
+        room_jid: &'a str,
+        query: &'a str,
+        max: u32,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
+
+    /// Full-text search of the account's personal archive, filtered to a
+    /// 1:1 peer via the standard `with` field plus the
+    /// `{urn:xmpp:fulltext:0}fulltext` extended form field. The archive
+    /// address is the session's bound bare JID.
+    fn search_dm_history<'a>(
+        &'a self,
+        peer_jid: &'a str,
+        query: &'a str,
+        max: u32,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -163,6 +184,47 @@ impl MamExt for ClientHandle {
         let iq_id = Uuid::new_v4().to_string();
 
         let iq = build_mam_iq(&iq_id, &query_id, max, before, Some(peer_jid), None);
+        run_mam_query(self, iq, &query_id).await
+    }
+
+    async fn search_room_history(
+        &self,
+        room_jid: &str,
+        query: &str,
+        max: u32,
+    ) -> ClientResult<MamPage> {
+        let query_id = Uuid::new_v4().to_string();
+        let iq_id = Uuid::new_v4().to_string();
+
+        let iq = build_room_search_history_iq(&iq_id, &query_id, max, room_jid, query);
+        run_mam_query(self, iq, &query_id).await
+    }
+
+    async fn search_dm_history(
+        &self,
+        peer_jid: &str,
+        query: &str,
+        max: u32,
+    ) -> ClientResult<MamPage> {
+        // The personal archive lives at the account's bare JID: address the
+        // query with the session's bound JID (RFC 6120 resource binding),
+        // mirroring how the WASM client targets its configured account JID.
+        let account_jid = self
+            .snapshot()
+            .binding
+            .map(|binding| binding.jid.to_bare())
+            .ok_or(ClientError::Disconnected)?;
+        let query_id = Uuid::new_v4().to_string();
+        let iq_id = Uuid::new_v4().to_string();
+
+        let iq = build_dm_search_history_iq(
+            &iq_id,
+            &query_id,
+            max,
+            account_jid.as_str(),
+            peer_jid,
+            query,
+        );
         run_mam_query(self, iq, &query_id).await
     }
 }
@@ -348,6 +410,44 @@ pub fn build_mam_iq(
         builder = builder.to_jid(value);
     }
     builder.build()
+}
+
+/// Build a full-text room-archive search IQ: targets the room archive
+/// (`to=room`) with the `{urn:xmpp:fulltext:0}fulltext` extended form field
+/// and an empty `<before/>` so the server pages backward from the newest
+/// match (XEP-0059 §2.5 / XEP-0313 §4.3).
+pub fn build_room_search_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    room_jid: &str,
+    query: &str,
+) -> Element {
+    MamIqBuilder::new(iq_id, query_id, max)
+        .before("")
+        .to_jid(room_jid)
+        .fulltext(query)
+        .build()
+}
+
+/// Build a full-text DM search IQ against the account's personal archive
+/// (`to=account`), constrained to the peer via the standard `with` field
+/// plus the `{urn:xmpp:fulltext:0}fulltext` extended form field. An empty
+/// `<before/>` requests the newest matching page first.
+pub fn build_dm_search_history_iq(
+    iq_id: &str,
+    query_id: &str,
+    max: u32,
+    account_jid: &str,
+    peer_jid: &str,
+    query: &str,
+) -> Element {
+    MamIqBuilder::new(iq_id, query_id, max)
+        .before("")
+        .to_jid(account_jid)
+        .with_jid(peer_jid)
+        .fulltext(query)
+        .build()
 }
 
 fn build_form_field(var: &str, value: &str) -> Element {
