@@ -6,7 +6,9 @@
 //! ## Algorithm
 //!
 //! 1. Compute SHA-1 hash of the input string (UTF-8 encoded).
-//! 2. Take the first two bytes of the hash as a big-endian u16.
+//! 2. Take the first two bytes of the hash as a little-endian u16
+//!    (the second byte is the most significant one, per XEP-0392
+//!    §"Angle generation").
 //! 3. Map to a hue angle: `hue = (value / 65536) * 360`.
 //! 4. Combine with configurable saturation and lightness to produce HSL.
 //!
@@ -81,11 +83,12 @@ impl HslColor {
 ///
 /// This is the core XEP-0392 algorithm:
 /// 1. SHA-1 hash the input
-/// 2. Take first 2 bytes as big-endian u16
+/// 2. Take first 2 bytes as little-endian u16 (XEP-0392 §"Angle
+///    generation": "with the second byte being the most significant one")
 /// 3. Map to 0.0–360.0 hue range
 pub fn compute_hue(input: &str) -> f64 {
     let hash = Sha1::digest(input.as_bytes());
-    let value = u16::from_be_bytes([hash[0], hash[1]]);
+    let value = u16::from_le_bytes([hash[0], hash[1]]);
     (value as f64 / 65536.0) * 360.0
 }
 
@@ -326,15 +329,38 @@ mod tests {
         assert_eq!(color.lightness, 60.0);
     }
 
-    // XEP-0392 spec test vector: "Romeo" should produce a known hue
+    /// XEP-0392 §"Test Vectors" (testvectors-fullrange): angle column.
+    fn assert_spec_vector(input: &str, expected_hue: f64) {
+        let hue = compute_hue(input);
+        assert!(
+            (hue - expected_hue).abs() < 1e-4,
+            "compute_hue({input:?}) = {hue}, expected {expected_hue}"
+        );
+    }
+
     #[test]
     fn test_spec_vector_romeo() {
-        let hue = compute_hue("Romeo");
-        // SHA-1("Romeo") = sha1 hash, first 2 bytes → hue
-        // Just verify it's deterministic and in range
-        assert!((0.0..360.0).contains(&hue));
-        // Re-compute to verify determinism
-        assert_eq!(hue, compute_hue("Romeo"));
+        assert_spec_vector("Romeo", 327.255_249);
+    }
+
+    #[test]
+    fn test_spec_vector_juliet_jid() {
+        assert_spec_vector("juliet@capulet.lit", 209.410_400);
+    }
+
+    #[test]
+    fn test_spec_vector_cat_emoji() {
+        assert_spec_vector("\u{1F63A}", 331.199_341);
+    }
+
+    #[test]
+    fn test_spec_vector_council() {
+        assert_spec_vector("council", 359.994_507);
+    }
+
+    #[test]
+    fn test_spec_vector_board() {
+        assert_spec_vector("Board", 171.430_664);
     }
 
     #[test]
