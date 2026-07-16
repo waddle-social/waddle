@@ -48,7 +48,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | Pinned messages | urn:waddle:pin:0 | ✅ | ✅ | Android has pin/unpin actions + `PinStore.kt`; web adds `PinnedPanel.vue` |
 | @-mentions | 0372 | ✅ | 🟡 | FFI carries `references`/`mention_uris`; no Android compose or render UI — in flight |
-| Mention/nick colors | 0392 | ✅ | ❌ | Web: `consistentColor` in `chat/src/lib/chat-ui.ts` |
+| Mention/nick colors | 0392 | ✅ | ✅ | Shared Rust hue via `consistent_color_hue` FFI; `theme/ConsistentColor.kt` |
 | Per-conversation notify modes / mute | 0492 | ✅ | ❌ | Web: `chat/src/lib/notify-settings.ts`; in flight for Android |
 | Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
 | Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
@@ -63,7 +63,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Avatars | 0084, 0153 | ✅ | 🟡 | Android displays avatars only; no publish/upload FFI |
 | vCard / profile editing | 0292 | ✅ | ❌ | Web: `chat/src/components/chat/VCardEditor.vue`; Android is display-only |
 | Rich presence (mood/activity/tune) | 0107, 0108, 0118 | ✅ | ❌ | Web publishes via pubsub (`client-pubsub.ts`) |
-| Idle time | 0319 | ✅ | 🟡 | FFI exposes `idle_since`; not surfaced in Android UI |
+| Idle time | 0319 | ✅ | ✅ | DM subtitle “away · idle Nm” (`DmScreen.kt`), minute ticker |
 
 ## Notifications
 
@@ -81,11 +81,11 @@ compares user-facing capability per area, verified against both codebases as of
 | File/HTTP upload + attachments | 0363, 0446, 0447 | ✅ | ✅ | Android: `AttachmentUploader.kt`, slot request via FFI |
 | Inline image display | 0447 | ✅ | ✅ | Android renders via Coil in `MessageCard.kt` |
 | Encrypted file attachments | 0448 | ✅ | ❌ | Web: `chat/src/lib/xmpp/encrypted-attachments.ts`; Android uploads plaintext (no OMEMO) |
-| Rich text editor / markup | 0394 | ✅ | 🟡 | FFI carries `markup_spans`; Android renders plain body, plain-text composer |
-| Markdown rendering | — | ✅ | ❌ | Web: `chat/src/lib/rich-message/markdown.ts` |
-| Link previews | urn:waddle:link-preview:0 | ✅ | 🟡 | FFI type present; not rendered in `MessageCard.kt` |
-| Stickers | 0449 | ✅ | 🟡 | Android renders received stickers; no picker |
-| GIF picker | — | ✅ | ❌ | Web: `chat/src/components/chat/GifPicker.vue` |
+| Rich text editor / markup | 0394 | ✅ | ✅ | Rendered via `RichBody.kt`/`RichMessageBody.kt`; composer converts markdown at send (`ComposerMarkdown.kt`) |
+| Markdown rendering | — | ✅ | ✅ | Neither client renders markdown from received bodies (0394-only); Android converts typed markdown at send |
+| Link previews | urn:waddle:link-preview:0 | ✅ | ✅ | Cards in `LinkPreviewCard.kt`; composer lookup token via `lookup_link_preview` FFI |
+| Stickers | 0449 | ✅ | 🟡 | Inline sticker image (112dp, body = alt text); no picker on either client |
+| GIF picker | — | ✅ | ✅ | `GifPickerSheet.kt` over the server-origin `/api/giphy` proxy contract |
 
 ## Calls
 
@@ -109,7 +109,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | Message moderation (remove others' messages) | 0425 | ✅ | ✅ | Android: `send_moderation` FFI verb wired to action sheet |
 | Affiliation management (kick/ban/roles) | 0045 | ✅ | 🟡 | Android has read-only affiliation models; no management actions or UI |
-| Hats (role badges) | 0317 | ✅ | 🟡 | FFI exposes `WaddlePresenceHat`; not shown in Android UI |
+| Hats (role badges) | 0317 | ✅ | ✅ | Single seniority badge on message rows (`AuthorBadges.kt`); authority stays 0045 |
 | Ad-hoc commands | 0050 | ✅ | ❌ | Web: extension-commands infrastructure |
 | Server admin pages | — | ✅ | ❌ | Web: `chat/src/pages/admin/[panel].astro` |
 
@@ -133,8 +133,8 @@ In flight in the current improvement sweep:
 Biggest remaining gaps after that, in priority order:
 
 1. **Voice/video calls** — the FFI signaling layer is complete; Android needs a call UI and media stack. Largest single capability gap.
-2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), hats display, ad-hoc commands.
-3. **Rich content rendering** — markup spans (0394), markdown, link previews, sticker/GIF pickers; most of the data already arrives typed over FFI.
+2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), ad-hoc commands.
+3. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
 4. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
 5. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
 6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
