@@ -82,4 +82,17 @@ class MentionSpansTest {
 
         assertTrue(mentionSpansIn(display, listOf(mention(2u, 6u)), 0u, 9u).isEmpty())
     }
+
+    @Test
+    fun `a fallback range the store rejected never rebases the offsets`() {
+        // stripReplyFallback leaves the body untouched when the range is
+        // out of bounds — a fallback starting past the display body can
+        // never have been stripped, so the offsets stay wire offsets.
+        val display = "hi @bob"
+
+        val spans = mentionSpansIn(display, listOf(mention(3u, 7u)), 40u, 49u)
+
+        assertEquals(1, spans.size)
+        assertEquals("@bob", display.substring(spans[0].startIndex, spans[0].endIndex))
+    }
 }

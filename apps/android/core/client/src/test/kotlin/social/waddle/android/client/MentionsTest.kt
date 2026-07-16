@@ -33,14 +33,14 @@ class MentionsTest {
     fun `broadcast uris satisfy the rust parser's classification`() {
         // parsing/mod.rs derives broadcast_mention from `xmpp:` URIs
         // containing `@everyone`/`@here` — the emitted constants MUST
-        // round-trip through that check.
+        // round-trip through that check (mirrored here verbatim).
+        fun rustClassifiesAsBroadcast(uri: String): Boolean =
+            uri.startsWith("xmpp:") && (uri.contains("@everyone") || uri.contains("@here"))
         listOf(MENTION_URI_EVERYONE, MENTION_URI_HERE).forEach { uri ->
-            assertTrue(uri.startsWith("xmpp:"))
-            assertTrue(uri.contains("@everyone") || uri.contains("@here"))
-            assertTrue(isBroadcastMentionUri(uri))
+            assertTrue(rustClassifiesAsBroadcast(uri))
         }
-        assertFalse(isBroadcastMentionUri("xmpp:bob@waddle.test"))
-        assertFalse(isBroadcastMentionUri("@everyone"))
+        assertFalse(rustClassifiesAsBroadcast("xmpp:bob@waddle.test"))
+        assertFalse(rustClassifiesAsBroadcast("@everyone"))
     }
 
     @Test

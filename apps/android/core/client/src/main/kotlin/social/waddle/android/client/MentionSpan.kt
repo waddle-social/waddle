@@ -28,7 +28,7 @@ fun mentionSpansIn(
 ): List<MentionSpan> {
     if (references.isEmpty()) return emptyList()
     val totalCodePoints = body.codePointCount(0, body.length).toLong()
-    val strip = strippedRangeOf(fallbackStart, fallbackEnd)
+    val strip = strippedRangeOf(fallbackStart, fallbackEnd, totalCodePoints)
     return references.mapNotNull { reference ->
         if (reference.refType != WaddleReferenceType.Mention) return@mapNotNull null
         val begin = reference.begin.toLong()
@@ -46,12 +46,15 @@ fun mentionSpansIn(
     }
 }
 
-private fun strippedRangeOf(start: UInt?, end: UInt?): LongRange? {
+private fun strippedRangeOf(start: UInt?, end: UInt?, displayCodePoints: Long): LongRange? {
     start ?: return null
     end ?: return null
     val startCp = start.toLong()
     val endCp = end.toLong()
-    return if (endCp > startCp) startCp until endCp else null
+    // Mirror [stripReplyFallback]'s rejection: a range starting past the
+    // display body cannot have been removed from the wire body, so the
+    // reference offsets are wire offsets and must not rebase.
+    return if (endCp > startCp && startCp <= displayCodePoints) startCp until endCp else null
 }
 
 /** Web `rebaseOffsetAfterRemoval`: shift an offset past a removed range. */

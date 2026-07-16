@@ -58,6 +58,10 @@ class MentionSpanTracker {
      */
     fun insertMention(current: String, token: MentionToken, candidate: MentionCandidate): MentionInsertion? {
         if (token.start < 0 || token.end > current.length || token.start >= token.end) return null
+        // A stale token (e.g. a second tap racing the recomposition that
+        // dismisses the popover) must not re-insert over already-updated
+        // text: the token region must still read `@query`.
+        if (current.substring(token.start, token.end) != "@${token.query}") return null
         val label = "@${candidate.display}"
         val newText = current.replaceRange(token.start, token.end, "$label ")
         onTextChanged(newText)

@@ -38,10 +38,6 @@ fun bareJidOfMentionUri(uri: String): String? {
     return canonical.substringBefore('/').ifEmpty { null }
 }
 
-/** Rust-parser twin: does [uri] classify as an `@everyone`/`@here` broadcast? */
-fun isBroadcastMentionUri(uri: String): Boolean =
-    uri.startsWith("xmpp:") && (uri.contains("@everyone") || uri.contains("@here"))
-
 /**
  * Whether a message addresses the signed-in account: any broadcast
  * mention does, otherwise one of the mention URIs must resolve to
