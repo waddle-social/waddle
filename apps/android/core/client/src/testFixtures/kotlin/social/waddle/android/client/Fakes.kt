@@ -198,7 +198,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     /** Recorded (conversationJid, query, max) full-text search queries. */
-    val searchCalls = mutableListOf<Triple<String, String, UInt>>()
+    val searchCalls = CopyOnWriteArrayList<Triple<String, String, UInt>>()
 
     override suspend fun searchDmHistory(peerJid: String, query: String, maxMessages: UInt): WaddleMamPage {
         searchCalls += Triple(peerJid, query, maxMessages)
