@@ -165,4 +165,35 @@ class PendingSendTrackerTest {
         assertEquals("retry keeps the reply/thread extras", extras, taken?.extras)
         assertEquals(listOf(healthy.localId), tracker.pending.value.map { it.localId })
     }
+
+    @Test
+    fun `pruning a stored row settles its delivery-id bookkeeping`() {
+        // An ack recorded before pruning must not linger: a NEW send that
+        // happens to reuse the id (queue replay across sessions) would
+        // otherwise adopt a stale acked flag.
+        val message = tracker.append("hello", extras = null, timestampMillis = 1_000L)
+        tracker.onSendResult(message.localId, SendResult(WaddleSendMessageOutcome.Sent("id-1")))
+        tracker.onDeliveryAcked("id-1")
+
+        tracker.pruneAgainst(setOf("id-1"))
+        assertTrue(tracker.pending.value.isEmpty())
+
+        val fresh = tracker.append("again", extras = null, timestampMillis = 2_000L)
+        tracker.onSendResult(fresh.localId, SendResult(WaddleSendMessageOutcome.Sent("id-1")))
+        assertFalse(row(fresh.localId).acked)
+    }
+
+    @Test
+    fun `delivery-id sets stay bounded for ids that never match a row`() {
+        repeat(300) { tracker.onDeliveryAcked("orphan-$it") }
+        // Oldest orphans evicted: a late send adopting an evicted id is
+        // simply unacked (harmless), while recent ids still race-resolve.
+        val message = tracker.append("late", extras = null, timestampMillis = 1_000L)
+        tracker.onSendResult(message.localId, SendResult(WaddleSendMessageOutcome.Sent("orphan-0")))
+        assertFalse(row(message.localId).acked)
+
+        val recent = tracker.append("recent", extras = null, timestampMillis = 2_000L)
+        tracker.onSendResult(recent.localId, SendResult(WaddleSendMessageOutcome.Sent("orphan-299")))
+        assertTrue(row(recent.localId).acked)
+    }
 }
