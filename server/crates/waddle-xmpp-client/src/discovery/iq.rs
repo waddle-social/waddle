@@ -2,7 +2,7 @@ use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp_core::roster::RosterItem;
 
-use crate::messaging::MucAffiliation;
+use crate::messaging::{MucAffiliation, MucRole};
 
 use super::ids::next_id;
 use super::types::{
@@ -265,6 +265,41 @@ pub fn build_muc_admin_affiliation_set_iq(
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), room_jid)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(query.build())
+        .build()
+}
+
+/// XEP-0045 §8.2 "Kicking an Occupant" (and general role changes):
+/// `<iq type='set'><query xmlns='muc#admin'><item nick='…'
+/// role='…'><reason/></item></query></iq>`. A kick is `role='none'`
+/// addressed by nick — distinct from a §9.1 ban, which sets
+/// `affiliation='outcast'` by bare JID via
+/// [`build_muc_admin_affiliation_set_iq`].
+pub fn build_muc_admin_role_set_iq(
+    room_jid: &str,
+    nick: &str,
+    role: MucRole,
+    reason: Option<&str>,
+) -> Element {
+    let id = format!("muc-admin-role-{}", next_id());
+    let mut item = Element::builder("item", MUC_ADMIN_NS)
+        .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick)
+        .attr(minidom::rxml::xml_ncname!("role").to_owned(), role.as_str());
+    if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+        item = item.append(
+            Element::builder("reason", MUC_ADMIN_NS)
+                .append(reason)
+                .build(),
+        );
+    }
+    Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room_jid)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .append(
+            Element::builder("query", MUC_ADMIN_NS)
+                .append(item.build())
+                .build(),
+        )
         .build()
 }
 

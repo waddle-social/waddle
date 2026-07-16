@@ -1,7 +1,7 @@
 use jid::BareJid;
 use minidom::Element;
 
-use crate::messaging::MucAffiliation;
+use crate::messaging::{MucAffiliation, MucRole};
 
 use super::parsing::resolve_component_services;
 use super::*;
@@ -584,6 +584,42 @@ fn build_and_parse_muc_admin_affiliation_queries() {
     assert_eq!(parsed[0].jid.as_deref(), Some("alice@example.com"));
     assert_eq!(parsed[0].affiliation, Some(MucAffiliation::Admin));
     assert_eq!(parsed[0].reason.as_deref(), Some("promoted"));
+}
+
+#[test]
+fn build_muc_admin_role_set_iq_matches_xep0045_kick_shape() {
+    // XEP-0045 §8.2 example 91: kick = <item nick='…' role='none'>
+    // with an optional <reason/>, sent as IQ-set to the room.
+    let kick = build_muc_admin_role_set_iq(
+        "room@muc.example.com",
+        "pistol",
+        MucRole::None,
+        Some("Avaunt, you cullion!"),
+    );
+    assert_eq!(kick.attr("type"), Some("set"));
+    assert_eq!(kick.attr("to"), Some("room@muc.example.com"));
+    let item = kick
+        .get_child("query", MUC_ADMIN_NS)
+        .and_then(|query| query.get_child("item", MUC_ADMIN_NS))
+        .expect("item");
+    assert_eq!(item.attr("nick"), Some("pistol"));
+    assert_eq!(item.attr("role"), Some("none"));
+    assert_eq!(item.attr("jid"), None);
+    assert_eq!(item.attr("affiliation"), None);
+    assert_eq!(
+        item.get_child("reason", MUC_ADMIN_NS).map(Element::text),
+        Some("Avaunt, you cullion!".to_string())
+    );
+}
+
+#[test]
+fn build_muc_admin_role_set_iq_omits_empty_reason() {
+    let kick = build_muc_admin_role_set_iq("room@muc.example.com", "pistol", MucRole::None, None);
+    let item = kick
+        .get_child("query", MUC_ADMIN_NS)
+        .and_then(|query| query.get_child("item", MUC_ADMIN_NS))
+        .expect("item");
+    assert!(item.get_child("reason", MUC_ADMIN_NS).is_none());
 }
 
 // ── Component service resolution ─────────────────────────────────────
