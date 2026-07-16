@@ -20,6 +20,7 @@ on:
     - apps/android/debug.keystore
     - apps/android/debug.keystore/**
     - apps/android/env.cue
+    - apps/android/env.cue/**
     - apps/android/gradle.properties
     - apps/android/gradle.properties/**
     - apps/android/gradle/**
