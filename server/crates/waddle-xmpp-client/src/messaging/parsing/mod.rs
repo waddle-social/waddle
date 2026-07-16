@@ -449,7 +449,7 @@ fn link_preview_image_url(el: &Element) -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
-fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
+pub(super) fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
     if !cached_preview_media_origin_allowed(&url) {
         return None;

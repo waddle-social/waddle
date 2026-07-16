@@ -20,6 +20,7 @@ uniffi-bindgen-bin = ["uniffi/cli"]
 
 [dependencies]
 waddle-xmpp-client = { path = "../waddle-xmpp-client" }
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 uniffi = { version = "0.31", features = ["tokio"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 jid = { workspace = true }

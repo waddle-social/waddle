@@ -304,6 +304,44 @@ pub struct WaddleLinkPreviewPlayer {
     pub height: Option<u32>,
 }
 
+/// Status of a composer-side `urn:waddle:link-preview:0` lookup IQ
+/// (`WaddleClient::lookup_link_preview`).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleLinkPreviewLookupStatus {
+    /// Preview resolved; the token in the paired preview payload is
+    /// valid until its `expires_at` instant.
+    Ready,
+    /// The URL cannot be previewed (unparsable or unsupported).
+    Unsupported,
+    /// The server's resolver is disabled or refused the URL.
+    Blocked,
+    /// Resolution failed, or the response payload was malformed.
+    Failed,
+}
+
+/// Ready payload of a link-preview lookup. Attach `token` through
+/// [`WaddleSendOptions::link_preview_token`] — but only while the
+/// RFC 3339 `expires_at` instant is still in the future.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleLinkPreviewLookupPreview {
+    pub token: String,
+    pub original_url: String,
+    pub normalized_url: String,
+    pub expires_at: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<WaddleLinkPreviewImage>,
+    pub player_embed: Option<WaddleLinkPreviewPlayer>,
+}
+
+/// Typed outcome of the composer-side lookup: `preview` is present
+/// exactly when `status` is [`WaddleLinkPreviewLookupStatus::Ready`].
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleLinkPreviewLookup {
+    pub status: WaddleLinkPreviewLookupStatus,
+    pub preview: Option<WaddleLinkPreviewLookupPreview>,
+}
+
 /// urn:waddle:pin:0 pin/unpin action carried on a room system message.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddlePinAction {

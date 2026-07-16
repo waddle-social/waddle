@@ -6,6 +6,7 @@
 
 mod builders;
 mod call;
+mod link_preview_lookup;
 pub(crate) mod namespaces;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 mod native;
@@ -31,10 +32,14 @@ pub use call::{
     parse_call_event, parse_jingle_iq, parse_jmi_message, wrap_jmi_message, CallEventKind,
     CallMedia, InboundCallEvent, LiveKitJoin,
 };
+pub use link_preview_lookup::{
+    build_link_preview_lookup_iq, eligible_preview_url, parse_link_preview_lookup_response,
+    LinkPreviewLookup, LinkPreviewLookupReady, MAX_LINK_PREVIEW_TOKEN_BYTES,
+};
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, NS_CHAT_MARKERS, NS_CHAT_STATES,
     NS_CLIENT, NS_JINGLE_RTP, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI,
-    NS_REACTIONS, NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_PIN_V0,
+    NS_REACTIONS, NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW, NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;

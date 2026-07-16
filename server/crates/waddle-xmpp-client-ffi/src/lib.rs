@@ -11,6 +11,7 @@ use url::Url;
 
 mod boundary_convert;
 mod calls;
+mod consistent_color;
 mod convert;
 mod error;
 mod jid_parts;

@@ -21,9 +21,10 @@ use waddle_xmpp_client::mds::{
     NS_PUBSUB_PUBLISH_OPTIONS_FEATURE,
 };
 use waddle_xmpp_client::messaging::{
-    build_correction_message, build_moderation_message, build_pinned_chat_message,
-    build_pinned_message, build_reaction_message, build_unpinned_chat_message,
-    build_unpinned_message, MessagingExt, SendMessageOptions,
+    build_correction_message, build_link_preview_lookup_iq, build_moderation_message,
+    build_pinned_chat_message, build_pinned_message, build_reaction_message,
+    build_unpinned_chat_message, build_unpinned_message, eligible_preview_url,
+    parse_link_preview_lookup_response, MessagingExt, SendMessageOptions,
 };
 use waddle_xmpp_client::pin::{build_pin_list_iq, parse_pin_list_response};
 use waddle_xmpp_client::request::StanzaId;
@@ -47,11 +48,15 @@ pub(crate) async fn send_iq_with_timeout(
 }
 
 use crate::boundary_convert::jid_domain;
-use crate::convert::{mds_catchup_entry_to_ffi, pin_entry_to_ffi, send_options_from_ffi};
+use crate::convert::{
+    link_preview_lookup_to_ffi, lookup_status_only, mds_catchup_entry_to_ffi, pin_entry_to_ffi,
+    send_options_from_ffi,
+};
 use crate::error::client_error_to_waddle;
 use crate::send_outcome::send_failure_outcome;
 use crate::{
-    WaddleChatState, WaddleClient, WaddleError, WaddleMdsDisplayedEntry, WaddlePinEntry,
+    WaddleChatState, WaddleClient, WaddleError, WaddleLinkPreviewLookup,
+    WaddleLinkPreviewLookupStatus, WaddleMdsDisplayedEntry, WaddlePinEntry,
     WaddleSendMessageOutcome, WaddleSendOptions,
 };
 
@@ -454,6 +459,37 @@ impl WaddleClient {
                 .into_iter()
                 .map(pin_entry_to_ffi)
                 .collect()),
+            Err(e) => Err(client_error_to_waddle(&e)),
+        }
+    }
+
+    /// `urn:waddle:link-preview:0`: resolve a composer URL into a
+    /// send-time preview token scoped to the conversation
+    /// `scope_jid` (DM peer or room bare JID). URLs that are not
+    /// HTTPS with a dotted hostname report `Unsupported` without
+    /// touching the wire (web `firstEligibleHttpsUrl` parity); a
+    /// malformed or non-matching response reports `Failed`.
+    pub async fn lookup_link_preview(
+        &self,
+        url: String,
+        scope_jid: String,
+    ) -> Result<WaddleLinkPreviewLookup, WaddleError> {
+        let scope = scope_jid
+            .parse::<BareJid>()
+            .map_err(|_| WaddleError::InvalidJid)?;
+        let Some(parsed_url) = eligible_preview_url(&url) else {
+            return Ok(lookup_status_only(
+                WaddleLinkPreviewLookupStatus::Unsupported,
+            ));
+        };
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        let iq = build_link_preview_lookup_iq(&parsed_url, &scope);
+        match send_iq_with_timeout(&handle, iq).await {
+            Ok(result) => Ok(link_preview_lookup_to_ffi(
+                parse_link_preview_lookup_response(&result, &parsed_url),
+            )),
             Err(e) => Err(client_error_to_waddle(&e)),
         }
     }

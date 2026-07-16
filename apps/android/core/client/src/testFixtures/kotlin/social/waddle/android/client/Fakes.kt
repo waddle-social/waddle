@@ -18,6 +18,8 @@ import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
 import social.waddle.client.ffi.WaddleJingleReason
+import social.waddle.client.ffi.WaddleLinkPreviewLookup
+import social.waddle.client.ffi.WaddleLinkPreviewLookupStatus
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleNotifyMode
@@ -354,6 +356,17 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
+
+    /** Canned lookup outcome served by [lookupLinkPreview]; recorded calls. */
+    @Volatile
+    var linkPreviewLookup: WaddleLinkPreviewLookup =
+        WaddleLinkPreviewLookup(status = WaddleLinkPreviewLookupStatus.FAILED, preview = null)
+    val linkPreviewLookupCalls = CopyOnWriteArrayList<Pair<String, String>>()
+
+    override suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup {
+        linkPreviewLookupCalls += url to scopeJid
+        return linkPreviewLookup
+    }
 
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
     @Volatile

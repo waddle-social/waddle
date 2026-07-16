@@ -489,6 +489,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    public static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -711,6 +727,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * `forbidden` stanza error.
      */
     func fetchRoomPins(roomJid: String) async throws  -> [WaddlePinEntry]
+
+    /**
+     * `urn:waddle:link-preview:0`: resolve a composer URL into a
+     * send-time preview token scoped to the conversation
+     * `scope_jid` (DM peer or room bare JID). URLs that are not
+     * HTTPS with a dotted hostname report `Unsupported` without
+     * touching the wire (web `firstEligibleHttpsUrl` parity); a
+     * malformed or non-matching response reports `Failed`.
+     */
+    func lookupLinkPreview(url: String, scopeJid: String) async throws  -> WaddleLinkPreviewLookup
 
     /**
      * `urn:waddle:pin:0`: pin a message in a 1:1 DM conversation.
@@ -1523,6 +1549,31 @@ open func fetchRoomPins(roomJid: String)async throws  -> [WaddlePinEntry]  {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeWaddlePinEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:link-preview:0`: resolve a composer URL into a
+     * send-time preview token scoped to the conversation
+     * `scope_jid` (DM peer or room bare JID). URLs that are not
+     * HTTPS with a dotted hostname report `Unsupported` without
+     * touching the wire (web `firstEligibleHttpsUrl` parity); a
+     * malformed or non-matching response reports `Failed`.
+     */
+open func lookupLinkPreview(url: String, scopeJid: String)async throws  -> WaddleLinkPreviewLookup  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_lookup_link_preview(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(url),FfiConverterString.lower(scopeJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleLinkPreviewLookup_lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -3578,6 +3629,147 @@ public func FfiConverterTypeWaddleLinkPreviewImage_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeWaddleLinkPreviewImage_lower(_ value: WaddleLinkPreviewImage) -> RustBuffer {
     return FfiConverterTypeWaddleLinkPreviewImage.lower(value)
+}
+
+
+/**
+ * Typed outcome of the composer-side lookup: `preview` is present
+ * exactly when `status` is [`WaddleLinkPreviewLookupStatus::Ready`].
+ */
+public struct WaddleLinkPreviewLookup: Equatable, Hashable {
+    public var status: WaddleLinkPreviewLookupStatus
+    public var preview: WaddleLinkPreviewLookupPreview?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(status: WaddleLinkPreviewLookupStatus, preview: WaddleLinkPreviewLookupPreview?) {
+        self.status = status
+        self.preview = preview
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewLookup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewLookup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewLookup {
+        return
+            try WaddleLinkPreviewLookup(
+                status: FfiConverterTypeWaddleLinkPreviewLookupStatus.read(from: &buf),
+                preview: FfiConverterOptionTypeWaddleLinkPreviewLookupPreview.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreviewLookup, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleLinkPreviewLookupStatus.write(value.status, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewLookupPreview.write(value.preview, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookup_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewLookup {
+    return try FfiConverterTypeWaddleLinkPreviewLookup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookup_lower(_ value: WaddleLinkPreviewLookup) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewLookup.lower(value)
+}
+
+
+/**
+ * Ready payload of a link-preview lookup. Attach `token` through
+ * [`WaddleSendOptions::link_preview_token`] — but only while the
+ * RFC 3339 `expires_at` instant is still in the future.
+ */
+public struct WaddleLinkPreviewLookupPreview: Equatable, Hashable {
+    public var token: String
+    public var originalUrl: String
+    public var normalizedUrl: String
+    public var expiresAt: String
+    public var title: String?
+    public var description: String?
+    public var image: WaddleLinkPreviewImage?
+    public var playerEmbed: WaddleLinkPreviewPlayer?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(token: String, originalUrl: String, normalizedUrl: String, expiresAt: String, title: String?, description: String?, image: WaddleLinkPreviewImage?, playerEmbed: WaddleLinkPreviewPlayer?) {
+        self.token = token
+        self.originalUrl = originalUrl
+        self.normalizedUrl = normalizedUrl
+        self.expiresAt = expiresAt
+        self.title = title
+        self.description = description
+        self.image = image
+        self.playerEmbed = playerEmbed
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewLookupPreview: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewLookupPreview: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewLookupPreview {
+        return
+            try WaddleLinkPreviewLookupPreview(
+                token: FfiConverterString.read(from: &buf),
+                originalUrl: FfiConverterString.read(from: &buf),
+                normalizedUrl: FfiConverterString.read(from: &buf),
+                expiresAt: FfiConverterString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                image: FfiConverterOptionTypeWaddleLinkPreviewImage.read(from: &buf),
+                playerEmbed: FfiConverterOptionTypeWaddleLinkPreviewPlayer.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleLinkPreviewLookupPreview, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.token, into: &buf)
+        FfiConverterString.write(value.originalUrl, into: &buf)
+        FfiConverterString.write(value.normalizedUrl, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewImage.write(value.image, into: &buf)
+        FfiConverterOptionTypeWaddleLinkPreviewPlayer.write(value.playerEmbed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookupPreview_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewLookupPreview {
+    return try FfiConverterTypeWaddleLinkPreviewLookupPreview.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookupPreview_lower(_ value: WaddleLinkPreviewLookupPreview) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewLookupPreview.lower(value)
 }
 
 
@@ -6862,6 +7054,104 @@ public func FfiConverterTypeWaddleJingleReason_lower(_ value: WaddleJingleReason
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Status of a composer-side `urn:waddle:link-preview:0` lookup IQ
+ * (`WaddleClient::lookup_link_preview`).
+ */
+
+public enum WaddleLinkPreviewLookupStatus: Equatable, Hashable {
+
+    /**
+     * Preview resolved; the token in the paired preview payload is
+     * valid until its `expires_at` instant.
+     */
+    case ready
+    /**
+     * The URL cannot be previewed (unparsable or unsupported).
+     */
+    case unsupported
+    /**
+     * The server's resolver is disabled or refused the URL.
+     */
+    case blocked
+    /**
+     * Resolution failed, or the response payload was malformed.
+     */
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleLinkPreviewLookupStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleLinkPreviewLookupStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleLinkPreviewLookupStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleLinkPreviewLookupStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ready
+
+        case 2: return .unsupported
+
+        case 3: return .blocked
+
+        case 4: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleLinkPreviewLookupStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .ready:
+            writeInt(&buf, Int32(1))
+
+
+        case .unsupported:
+            writeInt(&buf, Int32(2))
+
+
+        case .blocked:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookupStatus_lift(_ buf: RustBuffer) throws -> WaddleLinkPreviewLookupStatus {
+    return try FfiConverterTypeWaddleLinkPreviewLookupStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleLinkPreviewLookupStatus_lower(_ value: WaddleLinkPreviewLookupStatus) -> RustBuffer {
+    return FfiConverterTypeWaddleLinkPreviewLookupStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0394 markup span kind. Mirrors the client crate's
  * `MarkupSpanType`; `Link` is Waddle's `urn:waddle:markup:0` span
  * extension (XEP-0394 defines no link span).
@@ -8494,6 +8784,30 @@ fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewImage: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewLookupPreview: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleLinkPreviewLookupPreview?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleLinkPreviewLookupPreview.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleLinkPreviewLookupPreview.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewPlayer: FfiConverterRustBuffer {
     typealias SwiftType = WaddleLinkPreviewPlayer?
 
@@ -9444,6 +9758,17 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * XEP-0392 §"Angle generation": hue in degrees (`0.0..360.0`) for
+ * `input` (nickname or bare JID, used verbatim — no normalization).
+ */
+public func consistentColorHue(input: String) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+    uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(
+        FfiConverterString.lower(input),$0
+    )
+})
+}
+/**
  * Parse and validate a JID string. Returns `None` for invalid JIDs.
  */
 public func parseJid(input: String) -> WaddleJidParts?  {
@@ -9468,6 +9793,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_waddle_xmpp_client_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid() != 54118) {
         return InitializationResult.apiChecksumMismatch
@@ -9554,6 +9882,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins() != 59200) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview() != 12987) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message() != 55354) {
