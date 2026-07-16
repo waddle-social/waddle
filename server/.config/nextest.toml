@@ -1,0 +1,40 @@
+# Nextest configuration (https://nexte.st/docs/configuration/).
+# CI runs with `--profile ci`; local runs use the nextest defaults.
+
+# Unlike cargo test (threads in one process, binaries sequential), nextest
+# runs every test in its own process with cross-binary parallelism. That
+# defeats the process-local serial mutexes some Postgres-backed tests use,
+# and lets table-wide DELETEs in the clustering/xep0198 integration binaries
+# interleave with other tests on the shared WADDLE_TEST_POSTGRES_URL
+# database. Every test that touches that database must run in this
+# single-threaded group. If you add a new test module that reads
+# WADDLE_TEST_POSTGRES_URL, add it to the filter below.
+[test-groups]
+postgres = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = '''
+package(waddle-server) & (
+    binary(clustering_cluster_e2e)
+    | binary(xep0198_cross_node_resume)
+    | test(clustering::)
+    | test(db::)
+    | test(inbox::)
+    | test(muc_durable::)
+    | test(notification_outbox::)
+    | test(pending_delivery::)
+    | test(pubsub::)
+    | test(session_janitors::)
+    | test(sm_persistence)
+    | test(isr_resume::)
+    | test(stream_management::)
+)
+'''
+test-group = 'postgres'
+
+[profile.ci]
+# Show every failure in one run instead of cancelling on the first one,
+# matching the old `cargo test` per-binary behavior.
+fail-fast = false
+# Flaky tests must fail loudly; retries mask flakiness.
+retries = 0

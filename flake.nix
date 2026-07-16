@@ -195,6 +195,7 @@
             fileset = lib.fileset.unions [
               ./server/Cargo.toml
               ./server/Cargo.lock
+              ./server/.config/nextest.toml
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions
@@ -338,12 +339,21 @@
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
             }
           );
-          waddle-server-test = craneLib.cargoTest (
+          waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
-              cargoTestExtraArgs = "--lib --tests";
+              cargoNextestExtraArgs = "--profile ci --lib --tests";
+            }
+          );
+          waddle-server-doctest = craneLib.cargoTest (
+            testArgs
+            // {
+              pname = "waddle-server-doctest";
+              cargoArtifacts = workspaceAllFeaturesArtifacts;
+              cargoExtraArgs = "--locked --workspace --all-features";
+              cargoTestExtraArgs = "--doc";
             }
           );
           waddle-server-ci-build = craneLib.cargoBuild (
@@ -364,40 +374,40 @@
               cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
             }
           );
-          waddle-server-xmpp-unit-tests = craneLib.cargoTest (
+          waddle-server-xmpp-unit-tests = craneLib.cargoNextest (
             testArgs
             // {
               pname = "waddle-server-xmpp-unit-tests";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
-              cargoTestExtraArgs = "--lib --verbose";
+              cargoNextestExtraArgs = "--profile ci --lib";
             }
           );
-          waddle-server-xmpp-server-tests = craneLib.cargoTest (
+          waddle-server-xmpp-server-tests = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
-              cargoTestExtraArgs = "--lib --tests --verbose";
+              cargoNextestExtraArgs = "--profile ci --lib --tests";
             }
           );
-          waddle-server-xmpp-cue-e2e = craneLib.cargoTest (
+          waddle-server-xmpp-cue-e2e = craneLib.cargoNextest (
             serverTestArgs
             // {
               pname = "waddle-server-xmpp-cue-e2e";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
-              cargoTestExtraArgs = "--test xmpp_e2e_cue --verbose";
+              cargoNextestExtraArgs = "--profile ci --test xmpp_e2e_cue";
             }
           );
-          waddle-server-xmpp-xep-integration = craneLib.cargoTest (
+          waddle-server-xmpp-xep-integration = craneLib.cargoNextest (
             testArgs
             // {
               pname = "waddle-server-xmpp-xep-integration";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
-              cargoTestExtraArgs = "--tests --verbose";
+              cargoNextestExtraArgs = "--profile ci --tests";
             }
           );
         }
@@ -422,6 +432,7 @@
               pkgs.just
               pkgs.jujutsu
               pkgs.cargo-chef
+              pkgs.cargo-nextest
               pkgs.wasm-pack
               pkgs.teleport
               pkgs.openssl
