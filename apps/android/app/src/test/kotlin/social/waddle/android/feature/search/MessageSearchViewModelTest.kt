@@ -1,8 +1,10 @@
 package social.waddle.android.feature.search
 
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -192,6 +194,65 @@ class MessageSearchViewModelTest {
         parked.complete(matchPage(mamId = "m1", body = "late match"))
         runCurrent()
         assertEquals(MessageSearchState.Idle, viewModel.state.value)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `sheet clear resets to idle, drops in-flight responses, and re-arms the same query`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = MessageSearchViewModel(harness.manager, roomTarget)
+        runCurrent()
+
+        val parked = CompletableDeferred<WaddleMamPage>()
+        harness.client.searchResponses += parked
+        viewModel.onQueryChanged("penguin")
+        advanceTimeBy(MessageSearchViewModel.DEBOUNCE_MILLIS)
+        runCurrent()
+        assertEquals(MessageSearchState.Searching, viewModel.state.value)
+
+        // The sheet-dismiss path: clear() rather than an emptied field.
+        viewModel.clear()
+        runCurrent()
+        assertEquals("", viewModel.query.value)
+        assertEquals(MessageSearchState.Idle, viewModel.state.value)
+
+        // The abandoned response must not resurrect results after close.
+        parked.complete(matchPage(mamId = "m1", body = "late match"))
+        runCurrent()
+        assertEquals(MessageSearchState.Idle, viewModel.state.value)
+
+        // Reopen: the identical query searches again from scratch.
+        harness.client.mamPage = matchPage(mamId = "m2", body = "fresh match")
+        viewModel.onQueryChanged("penguin")
+        advanceTimeBy(MessageSearchViewModel.DEBOUNCE_MILLIS)
+        runCurrent()
+        assertEquals(
+            listOf("fresh match"),
+            (viewModel.state.value as MessageSearchState.Results).hits.map { it.body },
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `cancellation mid-search propagates instead of reporting failure`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = MessageSearchViewModel(harness.manager, roomTarget)
+        runCurrent()
+
+        harness.client.searchResponses += CompletableDeferred()
+        viewModel.onQueryChanged("penguin")
+        advanceTimeBy(MessageSearchViewModel.DEBOUNCE_MILLIS)
+        runCurrent()
+        assertEquals(MessageSearchState.Searching, viewModel.state.value)
+
+        // Screen teardown: the in-flight search is cancelled, and the
+        // cancellation must propagate — not be swallowed into Failed.
+        viewModel.viewModelScope.cancel()
+        runCurrent()
+
+        assertEquals(MessageSearchState.Searching, viewModel.state.value)
         harness.manager.logout()
     }
 

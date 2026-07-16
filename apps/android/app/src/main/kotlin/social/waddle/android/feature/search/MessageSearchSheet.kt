@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -63,6 +64,10 @@ fun MessageSearchSheet(
             OutlinedTextField(
                 value = query,
                 onValueChange = viewModel::onQueryChanged,
+                // Label, not just placeholder: TalkBack keeps announcing
+                // the field's purpose after text is typed (web parity
+                // with the input's aria-label).
+                label = { Text(stringResource(R.string.search_messages)) },
                 placeholder = { Text(stringResource(R.string.search_placeholder)) },
                 leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                 singleLine = true,
@@ -73,7 +78,13 @@ fun MessageSearchSheet(
             )
             // Web parity: the caret drops straight into the field on
             // open — without this the user taps the input a second time.
-            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+            // The frame yield lets the sheet's dialog-hosted content
+            // attach the focus target first; requesting focus on a
+            // not-yet-attached node throws.
+            LaunchedEffect(Unit) {
+                withFrameNanos {}
+                focusRequester.requestFocus()
+            }
             SearchStateContent(state)
         }
     }

@@ -2,10 +2,11 @@ package social.waddle.android.feature.search
 
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -87,7 +88,15 @@ class MessageSearchSheetTest {
         )
 
         composeRule.onNodeWithContentDescription("Search messages").performClick()
-        composeRule.onNodeWithText("Search messages…").performTextInput("penguin")
+        // Structural + label match: the composer is also settable, and
+        // matching the label ("Search messages") instead of placeholder
+        // copy keeps the test immune to punctuation churn.
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText("Search messages")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNode(hasSetTextAction() and hasText("Search messages"))
+            .performTextInput("penguin")
 
         waitForText("archived penguin fact")
         // The result stays out of the timeline: it renders in the sheet

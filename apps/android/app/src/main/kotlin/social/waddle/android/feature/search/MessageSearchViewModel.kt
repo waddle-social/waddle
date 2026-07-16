@@ -3,6 +3,7 @@ package social.waddle.android.feature.search
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,7 +88,15 @@ class MessageSearchViewModel(
     }
 
     private suspend fun runSearch(ticket: Int, query: String) {
-        val page = runCatching { searchArchive(query) }.getOrNull()
+        // Client-layer parity: cancellation must propagate — swallowing
+        // it here would report a torn-down screen's search as Failed.
+        val page = try {
+            searchArchive(query)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
         if (ticket != searchGeneration) return
         _state.value = when (page) {
             null -> MessageSearchState.Failed
@@ -124,7 +133,12 @@ class MessageSearchViewModel(
         /** Web parity: wait out a typing pause before hitting the archive. */
         const val DEBOUNCE_MILLIS = 300L
 
-        /** Newest matches per query (web DM message-search parity). */
+        /**
+         * Matches per query. The DM cap of 20 is web parity; applying
+         * the same bound to room search is a deliberate Android choice
+         * (the web channel side passes no explicit limit) — the sheet's
+         * compact list wants a bounded page.
+         */
         const val MAX_RESULTS = 20u
 
         fun factory(graph: AppGraph, target: MessageSearchTarget): ViewModelProvider.Factory =
