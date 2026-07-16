@@ -154,19 +154,86 @@ class FakeWaddleClient : WaddleClientInterface {
         return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
-    override suspend fun sendReaction(targetJid: String, targetStanzaId: String, emojis: List<String>, isMuc: Boolean): Boolean = unused()
-    override suspend fun sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Boolean, options: WaddleSendOptions?): WaddleSendMessageOutcome = unused()
-    override suspend fun sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Boolean): Boolean = unused()
+    /** Recorded (conversation, targetId, emojis) reaction sends. */
+    val reactionCalls = mutableListOf<Triple<String, String, List<String>>>()
+    var reactionResult = true
+
+    override suspend fun sendReaction(targetJid: String, targetStanzaId: String, emojis: List<String>, isMuc: Boolean): Boolean {
+        reactionCalls += Triple(targetJid, targetStanzaId, emojis)
+        return reactionResult
+    }
+
+    /** Recorded (conversation, targetId, newBody) corrections. */
+    val correctionCalls = mutableListOf<Triple<String, String, String>>()
+    var correctionOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("corr-1")
+
+    override suspend fun sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Boolean, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+        correctionCalls += Triple(peerJid, targetId, newBody)
+        return correctionOutcome
+    }
+
+    /** Recorded (conversation, targetId) retractions. */
+    val retractionCalls = mutableListOf<Pair<String, String>>()
+    var retractionResult = true
+
+    override suspend fun sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Boolean): Boolean {
+        retractionCalls += peerJid to targetStanzaId
+        return retractionResult
+    }
+
     override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
-    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean = unused()
-    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean = unused()
-    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean = unused()
-    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = unused()
-    override suspend fun subscribeMdsDisplayed(): Boolean = unused()
-    override suspend fun supportsMdsPublishOptions(): Boolean = unused()
-    override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = unused()
-    override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()
-    override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean = unused()
+    /** Recorded (conversation, state, isMuc) typing notifications. */
+    val chatStateCalls = mutableListOf<Triple<String, WaddleChatState, Boolean>>()
+
+    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean {
+        chatStateCalls += Triple(peerJid, state, isMuc)
+        return true
+    }
+
+    /** Recorded (conversation, stanzaId, isMuc) displayed markers. */
+    val displayedCalls = mutableListOf<Triple<String, String, Boolean>>()
+
+    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean {
+        displayedCalls += Triple(peerJid, stanzaId, isMuc)
+        return true
+    }
+
+    /** Recorded (chatJid, stanzaId, stanzaIdBy) MDS publishes. */
+    val mdsPublishCalls = mutableListOf<Triple<String, String, String>>()
+
+    override suspend fun publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: String): Boolean {
+        mdsPublishCalls += Triple(chatJid, stanzaId, stanzaIdBy)
+        return true
+    }
+
+    /** Canned XEP-0490 catch-up entries served by [fetchMdsDisplayed]. */
+    var mdsEntries: List<WaddleMdsDisplayedEntry> = emptyList()
+    var mdsSubscribeCalls = 0
+    var mdsPublishOptionsSupported = true
+
+    override suspend fun fetchMdsDisplayed(): List<WaddleMdsDisplayedEntry> = mdsEntries
+
+    override suspend fun subscribeMdsDisplayed(): Boolean {
+        mdsSubscribeCalls += 1
+        return true
+    }
+
+    override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
+    /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
+    var roomPins: List<WaddlePinEntry> = emptyList()
+    val pinCalls = mutableListOf<Triple<String, String, Boolean>>()
+
+    override suspend fun fetchRoomPins(roomJid: String): List<WaddlePinEntry> = roomPins
+
+    override suspend fun pinMessage(roomJid: String, targetStanzaId: String): Boolean {
+        pinCalls += Triple(roomJid, targetStanzaId, true)
+        return true
+    }
+
+    override suspend fun unpinMessage(roomJid: String, targetStanzaId: String): Boolean {
+        pinCalls += Triple(roomJid, targetStanzaId, false)
+        return true
+    }
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()

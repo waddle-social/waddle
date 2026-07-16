@@ -12,10 +12,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import social.waddle.android.client.store.TimelineItem
 
 /**
  * Reverse-layout timeline (newest pinned at the bottom); reaching the
@@ -28,10 +31,28 @@ fun TimelineList(
     onTopReached: () -> Unit,
     onRetry: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    pinnedIds: Set<String> = emptySet(),
+    threadReplyCounts: Map<String, Int> = emptyMap(),
+    onLongPress: (item: TimelineItem) -> Unit = {},
+    onToggleReaction: (item: TimelineItem, emoji: String) -> Unit = { _, _ -> },
+    onOpenThread: ((item: TimelineItem) -> Unit)? = null,
+    onAtNewestEdgeChanged: (Boolean) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     // reverseLayout renders index 0 at the bottom → newest first.
     val newestFirst = remember(rows) { rows.asReversed() }
+    // Every wire identity → row, for quote previews and scroll targets.
+    val byIdentity = remember(rows) {
+        buildMap {
+            rows.forEach { row ->
+                if (row is ConversationRow.Stored) {
+                    put(row.item.id, row.item)
+                    row.item.identityIds.forEach { put(it, row.item) }
+                }
+            }
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -40,7 +61,28 @@ fun TimelineList(
         contentPadding = PaddingValues(vertical = 8.dp),
     ) {
         items(items = newestFirst, key = ::rowKey) { row ->
-            MessageCard(row = row, onRetry = onRetry)
+            MessageCard(
+                row = row,
+                onRetry = onRetry,
+                pinnedIds = pinnedIds,
+                onLongPress = onLongPress,
+                onToggleReaction = onToggleReaction,
+                resolveQuoted = { id -> byIdentity[id] },
+                onQuoteClick = { id ->
+                    val target = byIdentity[id] ?: return@MessageCard
+                    val index = newestFirst.indexOfFirst { candidate ->
+                        candidate is ConversationRow.Stored && candidate.item.id == target.id
+                    }
+                    if (index >= 0) scope.launch { listState.animateScrollToItem(index) }
+                },
+                // A root's replies key their <thread/> by ANY of the
+                // root's wire identities.
+                threadReplyCount = (row as? ConversationRow.Stored)?.item?.let { item ->
+                    (listOfNotNull(item.threadId) + item.identityIds)
+                        .firstNotNullOfOrNull { threadReplyCounts[it] }
+                } ?: 0,
+                onOpenThread = onOpenThread,
+            )
         }
         if (isLoadingOlder) {
             item(key = LOADING_KEY) {
@@ -54,6 +96,13 @@ fun TimelineList(
                 }
             }
         }
+    }
+
+    // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
+    // scrolled to the newest message. Read markers gate on this.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex == 0 }
+            .collect(onAtNewestEdgeChanged)
     }
 
     LaunchedEffect(listState, newestFirst.size) {
@@ -70,7 +119,11 @@ fun TimelineList(
 }
 
 private fun rowKey(row: ConversationRow): String = when (row) {
-    is ConversationRow.Stored -> "s:${row.item.id}"
+    // id + sender: the store deliberately keeps cross-sender id
+    // collisions as distinct rows (suppressing them would be an
+    // injection vector), and same-sender same-id always merges — so
+    // the pair is unique where the id alone would crash the LazyColumn.
+    is ConversationRow.Stored -> "s:${row.item.id}:${row.item.from.orEmpty()}"
     is ConversationRow.Unconfirmed -> "p:${row.message.localId}"
 }
 

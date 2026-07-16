@@ -2,7 +2,9 @@ package social.waddle.android.client
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSaslCondition
 
@@ -36,6 +38,37 @@ sealed interface XmppEvent {
     data class DeliveryFailed(val stanzaId: String) : XmppEvent
 
     data class Call(val event: WaddleCallEvent) : XmppEvent
+
+    /**
+     * XEP-0490 catch-up entries from the connect bootstrap, injected
+     * into the event stream so cursor/badge recomputes serialize with
+     * live-message unread increments. [applied] (when present) is
+     * completed by the consumer after application — the ready pipeline
+     * joins it so later steps (the pending-displayed drain) order after
+     * the fetched cursors.
+     */
+    data class MdsEntries(
+        val entries: List<WaddleMdsDisplayedEntry>,
+        val applied: kotlinx.coroutines.CompletableJob? = null,
+    ) : XmppEvent
+
+    /**
+     * `urn:waddle:pin:0` room snapshot from `fetch_room_pins`, injected
+     * into the event stream so the seed serializes with live pin-event
+     * broadcasts instead of clobbering them.
+     */
+    data class RoomPins(
+        val roomJid: String,
+        val entries: List<WaddlePinEntry>,
+        /** PinStore event version captured before the fetch started. */
+        val fetchedAtVersion: Long,
+    ) : XmppEvent
+
+    /**
+     * A sibling device's XEP-0490 cursor covered everything unread in
+     * this conversation — shade notifications for it are stale.
+     */
+    data class ReadSynced(val conversationJid: String) : XmppEvent
 
     /**
      * RFC 6120 §6.5 SASL failure: terminal for the presented token —

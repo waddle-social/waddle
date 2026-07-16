@@ -46,6 +46,7 @@ fun testMessage(
     stanzaId: String? = null,
     originId: String? = null,
     isMuc: Boolean = false,
+    thread: String? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -71,7 +72,7 @@ fun testMessage(
     displayedMarkerRequested = false,
     displayedMarkerId = null,
     isMuc = isMuc,
-    thread = null,
+    thread = thread,
     parentThreadId = null,
     markupSpans = emptyList(),
     broadcastMention = null,

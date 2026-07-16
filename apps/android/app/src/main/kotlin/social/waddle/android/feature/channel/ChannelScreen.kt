@@ -7,11 +7,21 @@ import social.waddle.android.feature.conversation.ConversationScreen
 
 /** Channel timeline + composer over the shared conversation scaffold. */
 @Composable
-fun ChannelScreen(roomJid: String, name: String, onBack: () -> Unit) {
+fun ChannelScreen(
+    roomJid: String,
+    name: String,
+    onBack: () -> Unit,
+    onOpenThread: (threadId: String) -> Unit,
+) {
     val graph = LocalAppGraph.current
     val viewModel: ChannelViewModel = viewModel(
         key = "channel:$roomJid",
         factory = ChannelViewModel.factory(graph, roomJid),
     )
-    ConversationScreen(title = name, viewModel = viewModel, onBack = onBack)
+    ConversationScreen(
+        title = name,
+        viewModel = viewModel,
+        onBack = onBack,
+        onOpenThread = onOpenThread,
+    )
 }

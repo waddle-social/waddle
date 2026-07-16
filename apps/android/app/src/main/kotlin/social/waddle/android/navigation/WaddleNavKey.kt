@@ -23,5 +23,12 @@ sealed interface WaddleNavKey : NavKey {
     data object DmList : WaddleNavKey
 
     @Serializable
+    data class Thread(
+        val conversationJid: String,
+        val isGroupchat: Boolean,
+        val threadId: String,
+    ) : WaddleNavKey
+
+    @Serializable
     data object Settings : WaddleNavKey
 }

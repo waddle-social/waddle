@@ -3,6 +3,21 @@ package social.waddle.android.client.prefs
 import kotlinx.serialization.Serializable
 
 /**
+ * A completed XEP-0363 upload attached to an outbound send (XEP-0447
+ * metadata subset the Android client produces; the URL is durable, so
+ * queued sends survive with their attachments intact).
+ */
+@Serializable
+data class SharedFileRef(
+    val url: String,
+    val name: String? = null,
+    val mediaType: String? = null,
+    val sizeBytes: Long? = null,
+    /** `inline` (image/video/audio/pdf) or `attachment` (web parity). */
+    val disposition: String = "attachment",
+)
+
+/**
  * One persisted outbound send awaiting replay, stored as a JSON list in
  * [SessionPrefs] (the Android analog of web localStorage
  * `waddle.chat.outbound-queue`). Survives process death; replayed in
@@ -27,4 +42,13 @@ data class QueuedOutboundMessage(
      */
     val clientStanzaId: String,
     val enqueuedAtMillis: Long,
+    /** XEP-0461 reply annotation (see `MessageSendExtras`). */
+    val replyToId: String? = null,
+    val replyToAuthorJid: String? = null,
+    val replyParentBody: String? = null,
+    /** XEP-0201 thread annotation. */
+    val threadId: String? = null,
+    val threadParent: String? = null,
+    /** XEP-0363/0447 attachments (already uploaded; URLs are durable). */
+    val sharedFiles: List<SharedFileRef> = emptyList(),
 )

@@ -1,28 +1,55 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Mood
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil3.compose.AsyncImage
+import social.waddle.android.client.store.ReactionGroup
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -37,9 +64,30 @@ import social.waddle.client.ffi.WaddleSharedFile
 
 /** One timeline row: author, time, body, attachment placeholders. */
 @Composable
-fun MessageCard(row: ConversationRow, onRetry: (Long) -> Unit, modifier: Modifier = Modifier) {
+fun MessageCard(
+    row: ConversationRow,
+    onRetry: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+    pinnedIds: Set<String> = emptySet(),
+    onLongPress: (TimelineItem) -> Unit = {},
+    onToggleReaction: (TimelineItem, String) -> Unit = { _, _ -> },
+    resolveQuoted: (String) -> TimelineItem? = { null },
+    onQuoteClick: (String) -> Unit = {},
+    threadReplyCount: Int = 0,
+    onOpenThread: ((TimelineItem) -> Unit)? = null,
+) {
     when (row) {
-        is ConversationRow.Stored -> StoredMessageCard(item = row.item, modifier = modifier)
+        is ConversationRow.Stored -> StoredMessageCard(
+            item = row.item,
+            isPinned = row.item.identityIds.any { it in pinnedIds },
+            onLongPress = onLongPress,
+            onToggleReaction = onToggleReaction,
+            resolveQuoted = resolveQuoted,
+            onQuoteClick = onQuoteClick,
+            threadReplyCount = threadReplyCount,
+            onOpenThread = onOpenThread,
+            modifier = modifier,
+        )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
             message = row.message,
             onRetry = onRetry,
@@ -49,13 +97,60 @@ fun MessageCard(row: ConversationRow, onRetry: (Long) -> Unit, modifier: Modifie
 }
 
 @Composable
-private fun StoredMessageCard(item: TimelineItem, modifier: Modifier = Modifier) {
+private fun StoredMessageCard(
+    item: TimelineItem,
+    isPinned: Boolean,
+    onLongPress: (TimelineItem) -> Unit,
+    onToggleReaction: (TimelineItem, String) -> Unit,
+    resolveQuoted: (String) -> TimelineItem?,
+    onQuoteClick: (String) -> Unit,
+    threadReplyCount: Int,
+    onOpenThread: ((TimelineItem) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    if (item.tombstone != null) {
+        MessageBubble(
+            author = authorOf(item),
+            time = formatTimestamp(item.timestamp),
+            body = null,
+            isMine = item.isMine,
+            modifier = modifier,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Outlined.DeleteOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.message_deleted),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
+        }
+        return
+    }
     MessageBubble(
         author = authorOf(item),
         time = formatTimestamp(item.timestamp),
         body = item.body,
         isMine = item.isMine,
+        edited = item.edited,
+        pinned = isPinned,
+        onLongPress = { onLongPress(item) },
         modifier = modifier,
+        header = {
+            item.replyToId?.let { replyToId ->
+                QuotedReply(
+                    quoted = resolveQuoted(replyToId),
+                    fallbackSender = item.replyToSender,
+                    onClick = { onQuoteClick(replyToId) },
+                )
+            }
+        },
     ) {
         if (isSticker(item)) {
             AttachmentRow(
@@ -64,14 +159,64 @@ private fun StoredMessageCard(item: TimelineItem, modifier: Modifier = Modifier)
             )
         }
         sharedFilesOf(item).forEach { file ->
-            AttachmentRow(
-                icon = {
-                    Icon(
-                        Icons.Outlined.AttachFile,
-                        contentDescription = stringResource(R.string.message_attachment),
-                    )
+            SharedFileContent(file)
+        }
+        if (item.reactions.isNotEmpty()) {
+            ReactionChips(
+                reactions = item.reactions,
+                onToggle = { emoji -> onToggleReaction(item, emoji) },
+            )
+        }
+        if (threadReplyCount > 0 && onOpenThread != null) {
+            TextButton(onClick = { onOpenThread(item) }) {
+                Text(
+                    text = pluralStringResource(
+                        R.plurals.thread_replies_chip,
+                        threadReplyCount,
+                        threadReplyCount,
+                    ),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+/** Collapsed XEP-0461 quote above the reply body; tap scrolls to it. */
+@Composable
+private fun QuotedReply(
+    quoted: TimelineItem?,
+    fallbackSender: String?,
+    onClick: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        onClick = onClick,
+        modifier = Modifier.padding(bottom = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            // Web parity: a MUC occupant JID's display name is its
+            // resource (nick) — the localpart is the channel's name.
+            val author = quoted?.let { authorOf(it) }
+                ?: fallbackSender?.let { resourcepartOf(it) ?: localpartOf(it) }
+            author?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(
+                text = when {
+                    quoted == null -> stringResource(R.string.reply_original_unloaded)
+                    quoted.tombstone != null -> stringResource(R.string.message_deleted)
+                    else -> quoted.body
                 },
-                label = file.name ?: file.url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -115,13 +260,18 @@ private fun PendingMessageCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     author: String,
     time: String?,
-    body: String,
+    body: String?,
     isMine: Boolean,
     modifier: Modifier = Modifier,
+    edited: Boolean = false,
+    pinned: Boolean = false,
+    onLongPress: (() -> Unit)? = null,
+    header: @Composable () -> Unit = {},
     extras: @Composable () -> Unit,
 ) {
     Column(
@@ -139,7 +289,14 @@ private fun MessageBubble(
             },
             modifier = Modifier
                 .widthIn(max = 340.dp)
-                .semantics(mergeDescendants = true) {},
+                .semantics(mergeDescendants = true) {}
+                .then(
+                    if (onLongPress != null) {
+                        Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress)
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -161,10 +318,147 @@ private fun MessageBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    if (edited) {
+                        Text(
+                            text = stringResource(R.string.message_edited),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
+                    }
+                    if (pinned) {
+                        Icon(
+                            Icons.Outlined.PushPin,
+                            contentDescription = stringResource(R.string.message_pinned),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp).size(14.dp),
+                        )
+                    }
                 }
-                Text(text = body, style = MaterialTheme.typography.bodyLarge)
+                header()
+                body?.let { Text(text = it, style = MaterialTheme.typography.bodyLarge) }
                 extras()
             }
+        }
+    }
+}
+
+/** XEP-0444 aggregation chips; tap toggles the account's reaction. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ReactionChips(
+    reactions: List<ReactionGroup>,
+    onToggle: (String) -> Unit,
+) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(top = 2.dp),
+    ) {
+        reactions.forEach { group ->
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (group.mine) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                },
+                border = if (group.mine) {
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                } else {
+                    null
+                },
+                onClick = { onToggle(group.emoji) },
+            ) {
+                Text(
+                    text = if (group.count > 1) "${group.emoji} ${group.count}" else group.emoji,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One XEP-0447 attachment: inline images render via Coil with a tap-to-
+ * expand viewer (web lightbox parity); everything else is a card that
+ * opens the URL externally. Encrypted attachments (XEP-0448) cannot be
+ * decrypted without OMEMO — they degrade to a plain card.
+ */
+@Composable
+private fun SharedFileContent(file: WaddleSharedFile) {
+    val uriHandler = LocalUriHandler.current
+    var viewerOpen by remember { mutableStateOf(false) }
+    val isInlineImage = file.encrypted == null &&
+        file.disposition == "inline" &&
+        file.mediaType?.startsWith("image/") == true
+    if (isInlineImage) {
+        AsyncImage(
+            model = file.url,
+            contentDescription = file.name ?: stringResource(R.string.message_attachment),
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp, max = 240.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { viewerOpen = true },
+        )
+        if (viewerOpen) {
+            MediaViewerDialog(
+                url = file.url,
+                contentDescription = file.name,
+                onDismiss = { viewerOpen = false },
+            )
+        }
+    } else {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            // Guarded: the URL is peer-controlled metadata and openUri
+            // throws when no activity handles the scheme.
+            modifier = Modifier.clickable {
+                runCatching { uriHandler.openUri(file.url) }
+            },
+        ) {
+            Icon(
+                Icons.Outlined.AttachFile,
+                contentDescription = stringResource(R.string.message_attachment),
+            )
+            Text(
+                text = file.name ?: file.url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+    }
+}
+
+/** Full-screen image viewer (single image; tap anywhere to dismiss). */
+@Composable
+private fun MediaViewerDialog(
+    url: String,
+    contentDescription: String?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.92f))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            AsyncImage(
+                model = url,
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }

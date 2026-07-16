@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
@@ -33,6 +34,7 @@ class XmppSessionManagerQueueTest {
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
+            userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
         )

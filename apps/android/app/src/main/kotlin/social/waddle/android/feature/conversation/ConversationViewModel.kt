@@ -2,14 +2,19 @@ package social.waddle.android.feature.conversation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
@@ -24,10 +29,21 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  */
 open class ConversationViewModel(
     private val conversationJid: String,
+    private val isGroupchat: Boolean,
     timeline: StateFlow<List<TimelineItem>>,
     events: SharedFlow<XmppEvent>,
     private val unreadStore: UnreadStore,
     private val io: ConversationIo,
+    typingNames: Flow<List<String>> = emptyFlow(),
+    // Must emit (combine stalls on a never-emitting source).
+    pinnedIds: Flow<Set<String>> = flowOf(emptySet()),
+    /**
+     * Non-null when this screen shows ONE thread: rows filter to the
+     * thread, and every send targets it (XEP-0201). Null = the main
+     * feed, which hides thread replies behind reply-count chips.
+     */
+    private val threadId: String? = null,
+    private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -45,8 +61,30 @@ open class ConversationViewModel(
     private val ackedIds = mutableSetOf<String>()
     private val failedIds = mutableSetOf<String>()
 
+    @Volatile
+    private var visible = false
+
+    /**
+     * Web `isPinnedAtEdge` parity: displayed markers dispatch only
+     * while the timeline is scrolled to the newest message — a user
+     * reading old history must not mark below-the-fold arrivals read.
+     * Conversations open at the newest edge, hence the true default.
+     */
+    @Volatile
+    private var atNewestEdge = true
+
+
+    private val typingNotifier = ComposerTypingNotifier(
+        scope = viewModelScope,
+        sendState = { state -> io.sendChatState(state) },
+    )
+
+    /** Peers currently composing in this conversation (XEP-0085). */
+    val typing: StateFlow<List<String>> =
+        typingNames.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     val uiState: StateFlow<ConversationUiState> =
-        combine(timeline, pending, history) { items, unconfirmed, load ->
+        combine(timeline, pending, history, pinnedIds) { items, unconfirmed, load, pins ->
             // Union of every stored identity: the MUC reflection is keyed
             // by the room-assigned XEP-0359 stanza-id, but the id the send
             // returned is the client origin-id — matching only the
@@ -59,14 +97,57 @@ open class ConversationViewModel(
             }
             val visiblePending = unconfirmed.filter { message ->
                 message.stanzaId == null || message.stanzaId !in storedIds
+            }.filter { message ->
+                // Feed mode hides thread-targeted pending rows (their
+                // stored echo will be feed-hidden); a thread screen shows
+                // only its own thread's sends.
+                val pendingThread = message.extras?.threadId
+                if (threadId == null) pendingThread == null else pendingThread == threadId
+            }
+            val visibleItems = if (threadId != null) {
+                items.filter { it.threadId == threadId || threadId in it.identityIds }
+            } else {
+                items.filter { it.isFeedVisible }
+            }
+            // Reply-count chips on feed roots: replies grouped by the
+            // thread they carry, matched to the root via its identities.
+            val replyCounts = if (threadId == null) {
+                val byThread = HashMap<String, Int>()
+                items.forEach { item ->
+                    val thread = item.threadId ?: return@forEach
+                    if (item.hasCallThread) return@forEach
+                    if (thread !in item.identityIds) byThread.merge(thread, 1, Int::plus)
+                }
+                byThread
+            } else {
+                emptyMap()
             }
             ConversationUiState(
-                rows = items.map { ConversationRow.Stored(it) } +
+                rows = visibleItems.map { ConversationRow.Stored(it) } +
                     visiblePending.map { ConversationRow.Unconfirmed(it) },
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
+                pinnedIds = pins,
+                canPin = io.canPin,
+                threadReplyCounts = replyCounts,
+                threads = if (threadId == null) threadSummariesOf(items) else emptyList(),
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
+
+    private val _composerMode = MutableStateFlow<ComposerMode>(ComposerMode.Normal)
+
+    /** Normal sends vs editing an existing own message (XEP-0308). */
+    val composerMode: StateFlow<ComposerMode> = _composerMode
+
+    private val _actionFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+
+    /** Fired when a room-gated action (pin/unpin) is refused. */
+    val actionFailures: SharedFlow<Unit> = _actionFailures
+
+    private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
+
+    /** XEP-0363 attachment upload progress for the composer banner. */
+    val uploadState: StateFlow<UploadState> = _uploadState
 
     init {
         // Prune (not just hide) pending rows once the timeline holds their
@@ -82,6 +163,14 @@ open class ConversationViewModel(
                 }
                 pending.update { list ->
                     list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
+                }
+                // New rows arriving while the conversation is on screen
+                // AND scrolled to the newest edge count as read (the
+                // marker path dedupes repeats). Guarded: a marker failure
+                // must not kill the pruning collector. Thread screens
+                // never mark (see onConversationVisible).
+                if (visible && atNewestEdge && threadId == null) {
+                    runCatching { io.markDisplayed() }
                 }
             }
         }
@@ -149,53 +238,351 @@ open class ConversationViewModel(
     fun send(body: String) {
         val text = body.trim()
         if (text.isEmpty()) return
+        val mode = _composerMode.value
+        if (mode is ComposerMode.Editing) {
+            _composerMode.value = ComposerMode.Normal
+            viewModelScope.launch {
+                val sent = runCatching {
+                    io.sendCorrection(mode.targetId, text, mode.threadId)
+                }.getOrDefault(false)
+                if (sent) {
+                    typingNotifier.onMessageSent()
+                } else {
+                    // Corrections are never queued (a replayed edit could
+                    // outrank a newer one) — restore edit mode with the
+                    // attempted text instead of silently discarding it.
+                    // CAS: only when the composer is still Normal — the
+                    // user may have started another edit or a reply while
+                    // this send was in flight, and clobbering that state
+                    // would destroy their newer intent.
+                    _composerMode.compareAndSet(
+                        ComposerMode.Normal,
+                        ComposerMode.Editing(
+                            mode.targetId,
+                            originalBody = text,
+                            threadId = mode.threadId,
+                            attempt = mode.attempt + 1,
+                        ),
+                    )
+                }
+            }
+            return
+        }
+        val extras = when {
+            mode is ComposerMode.Replying -> MessageSendExtras(
+                replyToId = mode.targetId,
+                replyToAuthorJid = mode.authorJid,
+                replyParentBody = mode.previewBody,
+                // A reply echoes the parent's thread (web parity); a
+                // thread-screen reply targets the screen's thread.
+                threadId = mode.threadId ?: threadId,
+            )
+            threadId != null -> MessageSendExtras(threadId = threadId)
+            else -> null
+        }
+        if (mode is ComposerMode.Replying) _composerMode.value = ComposerMode.Normal
         val message = PendingMessage(
             localId = nextLocalId++,
             stanzaId = null,
             body = text,
             timestampMillis = clock(),
             failed = false,
+            extras = extras,
         )
         pending.update { it + message }
+        viewModelScope.launch { dispatch(message, extras) }
+    }
+
+    private suspend fun dispatch(
+        message: PendingMessage,
+        extras: MessageSendExtras?,
+        wireBody: String = message.body,
+    ) {
+        val result = io.send(wireBody, extras)
+        val trackedId = when (val outcome = result.outcome) {
+            is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
+            else -> result.queuedId
+        }
+        if (trackedId == null) {
+            updatePending(message.localId) { it.copy(failed = true) }
+            return
+        }
+        // Delivered (or queued for replay): typing ended with content,
+        // not a pause — emit `active` (web parity).
+        typingNotifier.onMessageSent()
+        updatePending(message.localId) {
+            it.copy(
+                stanzaId = trackedId,
+                queued = result.queued && trackedId !in failedIds,
+                // Both the ack AND the failure event can beat this
+                // continuation; failure wins.
+                acked = trackedId in ackedIds && trackedId !in failedIds,
+                failed = trackedId in failedIds,
+            )
+        }
+    }
+
+    /** The composer's text changed: drive the XEP-0085 state machine. */
+    fun onDraftChanged() {
+        typingNotifier.onTyping()
+    }
+
+    /**
+     * Upload a picked document (XEP-0363) and send it as a files-only
+     * message (empty wire body, XEP-0447 metadata — web parity); the
+     * optimistic row shows the file name.
+     */
+    fun sendAttachment(uri: android.net.Uri) {
+        val up = uploader ?: return
+        if (_uploadState.value == UploadState.Uploading) return
+        _uploadState.value = UploadState.Uploading
         viewModelScope.launch {
-            val result = io.send(text)
-            val trackedId = when (val outcome = result.outcome) {
-                is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
-                else -> result.queuedId
-            }
-            if (trackedId == null) {
-                updatePending(message.localId) { it.copy(failed = true) }
-                return@launch
-            }
-            updatePending(message.localId) {
-                it.copy(
-                    stanzaId = trackedId,
-                    queued = result.queued && trackedId !in failedIds,
-                    // Both the ack AND the failure event can beat this
-                    // continuation; failure wins.
-                    acked = trackedId in ackedIds && trackedId !in failedIds,
-                    failed = trackedId in failedIds,
-                )
+            val result = runCatching { up.upload(uri) }.getOrElse { UploadResult.Failed }
+            when (result) {
+                is UploadResult.Done -> {
+                    _uploadState.value = UploadState.Idle
+                    // A file sent while replying IS the reply (web
+                    // parity: files and replyTo ride the same stanza).
+                    val mode = _composerMode.value
+                    val extras = if (mode is ComposerMode.Replying) {
+                        MessageSendExtras(
+                            replyToId = mode.targetId,
+                            replyToAuthorJid = mode.authorJid,
+                            replyParentBody = mode.previewBody,
+                            threadId = mode.threadId ?: threadId,
+                            sharedFiles = listOf(result.file),
+                        )
+                    } else {
+                        MessageSendExtras(
+                            threadId = threadId,
+                            sharedFiles = listOf(result.file),
+                        )
+                    }
+                    if (mode is ComposerMode.Replying) _composerMode.value = ComposerMode.Normal
+                    val message = PendingMessage(
+                        localId = nextLocalId++,
+                        stanzaId = null,
+                        body = result.file.name ?: result.file.url,
+                        timestampMillis = clock(),
+                        failed = false,
+                        extras = extras,
+                    )
+                    pending.update { it + message }
+                    dispatch(message, extras, wireBody = "")
+                }
+                UploadResult.TooLarge -> _uploadState.value = UploadState.TooLarge
+                UploadResult.Failed -> _uploadState.value = UploadState.Failed
             }
         }
     }
 
-    /** Re-send a failed optimistic message. */
+    /** Dismiss a failed-upload banner. */
+    fun clearUploadState() {
+        if (_uploadState.value != UploadState.Uploading) {
+            _uploadState.value = UploadState.Idle
+        }
+    }
+
+    /**
+     * XEP-0444 chip/sheet toggle. The replacement set is computed by
+     * the session manager INSIDE its reaction mutex — computing it here
+     * would read a stale base while a prior send holds the lock, and
+     * the full-set replace semantics would erase the queued toggle.
+     */
+    fun toggleReaction(item: TimelineItem, emoji: String) {
+        val target = actionTargetIdOf(item) ?: return
+        viewModelScope.launch {
+            runCatching { io.toggleReaction(target, emoji) }
+        }
+    }
+
+    /** Enter reply mode targeting [item] (XEP-0461). */
+    fun startReply(item: TimelineItem) {
+        if (item.tombstone != null) return
+        val target = actionTargetIdOf(item) ?: return
+        val author = item.from?.let { if (isGroupchat) it else bareJidOf(it) } ?: return
+        _composerMode.value = ComposerMode.Replying(
+            targetId = target,
+            authorJid = author,
+            authorName = authorNameOf(item) ?: author,
+            previewBody = item.body,
+            // DM replies root an implicit thread at the parent when none
+            // exists (web chat-send parity: every DM reply carries a
+            // <thread/>); channels only thread explicit replies.
+            threadId = item.threadId
+                ?: if (isGroupchat) null else (item.originId ?: item.messageId),
+        )
+    }
+
+    fun cancelReply() {
+        if (_composerMode.value is ComposerMode.Replying) {
+            _composerMode.value = ComposerMode.Normal
+        }
+    }
+
+    /**
+     * The thread a "reply in thread" on [item] opens: its own thread,
+     * else a new thread rooted at the message (web
+     * `thread-action-target` parity). The DM root id must be
+     * author-assigned for the same reason as [actionTargetIdOf].
+     */
+    fun threadIdFor(item: TimelineItem): String = item.threadId
+        ?: if (isGroupchat) item.id else (item.originId ?: item.messageId ?: item.id)
+
+    /** Enter edit mode for an own, non-tombstoned message. */
+    fun startEdit(item: TimelineItem) {
+        if (!item.isMine || item.tombstone != null) return
+        val target = correctionTargetIdOf(item) ?: return
+        _composerMode.value = ComposerMode.Editing(
+            targetId = target,
+            originalBody = item.body,
+            threadId = item.threadId,
+        )
+    }
+
+    fun cancelEdit() {
+        _composerMode.value = ComposerMode.Normal
+    }
+
+    /** XEP-0424 retraction of an own message. */
+    fun retract(item: TimelineItem) {
+        if (!item.isMine || item.tombstone != null) return
+        val target = actionTargetIdOf(item) ?: return
+        viewModelScope.launch { runCatching { io.sendRetraction(target) } }
+    }
+
+    /**
+     * `urn:waddle:pin:0` room pin toggle. The server gates on
+     * Owner/Admin affiliation; a refusal surfaces instead of failing
+     * silently (the action is offered to every member because the
+     * client does not track its own affiliation yet).
+     */
+    fun setPinned(item: TimelineItem, pinned: Boolean) {
+        val target = actionTargetIdOf(item) ?: return
+        viewModelScope.launch {
+            val ok = runCatching { io.setPinned(target, pinned) }.getOrDefault(false)
+            if (!ok) _actionFailures.tryEmit(Unit)
+        }
+    }
+
+    /**
+     * Reaction/retraction/pin target (web parity): in a MUC strictly
+     * the room-assigned XEP-0359 stanza id (`by` must be the room — no
+     * id means the action is unavailable); in a DM strictly the
+     * AUTHOR-assigned id — the local archive stanza id was stamped by
+     * our own server and the peer's copy never carried it, so a
+     * reaction/retraction/reply targeting it silently fails to apply
+     * on the other side.
+     */
+    fun actionTargetIdOf(item: TimelineItem): String? = if (isGroupchat) {
+        // Authority scan, never the first stanza-id (sender-controlled):
+        // an occupant-injected foreign id must not disable actions on
+        // the message.
+        item.assignedStanzaId(conversationJid)?.id
+    } else {
+        item.originId ?: item.messageId
+    }
+
+    /** XEP-0308 targets the AUTHOR-assigned id of the original send. */
+    private fun correctionTargetIdOf(item: TimelineItem): String? =
+        item.originId ?: item.messageId
+
+    private fun authorNameOf(item: TimelineItem): String? {
+        val from = item.from ?: return null
+        return if (isGroupchat) from.substringAfter('/', from) else bareJidOf(from).substringBefore('@')
+    }
+
+    private fun bareJidOf(jid: String): String = jid.substringBefore('/')
+
+    /**
+     * Loaded-history threads overview, newest activity first. Purely
+     * client-side (the FFI exposes no server thread listing yet): only
+     * threads whose messages are in the loaded window appear.
+     */
+    private fun threadSummariesOf(items: List<TimelineItem>): List<ThreadSummary> {
+        val byThread = LinkedHashMap<String, MutableList<TimelineItem>>()
+        val lastActivityIndex = HashMap<String, Int>()
+        items.forEachIndexed { index, item ->
+            val thread = item.threadId ?: return@forEachIndexed
+            // Call anchors carry a thread id (the call sid) but are feed
+            // rows, not thread members.
+            if (item.hasCallThread) return@forEachIndexed
+            byThread.getOrPut(thread) { mutableListOf() }.add(item)
+            lastActivityIndex[thread] = index
+        }
+        // Roots carry no <thread/> of their own (Waddle implicit-root):
+        // resolve them by identity so previews show the root body.
+        return byThread.map { (thread, members) ->
+            val root = items.firstOrNull { thread in it.identityIds }
+            val previewSource = root ?: members.first()
+            ThreadSummary(
+                threadId = thread,
+                rootAuthor = previewSource.let(::authorNameOf),
+                // Tombstoned content must never leak through previews
+                // (XEP-0424/0425); the UI substitutes the placeholder.
+                rootPreview = if (previewSource.tombstone != null) "" else previewSource.body,
+                rootTombstoned = previewSource.tombstone != null,
+                replyCount = members.count { thread !in it.identityIds },
+                lastTimestamp = members.last().timestamp,
+            )
+            // Newest activity first BY TIMELINE ORDER — live replies
+            // carry no timestamp and a string sort would sink them.
+        }.sortedByDescending { lastActivityIndex[it.threadId] ?: -1 }
+    }
+
+    /** Re-send a failed optimistic message (reply/thread extras kept). */
     fun retry(localId: Long) {
         val message = pending.value.firstOrNull { it.localId == localId && it.failed } ?: return
         pending.update { list -> list.filterNot { it.localId == localId } }
-        send(message.body)
+        val retried = PendingMessage(
+            localId = nextLocalId++,
+            stanzaId = null,
+            body = message.body,
+            timestampMillis = clock(),
+            failed = false,
+            extras = message.extras,
+        )
+        pending.update { it + retried }
+        viewModelScope.launch {
+            // Files-only sends carry an empty wire body (the row shows
+            // the file name); everything else resends its body.
+            val wireBody = if (message.extras?.sharedFiles.orEmpty().isNotEmpty()) "" else retried.body
+            dispatch(retried, message.extras, wireBody)
+        }
     }
 
-    /** The conversation is on screen: suppress and clear unread counts. */
+    /**
+     * The conversation is on screen: suppress and clear unread counts.
+     * Thread screens do NEITHER — they share the parent conversation's
+     * jid, so claiming the active marker would fight the feed screen
+     * underneath, and marking displayed would read messages the user
+     * has never seen in the main feed.
+     */
     fun onConversationVisible() {
+        visible = true
+        io.recordConversationSeen()
+        if (threadId != null) return
         unreadStore.setActiveConversation(conversationJid)
         unreadStore.clear(conversationJid)
-        io.recordConversationSeen()
         viewModelScope.launch { runCatching { onConversationRead(conversationJid) } }
+        if (atNewestEdge) {
+            viewModelScope.launch { runCatching { io.markDisplayed() } }
+        }
+    }
+
+    /** The list crossed the newest-edge boundary (see [atNewestEdge]). */
+    fun onAtNewestEdgeChanged(atEdge: Boolean) {
+        val was = atNewestEdge
+        atNewestEdge = atEdge
+        if (!was && atEdge && visible && threadId == null) {
+            // Scrolling back down to live reads everything above it.
+            viewModelScope.launch { runCatching { io.markDisplayed() } }
+        }
     }
 
     fun onConversationHidden() {
+        visible = false
+        if (threadId != null) return
         unreadStore.clearActiveConversationIf(conversationJid)
     }
 

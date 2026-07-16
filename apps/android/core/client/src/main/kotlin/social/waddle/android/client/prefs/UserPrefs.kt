@@ -31,6 +31,9 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
     val notificationsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_NOTIFICATIONS] ?: true }
     val messageSoundsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_MESSAGE_SOUNDS] ?: true }
 
+    /** XEP-0333 outbound gate, web `waddle:read-receipts` (default send). */
+    val readReceiptsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_READ_RECEIPTS] ?: true }
+
     suspend fun setTheme(mode: ThemeMode) {
         dataStore.edit { it[KEY_THEME] = mode.storageValue }
     }
@@ -43,6 +46,10 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[KEY_MESSAGE_SOUNDS] = enabled }
     }
 
+    suspend fun setReadReceiptsEnabled(enabled: Boolean) {
+        dataStore.edit { it[KEY_READ_RECEIPTS] = enabled }
+    }
+
     suspend fun clear() {
         dataStore.edit { it.clear() }
     }
@@ -51,5 +58,6 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_NOTIFICATIONS = booleanPreferencesKey("notifications_enabled")
         val KEY_MESSAGE_SOUNDS = booleanPreferencesKey("message_sounds_enabled")
+        val KEY_READ_RECEIPTS = booleanPreferencesKey("read_receipts_enabled")
     }
 }

@@ -13,6 +13,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -20,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -37,20 +40,33 @@ import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
+import social.waddle.android.client.store.ChatStateStore
 import social.waddle.android.client.store.DmStore
+import social.waddle.android.client.store.MessageMutation
+import social.waddle.android.client.store.PinStore
+import social.waddle.android.client.store.ReadCursorStore
+import social.waddle.android.client.store.TimelineItem
+import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.store.PresenceStore
 import social.waddle.android.client.store.RoomStore
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
+import social.waddle.android.client.store.isTimelineMutation
+import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSmResumeState
+import social.waddle.client.ffi.WaddleThreadTarget
+import social.waddle.client.ffi.WaddleUploadSlot
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -66,6 +82,7 @@ class XmppSessionManager(
     private val sessionPrefs: SessionPrefs,
     private val clientFactory: ClientFactory,
     private val networkSignal: NetworkSignal,
+    private val userPrefs: UserPrefs,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
@@ -75,6 +92,9 @@ class XmppSessionManager(
     val presenceStore = PresenceStore()
     val dmStore = DmStore()
     val unreadStore = UnreadStore()
+    val chatStateStore = ChatStateStore()
+    val readCursorStore = ReadCursorStore()
+    val pinStore = PinStore()
 
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val cursorTracker = ResumeCursorTracker()
@@ -107,6 +127,22 @@ class XmppSessionManager(
     @Volatile
     private var ownBareJid: String? = null
 
+    /** XEP-0490 publish-options probe result, reset per attempt. */
+    @Volatile
+    private var mdsPublishSupported: Boolean? = null
+
+    /** XEP-0363 upload service JID, discovered once per attempt. */
+    @Volatile
+    private var uploadService: String? = null
+
+    /** Reads parked while offline, replayed on the next ready session. */
+    private val pendingDisplayed =
+        java.util.concurrent.ConcurrentHashMap<String, PendingDisplayed>()
+
+    /** The live attempt's bridge, for injecting locally-produced events. */
+    @Volatile
+    private var currentBridge: XmppEventBridge? = null
+
     @Volatile
     private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
 
@@ -125,6 +161,12 @@ class XmppSessionManager(
 
     private val lifecycleMutex = Mutex()
 
+    /** Serializes reaction send+rollback pairs (see [sendReaction]). */
+    private val reactionMutex = Mutex()
+
+    /** Serializes displayed dispatches (see [markConversationDisplayed]). */
+    private val displayedMutex = Mutex()
+
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
@@ -142,6 +184,7 @@ class XmppSessionManager(
         _appState.value = WaddleAppState.Ready
         scope.launch { persistResumeSnapshots(resumeSnapshots) }
         scope.launch { persistResumeCursors(cursorWrites) }
+        scope.launch { sweepChatStates() }
         scope.launch { runConnectionLoop(session) }
     }
 
@@ -203,6 +246,7 @@ class XmppSessionManager(
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
         val bridge = XmppEventBridge(::queueResumeSnapshot)
+        currentBridge = bridge
         val config = buildConfig(session)
         val client = clientFactory.create(config, bridge)
         val hadResumeSnapshot = config.resumeState != null
@@ -288,14 +332,496 @@ class XmppSessionManager(
     /**
      * Send a groupchat message on the live connection; a session-shaped
      * failure persists the message to the outbound queue for replay (see
-     * [sendOrEnqueue]).
+     * [sendOrEnqueue]). [extras] carry XEP-0461 reply / XEP-0201 thread
+     * annotations and survive queueing.
      */
-    suspend fun sendGroupchatMessage(roomJid: String, body: String): SendResult =
-        sendOrEnqueue(conversationJid = roomJid, isGroupchat = true, body = body)
+    suspend fun sendGroupchatMessage(
+        roomJid: String,
+        body: String,
+        extras: MessageSendExtras? = null,
+    ): SendResult =
+        sendOrEnqueue(conversationJid = roomJid, isGroupchat = true, body = body, extras = extras)
 
     /** 1:1 chat twin of [sendGroupchatMessage]. */
-    suspend fun sendChatMessage(peerJid: String, body: String): SendResult =
-        sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body)
+    suspend fun sendChatMessage(
+        peerJid: String,
+        body: String,
+        extras: MessageSendExtras? = null,
+    ): SendResult =
+        sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body, extras = extras)
+
+    /**
+     * XEP-0363: request an upload slot from the account's upload
+     * service (discovered once per attempt). `null` when offline, no
+     * service exists, or the service refused (e.g. size over quota).
+     */
+    suspend fun requestUploadSlot(
+        filename: String,
+        sizeBytes: ULong,
+        contentType: String,
+    ): WaddleUploadSlot? {
+        val client = activeClient ?: return null
+        val service = uploadService ?: run {
+            val discovered = runCatching { client.discoverUploadService() }.getOrNull() ?: return null
+            uploadService = discovered
+            discovered
+        }
+        return try {
+            client.requestUploadSlot(service, filename, sizeBytes, contentType)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * XEP-0444 toggle: flip [emoji] in the account's CURRENT reaction
+     * set for a message and send the complete replacement set (empty =
+     * clear), applied optimistically — a DM send never echoes back to
+     * this client. The current set is resolved INSIDE the mutex: a
+     * caller-computed set would read a stale base whenever a prior
+     * send still holds the lock, and the full-set replace semantics
+     * would silently erase the queued toggle.
+     */
+    suspend fun toggleReaction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetStanzaId: String,
+        emoji: String,
+    ): Boolean = reactionMutex.withLock {
+        // NOTE (deferred, needs an FFI signature change): the reaction
+        // stanza does not yet echo the target's XEP-0201 <thread/> like
+        // the web client does — send_reaction takes no options today.
+        val owner = ownBareJid ?: return false
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val base = ownReactionSet(conversationJid, targetStanzaId) ?: emptyList()
+        val next = if (emoji in base) base - emoji else base + emoji
+        applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
+        var sent = false
+        try {
+            sent = clientCall {
+                it.sendReaction(bareJid(conversationJid), targetStanzaId, next, isGroupchat)
+            }
+        } finally {
+            // Also runs on cancellation (screen closed mid-send): the
+            // optimistic apply must never outlive a send that did not
+            // happen — in a DM nothing on the wire would ever correct
+            // the phantom chip. Owner-gated: a rollback racing logout
+            // must not park pre-logout state into the next session.
+            if (!sent && ownBareJid == owner) {
+                applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
+            }
+        }
+        return sent
+    }
+
+    /** The account's current reaction set on a row, from the store. */
+    private fun ownReactionSet(conversationJid: String, targetId: String): List<String>? {
+        val row = timelineStore.timeline(bareJid(conversationJid)).value
+            .firstOrNull { targetId in it.identityIds } ?: return null
+        return row.reactions.filter { it.mine }.map { it.emoji }
+    }
+
+    /** XEP-0308: replace an own message's body; applies locally on a
+     *  successful send (no DM echo). [threadId] repeats the corrected
+     *  message's XEP-0201 `<thread/>` (web parity) so the edit stays in
+     *  its thread. */
+    suspend fun sendCorrection(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetId: String,
+        newBody: String,
+        threadId: String? = null,
+    ): Boolean {
+        val client = activeClient ?: return false
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val options = threadId?.let {
+            sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
+        }
+        val outcome = try {
+            client.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return false
+        }
+        if (outcome !is WaddleSendMessageOutcome.Sent) return false
+        // DM only: `Sent` means stream-accepted, and a room can still
+        // reject the correction — MUC state waits for the reflection
+        // (web parity). A DM has no reflection to wait for. Owner-gated
+        // so a completion racing logout cannot park stale state.
+        if (!isGroupchat && ownBareJid != null) {
+            timelineStore.applyLocalMutation(
+                conversationJid,
+                MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
+                isGroupchat,
+            )
+        }
+        return true
+    }
+
+    /** XEP-0424: retract an own message; tombstones locally on success. */
+    suspend fun sendRetraction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        targetStanzaId: String,
+    ): Boolean {
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val sent = clientCall {
+            it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
+        }
+        // DM only (see sendCorrection): a room rejection after stream
+        // accept would leave an irreversible local tombstone; the MUC
+        // reflection drives room state instead. Owner-gated like the
+        // reaction rollback.
+        if (sent && !isGroupchat && ownBareJid != null) {
+            timelineStore.applyLocalMutation(
+                conversationJid,
+                MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
+                isGroupchat,
+            )
+        }
+        return sent
+    }
+
+    /**
+     * `urn:waddle:pin:0` room pin/unpin. No optimistic pin-set write —
+     * the room broadcasts a `<pin-event/>` that lands in [pinStore]
+     * (and a forbidden reply for non-admins surfaces via `on_error`).
+     */
+    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): Boolean =
+        clientCall { client ->
+            if (pin) {
+                client.pinMessage(bareJid(roomJid), targetStanzaId)
+            } else {
+                client.unpinMessage(bareJid(roomJid), targetStanzaId)
+            }
+        }
+
+    /**
+     * Seed [pinStore] with the room's current pin list (room open). The
+     * snapshot is injected into the serialized event stream — applying
+     * it here would race live pin events and clobber updates that
+     * arrived while the fetch was in flight.
+     */
+    suspend fun refreshRoomPins(roomJid: String) {
+        val client = activeClient ?: return
+        val room = bareJid(roomJid)
+        val fetchedAtVersion = pinStore.eventVersion(room)
+        val entries = try {
+            client.fetchRoomPins(room)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return
+        }
+        currentBridge?.submit(XmppEvent.RoomPins(room, entries, fetchedAtVersion))
+    }
+
+    private fun applyOwnReaction(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        sender: String,
+        targetStanzaId: String,
+        emojis: List<String>,
+    ) {
+        timelineStore.applyLocalMutation(
+            conversationJid,
+            MessageMutation.Reaction(
+                targetId = targetStanzaId,
+                from = sender,
+                senderKey = sender,
+                mine = true,
+                emojis = emojis,
+            ),
+            isGroupchat,
+        )
+    }
+
+    /**
+     * The account's mutation identity in a conversation: the occupant
+     * JID (room/nick) in a MUC, the bare account JID in 1:1 — matching
+     * how [conversationKeyOf] classifies own incoming copies.
+     */
+    private fun ownMutationSender(conversationJid: String, isGroupchat: Boolean): String? {
+        val own = ownBareJid ?: return null
+        return if (isGroupchat) {
+            "${bareJid(conversationJid)}/${own.substringBefore('@')}"
+        } else {
+            own
+        }
+    }
+
+    /** Boolean client verb with the standard not-connected/error → false. */
+    private suspend fun clientCall(op: suspend (WaddleClientInterface) -> Boolean): Boolean {
+        val client = activeClient ?: return false
+        return try {
+            op(client)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Mark the newest displayable message of a conversation as read:
+     * sends the XEP-0333 `<displayed/>` (gated on the read-receipts
+     * pref, and on `stanza_id_by == room` for MUCs / an explicit marker
+     * request for DMs — web parity) and publishes the XEP-0490 MDS
+     * cursor (independent of the pref) so sibling devices retire their
+     * badges. Equality-deduped per conversation; safe to call on every
+     * timeline change while the conversation is visible.
+     *
+     * Ordering matters: the local badge clears unconditionally (reading
+     * offline is still reading), but the cursor dedupe is consumed ONLY
+     * once a live client will carry the dispatch — otherwise an offline
+     * read would permanently swallow the marker and the MDS publish.
+     *
+     * [explicitTarget] lets callers without a loaded timeline (the
+     * notification mark-as-read action after process death) name the
+     * message directly.
+     */
+    suspend fun markConversationDisplayed(
+        conversationJid: String,
+        isGroupchat: Boolean,
+        explicitTarget: DisplayedTarget? = null,
+    ): Unit = displayedMutex.withLock {
+        // Serialized: unguarded concurrent dispatches (timeline
+        // collector, visibility hooks, the notification receiver) could
+        // interleave across the suspend points and let a STALE call's
+        // terminal advance/publish land last, regressing the local
+        // cursor and the published MDS node.
+        val conversation = bareJid(conversationJid)
+        val items = timelineStore.timeline(conversation).value
+        val ids = explicitTarget ?: run {
+            // Only feed-visible rows count: a thread reply the user has
+            // never opened must not advance the read cursor.
+            val target = items.lastOrNull {
+                !it.isMine && it.tombstone == null && it.isFeedVisible
+            } ?: return
+            displayedTargetOf(target, isGroupchat, conversation) ?: return
+        }
+        // The on-screen path clears the badge unconditionally (looking
+        // IS reading, even offline). Explicit targets (parked replays,
+        // notification actions) must pass the staleness guard first —
+        // a parked replay racing a fresh arrival would otherwise wipe
+        // the badge for a message the user has never seen (the tap-time
+        // clear already happened in the receiver).
+        if (explicitTarget == null) unreadStore.clear(conversation)
+        // Explicit targets can be stale: never move the cursor
+        // BACKWARDS in timeline order, and when the target cannot be
+        // ordered against an EXISTING cursor (not in the loaded
+        // timeline) treat it as stale rather than risk regressing the
+        // published MDS node.
+        var expectedCursor: String? = null
+        if (explicitTarget != null) {
+            val targetIndex = items.indexOfLast { ids.markerId in it.identityIds }
+            val current = readCursorStore.cursor(conversation)
+            val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
+            if (targetIndex in 0..currentIndex) return
+            if (targetIndex < 0 && current != null) return
+            expectedCursor = current
+        }
+        val client = activeClient ?: run {
+            // No live session: park the RESOLVED target and replay it on
+            // the next ready (a notification tap during a reconnect gap
+            // must not permanently drop the read receipt). Parking null
+            // would re-resolve after MAM catch-up and mark messages the
+            // user never saw.
+            pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
+            return
+        }
+        // Snapshot the cursor to CAS against below: applyMdsEntry runs
+        // OUTSIDE displayedMutex and can advance the cursor to a newer
+        // sibling value across our suspend points — an unconditional
+        // advance would then regress it to our (older) marker and wedge
+        // the sibling entry's CAS forever.
+        val cursorBefore = readCursorStore.cursor(conversation)
+        if (cursorBefore == ids.markerId) return
+        val markerAllowed = when {
+            !readReceiptsEnabled() -> false
+            isGroupchat -> ids.stanzaIdBy == conversation && ids.markerId == ids.stanzaId
+            else -> ids.markerRequested
+        }
+        // The cursor (which dedupes future dispatches) is taken only
+        // when every attempted send went through — a thrown/refused
+        // dispatch stays retryable on the next timeline change.
+        var failed = false
+        if (markerAllowed) {
+            val sent = runCatching {
+                client.sendDisplayed(conversation, ids.markerId, isGroupchat)
+            }.getOrDefault(false)
+            failed = failed || !sent
+        }
+        // The MDS pair is authority-verified at construction (room-
+        // assigned for MUCs, own-server-assigned for DMs — XEP-0490 §3);
+        // a row without a trusted pair simply skips the publish.
+        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
+            val published = runCatching {
+                client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy)
+            }.getOrDefault(false)
+            failed = failed || !published
+        }
+        if (!failed) {
+            // CAS on both paths: a concurrent applyMdsEntry advance (it
+            // does not hold displayedMutex) during our sends must never
+            // be clobbered by our older marker.
+            val expected = if (explicitTarget != null) expectedCursor else cursorBefore
+            readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
+        }
+    }
+
+    /**
+     * Replay reads parked while no session was live (see above).
+     * Atomic per-key removal — a snapshot-then-clear would drop a
+     * dispatch parked concurrently (notification receiver) between the
+     * snapshot and the clear.
+     */
+    private suspend fun drainPendingDisplayed() {
+        while (pendingDisplayed.isNotEmpty()) {
+            // A dispatch below re-parks when the session dropped mid-
+            // drain; bail instead of spinning on it.
+            if (activeClient == null) return
+            for (conversation in pendingDisplayed.keys) {
+                val pending = pendingDisplayed.remove(conversation) ?: continue
+                markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
+            }
+        }
+    }
+
+    private suspend fun readReceiptsEnabled(): Boolean =
+        runCatching { userPrefs.readReceiptsEnabled.first() }.getOrDefault(true)
+
+    /**
+     * XEP-0490 §3 publish-options probe, once per session attempt
+     * (web parity); a failed probe retries on the next dispatch.
+     */
+    private suspend fun supportsMdsPublish(client: WaddleClientInterface): Boolean {
+        mdsPublishSupported?.let { return it }
+        val supported = runCatching { client.supportsMdsPublishOptions() }.getOrNull() ?: return false
+        mdsPublishSupported = supported
+        return supported
+    }
+
+    /**
+     * The ids a displayed dispatch needs, per XEP-0333 id-class rules:
+     * a MUC marker targets the ROOM-assigned XEP-0359 stanza id, but a
+     * 1:1 marker must carry the AUTHOR-assigned id — the local archive
+     * stanza id was stamped by our own server and the peer never saw
+     * it. The stanza-id pair rides along strictly for the MDS publish.
+     */
+    private fun displayedTargetOf(
+        item: TimelineItem,
+        isGroupchat: Boolean,
+        conversation: String,
+    ): DisplayedTarget? {
+        // Authority-scanned XEP-0359 ids (never the first element, which
+        // is sender-controlled): the marker/MDS pair for a MUC is the
+        // ROOM-assigned stanza id; the DM MDS pair is the id assigned by
+        // the user's OWN server (XEP-0490 §3) — a peer's archive stamp
+        // or an injected foreign id must never be republished as the
+        // account's read cursor.
+        val own = ownBareJid
+        val mdsPair = if (isGroupchat) {
+            item.assignedStanzaId(conversation)
+        } else {
+            own?.let { item.assignedStanzaId(it, it.substringAfter('@')) }
+        }
+        val markerId = if (isGroupchat) {
+            mdsPair?.id
+        } else {
+            item.originId ?: item.messageId
+        } ?: return null
+        val markerRequested = when (val source = item.source) {
+            is TimelineSource.Live -> source.message.displayedMarkerRequested
+            // The archive does not carry `<request/>`; archived DM rows
+            // sync via MDS only.
+            is TimelineSource.Archived -> false
+        }
+        return DisplayedTarget(
+            markerId = markerId,
+            stanzaId = mdsPair?.id,
+            stanzaIdBy = mdsPair?.by,
+            markerRequested = markerRequested,
+        )
+    }
+
+    /**
+     * A displayed cursor from ANOTHER device (MDS fetch or live PEP
+     * event): advance the local cursor and recompute the badge from the
+     * loaded timeline. An entry whose target is not loaded is ignored —
+     * the conversation's next open recomputes from scratch anyway.
+     */
+    private fun applyMdsEntry(entry: WaddleMdsDisplayedEntry) {
+        val conversation = bareJid(entry.chatId)
+        val items = timelineStore.timeline(conversation).value
+        val index = items.indexOfLast { entry.stanzaId in it.identityIds }
+        if (index < 0) return
+        val current = readCursorStore.cursor(conversation)
+        val currentIndex = current?.let { c -> items.indexOfLast { c in it.identityIds } } ?: -1
+        if (currentIndex >= index) return
+        // Compare-and-advance: a local displayed dispatch (UI scope) can
+        // move the cursor between the read above and this write — a
+        // stale sibling entry must not regress it and resurrect a badge
+        // the user just cleared.
+        if (!readCursorStore.compareAndAdvance(conversation, expected = current, stanzaId = entry.stanzaId)) {
+            return
+        }
+        // Feed-visible rows only: hidden thread replies never count.
+        val unread = items.subList(index + 1, items.size).count {
+            !it.isMine && it.tombstone == null && it.isFeedVisible
+        }
+        // Atomic recompute-unless-active: the on-screen conversation's
+        // badge is owned by the local read path.
+        unreadStore.setUnlessActive(conversation, unread)
+        // A sibling device read everything: the stale notification in
+        // the shade must retire too (the notifier owns that side).
+        if (unread == 0) _events.tryEmit(XmppEvent.ReadSynced(conversation))
+    }
+
+    /**
+     * XEP-0490 connect bootstrap: seed cursors from the account's MDS
+     * node, then subscribe for live sibling-device updates. Fetched
+     * entries are INJECTED into the event stream rather than applied
+     * here — the unread recompute must serialize with live-message
+     * increments on the single event consumer, or a concurrent arrival
+     * could have its badge erased by a stale recompute.
+     */
+    private suspend fun bootstrapMdsDisplayed(client: WaddleClientInterface) {
+        runCatching { client.fetchMdsDisplayed() }.getOrNull()?.let { entries ->
+            if (entries.isNotEmpty()) {
+                // Handshake: the pipeline continues (pending-displayed
+                // drain!) only after the consumer APPLIED the fetched
+                // cursors — a parked read replayed before them could
+                // publish an older MDS cursor over a sibling's newer one.
+                val applied = kotlinx.coroutines.Job()
+                currentBridge?.submit(XmppEvent.MdsEntries(entries, applied))
+                // Bare join: swallowing a cancellation here (attempt
+                // teardown drops unconsumed events) would resume a
+                // cancelled pipeline into the drain.
+                applied.join()
+            }
+        }
+        runCatching { client.subscribeMdsDisplayed() }
+    }
+
+    /**
+     * XEP-0085 typing notification: best-effort and live-session-only —
+     * a stale typing state must never replay from a queue, so a
+     * disconnected send is simply dropped (web parity).
+     */
+    suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): Boolean {
+        val client = activeClient ?: return false
+        return try {
+            client.sendChatState(conversationJid, state, isGroupchat)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     /**
      * One manager-level send: the client stanza id is generated HERE
@@ -311,9 +837,10 @@ class XmppSessionManager(
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
+        extras: MessageSendExtras? = null,
     ): SendResult {
         val clientStanzaId = newClientStanzaId()
-        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId)
+        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId, extras)
         if (!isQueueableFailure(outcome)) return SendResult(outcome)
         // A logout can race this persist (reply-receiver sends run on the
         // process scope): never enqueue without an owner, and the owned
@@ -334,6 +861,12 @@ class XmppSessionManager(
                 body = body,
                 clientStanzaId = clientStanzaId,
                 enqueuedAtMillis = System.currentTimeMillis(),
+                replyToId = extras?.replyToId,
+                replyToAuthorJid = extras?.replyToAuthorJid,
+                replyParentBody = extras?.replyParentBody,
+                threadId = extras?.threadId,
+                threadParent = extras?.threadParent,
+                sharedFiles = extras?.sharedFiles.orEmpty(),
             ),
             )
         } catch (cancellation: CancellationException) {
@@ -353,12 +886,33 @@ class XmppSessionManager(
         isGroupchat: Boolean,
         body: String,
         stanzaId: String,
-    ): WaddleSendMessageOutcome = send { client ->
-        if (isGroupchat) {
-            client.sendGroupchatMessage(conversationJid, body, sendOptionsFor(stanzaId))
-        } else {
-            client.sendChatMessage(conversationJid, body, sendOptionsFor(stanzaId))
+        extras: MessageSendExtras? = null,
+    ): WaddleSendMessageOutcome {
+        val (finalBody, options) = preparedSend(stanzaId, body, extras)
+        val outcome = send { client ->
+            if (isGroupchat) {
+                client.sendGroupchatMessage(conversationJid, finalBody, options)
+            } else {
+                client.sendChatMessage(conversationJid, finalBody, options)
+            }
         }
+        // A DM send has no reflection: insert the local echo so peer
+        // mutations (reactions, markers) can resolve their target and
+        // the sender can edit/retract the fresh message (see ownDmEcho).
+        if (!isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
+            ownBareJid?.let { own ->
+                timelineStore.onLiveMessage(
+                    ownDmEcho(
+                        ownJid = own,
+                        peerJid = conversationJid,
+                        stanzaId = stanzaId,
+                        body = finalBody,
+                        options = options,
+                    ),
+                )
+            }
+        }
+        return outcome
     }
 
     private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
@@ -390,7 +944,12 @@ class XmppSessionManager(
         } catch (_: Throwable) {
             return null
         }
-        page.messages.forEach(timelineStore::onArchivedMessage)
+        // Per-message guard: one malformed archived stanza must not kill
+        // the caller's paging coroutine (and crash-loop on every reopen
+        // of the conversation, since the archive re-serves it).
+        page.messages.forEach { message ->
+            runCatching { timelineStore.onArchivedMessage(message) }
+        }
         return page
     }
 
@@ -426,6 +985,8 @@ class XmppSessionManager(
             Readiness.READY -> Unit
         }
         activeClient = client
+        mdsPublishSupported = null
+        uploadService = null
         // Fresh-stream heuristic: the FFI does not report whether the
         // XEP-0198 <resume/> was accepted, so treat the stream as fresh
         // when (a) no resume snapshot was presented (definitely a new
@@ -451,6 +1012,10 @@ class XmppSessionManager(
                 rejoinPersistedRooms(client, session)
                 drainOutboundQueue()
                 if (freshStream) catchUpConversations()
+                // After catch-up so fetched cursors can resolve against
+                // the freshly loaded newest pages.
+                bootstrapMdsDisplayed(client)
+                drainPendingDisplayed()
             }
         }
         // Auth classification is deliberately confined to the pre-ready
@@ -504,6 +1069,7 @@ class XmppSessionManager(
                     isGroupchat = queued.isGroupchat,
                     body = queued.body,
                     stanzaId = queued.clientStanzaId,
+                    extras = queued.sendExtras(),
                 )
             },
             onDropped = { queued, outcome ->
@@ -559,9 +1125,33 @@ class XmppSessionManager(
     private fun fanOut(event: XmppEvent) {
         when (event) {
             is XmppEvent.Message -> {
-                persistDmRecency(event)
+                // A live MDS PEP event is pure read-state metadata from a
+                // sibling device — apply the cursors and skip every chat
+                // consumer.
+                event.message.mdsDisplayed?.let { entries ->
+                    entries.forEach(::applyMdsEntry)
+                    _events.tryEmit(event)
+                    return
+                }
+                // Pin/unpin room broadcasts mutate the pin set, not the
+                // timeline.
+                event.message.pinEvent?.let { pin ->
+                    event.message.from?.let { from -> pinStore.onPinEvent(bareJid(from), pin) }
+                    _events.tryEmit(event)
+                    return
+                }
+                // Mutation stanzas (reactions/corrections/retractions/
+                // moderation) alter existing rows via the timeline store;
+                // they are not new DM activity and must not reorder or
+                // re-persist recency.
+                val isMutation = event.message.isTimelineMutation()
+                // Bodyless protocol stanzas (chat states, displayed
+                // markers) are not DM activity either — a typing burst
+                // must not reorder or create DM-list entries.
+                val hasContent = event.message.body != null
+                if (!isMutation && hasContent) persistDmRecency(event)
                 val newlyInserted = timelineStore.onLiveMessage(event.message)
-                dmStore.onChatMessage(ownBareJid, event.message)
+                if (!isMutation && hasContent) dmStore.onChatMessage(ownBareJid, event.message)
                 val message = event.message
                 conversationKeyOf(
                     ownBareJid = ownBareJid,
@@ -570,11 +1160,23 @@ class XmppSessionManager(
                     to = message.to,
                     isGroupchat = message.isMuc || message.messageType == "groupchat",
                 )?.let { key ->
+                    trackChatState(key, message)
                     if (message.body != null) {
                         // Replays the timeline deduped (XEP-0198 resume)
                         // must not inflate the badge for a message that
-                        // renders once.
-                        if (newlyInserted) {
+                        // renders once. Thread REPLIES are hidden from
+                        // the feed and never count either (web
+                        // feed-only unread parity).
+                        // Must match TimelineItem.isFeedVisible exactly
+                        // (all XEP-0359 ids, not just the first): a root
+                        // whose thread id lands on a secondary stanza-id
+                        // is feed-visible and MUST bump unread.
+                        val rootIds = setOfNotNull(message.stanzaId, message.originId, message.id) +
+                            message.stanzaIds.map { it.id }
+                        val isThreadReply = message.thread != null &&
+                            message.thread !in rootIds &&
+                            message.callThread == null
+                        if (newlyInserted && !isThreadReply) {
                             unreadStore.onLiveMessage(key.jid, key.isMine)
                         }
                         recordResumeCursor(
@@ -585,6 +1187,12 @@ class XmppSessionManager(
                     }
                 }
             }
+            is XmppEvent.MdsEntries -> {
+                event.entries.forEach(::applyMdsEntry)
+                event.applied?.complete()
+            }
+            is XmppEvent.RoomPins ->
+                pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
             is XmppEvent.MamResult -> {
                 timelineStore.onArchivedMessage(event.message)
@@ -608,6 +1216,56 @@ class XmppSessionManager(
             else -> Unit
         }
         _events.tryEmit(event)
+    }
+
+    /**
+     * XEP-0085 bookkeeping from the fan-out: a `composing` state adds
+     * the sender to the conversation's typing set, anything else — a
+     * different state or a real message — removes them. Sender display
+     * name: the occupant nick in a MUC, the peer's LOCALPART in 1:1 —
+     * DM states arrive from the peer's full JID, whose resource is a
+     * device identifier, never a name.
+     */
+    private fun trackChatState(key: ConversationKey, message: WaddleMessage) {
+        val from = message.from ?: return
+        val isGroupchat = message.isMuc || message.messageType == "groupchat"
+        val sender = if (isGroupchat) {
+            resourcepart(from) ?: bareJid(from).substringBefore('@')
+        } else {
+            bareJid(from).substringBefore('@')
+        }
+        val state = message.chatState
+        if (state != null) {
+            chatStateStore.onChatState(key.jid, sender, state, key.isMine)
+        }
+        if (message.body != null && !key.isMine) {
+            chatStateStore.onLiveMessage(key.jid, sender)
+        }
+    }
+
+    /**
+     * 1s expiry ticker for incoming typing indicators — armed ONLY while
+     * someone is composing. An unconditional periodic timer would keep a
+     * task perpetually pending on virtual-time test schedulers (and wake
+     * the process forever); this one parks on the composing flow when
+     * idle and dies with the last composer.
+     */
+    private suspend fun sweepChatStates() {
+        chatStateStore.composing
+            .map { it.isNotEmpty() }
+            .distinctUntilChanged()
+            .collectLatest { anyComposing ->
+                if (!anyComposing) return@collectLatest
+                // Loop exit is driven ONLY by collectLatest observing the
+                // empty state (sweep publishes it, StateFlow guarantees
+                // delivery of the latest value) — breaking on sweep()'s
+                // return raced a conflated empty→composing flip and left
+                // a live composer with no ticker.
+                while (true) {
+                    delay(CHAT_STATE_SWEEP_MILLIS)
+                    chatStateStore.sweep()
+                }
+            }
     }
 
     /**
@@ -796,6 +1454,10 @@ class XmppSessionManager(
         presenceStore.clear()
         dmStore.clear()
         unreadStore.clearAll()
+        chatStateStore.clear()
+        readCursorStore.clear()
+        pinStore.clear()
+        pendingDisplayed.clear()
         cursorTracker.clear()
     }
 
@@ -806,12 +1468,33 @@ class XmppSessionManager(
     /** Wrapper so a conflated channel can carry a `null` (= clear) update. */
     private data class ResumeUpdate(val snapshot: SmResumeSnapshot?)
 
+    /**
+     * A displayed dispatch target: [markerId] is what the XEP-0333
+     * marker carries (author-assigned in 1:1, room stanza id in MUCs);
+     * the stanza-id pair feeds only the XEP-0490 MDS publish.
+     */
+    data class DisplayedTarget(
+        val markerId: String,
+        val stanzaId: String?,
+        val stanzaIdBy: String?,
+        val markerRequested: Boolean,
+    )
+
+    /** A displayed dispatch waiting for a live session. */
+    private data class PendingDisplayed(
+        val isGroupchat: Boolean,
+        val target: DisplayedTarget,
+    )
+
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = 15_000L
 
         /** Newest page per conversation on fresh-stream catch-up. */
         const val CATCHUP_PAGE_SIZE = 50u
+
+        /** Incoming-typing expiry tick (XEP-0085 indicator sweep). */
+        const val CHAT_STATE_SWEEP_MILLIS = 1_000L
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = 3

@@ -97,6 +97,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = state.messageSoundsEnabled,
                 onCheckedChange = viewModel::setMessageSoundsEnabled,
             )
+            SectionHeader(text = stringResource(R.string.settings_privacy))
+            ToggleRow(
+                title = stringResource(R.string.settings_read_receipts),
+                checked = state.readReceiptsEnabled,
+                onCheckedChange = viewModel::setReadReceiptsEnabled,
+            )
             SectionHeader(text = stringResource(R.string.settings_battery))
             BatteryOptimizationRow()
             Button(

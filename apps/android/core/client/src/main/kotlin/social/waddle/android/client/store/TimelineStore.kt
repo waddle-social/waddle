@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import social.waddle.android.client.bareJid
 import social.waddle.android.client.conversationKeyOf
+import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
 
@@ -17,6 +18,17 @@ import social.waddle.client.ffi.WaddleMessage
  * present, else origin id, else message id. Ordering is by timestamp,
  * with insertion order breaking ties; items without a timestamp sort
  * after timestamped history (live messages are the newest).
+ *
+ * Mutation messages (XEP-0444 reactions, XEP-0308 corrections, XEP-0424
+ * retractions, XEP-0425 moderation — see [MessageMutation]) never insert
+ * rows; they are applied to the row whose wire identity contains their
+ * target id. Latest-wins per mutation kind: a mutation's rank is its
+ * timestamp (live mutations, which carry none, rank newest), insertion
+ * order breaking ties. Mutations arriving before their target (backwards
+ * MAM paging fetches newest-first, so a reaction loads before the
+ * message it targets) are held in a bounded per-conversation pending
+ * index and applied when the target inserts; overflow drops oldest —
+ * recoverable the same way pruned rows are, by re-paging.
  *
  * Bounded-timeline invariant: only a LIVE insert enforces
  * [maxItemsPerConversation], trimming from the OLDEST end; archived
@@ -39,10 +51,15 @@ import social.waddle.client.ffi.WaddleMessage
  */
 class TimelineStore(
     private val maxItemsPerConversation: Int = MAX_ITEMS_PER_CONVERSATION,
+    private val maxPendingMutationsPerConversation: Int = MAX_PENDING_MUTATIONS,
 ) {
     private val lock = Any()
     private val flows = HashMap<String, MutableStateFlow<List<TimelineItem>>>()
     private val entries = HashMap<String, MutableList<Entry>>()
+    private val pendingMutations = HashMap<String, ArrayDeque<RankedMutation>>()
+
+    /** Newest wire timestamp seen per conversation (the rank anchor). */
+    private val newestWireInstant = HashMap<String, Instant>()
     private var insertionCounter = 0L
 
     @Volatile
@@ -59,86 +76,167 @@ class TimelineStore(
 
     /**
      * Returns true only when the message was a genuinely NEW timeline
-     * row — XEP-0198 replays and live/archive twins dedupe to false so
-     * callers (the unread counter) don't double-count what the timeline
-     * itself collapses.
+     * row — XEP-0198 replays, live/archive twins, and mutation messages
+     * all return false so callers (the unread counter) don't count what
+     * the timeline itself never renders as new content.
      */
     fun onLiveMessage(message: WaddleMessage): Boolean {
-        val body = message.body ?: return false
+        val isGroupchat = message.isMuc || message.messageType == "groupchat"
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
             ownNick = ownNick,
             from = message.from,
             to = message.to,
-            isGroupchat = message.isMuc || message.messageType == "groupchat",
+            isGroupchat = isGroupchat,
         ) ?: return false
+        mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
+            applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
+            return false
+        }
+        val body = message.body ?: return false
         return insert(
             conversation = key.jid,
             item = TimelineItem(
                 id = message.stanzaId ?: message.originId ?: message.id ?: return false,
                 conversationJid = key.jid,
                 from = message.from,
-                body = body,
+                body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
             ),
+            isGroupchat = isGroupchat,
+            initialTombstone = null,
         )
     }
 
     fun onArchivedMessage(message: WaddleArchivedMessage) {
-        val body = message.body ?: return
+        val isGroupchat = message.messageType == "groupchat"
         val key = conversationKeyOf(
             ownBareJid = ownBareJid,
             ownNick = ownNick,
             from = message.from,
             to = message.to,
-            isGroupchat = message.messageType == "groupchat",
+            isGroupchat = isGroupchat,
         ) ?: return
+        mutationOf(message, isGroupchat = isGroupchat, mine = key.isMine)?.let { mutation ->
+            applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
+            return
+        }
+        val body = message.body ?: return
         insert(
             conversation = key.jid,
             item = TimelineItem(
                 id = message.stanzaId ?: message.originId ?: message.id ?: message.mamId,
                 conversationJid = key.jid,
                 from = message.from,
-                body = body,
+                body = stripReplyFallback(body, message.replyFallbackStart, message.replyFallbackEnd),
                 timestamp = message.timestamp,
                 isMine = key.isMine,
                 source = TimelineSource.Archived(message),
             ),
+            isGroupchat = isGroupchat,
+            // The archive returns retracted originals as tombstones.
+            initialTombstone = if (message.isRetracted) MessageTombstone.Retracted else null,
         )
+    }
+
+    /**
+     * Apply one of the account's OWN mutations optimistically (a DM
+     * send is never reflected back to the sending client, so waiting
+     * for an echo would leave the sender's UI stale; the MUC reflection
+     * re-applies idempotently). Same pipeline as wire mutations —
+     * sender checks and ranking included — so a bad local apply cannot
+     * do anything a spoofed stanza couldn't.
+     */
+    fun applyLocalMutation(conversationJid: String, mutation: MessageMutation, isGroupchat: Boolean) {
+        applyMutation(bareJid(conversationJid), mutation, isGroupchat, timestamp = null)
     }
 
     fun clear() {
         synchronized(lock) {
             entries.clear()
+            pendingMutations.clear()
+            newestWireInstant.clear()
             insertionCounter = 0L
             flows.values.forEach { it.value = emptyList() }
         }
     }
 
-    private fun insert(conversation: String, item: TimelineItem): Boolean {
+    /** Must hold [lock]. */
+    private fun recordWireInstant(conversation: String, timestamp: String?) {
+        val instant = timestamp?.let(::parseInstant) ?: return
+        val current = newestWireInstant[conversation]
+        if (current == null || instant > current) newestWireInstant[conversation] = instant
+    }
+
+    private fun insert(
+        conversation: String,
+        item: TimelineItem,
+        isGroupchat: Boolean,
+        initialTombstone: MessageTombstone?,
+    ): Boolean {
         synchronized(lock) {
             val list = entries.getOrPut(conversation) { mutableListOf() }
-            val existingIndex = list.indexOfFirst { it.item.id == item.id }
+            // Dedupe on the collapsed primary id OR — for the SAME
+            // sender only — a shared XEP-0359 identity: the MAM copy of
+            // an own DM echo keys on the server-assigned stanza id while
+            // the echo keys on the client origin id, overlapping only
+            // through the origin id. Cross-sender id collisions are NOT
+            // merged (dropping a message because another sender reused
+            // an id would be an injection vector); they stay as distinct
+            // rows that the ambiguous-alias guard refuses to mutate.
+            val incomingUnique = uniqueWireIds(item)
+            val incomingSender = senderKeyOf(item.from, isGroupchat)
+            // Sender continuity gates BOTH disjuncts: a different sender
+            // reusing a primary id must not suppress or overwrite the
+            // original row (cross-sender collisions stay distinct and
+            // un-mutatable via the ambiguous-alias guard).
+            val existingIndex = list.indexOfFirst { entry ->
+                incomingSender != null &&
+                    senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
+                    (entry.item.id == item.id || uniqueWireIds(entry.item).any { it in incomingUnique })
+            }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
                 // A live record supersedes its archived twin (richer
                 // payload); otherwise the first record wins and the
-                // replay is dropped.
+                // replay is dropped. Applied mutations live on the entry
+                // and survive the swap.
                 if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
+                    val merged = item.copy(timestamp = item.timestamp ?: existing.item.timestamp)
+                    // The sort key must follow the adopted timestamp or
+                    // the row keeps its stale placement forever.
                     list[existingIndex] = existing.copy(
-                        item = item.copy(timestamp = item.timestamp ?: existing.item.timestamp),
+                        item = merged,
+                        sortInstant = merged.timestamp?.let(::parseInstant) ?: existing.sortInstant,
                     )
+                    list.sortWith(ENTRY_ORDER)
+                    publish(conversation, list)
+                } else if (existing.item.timestamp == null && item.timestamp != null) {
+                    // The archived copy of a timestampless local echo
+                    // brings the server timestamp; adopt it in place —
+                    // including the sort key, else the echo stays pinned
+                    // at the newest edge above later-arriving messages.
+                    list[existingIndex] = existing.copy(
+                        item = existing.item.copy(timestamp = item.timestamp),
+                        sortInstant = parseInstant(item.timestamp),
+                    )
+                    list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 }
+                recordWireInstant(conversation, item.timestamp)
                 return false
             }
-            list += Entry(
+            var entry = Entry(
                 item = item,
                 sortInstant = item.timestamp?.let { parseInstant(it) },
                 order = insertionCounter++,
+                mutations = MutationState(tombstone = initialTombstone),
             )
+            recordWireInstant(conversation, item.timestamp)
+            entry = drainPendingMutationsInto(conversation, entry, isGroupchat)
+            list += entry
             list.sortWith(ENTRY_ORDER)
             if (item.source is TimelineSource.Live) {
                 // Live-append overflow only — see the class KDoc invariant.
@@ -149,8 +247,166 @@ class TimelineStore(
         return true
     }
 
+    private fun applyMutation(
+        conversation: String,
+        mutation: MessageMutation,
+        isGroupchat: Boolean,
+        timestamp: String?,
+    ) {
+        synchronized(lock) {
+            val instant = timestamp?.let { parseInstant(it) }
+            // Web `appliedAfterWire` anchor parity: a live (unstamped)
+            // mutation ranks AT the newest wire instant this conversation
+            // has seen, with insertion order breaking ties — an archived
+            // replay stamped LATER than everything seen so far still
+            // wins (an Instant.MAX rank would reject genuinely newer
+            // mutations replayed via MAM after a stream drop, freezing
+            // stale reactions/bodies forever).
+            recordWireInstant(conversation, timestamp)
+            val ranked = RankedMutation(
+                mutation = mutation,
+                rank = Rank(
+                    instant = instant ?: newestWireInstant[conversation],
+                    order = insertionCounter++,
+                ),
+                isGroupchat = isGroupchat,
+            )
+            val list = entries[conversation]
+            val index = list?.let { resolveTargetIndex(it, mutation.targetId, mutation, isGroupchat) } ?: -1
+            if (list != null && index >= 0) {
+                val updated = list[index].applying(ranked)
+                if (updated != list[index]) {
+                    list[index] = updated
+                    publish(conversation, list)
+                }
+            } else {
+                val queue = pendingMutations.getOrPut(conversation) { ArrayDeque() }
+                queue.addLast(ranked)
+                while (queue.size > maxPendingMutationsPerConversation) queue.removeFirst()
+            }
+        }
+    }
+
+    /**
+     * Collision-safe target resolution (web `findMessageIndexById`
+     * parity): the primary id always wins; a XEP-0359 alias resolves
+     * only when exactly one row claims it — destructive mutations must
+     * never land on an ambiguous alias. Sender-authorized mutations
+     * (corrections/retractions) pre-filter candidates to the mutating
+     * sender's own rows (web sender-predicate parity): another sender's
+     * colliding row must neither receive the mutation nor make the
+     * author's legitimate target ambiguous.
+     */
+    private fun resolveTargetIndex(
+        list: List<Entry>,
+        targetId: String,
+        mutation: MessageMutation,
+        isGroupchat: Boolean,
+    ): Int {
+        val senderScoped = mutation is MessageMutation.Correction ||
+            mutation is MessageMutation.Retraction
+        fun eligible(entry: Entry): Boolean =
+            !senderScoped || sameSender(mutation.from, entry.item.from, isGroupchat)
+        // Cross-sender collisions can leave several rows sharing a
+        // primary id; a mutation may only land when exactly one claims it.
+        var primary = -1
+        list.forEachIndexed { index, entry ->
+            if (entry.item.id == targetId && eligible(entry)) {
+                if (primary >= 0) return -1
+                primary = index
+            }
+        }
+        if (primary >= 0) return primary
+        var found = -1
+        list.forEachIndexed { index, entry ->
+            if (targetId in entry.item.identityIds && eligible(entry)) {
+                if (found >= 0) return -1
+                found = index
+            }
+        }
+        return found
+    }
+
+    /** Apply (in rank order) every parked mutation that targets [entry]. */
+    private fun drainPendingMutationsInto(
+        conversation: String,
+        entry: Entry,
+        isGroupchat: Boolean,
+    ): Entry {
+        val queue = pendingMutations[conversation] ?: return entry
+        val matching = queue.filter { it.mutation.targetId in entry.item.identityIds }
+        if (matching.isEmpty()) return entry
+        queue.removeAll(matching.toSet())
+        if (queue.isEmpty()) pendingMutations.remove(conversation)
+        return matching
+            .sortedBy { it.rank }
+            .fold(entry) { acc, ranked -> acc.applying(ranked.copy(isGroupchat = isGroupchat)) }
+    }
+
+    private fun Entry.applying(ranked: RankedMutation): Entry {
+        val state = mutations
+        val next = when (val mutation = ranked.mutation) {
+            is MessageMutation.Reaction -> {
+                val existing = state.reactionsBySender[mutation.senderKey]
+                if (existing != null && existing.rank > ranked.rank) {
+                    state
+                } else {
+                    val senders = state.reactionsBySender.toMutableMap()
+                    // An empty set KEEPS the sender entry (rendering
+                    // nothing) so the clear retains its rank — deleting
+                    // it would let an older MAM replay of the sender's
+                    // earlier reaction resurrect what they cleared.
+                    senders[mutation.senderKey] = SenderReactions(
+                        emojis = mutation.emojis.distinct(),
+                        mine = mutation.mine,
+                        rank = ranked.rank,
+                    )
+                    state.copy(reactionsBySender = senders)
+                }
+            }
+            is MessageMutation.Correction -> when {
+                state.tombstone != null -> state
+                !sameSender(mutation.from, item.from, ranked.isGroupchat) -> state
+                state.correctionRank != null && state.correctionRank > ranked.rank -> state
+                else -> state.copy(correctedBody = mutation.newBody, correctionRank = ranked.rank)
+            }
+            is MessageMutation.Retraction -> when {
+                state.tombstone != null -> state
+                !sameSender(mutation.from, item.from, ranked.isGroupchat) -> state
+                else -> state.copy(tombstone = MessageTombstone.Retracted)
+            }
+            is MessageMutation.Moderation -> when {
+                state.tombstone != null -> state
+                // XEP-0425 authenticity: only the room service itself
+                // (the bare room JID, no occupant resource) may moderate —
+                // an occupant stanza claiming moderation is a spoof.
+                mutation.from != item.conversationJid -> state
+                else -> state.copy(
+                    tombstone = MessageTombstone.Moderated(
+                        moderatedBy = mutation.moderatedBy,
+                        reason = mutation.reason,
+                    ),
+                )
+            }
+        }
+        return if (next == state) this else copy(mutations = next)
+    }
+
     private fun publish(conversation: String, list: List<Entry>) {
-        flowFor(conversation).value = list.map { it.item }
+        flowFor(conversation).value = list.map { it.enriched() }
+    }
+
+    private fun Entry.enriched(): TimelineItem {
+        val state = mutations
+        if (state == MutationState()) return item
+        // Cleared senders linger as empty entries (rank retention);
+        // aggregation naturally renders them as no chips.
+        return item.copy(
+            body = state.correctedBody ?: item.body,
+            edited = state.correctedBody != null,
+            tombstone = state.tombstone,
+            reactions = aggregateReactions(state.reactionsBySender),
+        )
     }
 
     private fun flowFor(conversation: String): MutableStateFlow<List<TimelineItem>> =
@@ -160,14 +416,79 @@ class TimelineStore(
         val item: TimelineItem,
         val sortInstant: Instant?,
         val order: Long,
+        val mutations: MutationState = MutationState(),
+    )
+
+    /**
+     * Latest-wins ordering for mutations: by timestamp when carried
+     * (archived mutations always are); live mutations are anchored to
+     * the newest wire instant seen at apply time (see [applyMutation]),
+     * so a null instant only means "nothing wire-stamped seen yet" and
+     * sorts oldest. Insertion order breaks ties (a live apply outranks
+     * the wire stamp it was anchored to).
+     */
+    private data class Rank(val instant: Instant?, val order: Long) : Comparable<Rank> {
+        override fun compareTo(other: Rank): Int {
+            val byInstant = (instant ?: Instant.MIN).compareTo(other.instant ?: Instant.MIN)
+            return if (byInstant != 0) byInstant else order.compareTo(other.order)
+        }
+    }
+
+    private data class RankedMutation(
+        val mutation: MessageMutation,
+        val rank: Rank,
+        val isGroupchat: Boolean,
+    )
+
+    /** One sender's complete current reaction set (XEP-0444 replace). */
+    private data class SenderReactions(
+        val emojis: List<String>,
+        val mine: Boolean,
+        val rank: Rank,
+    )
+
+    private data class MutationState(
+        val reactionsBySender: Map<String, SenderReactions> = emptyMap(),
+        val correctedBody: String? = null,
+        val correctionRank: Rank? = null,
+        val tombstone: MessageTombstone? = null,
     )
 
     private companion object {
         /** Per-conversation row bound; live overflow drops oldest. */
         const val MAX_ITEMS_PER_CONVERSATION = 500
 
+        /** Per-conversation bound on mutations parked before their target. */
+        const val MAX_PENDING_MUTATIONS = 200
+
         val ENTRY_ORDER: Comparator<Entry> =
             compareBy<Entry> { it.sortInstant ?: Instant.MAX }.thenBy { it.order }
+
+        fun aggregateReactions(bySender: Map<String, SenderReactions>): List<ReactionGroup> {
+            if (bySender.isEmpty()) return emptyList()
+            // Group per emoji, ordered by the earliest contributing
+            // sender's rank so chips keep first-reacted order.
+            data class Accumulated(var count: Int, var mine: Boolean, var firstRank: Rank)
+            val groups = LinkedHashMap<String, Accumulated>()
+            bySender.values.sortedBy { it.rank }.forEach { sender ->
+                sender.emojis.forEach { emoji ->
+                    val group = groups.getOrPut(emoji) { Accumulated(0, false, sender.rank) }
+                    group.count += 1
+                    group.mine = group.mine || sender.mine
+                }
+            }
+            return groups.entries
+                .sortedBy { it.value.firstRank }
+                .map { (emoji, acc) -> ReactionGroup(emoji = emoji, count = acc.count, mine = acc.mine) }
+        }
+
+        /** XEP-0359 ids only — unique by construction, unlike `@id`. */
+        fun uniqueWireIds(item: TimelineItem): Set<String> =
+            setOfNotNull(item.stanzaId, item.originId)
+
+        /** Occupant JID in MUCs (bare = the room), bare JID in 1:1. */
+        fun senderKeyOf(from: String?, isGroupchat: Boolean): String? =
+            from?.let { if (isGroupchat) it else bareJid(it) }
 
         fun parseInstant(timestamp: String): Instant? =
             runCatching { Instant.parse(timestamp) }.getOrElse {

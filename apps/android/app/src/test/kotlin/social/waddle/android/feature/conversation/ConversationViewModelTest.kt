@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
@@ -45,9 +46,18 @@ class ConversationViewModelTest {
             return page
         }
 
-        override suspend fun send(body: String): SendResult {
+        override suspend fun send(body: String, extras: MessageSendExtras?): SendResult {
             sent += body
+            sentExtras += extras
             return sendResult
+        }
+
+        val sentExtras = mutableListOf<MessageSendExtras?>()
+
+        var markDisplayedCalls = 0
+
+        override suspend fun markDisplayed() {
+            markDisplayedCalls += 1
         }
     }
 
@@ -68,6 +78,7 @@ class ConversationViewModelTest {
 
     private fun createViewModel(): ConversationViewModel = ConversationViewModel(
         conversationJid = ROOM_JID,
+        isGroupchat = true,
         timeline = store.timeline(ROOM_JID),
         events = events,
         unreadStore = unreadStore,
@@ -375,6 +386,65 @@ class ConversationViewModelTest {
         assertTrue("active conversation never counts", unreadStore.counts.value.isEmpty())
 
         viewModel.onConversationHidden()
+        unreadStore.onLiveMessage(ROOM_JID, isMine = false)
+        assertEquals(mapOf(ROOM_JID to 1), unreadStore.counts.value)
+    }
+
+    @Test
+    fun `dm action targets prefer the author-assigned id over the local stanza id`() = runTest {
+        val dmStore = TimelineStore().apply { setOwnBareJid(OWN_JID) }
+        val dmViewModel = ConversationViewModel(
+            conversationJid = "alice@waddle.test",
+            isGroupchat = false,
+            timeline = dmStore.timeline("alice@waddle.test"),
+            events = events,
+            unreadStore = unreadStore,
+            io = FakeConversationIo(dmStore),
+            clock = { 1_000L },
+        )
+        dmStore.onLiveMessage(
+            testMessage(id = "author-id", originId = "origin-id", stanzaId = "local-archive-id"),
+        )
+        runCurrent()
+
+        val item = dmStore.timeline("alice@waddle.test").value.single()
+        // The peer never saw our archive's stanza id — the action id
+        // must be author-assigned or the mutation cannot apply remotely.
+        assertEquals("origin-id", dmViewModel.actionTargetIdOf(item))
+        assertEquals("origin-id", dmViewModel.threadIdFor(item))
+    }
+
+    @Test
+    fun `thread screens never mark the parent conversation displayed`() = runTest {
+        val threadViewModel = ConversationViewModel(
+            conversationJid = ROOM_JID,
+            isGroupchat = true,
+            timeline = store.timeline(ROOM_JID),
+            events = events,
+            unreadStore = unreadStore,
+            io = io,
+            threadId = "t1",
+            clock = { 1_000L },
+        )
+        runCurrent()
+
+        threadViewModel.onConversationVisible()
+        store.onLiveMessage(
+            testMessage(
+                id = "id-s9",
+                stanzaId = "s9",
+                from = "$ROOM_JID/alice",
+                to = null,
+                messageType = "groupchat",
+                isMuc = true,
+                thread = "t1",
+            ),
+        )
+        runCurrent()
+
+        assertEquals(0, io.markDisplayedCalls)
+        // The active-conversation marker stays untouched too: a live
+        // message to the parent feed must still count as unread.
         unreadStore.onLiveMessage(ROOM_JID, isMine = false)
         assertEquals(mapOf(ROOM_JID to 1), unreadStore.counts.value)
     }

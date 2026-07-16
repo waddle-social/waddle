@@ -21,6 +21,7 @@ data class SettingsUiState(
     val theme: ThemeMode = ThemeMode.SYSTEM,
     val notificationsEnabled: Boolean = true,
     val messageSoundsEnabled: Boolean = true,
+    val readReceiptsEnabled: Boolean = true,
 )
 
 /** Account row, theme mode, notification prefs, logout. */
@@ -39,11 +40,13 @@ class SettingsViewModel(
         userPrefs.theme,
         userPrefs.notificationsEnabled,
         userPrefs.messageSoundsEnabled,
-    ) { theme, notificationsEnabled, messageSoundsEnabled ->
+        userPrefs.readReceiptsEnabled,
+    ) { theme, notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
         accountState.copy(
             theme = theme,
             notificationsEnabled = notificationsEnabled,
             messageSoundsEnabled = messageSoundsEnabled,
+            readReceiptsEnabled = readReceiptsEnabled,
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, accountState)
 
@@ -57,6 +60,10 @@ class SettingsViewModel(
 
     fun setMessageSoundsEnabled(enabled: Boolean) {
         viewModelScope.launch { userPrefs.setMessageSoundsEnabled(enabled) }
+    }
+
+    fun setReadReceiptsEnabled(enabled: Boolean) {
+        viewModelScope.launch { userPrefs.setReadReceiptsEnabled(enabled) }
     }
 
     /** Server logout + local sign-out; the app shell flips to Login. */

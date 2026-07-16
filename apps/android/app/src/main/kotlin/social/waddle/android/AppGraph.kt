@@ -22,6 +22,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
+import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
 
@@ -53,6 +54,7 @@ class AppGraph(context: Context) {
         sessionPrefs = sessionPrefs,
         clientFactory = RustClientFactory(),
         networkSignal = networkSignal,
+        userPrefs = userPrefs,
     )
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
@@ -77,6 +79,12 @@ class AppGraph(context: Context) {
         context = appContext,
         appState = appState,
         scope = applicationScope,
+    )
+
+    val attachmentUploader: AttachmentUploader = AttachmentUploader(
+        contentResolver = appContext.contentResolver,
+        httpClient = okHttpClient,
+        sessionManager = sessionManager,
     )
 
     val messageNotifier: MessageNotifier = MessageNotifier(

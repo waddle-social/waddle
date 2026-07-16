@@ -22,7 +22,10 @@ data class SendResult(
 /**
  * Default send options carrying only the caller-chosen stanza id (the
  * Rust builder uses it as the message id AND the XEP-0359 origin-id,
- * and echoes it back as `Sent.stanzaId`).
+ * and echoes it back as `Sent.stanzaId`). Every send requests an
+ * XEP-0333 displayed marker (web parity: `requestDisplayedMarker ??
+ * true`) — recipients gate their DM read receipts on `<markable/>`,
+ * so a send without it can never be marked read by anyone.
  */
 internal fun sendOptionsFor(stanzaId: String): WaddleSendOptions = WaddleSendOptions(
     stanzaId = stanzaId,
@@ -34,6 +37,6 @@ internal fun sendOptionsFor(stanzaId: String): WaddleSendOptions = WaddleSendOpt
     references = emptyList(),
     sharedFiles = emptyList(),
     linkPreviewToken = null,
-    requestDisplayedMarker = false,
+    requestDisplayedMarker = true,
     mucPm = false,
 )
