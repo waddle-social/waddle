@@ -1,6 +1,6 @@
 # Delivery status
 
-Last verified: 2026-07-15 against `origin/main` at `67980ca5`.
+Last verified: 2026-07-16 against `origin/main` at `1b59bfc2`.
 
 This document records the completion state of the Lane J adversarial follow-up
 (epic #1279) and the shared observability/hygiene work discussed with it. It is
@@ -13,9 +13,8 @@ and must be updated and merged after each completed issue.
   complete.
 - Nine of the twelve Lane J follow-up issues are genuinely complete.
 - The three remaining product issues are #1289, #1283, and #1285.
-- #1289 is incorrectly closed on GitHub even though its durable journal and
-  production coordinator are not implemented. It must be reopened or correctly
-  rescoped before the epic can close.
+- #1289 has been reopened because its durable journal and production
+  coordinator are not implemented.
 - Shared completion work remains for #1136, #1163, and the unfinished portions
   of #1174.
 - No open implementation PR described below is currently ready to merge.
@@ -52,73 +51,43 @@ effort is materially greater than 25%.
 - PR #1344: room recovery and rejected-join repair fenced against stale actors.
 - PR #1354: mechanical MUC-presence test relocation for reviewability.
 - PRs #1346 and #1347: removed two obsolete XML/XEP-0184 helper surfaces.
+- PR #1355: bound every actor-owned MUC durable operation and publication
+  boundary to the actor incarnation's exact room/entity/owner/epoch fence.
 - PRs #1341 and #1345: incremental `TODO-ISSUES.md` progress updates.
 
-## Current implementation frontier: PR #1355
+## Exact MUC actor-incarnation fences — merged PR #1355
 
-PR #1355 is the exact MUC actor-incarnation fence prerequisite for the durable
-creator and storage work.
+PR #1355 merged as `1b59bfc2` after binding clustered MUC durable load, save,
+delete, mutation, restore, and publication paths to the immutable
+`RoomClaimFenceContext` retained by each `RoomActor` incarnation. It also made
+terminal ownership loss actor-specific, preserved same-JID successors during
+demotion, and retained one full-tuple conditional release when local identity
+supersession does not prove the old database claim disappeared.
 
-The full local review experiment is preserved at commit `eeda0e9d` and on
-`backup/pr1355-full-destroy-review-20260715`. Its verification was green:
+Merge evidence for exact head `4d454695`:
 
-- `cargo fmt --all -- --check`
-- checks for both affected crates across all features and targets
-- strict Clippy with `-D warnings`
-- 2,607 XMPP library tests
-- 15 dedicated XEP-0045 tests
-- 1,602 default server tests
-- 1,928 clustering server tests
+- 21 of 21 GitHub checks passed, including PostgreSQL-backed `nixTest`;
+- full `waddle-xmpp` and clustered `waddle-server` suites passed locally;
+- strict Clippy, rustfmt, and focused identity-rotation, concurrent-dispatch,
+  successor-safety, and XEP-0045 regressions passed;
+- three internal adversarial review lanes reported no actionable findings;
+- Qodo reported zero bugs, rule violations, requirement gaps, or skill findings;
+  and
+- Greptile rated the exact head 5/5 and safe to merge.
 
-PostgreSQL-backed test bodies were not executed locally because
-`WADDLE_TEST_POSTGRES_URL` was not configured. Their compilation and the
-in-memory/exact-fence coverage passed, but CI remains authoritative for the
-PostgreSQL runtime paths.
+The notification, mailbox-linearized authorization, retryable application
+cleanup, and MAM-incarnation coordinator remain in #1283. PR #1355 deliberately
+did not claim that broader destruction scope.
 
-Green tests did not prove the complete destroy protocol. Three independent
-adversarial passes found the following actionable design gaps:
-
-1. Destroy authorization happens before the mailbox-serialized seal. A requester
-   can be demoted before deletion and still destroy the room.
-2. Dormant and poisoned persistent rooms cannot be destroyed through the owner
-   IQ because preliminary authorization requires a live actor.
-3. `Destroyed(None)` can acknowledge success while skipping catalog,
-   permission-tuple, bookmark, archive-boundary, invite-ledger, and occupant
-   notification work.
-4. A replacement room incarnation can publish before the previous incarnation's
-   destroy notifications are handed off, reordering client-visible room state.
-5. A registry reply timeout can be followed by a committed deletion after the
-   caller has discarded the only occupant snapshot.
-6. Trusted administrative deletion unnecessarily depends on obtaining an
-   occupant snapshot that its caller discards.
-7. Several comments still describe an obsolete all-or-nothing destroy contract.
-
-The implementation is therefore being split. The narrowed worktree is based on
-`065699d3`; its remaining exact-fence guard/test port and destroy-scope removal
-are in progress. The final #1355 will keep only:
-
-- immutable typed `(entity, owner, epoch)` authority per actor incarnation;
-- exact-fenced durable load, save, and delete calls;
-- full room/entity/owner/epoch validation in the store;
-- fail-closed joins and mutations when exact authority cannot be proven;
-- exact fence installation before reclaimed-room durable reads; and
-- regression coverage preventing a second restore from transplanting an actor
-  onto a successor claim.
-
-The notification, authorization, cleanup, and MAM-epoch coordinator belongs to
-the #1283 stack instead of the exact-fence prerequisite.
-
-The remote #1355 branch still contains its draft scaffold. The narrowed working
-tree must be committed, then pass fresh verification and adversarial review
-before its exact head is pushed.
-
-## Durable creator and storage foundation
+## Current implementation frontier: durable creator and storage foundation
 
 ### PR #1352 — durable creator lifecycle
 
-The remote PR is still a draft scaffold. A prior local implementation exists,
-but it must be rebuilt on the final #1355 contract instead of pushing the old
-combined branch.
+The remote PR remains a draft boundary commit with no implementation diff. A
+prior local implementation exists, but it must be semantically ported onto
+merged #1355 instead of rebasing or pushing the old combined branch: its
+preparation/publication ordering and status-201 replay assumptions predate the
+exact actor-fence contract.
 
 Remaining behavior:
 
@@ -127,14 +96,18 @@ Remaining behavior:
 - durable `AwaitingInitialConfiguration` versus active lifecycle;
 - initial Owner persistence in the initialization transaction;
 - status 201 only for the initialization winner;
-- creator cancellation and failure recovery;
+- locked-room rejection for non-creators until accepted configuration;
+- creator cancellation, unavailable-presence destruction, and failure recovery;
+- restart, reclaimed-owner, competing-waiter, and exact-fence-loss behavior;
 - production join/configuration integration; and
 - a dedicated XEP-0045 lifecycle suite.
 
 ### PR #1350 — durable state integrity
 
-This draft is stacked on #1352. Its current storage-only diff must be rebased
-after #1352 and revalidated.
+This draft is stacked on #1352. Its current storage-only diff has twelve merge
+conflict regions against merged #1355 and still uses the obsolete room-keyed
+fence API. It must be rebuilt semantically after #1352 rather than resolved by
+mechanically accepting either side.
 
 Remaining behavior:
 
@@ -150,8 +123,8 @@ Remaining behavior:
 
 PR #1305 completed the actor-local protocol but deliberately did not wire it
 into production. PR #1343 also explicitly excluded the invite journal and
-coordinator. GitHub nevertheless closed #1289 when #1343 merged; that closure
-does not match the implementation evidence.
+coordinator. Issue #1289 was reopened on 2026-07-15 so its GitHub state now
+matches the remaining implementation evidence.
 
 Remaining reviewable slices:
 
@@ -170,13 +143,11 @@ Draft PR #1306 exists, but its local experiment spans approximately 85 files and
 more than 10,000 added lines. It is retained as source material and must not be
 reviewed or pushed as one monolith.
 
-GitHub issue #1283 must be updated before implementation review: its current
-acceptance criteria do not record the mailbox-linearized owner authorization,
-dormant-room authorization, durable notification retention, caller-timeout
-continuation, or application cleanup requirements found by the adversarial
-review. The issue must also record that the fence-dependent slices are blocked
-on the final #1355 contract, and the retained experiment must be rebased onto
-that merged prerequisite before it is split.
+GitHub issue #1283 was updated on 2026-07-15 with the mailbox-linearized owner
+authorization, dormant-room authorization, durable notification retention,
+caller-timeout continuation, application cleanup, and #1355 dependency found
+by adversarial review. That exact-fence dependency is now merged. The retained
+experiment must still be rebuilt on current `main` and split before review.
 
 Planned reviewable slices:
 
@@ -248,17 +219,16 @@ paths. Those should remain small, behavior-preserving cleanup PRs.
 
 ## Delivery order
 
-1. Narrow, verify, review, push, approve, and merge #1355.
-2. Rebuild and merge creator-lifecycle-only #1352.
-3. Rebase, verify, and merge storage-integrity #1350.
-4. Reopen/correct #1289 and deliver its durable journal/coordinator slices.
-5. Deliver the split #1283 destruction and MAM-epoch stack.
-6. Deliver the split #1285 terminal-shutdown stack.
-7. Finish #1136, then #1163, and finish the residual #1174 cleanup.
-8. Merge an incremental `TODO-ISSUES.md` update after each completed issue.
-9. Audit every issue, PR, test, review, and CI gate before closing epic #1279.
+1. Rebuild and merge creator-lifecycle-only #1352.
+2. Rebuild, verify, and merge storage-integrity #1350.
+3. Deliver #1289's durable journal/coordinator slices.
+4. Deliver the split #1283 destruction and MAM-epoch stack.
+5. Deliver the split #1285 terminal-shutdown stack.
+6. Finish #1136, then #1163, and finish the residual #1174 cleanup.
+7. Merge an incremental `TODO-ISSUES.md` update after each completed issue.
+8. Audit every issue, PR, test, review, and CI gate before closing epic #1279.
 
-The slices listed above total approximately 17 additional mergeable PRs. The
+The slices listed above total approximately 16 additional mergeable PRs. The
 estimate may shrink if small adjacent slices can be combined without weakening
 review boundaries.
 
@@ -280,7 +250,8 @@ No implementation PR may merge before all nine conditions are satisfied.
 
 ## Completion bookkeeping
 
-- Reopen or correctly rescope #1289.
+- Keep reopened #1289 visible until every durable journal/coordinator slice is
+  complete.
 - Keep epic #1279 open until #1289, #1283, and #1285 are proven complete.
 - Keep shared #1136/#1163/#1174 work visible until its remaining slices merge.
 - Update and merge `TODO-ISSUES.md` immediately after each completed item.
