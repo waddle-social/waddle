@@ -199,8 +199,12 @@ schema.#Project & {
 		// stable across builders, so `adb install -r` upgrades without an
 		// uninstall) with a monotonic timestamp-derived versionCode.
 		// GitHub releases are immutable once published (asset uploads to
-		// an existing release 422), so each publish deletes and recreates
-		// the `android-latest` prerelease + tag; the stable download URL
+		// an existing release 422), so each publish deletes the release
+		// and recreates it on the stable `android-latest` tag. The tag is
+		// re-pointed to HEAD SYNCHRONOUSLY via git — `gh release delete
+		// --cleanup-tag` deletes the tag asynchronously and the recreate
+		// races the still-present tag (422 Validation Failed), so tag
+		// lifecycle is managed here instead. The stable download URL
 		// releases/download/android-latest/waddle-android-debug.apk is
 		// keyed by tag name and survives the recreate.
 		publishDebugApk: schema.#Task & {
@@ -219,9 +223,26 @@ schema.#Project & {
 				  -PversionName="$(git rev-parse --short HEAD)"
 				apk="app/build/outputs/apk/debug/app-debug.apk"
 				sha="$(git rev-parse --short HEAD)"
-				gh release delete android-latest --yes --cleanup-tag || true
+				full_sha="$(git rev-parse HEAD)"
+				# Delete only the release object (not the tag — `gh release
+				# delete --cleanup-tag`'s tag removal is async and races the
+				# recreate); best-effort on the first run.
+				gh release delete android-latest --yes || true
+				# Re-point the stable tag to this commit via the git-refs
+				# API (same GH_TOKEN as the release commands, no reliance on
+				# checkout push credentials), so the create below always
+				# finds an up-to-date existing tag and never races one.
+				# Existence-check first so exactly ONE of PATCH/POST runs
+				# and its real error surfaces (a `PATCH || POST` chain would
+				# mask a permission/5xx PATCH failure behind the POST).
+				if gh api "repos/{owner}/{repo}/git/refs/tags/android-latest" >/dev/null 2>&1; then
+				  gh api -X PATCH "repos/{owner}/{repo}/git/refs/tags/android-latest" \
+				    -f sha="${full_sha}" -F force=true
+				else
+				  gh api -X POST "repos/{owner}/{repo}/git/refs" \
+				    -f ref="refs/tags/android-latest" -f sha="${full_sha}"
+				fi
 				gh release create android-latest --prerelease \
-				  --target "$(git rev-parse HEAD)" \
 				  --title "Android (rolling debug)" \
 				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)" \
 				  "${apk}#waddle-android-debug.apk"
