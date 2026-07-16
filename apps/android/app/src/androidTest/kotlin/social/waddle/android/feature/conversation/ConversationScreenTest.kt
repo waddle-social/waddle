@@ -4,11 +4,13 @@ import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -102,9 +104,11 @@ class ConversationScreenTest {
     fun replyModeShowsComposerBannerAndCancels() {
         emitPeerMessage(id = "reply-target", body = "reply to me")
         waitForText("reply to me")
-        val timeline = harness.graph.sessionManager.timelineStore.timeline(PEER_JID)
-        val item = timeline.value.first()
-        composeRule.runOnUiThread { viewModel.startReply(item) }
+        // The real user path: long-press opens the action sheet, Reply
+        // arms the composer.
+        composeRule.onNodeWithText("reply to me").performTouchInput { longClick() }
+        waitForText("Reply")
+        composeRule.onNodeWithText("Reply").performClick()
         waitForText("Replying to alice")
         composeRule.onNodeWithContentDescription("Cancel reply").performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {

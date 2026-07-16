@@ -128,8 +128,12 @@ schema.#Project & {
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
-		// feedback and can be re-run independently (/dev/kvm on the
-		// Namespace runner was proven by manual dispatch).
+		// feedback and can be re-run independently. /dev/kvm + GMD on the
+		// Namespace runner were proven by a real pull_request execution
+		// (PR #1366). Caveat: a manual dispatch on an unchanged ref
+		// reports green after "No affected tasks" — cuenv's affectedness
+		// gate skips gmdCheck entirely, so dispatch-green on main means
+		// "skipped", not "passed".
 		deviceTests: {
 			when: {
 				pullRequest: true
