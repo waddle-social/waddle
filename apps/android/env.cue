@@ -248,7 +248,12 @@ schema.#Project & {
 				  "${apk}#waddle-android-debug.apk"
 				"""#]
 			dependsOn: [setupSdk, buildRustJni]
-			inputs: _gradleInputs
+			// env.cue is in the input set so a change to THIS publish
+			// script (not just the app) re-runs the task — otherwise
+			// cuenv's incremental engine reports "no affected tasks" for
+			// a script-only fix and the rolling release is never
+			// rebuilt.
+			inputs: list.Concat([_gradleInputs, ["env.cue"]])
 			outputs: ["app/build/outputs/apk/debug/app-debug.apk"]
 		}
 	}
