@@ -98,10 +98,14 @@ class SettingsScreenTest {
     @Test
     fun soundAndReadReceiptTogglesRoundTripThroughUserPrefs() {
         waitForText("Message sounds")
-        composeRule.onNodeWithTag(SettingsScreenTestTags.MESSAGE_SOUNDS_TOGGLE).performClick()
+        composeRule.onNodeWithTag(SettingsScreenTestTags.MESSAGE_SOUNDS_TOGGLE)
+            .performScrollTo()
+            .performClick()
         waitForPref(harness.graph.userPrefs.messageSoundsEnabled, false)
         composeRule.onNodeWithTag(SettingsScreenTestTags.MESSAGE_SOUNDS_TOGGLE).assertIsOff()
-        composeRule.onNodeWithTag(SettingsScreenTestTags.READ_RECEIPTS_TOGGLE).performClick()
+        composeRule.onNodeWithTag(SettingsScreenTestTags.READ_RECEIPTS_TOGGLE)
+            .performScrollTo()
+            .performClick()
         waitForPref(harness.graph.userPrefs.readReceiptsEnabled, false)
         composeRule.onNodeWithTag(SettingsScreenTestTags.READ_RECEIPTS_TOGGLE).assertIsOff()
         composeRule.onNodeWithTag(SettingsScreenTestTags.READ_RECEIPTS_TOGGLE).performClick()
