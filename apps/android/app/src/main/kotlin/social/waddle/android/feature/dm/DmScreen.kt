@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.search.MessageSearchTarget
 
 /** DM timeline + composer over the shared conversation scaffold. */
 @Composable
@@ -23,5 +24,6 @@ fun DmScreen(
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
+        searchTarget = MessageSearchTarget(peerJid, isGroupchat = false),
     )
 }

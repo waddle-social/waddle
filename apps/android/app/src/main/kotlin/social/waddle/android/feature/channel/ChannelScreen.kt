@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.search.MessageSearchTarget
 
 /** Channel timeline + composer over the shared conversation scaffold. */
 @Composable
@@ -23,5 +24,6 @@ fun ChannelScreen(
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
+        searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
     )
 }
