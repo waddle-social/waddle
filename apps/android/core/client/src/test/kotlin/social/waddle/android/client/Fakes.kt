@@ -133,6 +133,19 @@ class FakeWaddleClient : WaddleClientInterface {
         return mamPage
     }
 
+    /** Recorded (conversationJid, query, max) full-text search queries. */
+    val searchCalls = mutableListOf<Triple<String, String, UInt>>()
+
+    override suspend fun searchDmHistory(peerJid: String, query: String, maxMessages: UInt): WaddleMamPage {
+        searchCalls += Triple(peerJid, query, maxMessages)
+        return mamPage
+    }
+
+    override suspend fun searchRoomHistory(roomJid: String, query: String, maxMessages: UInt): WaddleMamPage {
+        searchCalls += Triple(roomJid, query, maxMessages)
+        return mamPage
+    }
+
     override suspend fun joinRoom(roomJid: String, nick: String) {
         joinRoomCalls += roomJid to nick
         joinRoomFailure?.let { throw it }

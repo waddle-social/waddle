@@ -415,7 +415,7 @@ pub fn build_mam_iq(
 /// Build a full-text room-archive search IQ: targets the room archive
 /// (`to=room`) with the `{urn:xmpp:fulltext:0}fulltext` extended form field
 /// and an empty `<before/>` so the server pages backward from the newest
-/// match (XEP-0059 §2.5 / XEP-0313 §3.4).
+/// match (XEP-0059 §2.5 / XEP-0313 §4.3).
 pub fn build_room_search_history_iq(
     iq_id: &str,
     query_id: &str,
