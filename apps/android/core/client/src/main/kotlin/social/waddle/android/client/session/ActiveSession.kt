@@ -1,6 +1,7 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleSendMessageOutcome
@@ -59,15 +60,16 @@ internal class ActiveSession(
         client = null
     }
 
-    /** Boolean client verb with the standard not-connected/error → false. */
-    suspend fun clientCall(op: suspend (WaddleClientInterface) -> Boolean): Boolean {
-        val liveClient = client ?: return false
+    /** Fire-and-check verb shape: no client → [VerbResult.NotConnected],
+     *  a refusal or a broken transport → [VerbResult.Rejected]. */
+    suspend fun verbCall(op: suspend (WaddleClientInterface) -> Boolean): VerbResult {
+        val liveClient = client ?: return VerbResult.NotConnected
         return try {
-            op(liveClient)
+            if (op(liveClient)) VerbResult.Ok else VerbResult.Rejected
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            false
+            VerbResult.Rejected
         }
     }
 

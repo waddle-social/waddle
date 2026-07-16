@@ -138,7 +138,7 @@ class XmppSessionManager(
     // connected" shape when no session is ready instead of throwing.
 
     /** Join a MUC room; with no live session the intent still persists. */
-    suspend fun joinRoom(roomJid: String, nick: String): Boolean = verbs.joinRoom(roomJid, nick)
+    suspend fun joinRoom(roomJid: String, nick: String): VerbResult = verbs.joinRoom(roomJid, nick)
 
     /** Fetch a MAM page for a room and fan it into [timelineStore]. */
     suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
@@ -182,7 +182,7 @@ class XmppSessionManager(
         isGroupchat: Boolean,
         targetStanzaId: String,
         emoji: String,
-    ): Boolean = verbs.toggleReaction(conversationJid, isGroupchat, targetStanzaId, emoji)
+    ): VerbResult = verbs.toggleReaction(conversationJid, isGroupchat, targetStanzaId, emoji)
 
     /** XEP-0308: replace an own message's body ([ConversationVerbs.sendCorrection]). */
     suspend fun sendCorrection(
@@ -191,17 +191,17 @@ class XmppSessionManager(
         targetId: String,
         newBody: String,
         threadId: String? = null,
-    ): Boolean = verbs.sendCorrection(conversationJid, isGroupchat, targetId, newBody, threadId)
+    ): VerbResult = verbs.sendCorrection(conversationJid, isGroupchat, targetId, newBody, threadId)
 
     /** XEP-0424: retract an own message; tombstones locally on success. */
     suspend fun sendRetraction(
         conversationJid: String,
         isGroupchat: Boolean,
         targetStanzaId: String,
-    ): Boolean = verbs.sendRetraction(conversationJid, isGroupchat, targetStanzaId)
+    ): VerbResult = verbs.sendRetraction(conversationJid, isGroupchat, targetStanzaId)
 
     /** `urn:waddle:pin:0` room pin/unpin (no optimistic pin-set write). */
-    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): Boolean =
+    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): VerbResult =
         verbs.pinRoomMessage(roomJid, targetStanzaId, pin)
 
     /** Seed [pinStore] with the room's current pin list (room open). */
@@ -222,7 +222,7 @@ class XmppSessionManager(
     ) = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
 
     /** XEP-0085 typing notification: best-effort and live-session-only. */
-    suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): Boolean =
+    suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): VerbResult =
         verbs.sendChatState(conversationJid, isGroupchat, state)
 
     /** Manual retry from the Failed banner: fresh budget immediately. */

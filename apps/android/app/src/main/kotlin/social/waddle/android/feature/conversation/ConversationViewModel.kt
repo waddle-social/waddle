@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.TimelineItem
@@ -98,10 +99,10 @@ open class ConversationViewModel(
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = composer.mode
 
-    private val _actionFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    private val _actionFailures = MutableSharedFlow<VerbResult.Failure>(extraBufferCapacity = 4)
 
-    /** Fired when a room-gated action (pin/unpin) is refused. */
-    val actionFailures: SharedFlow<Unit> = _actionFailures
+    /** Fired when a conversation action (reaction, retraction, pin/unpin) is refused. */
+    val actionFailures: SharedFlow<VerbResult.Failure> = _actionFailures
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
 
@@ -185,10 +186,10 @@ open class ConversationViewModel(
     }
 
     private suspend fun sendCorrection(mode: ComposerMode.Editing, text: String) {
-        val sent = runCatching {
+        val result = runCatching {
             io.sendCorrection(mode.targetId, text, mode.threadId)
-        }.getOrDefault(false)
-        if (sent) typingNotifier.onMessageSent() else composer.restoreFailedEdit(mode, text)
+        }.getOrDefault(VerbResult.Rejected)
+        if (result is VerbResult.Ok) typingNotifier.onMessageSent() else composer.restoreFailedEdit(mode, text)
     }
 
     private suspend fun dispatch(message: PendingMessage, wireBody: String = message.body) {
@@ -245,9 +246,7 @@ open class ConversationViewModel(
      */
     fun toggleReaction(item: TimelineItem, emoji: String) {
         val target = actionTargetIdOf(item) ?: return
-        viewModelScope.launch {
-            runCatching { io.toggleReaction(target, emoji) }
-        }
+        launchVerb { io.toggleReaction(target, emoji) }
     }
 
     /** Enter reply mode targeting [item] (XEP-0461). */
@@ -267,7 +266,7 @@ open class ConversationViewModel(
     fun retract(item: TimelineItem) {
         if (!item.isMine || item.tombstone != null) return
         val target = actionTargetIdOf(item) ?: return
-        viewModelScope.launch { runCatching { io.sendRetraction(target) } }
+        launchVerb { io.sendRetraction(target) }
     }
 
     /**
@@ -278,9 +277,14 @@ open class ConversationViewModel(
      */
     fun setPinned(item: TimelineItem, pinned: Boolean) {
         val target = actionTargetIdOf(item) ?: return
+        launchVerb { io.setPinned(target, pinned) }
+    }
+
+    /** Fire a conversation verb; refusals surface via [actionFailures]. */
+    private fun launchVerb(verb: suspend () -> VerbResult) {
         viewModelScope.launch {
-            val ok = runCatching { io.setPinned(target, pinned) }.getOrDefault(false)
-            if (!ok) _actionFailures.tryEmit(Unit)
+            val result = runCatching { verb() }.getOrDefault(VerbResult.Rejected)
+            if (result is VerbResult.Failure) _actionFailures.tryEmit(result)
         }
     }
 

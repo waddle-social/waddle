@@ -38,23 +38,23 @@ internal class ConversationVerbs(
      * ready session fires it; silently dropping it left a live channel
      * that never received messages.
      */
-    suspend fun joinRoom(roomJid: String, nick: String): Boolean {
+    suspend fun joinRoom(roomJid: String, nick: String): VerbResult {
         val client = activeSession.client
         if (client == null) {
             stores.roomStore.markJoined(roomJid)
             persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
-            return false
+            return VerbResult.NotConnected
         }
         try {
             client.joinRoom(roomJid, nick)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            return false
+            return VerbResult.Rejected
         }
         stores.roomStore.markJoined(roomJid)
         persistQuietly { sessionPrefs.setJoinedRooms(stores.roomStore.joinedRooms.value) }
-        return true
+        return VerbResult.Ok
     }
 
     /**
@@ -108,18 +108,18 @@ internal class ConversationVerbs(
         isGroupchat: Boolean,
         targetStanzaId: String,
         emoji: String,
-    ): Boolean = reactionMutex.withLock {
+    ): VerbResult = reactionMutex.withLock {
         // NOTE (deferred, needs an FFI signature change): the reaction
         // stanza does not yet echo the target's XEP-0201 <thread/> like
         // the web client does — send_reaction takes no options today.
-        val owner = activeSession.ownBareJid ?: return false
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+        val owner = activeSession.ownBareJid ?: return VerbResult.NotReady
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
         val base = ownReactionSet(conversationJid, targetStanzaId) ?: emptyList()
         val next = if (emoji in base) base - emoji else base + emoji
         applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, next)
-        var sent = false
+        var result: VerbResult = VerbResult.Rejected
         try {
-            sent = activeSession.clientCall {
+            result = activeSession.verbCall {
                 it.sendReaction(bareJid(conversationJid), targetStanzaId, next, isGroupchat)
             }
         } finally {
@@ -128,11 +128,11 @@ internal class ConversationVerbs(
             // happen — in a DM nothing on the wire would ever correct
             // the phantom chip. Owner-gated: a rollback racing logout
             // must not park pre-logout state into the next session.
-            if (!sent && activeSession.ownBareJid == owner) {
+            if (result != VerbResult.Ok && activeSession.ownBareJid == owner) {
                 applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
             }
         }
-        return sent
+        return result
     }
 
     /** XEP-0308: replace an own message's body; applies locally on a
@@ -145,9 +145,9 @@ internal class ConversationVerbs(
         targetId: String,
         newBody: String,
         threadId: String? = null,
-    ): Boolean {
-        val client = activeSession.client ?: return false
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
+    ): VerbResult {
+        val client = activeSession.client ?: return VerbResult.NotConnected
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
         val options = threadId?.let {
             sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
         }
@@ -156,9 +156,9 @@ internal class ConversationVerbs(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
-            return false
+            return VerbResult.Rejected
         }
-        if (outcome !is WaddleSendMessageOutcome.Sent) return false
+        if (outcome !is WaddleSendMessageOutcome.Sent) return VerbResult.Rejected
         // DM only: `Sent` means stream-accepted, and a room can still
         // reject the correction — MUC state waits for the reflection
         // (web parity). A DM has no reflection to wait for. Owner-gated
@@ -170,7 +170,7 @@ internal class ConversationVerbs(
                 isGroupchat,
             )
         }
-        return true
+        return VerbResult.Ok
     }
 
     /** XEP-0424: retract an own message; tombstones locally on success. */
@@ -178,23 +178,23 @@ internal class ConversationVerbs(
         conversationJid: String,
         isGroupchat: Boolean,
         targetStanzaId: String,
-    ): Boolean {
-        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
-        val sent = activeSession.clientCall {
+    ): VerbResult {
+        val sender = ownMutationSender(conversationJid, isGroupchat) ?: return VerbResult.NotReady
+        val result = activeSession.verbCall {
             it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
         }
         // DM only (see sendCorrection): a room rejection after stream
         // accept would leave an irreversible local tombstone; the MUC
         // reflection drives room state instead. Owner-gated like the
         // reaction rollback.
-        if (sent && !isGroupchat && activeSession.ownBareJid != null) {
+        if (result == VerbResult.Ok && !isGroupchat && activeSession.ownBareJid != null) {
             stores.timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
                 isGroupchat,
             )
         }
-        return sent
+        return result
     }
 
     /**
@@ -202,8 +202,8 @@ internal class ConversationVerbs(
      * the room broadcasts a `<pin-event/>` that lands in the pin store
      * (and a forbidden reply for non-admins surfaces via `on_error`).
      */
-    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): Boolean =
-        activeSession.clientCall { client ->
+    suspend fun pinRoomMessage(roomJid: String, targetStanzaId: String, pin: Boolean): VerbResult =
+        activeSession.verbCall { client ->
             if (pin) {
                 client.pinMessage(bareJid(roomJid), targetStanzaId)
             } else {
@@ -240,16 +240,8 @@ internal class ConversationVerbs(
         conversationJid: String,
         isGroupchat: Boolean,
         state: WaddleChatState,
-    ): Boolean {
-        val client = activeSession.client ?: return false
-        return try {
-            client.sendChatState(conversationJid, state, isGroupchat)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            false
-        }
-    }
+    ): VerbResult =
+        activeSession.verbCall { it.sendChatState(conversationJid, state, isGroupchat) }
 
     /** The account's current reaction set on a row, from the store. */
     private fun ownReactionSet(conversationJid: String, targetId: String): List<String>? {

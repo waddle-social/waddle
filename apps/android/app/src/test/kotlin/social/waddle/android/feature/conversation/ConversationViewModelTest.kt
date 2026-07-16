@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -16,6 +17,7 @@ import org.junit.Before
 import org.junit.Test
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
@@ -58,6 +60,22 @@ class ConversationViewModelTest {
 
         override suspend fun markDisplayed() {
             markDisplayedCalls += 1
+        }
+
+        var reactionResult: VerbResult = VerbResult.Ok
+        val reactionCalls = mutableListOf<Pair<String, String>>()
+
+        override suspend fun toggleReaction(targetId: String, emoji: String): VerbResult {
+            reactionCalls += targetId to emoji
+            return reactionResult
+        }
+
+        var retractionResult: VerbResult = VerbResult.Ok
+        val retractionCalls = mutableListOf<String>()
+
+        override suspend fun sendRetraction(targetId: String): VerbResult {
+            retractionCalls += targetId
+            return retractionResult
         }
     }
 
@@ -377,6 +395,42 @@ class ConversationViewModelTest {
         // message to the parent feed must still count as unread.
         unreadStore.onLiveMessage(ROOM_JID, isMine = false)
         assertEquals(mapOf(ROOM_JID to 1), unreadStore.counts.value)
+    }
+
+    @Test
+    fun `refused reactions and retractions surface action failures`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        // Own MUC message with a room-assigned stanza id: actionable.
+        store.onLiveMessage(
+            testMessage(
+                id = "id-s1",
+                stanzaId = "s1",
+                stanzaIdBy = ROOM_JID,
+                from = "$ROOM_JID/icepuma",
+                to = null,
+                body = "mine",
+                messageType = "groupchat",
+                isMuc = true,
+            ),
+        )
+        runCurrent()
+        val failures = mutableListOf<VerbResult.Failure>()
+        backgroundScope.launch { viewModel.actionFailures.collect(failures::add) }
+        runCurrent()
+        val item = store.timeline(ROOM_JID).value.single()
+
+        io.reactionResult = VerbResult.Rejected
+        viewModel.toggleReaction(item, "👍")
+        runCurrent()
+        io.retractionResult = VerbResult.NotConnected
+        viewModel.retract(item)
+        runCurrent()
+
+        assertEquals(listOf("s1" to "👍"), io.reactionCalls)
+        assertEquals(listOf("s1"), io.retractionCalls)
+        // Both refusals reach the screen (they used to fail silently).
+        assertEquals(listOf(VerbResult.Rejected, VerbResult.NotConnected), failures)
     }
 
     private fun archived(
