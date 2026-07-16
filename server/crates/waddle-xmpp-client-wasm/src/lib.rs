@@ -18,7 +18,10 @@ use waddle_xmpp_client::discovery::{
     WaddleInboxMarkRead,
 };
 use waddle_xmpp_client::error::parse_stanza_error;
-use waddle_xmpp_client::mam::{self, build_mam_iq, MamIqBuilder, MamResultCollector};
+use waddle_xmpp_client::mam::{
+    self, build_dm_search_history_iq, build_mam_iq, build_room_search_history_iq, MamIqBuilder,
+    MamResultCollector,
+};
 use waddle_xmpp_client::mds::{
     build_mds_catchup_iq, build_mds_publish_iq, build_mds_subscribe_iq, parse_mds_catchup_result,
     MdsCatchupEntry, NS_PUBSUB_PUBLISH_OPTIONS_FEATURE,

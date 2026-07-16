@@ -156,3 +156,35 @@ async fn send_groupchat_message_reports_invalid_recipient_as_typed_outcome() {
         "expected invalid room JID diagnostic"
     );
 }
+
+#[tokio::test]
+async fn search_room_history_returns_empty_page_when_not_connected() {
+    let listener = Arc::new(RecordingListener::default());
+    let client = test_client((*listener).clone());
+
+    let page = client
+        .search_room_history("room@muc.waddle.test".to_string(), "needle".to_string(), 25)
+        .await;
+
+    assert!(page.messages.is_empty());
+    assert!(page.first_id.is_none());
+    assert!(page.last_id.is_none());
+    assert!(!page.is_complete);
+    assert_eq!(listener.errors(), vec!["Not connected"]);
+}
+
+#[tokio::test]
+async fn search_dm_history_returns_empty_page_when_not_connected() {
+    let listener = Arc::new(RecordingListener::default());
+    let client = test_client((*listener).clone());
+
+    let page = client
+        .search_dm_history("bob@waddle.test".to_string(), "needle".to_string(), 25)
+        .await;
+
+    assert!(page.messages.is_empty());
+    assert!(page.first_id.is_none());
+    assert!(page.last_id.is_none());
+    assert!(!page.is_complete);
+    assert_eq!(listener.errors(), vec!["Not connected"]);
+}
