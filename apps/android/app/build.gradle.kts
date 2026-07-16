@@ -104,9 +104,15 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
+    testImplementation(testFixtures(project(":core:client")))
+
+    // Hosts ComponentActivity for createAndroidComposeRule in androidTest.
+    debugImplementation(libs.compose.ui.test.manifest)
 
     androidTestImplementation(composeBom)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(testFixtures(project(":core:client")))
 }

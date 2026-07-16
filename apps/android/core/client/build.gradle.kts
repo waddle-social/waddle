@@ -13,6 +13,12 @@ android {
         minSdk = 34
         consumerProguardFiles("consumer-rules.pro")
     }
+
+    // Shared fakes (FakeClientFactory, in-memory stores, record builders)
+    // consumed by :app unit and instrumentation tests.
+    testFixtures {
+        enable = true
+    }
 }
 
 dependencies {

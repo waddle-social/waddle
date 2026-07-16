@@ -26,15 +26,20 @@ import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
 
-fun testSessionInfo(): WaddleSessionInfo = WaddleSessionInfo(
-    sessionId = "sess-1",
-    username = "icepuma",
+fun testSessionInfo(
+    sessionId: String = "sess-1",
+    username: String = "icepuma",
+    jid: String = "icepuma@waddle.test",
+    isExpired: Boolean = false,
+): WaddleSessionInfo = WaddleSessionInfo(
+    sessionId = sessionId,
+    username = username,
     avatarUrl = null,
-    xmppLocalpart = "icepuma",
-    jid = "icepuma@waddle.test",
+    xmppLocalpart = username,
+    jid = jid,
     xmppWebsocketUrl = "wss://waddle.test/xmpp",
     linkPreviewMediaOrigin = null,
-    isExpired = false,
+    isExpired = isExpired,
     expiresAt = null,
 )
 

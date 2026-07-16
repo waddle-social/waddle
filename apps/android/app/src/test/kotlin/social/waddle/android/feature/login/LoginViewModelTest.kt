@@ -20,7 +20,7 @@ import social.waddle.android.client.auth.AuthProvider
 import social.waddle.android.client.auth.DevicePollResult
 import social.waddle.android.client.auth.DeviceStartResponse
 import social.waddle.android.client.auth.WaddleSessionInfo
-import social.waddle.android.testSessionInfo
+import social.waddle.android.client.testSessionInfo
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LoginViewModelTest {

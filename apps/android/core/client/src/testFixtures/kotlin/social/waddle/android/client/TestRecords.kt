@@ -5,6 +5,7 @@ import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddleMessage
@@ -12,6 +13,18 @@ import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
+
+fun testMamPage(
+    messages: List<WaddleArchivedMessage> = emptyList(),
+    firstId: String? = messages.firstOrNull()?.mamId,
+    lastId: String? = messages.lastOrNull()?.mamId,
+    isComplete: Boolean = false,
+): WaddleMamPage = WaddleMamPage(
+    messages = messages,
+    firstId = firstId,
+    lastId = lastId,
+    isComplete = isComplete,
+)
 
 fun testMessage(
     id: String? = "msg-1",
