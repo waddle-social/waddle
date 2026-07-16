@@ -73,7 +73,6 @@ open class ConversationViewModel(
     @Volatile
     private var atNewestEdge = true
 
-
     private val typingNotifier = ComposerTypingNotifier(
         scope = viewModelScope,
         sendState = { state -> io.sendChatState(state) },
@@ -572,9 +571,9 @@ open class ConversationViewModel(
 
     /** The list crossed the newest-edge boundary (see [atNewestEdge]). */
     fun onAtNewestEdgeChanged(atEdge: Boolean) {
-        val was = atNewestEdge
+        val crossedIntoLive = !atNewestEdge && atEdge
         atNewestEdge = atEdge
-        if (!was && atEdge && visible && threadId == null) {
+        if (crossedIntoLive && visible && threadId == null) {
             // Scrolling back down to live reads everything above it.
             viewModelScope.launch { runCatching { io.markDisplayed() } }
         }
@@ -625,7 +624,7 @@ open class ConversationViewModel(
     )
 
     private companion object {
-        val PAGE_SIZE = 50u
+        const val PAGE_SIZE = 50u
 
         /** Scroll-back budget per screen (50 · 20 = 1000 messages). */
         const val HISTORY_PAGE_BUDGET = 20

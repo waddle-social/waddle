@@ -16,9 +16,8 @@ lifecycle = "2.11.0"
 coroutines = "1.11.0"
 okhttp = "5.4.0"
 turbine = "1.2.1"
-# @aar mandatory on Android (ships the JNA dispatcher .so); the catalog
-# cannot express the @aar classifier, so :core:client declares the
-# dependency literally with this version.
+# @aar mandatory on Android (ships the JNA dispatcher .so); :core:client
+# requests the aar artifact type on the dependency block.
 jna = "5.19.0"
 annotation = "1.10.0"
 junit = "4.13.2"
@@ -27,6 +26,7 @@ navigation3 = "1.1.4"
 coreSplashscreen = "1.2.0"
 browser = "1.10.0"
 coil = "3.5.0"
+detekt = "1.23.8"
 
 [libraries]
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation" }
@@ -61,10 +61,14 @@ turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine
 androidx-test-runner = { group = "androidx.test", name = "runner", version = "1.7.0" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version = "1.3.0" }
 compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+detekt-formatting = { group = "io.gitlab.arturbosch.detekt", name = "detekt-formatting", version.ref = "detekt" }
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlinCompose" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlinSerialization" }
+detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }

@@ -1,8 +1,8 @@
 package social.waddle.android.client
 
+import social.waddle.android.client.prefs.ResumeCursor
 import java.time.Instant
 import java.time.OffsetDateTime
-import social.waddle.android.client.prefs.ResumeCursor
 
 /**
  * In-memory per-conversation newest-seen cursors (web

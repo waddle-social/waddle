@@ -1,10 +1,10 @@
 package social.waddle.android.client.store
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.Flow
 import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleChatState
 

@@ -13,12 +13,31 @@ android {
         minSdk = 34
         consumerProguardFiles("consumer-rules.pro")
     }
+
+    // Shared fakes (FakeClientFactory, in-memory stores, record builders)
+    // consumed by :app unit and instrumentation tests.
+    testFixtures {
+        enable = true
+    }
+
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        // Version-bump nags churn weekly and carry no correctness signal;
+        // dependency updates are deliberate, reviewed changes here.
+        disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "NewerVersionAvailable")
+    }
 }
 
 dependencies {
-    // @aar is mandatory: it ships the JNA native dispatcher .so that the
-    // generated UniFFI bindings load. The plain jar would crash at runtime.
-    api("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
+    // The aar artifact is mandatory: it ships the JNA native dispatcher
+    // .so that the generated UniFFI bindings load. The plain jar would
+    // crash at runtime.
+    api(libs.jna) {
+        artifact {
+            type = "aar"
+        }
+    }
     // UniFFI-generated suspend functions poll through kotlinx-coroutines.
     api(libs.kotlinx.coroutines.core)
     // The android=true bindings annotate the SystemCleaner path with

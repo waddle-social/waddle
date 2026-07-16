@@ -67,7 +67,10 @@
     <string name="upload_dismiss">Dismiss</string>
     <string name="action_failed">Action failed — you may not have permission.</string>
     <string name="threads_overview_title">Threads</string>
-    <string name="thread_replies_count">%1$d replies · started by %2$s</string>
+    <plurals name="thread_replies_count">
+        <item quantity="one">%1$d reply · started by %2$s</item>
+        <item quantity="other">%1$d replies · started by %2$s</item>
+    </plurals>
     <plurals name="thread_replies_chip">
         <item quantity="one">%1$d reply</item>
         <item quantity="other">%1$d replies</item>

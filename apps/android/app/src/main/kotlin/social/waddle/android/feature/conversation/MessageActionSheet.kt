@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.clickable
 import social.waddle.android.R
 import social.waddle.android.client.store.TimelineItem
 
@@ -65,7 +65,10 @@ fun MessageActionSheet(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
                     QUICK_REACTIONS.forEach { emoji ->
-                        TextButton(onClick = { onReact(emoji); onDismiss() }) {
+                        TextButton(onClick = {
+                            onReact(emoji)
+                        onDismiss()
+                        }) {
                             Text(text = emoji, style = MaterialTheme.typography.headlineSmall)
                         }
                     }

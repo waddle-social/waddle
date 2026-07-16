@@ -59,14 +59,14 @@ class WaddleConnectionService : Service() {
                 buildNotification(state),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
-        } catch (denied: IllegalStateException) {
+        } catch (_: IllegalStateException) {
             // START_STICKY restarts re-enter here with the process in a
             // background state; when the system denies the promotion
             // (ForegroundServiceStartNotAllowedException), degrade to a
             // stop instead of crashing — the app-state collector re-arms
             // the service the next time the app is eligible.
             stopSelf()
-        } catch (denied: SecurityException) {
+        } catch (_: SecurityException) {
             stopSelf()
         }
     }

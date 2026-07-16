@@ -4,13 +4,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
@@ -35,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -128,7 +129,10 @@ fun ConversationScreen(
                 onLongPress = { item -> sheetTarget = item },
                 onToggleReaction = viewModel::toggleReaction,
                 onOpenThread = onOpenThread?.let { open ->
-                    { item -> open(viewModel.threadIdFor(item)) }
+                    {
+                        item ->
+                            open(viewModel.threadIdFor(item))
+                        }
                 },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
             )
@@ -157,7 +161,9 @@ fun ConversationScreen(
             onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
             onReply = { viewModel.startReply(item) },
             onReplyInThread = onOpenThread?.let { open ->
-                { open(viewModel.threadIdFor(item)) }
+                {
+                    open(viewModel.threadIdFor(item))
+                }
             },
             onEdit = { viewModel.startEdit(item) },
             onRetract = { viewModel.retract(item) },
@@ -192,8 +198,9 @@ fun ConversationScreen(
                             },
                             supportingContent = {
                                 Text(
-                                    text = stringResource(
-                                        R.string.thread_replies_count,
+                                    text = pluralStringResource(
+                                        R.plurals.thread_replies_count,
+                                        thread.replyCount,
                                         thread.replyCount,
                                         thread.rootAuthor ?: "",
                                     ),

@@ -19,9 +19,9 @@ import social.waddle.android.client.SendResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
-import social.waddle.android.testArchivedMessage
-import social.waddle.android.testMamPage
-import social.waddle.android.testMessage
+import social.waddle.android.client.testArchivedMessage
+import social.waddle.android.client.testMamPage
+import social.waddle.android.client.testMessage
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 

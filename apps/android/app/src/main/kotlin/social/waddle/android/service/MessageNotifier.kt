@@ -12,8 +12,6 @@ import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
-import java.time.Instant
-import java.time.OffsetDateTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,11 +25,10 @@ import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
-import social.waddle.android.client.store.isTimelineMutation
-import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
-import social.waddle.android.jid.resourcepartOf
 import social.waddle.client.ffi.WaddleMessage
+import java.time.Instant
+import java.time.OffsetDateTime
 
 /**
  * MessagingStyle notifications for messages arriving while the app is
@@ -49,6 +46,12 @@ class MessageNotifier(
         ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
     },
 ) {
+    private val policy = NotificationPolicy(
+        userPrefs = userPrefs,
+        currentSession = currentSession,
+        isAppVisible = isAppVisible,
+    )
+
     private val historyLock = Any()
     private val queuedReplies =
         java.util.concurrent.ConcurrentHashMap<String, Pair<String, Boolean>>()
@@ -178,76 +181,22 @@ class MessageNotifier(
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
-        val body = message.body ?: return
-        // A correction carries a body but only rewrites an existing row —
-        // notifying would re-announce old content as a new message.
-        if (message.isTimelineMutation()) return
-        if (isAppVisible()) return
-        if (!userPrefs.notificationsEnabled.first()) return
-        val session = currentSession.value ?: return
-        val isGroupchat = message.isMuc || message.messageType == MESSAGE_TYPE_GROUPCHAT
-        if (!isGroupchat && message.messageType != MESSAGE_TYPE_CHAT) return
-        val from = message.from ?: return
-        val conversationJid = bareJidOf(from)
-        val sender = if (isGroupchat) resourcepartOf(from) ?: localpartOf(from) else localpartOf(from)
-        // Own DM carbons come from the account bare JID; own MUC echoes
-        // from room/<own nick> — neither should notify.
-        if (!isGroupchat && conversationJid == bareJidOf(session.jid)) return
-        if (isGroupchat && sender == session.xmppLocalpart) return
+        val decision = policy.decide(message) ?: return
 
-        val person = Person.Builder().setName(sender).setKey(sender).build()
+        val person = Person.Builder().setName(decision.sender).setKey(decision.sender).build()
         val entry = NotificationCompat.MessagingStyle.Message(
-            body,
+            decision.body,
             timestampMillis(message.timestamp),
             person,
         )
         postMutex.withLock {
-            displayedTargetOf(message, isGroupchat, conversationJid)?.let { target ->
-                synchronized(historyLock) { displayedTargets[conversationJid] = target }
+            decision.displayedTarget?.let { target ->
+                synchronized(historyLock) { displayedTargets[decision.conversationJid] = target }
             }
-            val messages = appendToHistory(conversationJid, entry)
+            val messages = appendToHistory(decision.conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
-            postNotification(conversationJid, isGroupchat, messages, silent)
+            postNotification(decision.conversationJid, decision.isGroupchat, messages, silent)
         }
-    }
-
-    /**
-     * XEP-0333/0490 target for the mark-as-read action, carried in the
-     * intent so the dispatch survives process death (the in-memory
-     * timeline is empty when the receiver fires after a restart).
-     * Same id-class rules as the session manager: room stanza id in
-     * MUCs, author-assigned id in 1:1.
-     */
-    private fun displayedTargetOf(
-        message: WaddleMessage,
-        isGroupchat: Boolean,
-        conversationJid: String,
-    ): XmppSessionManager.DisplayedTarget? {
-        // Authority-scanned like the session manager's own resolution:
-        // the FIRST stanza-id is sender-controlled and must not become
-        // a marker target or a published MDS pair.
-        val ownBare = currentSession.value?.jid?.let(::bareJidOf)
-        val mdsPair = if (isGroupchat) {
-            message.stanzaIds.firstOrNull { it.by.equals(conversationJid, ignoreCase = true) }
-        } else {
-            ownBare?.let { own ->
-                val domain = own.substringAfter('@')
-                message.stanzaIds.firstOrNull {
-                    it.by.equals(own, ignoreCase = true) || it.by.equals(domain, ignoreCase = true)
-                }
-            }
-        }
-        val markerId = if (isGroupchat) {
-            mdsPair?.id
-        } else {
-            message.originId ?: message.id
-        } ?: return null
-        return XmppSessionManager.DisplayedTarget(
-            markerId = markerId,
-            stanzaId = mdsPair?.id,
-            stanzaIdBy = mdsPair?.by,
-            markerRequested = message.displayedMarkerRequested,
-        )
     }
 
     private fun appendToHistory(
@@ -418,7 +367,5 @@ class MessageNotifier(
         const val MESSAGE_NOTIFICATION_ID = 2
         const val MAX_HISTORY = 25
         const val SELF_PERSON_KEY = "me"
-        const val MESSAGE_TYPE_GROUPCHAT = "groupchat"
-        const val MESSAGE_TYPE_CHAT = "chat"
     }
 }

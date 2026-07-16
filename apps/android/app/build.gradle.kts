@@ -44,6 +44,23 @@ android {
         }
     }
 
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        checkDependencies = true
+        // Version-bump nags churn weekly and carry no correctness signal;
+        // dependency updates are deliberate, reviewed changes here.
+        disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "NewerVersionAvailable")
+        // targetSdk upgrades are deliberate, tested changes, not nags.
+        disable += "OldTargetApi"
+        // Persistent-XMPP FGS app distributed by sideload, not Play; the
+        // battery-optimization exemption is the documented use case.
+        disable += "BatteryLife"
+        // Release APKs are arm64-only by design (sideload target); x86_64
+        // stays debug/emulator-only.
+        disable += "ChromeOsAbiSupport"
+    }
+
     testOptions {
         managedDevices {
             localDevices {
@@ -104,9 +121,15 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
+    testImplementation(testFixtures(project(":core:client")))
+
+    // Hosts ComponentActivity for createAndroidComposeRule in androidTest.
+    debugImplementation(libs.compose.ui.test.manifest)
 
     androidTestImplementation(composeBom)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(testFixtures(project(":core:client")))
 }

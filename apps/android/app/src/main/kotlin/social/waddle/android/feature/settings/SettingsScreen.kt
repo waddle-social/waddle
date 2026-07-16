@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -91,17 +92,20 @@ fun SettingsScreen(onBack: () -> Unit) {
                 title = stringResource(R.string.settings_notifications_enabled),
                 checked = state.notificationsEnabled,
                 onCheckedChange = viewModel::setNotificationsEnabled,
+                toggleTestTag = SettingsScreenTestTags.NOTIFICATIONS_TOGGLE,
             )
             ToggleRow(
                 title = stringResource(R.string.settings_message_sounds),
                 checked = state.messageSoundsEnabled,
                 onCheckedChange = viewModel::setMessageSoundsEnabled,
+                toggleTestTag = SettingsScreenTestTags.MESSAGE_SOUNDS_TOGGLE,
             )
             SectionHeader(text = stringResource(R.string.settings_privacy))
             ToggleRow(
                 title = stringResource(R.string.settings_read_receipts),
                 checked = state.readReceiptsEnabled,
                 onCheckedChange = viewModel::setReadReceiptsEnabled,
+                toggleTestTag = SettingsScreenTestTags.READ_RECEIPTS_TOGGLE,
             )
             SectionHeader(text = stringResource(R.string.settings_battery))
             BatteryOptimizationRow()
@@ -171,13 +175,29 @@ private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
 }
 
 @Composable
-private fun ToggleRow(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun ToggleRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    toggleTestTag: String,
+) {
     ListItem(
         headlineContent = { Text(text = title) },
         trailingContent = {
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                modifier = Modifier.testTag(toggleTestTag),
+            )
         },
     )
+}
+
+/** Semantics tags shared with instrumented tests. */
+object SettingsScreenTestTags {
+    const val NOTIFICATIONS_TOGGLE = "settings-notifications-toggle"
+    const val MESSAGE_SOUNDS_TOGGLE = "settings-message-sounds-toggle"
+    const val READ_RECEIPTS_TOGGLE = "settings-read-receipts-toggle"
 }
 
 @Composable

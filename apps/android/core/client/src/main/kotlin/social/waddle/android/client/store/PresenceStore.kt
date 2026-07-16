@@ -43,8 +43,11 @@ class PresenceStore {
         _occupants.update { rooms ->
             val occupants = rooms[roomJid] ?: emptyMap()
             val next =
-                if (presence.presenceType == "unavailable") occupants - nick
-                else occupants + (nick to presence)
+                if (presence.presenceType == "unavailable") {
+                    occupants - nick
+                } else {
+                    occupants + (nick to presence)
+                }
             if (next.isEmpty()) rooms - roomJid else rooms + (roomJid to next)
         }
     }

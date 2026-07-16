@@ -14,10 +14,14 @@ on:
     - apps/android/core/client/build.gradle.kts/**
     - apps/android/core/client/consumer-rules.pro
     - apps/android/core/client/consumer-rules.pro/**
-    - apps/android/core/client/src/main/kotlin/**
+    - apps/android/core/client/lint.xml
+    - apps/android/core/client/lint.xml/**
+    - apps/android/core/client/src/**
     - apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/**
     - apps/android/debug.keystore
     - apps/android/debug.keystore/**
+    - apps/android/detekt.yml
+    - apps/android/detekt.yml/**
     - apps/android/env.cue
     - apps/android/env.cue/**
     - apps/android/gradle.properties
@@ -84,7 +88,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.53.2"
+        cuenv_version="0.54.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

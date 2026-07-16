@@ -27,7 +27,13 @@ class TimelineMutationTest {
     fun `reaction aggregates on the target and never inserts a row`() {
         store.onLiveMessage(testMessage(stanzaId = "s1", body = "hi"))
         val inserted = store.onLiveMessage(
-            testMessage(id = "r1", stanzaId = null, body = null, reactionTargetId = "s1", reactionEmojis = listOf("👍")),
+            testMessage(
+                id = "r1",
+                stanzaId = null,
+                body = null,
+                reactionTargetId = "s1",
+                reactionEmojis = listOf("👍"),
+            ),
         )
 
         assertFalse("a reaction is not a new row", inserted)
@@ -265,7 +271,13 @@ class TimelineMutationTest {
     fun `correction from a different sender is rejected`() {
         store.onLiveMessage(testMessage(stanzaId = "s1", body = "original", from = "alice@waddle.test"))
         store.onLiveMessage(
-            testMessage(id = "c1", from = "mallory@waddle.test", to = "me@waddle.test", body = "hacked", replacesId = "s1"),
+            testMessage(
+                id = "c1",
+                from = "mallory@waddle.test",
+                to = "me@waddle.test",
+                body = "hacked",
+                replacesId = "s1",
+            ),
         )
 
         // Mallory's "correction" opens mallory's own conversation but must
