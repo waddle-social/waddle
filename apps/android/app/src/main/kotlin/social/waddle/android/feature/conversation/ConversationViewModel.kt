@@ -112,6 +112,9 @@ open class ConversationViewModel(
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = composer.mode
 
+    /** True on thread screens: a thread inherits its parent conversation's settings. */
+    val isThread: Boolean get() = threadId != null
+
     private val _actionFailures = MutableSharedFlow<VerbResult.Failure>(extraBufferCapacity = 4)
 
     /** Fired when a conversation action (reaction, retraction, pin/unpin) is refused. */

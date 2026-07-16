@@ -131,9 +131,9 @@ fun ConversationScreen(
                             )
                         }
                     }
-                    // XEP-0492 bell: parent conversations only — a thread
-                    // (onOpenThread == null) shares its parent's setting.
-                    if (onOpenThread != null) {
+                    // XEP-0492 bell: parent conversations only — a
+                    // thread screen shares its parent's setting.
+                    if (!viewModel.isThread) {
                         IconButton(onClick = { notifySheetOpen = true }) {
                             Icon(
                                 if (notifyMode == WaddleNotifyMode.NEVER) {

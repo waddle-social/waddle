@@ -66,6 +66,14 @@ class NotifySettingsStore {
      */
     private val generation = AtomicLong(0)
 
+    /**
+     * Serializes the generation bump/check with its map write: without
+     * it a set-verb reconcile could land between hydrate's generation
+     * check and its commit assignment and be clobbered by the stale
+     * snapshot. Mutations are non-suspending, so a monitor suffices.
+     */
+    private val writeLock = Any()
+
     /** Re-entrancy guard: one hydrate at a time (web parity). */
     private val hydrating = AtomicBoolean(false)
 
@@ -105,8 +113,10 @@ class NotifySettingsStore {
                     put(bareJid(item.jid), NotifySettingsEntry(item.notifyMode, item.richPayloadOptIn))
                 }
             }
-            if (generation.get() == startGeneration) {
-                _entries.value = fetched
+            synchronized(writeLock) {
+                if (generation.get() == startGeneration) {
+                    _entries.value = fetched
+                }
             }
         } finally {
             hydrating.set(false)
@@ -128,17 +138,17 @@ class NotifySettingsStore {
      * the item, so the entry drops and the effective mode falls back
      * to the §3 direct-chat default.
      */
-    fun applyDmRemoved(jid: String) {
+    fun applyDmRemoved(jid: String) = synchronized(writeLock) {
         generation.incrementAndGet()
         _entries.update { it - bareJid(jid) }
     }
 
-    fun clear() {
+    fun clear() = synchronized(writeLock) {
         generation.incrementAndGet()
         _entries.value = emptyMap()
     }
 
-    private fun applyEntry(jid: String, entry: NotifySettingsEntry) {
+    private fun applyEntry(jid: String, entry: NotifySettingsEntry) = synchronized(writeLock) {
         generation.incrementAndGet()
         _entries.update { it + (bareJid(jid) to entry) }
     }
