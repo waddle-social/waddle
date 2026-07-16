@@ -42,13 +42,8 @@ class NotificationPolicy(
         val session = currentSession.value ?: return null
         val isGroupchat = message.isMuc || message.messageType == MESSAGE_TYPE_GROUPCHAT
         if (!isGroupchat && message.messageType != MESSAGE_TYPE_CHAT) return null
-        val from = message.from ?: return null
-        val conversationJid = bareJidOf(from)
-        val sender = if (isGroupchat) resourcepartOf(from) ?: localpartOf(from) else localpartOf(from)
-        // Own DM carbons come from the account bare JID; own MUC echoes
-        // from room/<own nick> — neither should notify.
-        if (!isGroupchat && conversationJid == bareJidOf(session.jid)) return null
-        if (isGroupchat && sender == session.xmppLocalpart) return null
+        val (conversationJid, sender) =
+            foreignSenderOf(message.from, isGroupchat, session) ?: return null
         return Notify(
             conversationJid = conversationJid,
             sender = sender,
@@ -56,6 +51,22 @@ class NotificationPolicy(
             body = body,
             displayedTarget = displayedTargetOf(message, isGroupchat, conversationJid),
         )
+    }
+
+    /** `(conversationJid, sender)`, or `null` for the account's own traffic. */
+    private fun foreignSenderOf(
+        from: String?,
+        isGroupchat: Boolean,
+        session: WaddleSessionInfo,
+    ): Pair<String, String>? {
+        from ?: return null
+        val conversationJid = bareJidOf(from)
+        val sender = if (isGroupchat) resourcepartOf(from) ?: localpartOf(from) else localpartOf(from)
+        // Own DM carbons come from the account bare JID; own MUC echoes
+        // from room/<own nick> — neither should notify.
+        if (!isGroupchat && conversationJid == bareJidOf(session.jid)) return null
+        if (isGroupchat && sender == session.xmppLocalpart) return null
+        return conversationJid to sender
     }
 
     /**

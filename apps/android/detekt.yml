@@ -50,6 +50,10 @@ style:
   # call site; forcing a named constant for every literal hurts locality.
   MagicNumber:
     active: false
+  # Guard-clause early returns are house style (parse-and-bail at the
+  # protocol boundary); the default threshold of 2 fights that directly.
+  ReturnCount:
+    active: false
 
 formatting:
   # The repo's Kotlin predates ktlint; indentation/wrapping style is
