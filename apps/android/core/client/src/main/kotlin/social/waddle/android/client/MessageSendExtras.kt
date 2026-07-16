@@ -33,6 +33,12 @@ data class MessageSendExtras(
     val mentions: List<MentionRef> = emptyList(),
     /** XEP-0394 markup, offsets over the pre-fallback send body. */
     val markup: List<MarkupRef> = emptyList(),
+    /**
+     * Fresh `urn:waddle:link-preview:0` token minted for this send.
+     * NOT persisted with queued sends — tokens expire in minutes, and
+     * an offline replay must not attach a stale one.
+     */
+    val linkPreviewToken: String? = null,
 ) {
     val hasReply: Boolean get() = replyToId != null && replyToAuthorJid != null
 }
@@ -116,6 +122,7 @@ internal fun preparedSend(
         sharedFiles = files,
         references = mentionReferences(extras.mentions, shiftBy = fallback?.end ?: 0u),
         markupSpans = markupWireSpans(extras.markup, shiftBy = fallback?.end ?: 0u),
+        linkPreviewToken = extras.linkPreviewToken,
     )
 }
 

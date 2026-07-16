@@ -5,7 +5,9 @@ import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -14,6 +16,7 @@ import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -58,6 +61,10 @@ fun testMessage(
     broadcastMention: String? = null,
     mentionUris: List<String> = emptyList(),
     references: List<WaddleReference> = emptyList(),
+    markupSpans: List<WaddleMarkupSpan> = emptyList(),
+    linkPreviews: List<WaddleLinkPreview> = emptyList(),
+    isSticker: Boolean = false,
+    sharedFiles: List<WaddleSharedFile> = emptyList(),
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -85,14 +92,14 @@ fun testMessage(
     isMuc = isMuc,
     thread = thread,
     parentThreadId = null,
-    markupSpans = emptyList(),
+    markupSpans = markupSpans,
     broadcastMention = broadcastMention,
     mentionUris = mentionUris,
     references = references,
     forumPostKind = null,
     forumTitle = null,
-    isSticker = false,
-    linkPreviews = emptyList(),
+    isSticker = isSticker,
+    linkPreviews = linkPreviews,
     pinEvent = pinEvent,
     callThreadEnded = null,
     carbon = null,
@@ -101,7 +108,7 @@ fun testMessage(
     replyFallbackStart = replyFallbackStart,
     replyFallbackEnd = replyFallbackEnd,
     callThread = null,
-    sharedFiles = emptyList(),
+    sharedFiles = sharedFiles,
     mdsDisplayed = mdsDisplayed,
 )
 
