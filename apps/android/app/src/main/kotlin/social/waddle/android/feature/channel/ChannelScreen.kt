@@ -6,6 +6,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
 
 /** Channel timeline + composer over the shared conversation scaffold. */
@@ -27,6 +28,7 @@ fun ChannelScreen(
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
+        searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
         selfBareJid = session?.jid?.let(::bareJidOf),
     )
 }

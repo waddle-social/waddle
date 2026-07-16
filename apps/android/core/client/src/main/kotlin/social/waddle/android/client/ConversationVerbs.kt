@@ -70,6 +70,21 @@ internal class ConversationVerbs(
         fetchHistory { client -> client.fetchDmHistory(peerJid, maxMessages, beforeId) }
 
     /**
+     * MAM full-text search over a room's archive (XEP-0313 with the
+     * full-text `query=` form field). Unlike [fetchRoomHistory] the
+     * results are ephemeral and never fan into the timeline store — a
+     * search page is a disjoint slice of the archive and splicing it
+     * into the conversation would fabricate adjacency. `null` when no
+     * session is ready or the query failed.
+     */
+    suspend fun searchRoomHistory(roomJid: String, query: String, maxResults: UInt): WaddleMamPage? =
+        activeSession.fetch { client -> client.searchRoomHistory(roomJid, query, maxResults) }
+
+    /** DM twin of [searchRoomHistory]. */
+    suspend fun searchDmHistory(peerJid: String, query: String, maxResults: UInt): WaddleMamPage? =
+        activeSession.fetch { client -> client.searchDmHistory(peerJid, query, maxResults) }
+
+    /**
      * XEP-0363: request an upload slot from the account's upload
      * service (discovered once per attempt). `null` when offline, no
      * service exists, or the service refused (e.g. size over quota).

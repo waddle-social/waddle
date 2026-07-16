@@ -3,6 +3,7 @@ package social.waddle.android.client
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -88,6 +89,14 @@ class FakeClientFactory : ClientFactory {
         checkNotNull(listener) { "no client created yet" }.onEvent(event)
     }
 }
+
+/** One recorded [FakeWaddleClient] full-text search query. */
+data class SearchCall(
+    val conversationJid: String,
+    val query: String,
+    val maxMessages: UInt,
+    val isRoom: Boolean,
+)
 
 /**
  * Connect/disconnect no-op; everything unused by the manager rejects.
@@ -197,17 +206,24 @@ class FakeWaddleClient : WaddleClientInterface {
         return mamPage
     }
 
-    /** Recorded (conversationJid, query, max) full-text search queries. */
-    val searchCalls = CopyOnWriteArrayList<Triple<String, String, UInt>>()
+    /** Recorded full-text search queries, room and DM alike. */
+    val searchCalls = CopyOnWriteArrayList<SearchCall>()
+
+    /**
+     * Per-call search responses consumed before [mamPage]; parking an
+     * uncompleted deferred lets a test control response ordering
+     * (stale-response race-guard coverage).
+     */
+    val searchResponses = ConcurrentLinkedDeque<CompletableDeferred<WaddleMamPage>>()
 
     override suspend fun searchDmHistory(peerJid: String, query: String, maxMessages: UInt): WaddleMamPage {
-        searchCalls += Triple(peerJid, query, maxMessages)
-        return mamPage
+        searchCalls += SearchCall(peerJid, query, maxMessages, isRoom = false)
+        return searchResponses.pollFirst()?.await() ?: mamPage
     }
 
     override suspend fun searchRoomHistory(roomJid: String, query: String, maxMessages: UInt): WaddleMamPage {
-        searchCalls += Triple(roomJid, query, maxMessages)
-        return mamPage
+        searchCalls += SearchCall(roomJid, query, maxMessages, isRoom = true)
+        return searchResponses.pollFirst()?.await() ?: mamPage
     }
 
     override suspend fun joinRoom(roomJid: String, nick: String) {

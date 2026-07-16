@@ -6,6 +6,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
 
 /** DM timeline + composer over the shared conversation scaffold. */
@@ -27,6 +28,7 @@ fun DmScreen(
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
+        searchTarget = MessageSearchTarget(peerJid, isGroupchat = false),
         selfBareJid = session?.jid?.let(::bareJidOf),
     )
 }
