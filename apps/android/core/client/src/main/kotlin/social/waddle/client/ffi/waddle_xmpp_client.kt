@@ -711,6 +711,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(
@@ -825,6 +829,10 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(`pt
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(`ptr`: Long,`jid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(`ptr`: Long,`serviceJid`: RustBuffer.ByValue,`filename`: RustBuffer.ByValue,`size`: Long,`contentType`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_dm_history(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`query`: RustBuffer.ByValue,`maxMessages`: Int,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_room_history(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`query`: RustBuffer.ByValue,`maxMessages`: Int,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_message(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,
 ): Long
@@ -1057,6 +1065,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history() != 34217) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history() != 4562) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 16287) {
@@ -1746,6 +1760,22 @@ public interface WaddleClientInterface {
     suspend fun `requestAvatar`(`jid`: kotlin.String): WaddleAvatar?
 
     suspend fun `requestUploadSlot`(`serviceJid`: kotlin.String, `filename`: kotlin.String, `size`: kotlin.ULong, `contentType`: kotlin.String): WaddleUploadSlot?
+
+    /**
+     * Full-text search of the account's personal archive, filtered to a
+     * 1:1 peer via the standard `with` field. Returns the newest matching
+     * page first; an empty page plus an `Error` event on failure,
+     * mirroring `fetch_dm_history`.
+     */
+    suspend fun `searchDmHistory`(`peerJid`: kotlin.String, `query`: kotlin.String, `maxMessages`: kotlin.UInt): WaddleMamPage
+
+    /**
+     * Full-text search of a room archive (XEP-0313 extended form field
+     * `{urn:xmpp:fulltext:0}fulltext`). Returns the newest matching page
+     * first; an empty page plus an `Error` event on failure, mirroring
+     * `fetch_room_history`.
+     */
+    suspend fun `searchRoomHistory`(`roomJid`: kotlin.String, `query`: kotlin.String, `maxMessages`: kotlin.UInt): WaddleMamPage
 
     suspend fun `sendChatMessage`(`peerJid`: kotlin.String, `body`: kotlin.String, `options`: WaddleSendOptions?): WaddleSendMessageOutcome
 
@@ -2479,6 +2509,58 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeWaddleUploadSlot.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Full-text search of the account's personal archive, filtered to a
+     * 1:1 peer via the standard `with` field. Returns the newest matching
+     * page first; an empty page plus an `Error` event on failure,
+     * mirroring `fetch_dm_history`.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `searchDmHistory`(`peerJid`: kotlin.String, `query`: kotlin.String, `maxMessages`: kotlin.UInt) : WaddleMamPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_dm_history(
+                uniffiHandle,
+                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`query`),FfiConverterUInt.lower(`maxMessages`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleMamPage.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Full-text search of a room archive (XEP-0313 extended form field
+     * `{urn:xmpp:fulltext:0}fulltext`). Returns the newest matching page
+     * first; an empty page plus an `Error` event on failure, mirroring
+     * `fetch_room_history`.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `searchRoomHistory`(`roomJid`: kotlin.String, `query`: kotlin.String, `maxMessages`: kotlin.UInt) : WaddleMamPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_room_history(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`query`),FfiConverterUInt.lower(`maxMessages`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleMamPage.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )

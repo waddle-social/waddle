@@ -60,6 +60,58 @@ impl WaddleClient {
         }
     }
 
+    /// Full-text search of a room archive (XEP-0313 extended form field
+    /// `{urn:xmpp:fulltext:0}fulltext`). Returns the newest matching page
+    /// first; an empty page plus an `Error` event on failure, mirroring
+    /// `fetch_room_history`.
+    pub async fn search_room_history(
+        &self,
+        room_jid: String,
+        query: String,
+        max_messages: u32,
+    ) -> WaddleMamPage {
+        let Some(handle) = self.clone_handle().await else {
+            return empty_mam_page();
+        };
+
+        match handle
+            .search_room_history(&room_jid, &query, max_messages)
+            .await
+        {
+            Ok(page) => mam_page_to_ffi(page),
+            Err(e) => {
+                self.emit_error(format!("search_room_history failed: {e}"));
+                empty_mam_page()
+            }
+        }
+    }
+
+    /// Full-text search of the account's personal archive, filtered to a
+    /// 1:1 peer via the standard `with` field. Returns the newest matching
+    /// page first; an empty page plus an `Error` event on failure,
+    /// mirroring `fetch_dm_history`.
+    pub async fn search_dm_history(
+        &self,
+        peer_jid: String,
+        query: String,
+        max_messages: u32,
+    ) -> WaddleMamPage {
+        let Some(handle) = self.clone_handle().await else {
+            return empty_mam_page();
+        };
+
+        match handle
+            .search_dm_history(&peer_jid, &query, max_messages)
+            .await
+        {
+            Ok(page) => mam_page_to_ffi(page),
+            Err(e) => {
+                self.emit_error(format!("search_dm_history failed: {e}"));
+                empty_mam_page()
+            }
+        }
+    }
+
     pub async fn send_groupchat_message(
         &self,
         room_jid: String,
