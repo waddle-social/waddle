@@ -79,6 +79,13 @@ function connectedClient() {
   return { client, state, xmpp, joinRoom, received, deliverSelfPresence };
 }
 
+async function waitForJoinAttempt(joinRoom: ReturnType<typeof mock>): Promise<void> {
+  for (let turn = 0; turn < 10 && joinRoom.mock.calls.length === 0; turn += 1) {
+    await Promise.resolve();
+  }
+  expect(joinRoom).toHaveBeenCalledTimes(1);
+}
+
 describe("#1221 resumed session-ready does not rejoin", () => {
   test("restores readiness from the snapshot and sends no join presence", async () => {
     const { state, xmpp, joinRoom } = connectedClient();
@@ -189,6 +196,7 @@ describe("#1221 session-ready runs once per handle", () => {
     state.retainedJoinedRoomJids = new Set([room]);
 
     const first = state.runSessionReady(xmpp, { type: "fresh" });
+    await waitForJoinAttempt(joinRoom);
     deliverSelfPresence(room);
     await first;
 
@@ -206,6 +214,7 @@ describe("#1221 fresh session-ready still rejoins", () => {
     state.retainedJoinedRoomJids = new Set([room]);
 
     const ready = state.runSessionReady(xmpp, { type: "fresh" });
+    await waitForJoinAttempt(joinRoom);
     deliverSelfPresence(room);
     await ready;
     await Promise.resolve();

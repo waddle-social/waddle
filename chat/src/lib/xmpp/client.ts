@@ -1,7 +1,9 @@
 import {
+  reportError,
   websocketUrlWithTraceparent,
   withSpan,
 } from "@/lib/telemetry";
+import type { DurableOutboundStore } from "@/lib/outbound-durable-store";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
@@ -342,6 +344,7 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   get_resume_state?: () => XmppResumeState | null;
   get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
   request_stream_management_ack?: () => Promise<void>;
+  dispose?: () => void;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
   supports_mds_publish_options?: () => Promise<boolean>;
   fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
@@ -428,7 +431,7 @@ async function loadWasmModule(): Promise<WasmModule> {
 export class BrowserXmppClient {
   private session: WaddleSession;
   private get queueScope() { return barePeerJid(this.session.jid); }
-  private readonly resource: string;
+  private resource: string;
   private readonly events = new TypedEventBus<ClientEvents>();
   private xmpp: XmppClientInstance | null = null;
   private mdsPublishOptionsSupport: Promise<boolean> | null = null;
@@ -461,6 +464,7 @@ export class BrowserXmppClient {
   private readonly reconnect: ReconnectScheduler;
   private readonly resume: ResumeStateStore;
   private readonly outboundQueue: OfflineSendQueue;
+  private outboundQueueHydration: Promise<void>;
   private readonly mam: MamPager;
   private readonly mucAdmin: MucAdmin;
   private readonly presence: PresenceManager;
@@ -544,7 +548,11 @@ export class BrowserXmppClient {
   // page load constructing a new client) may leave this state.
   private inTerminalErrorState = false;
 
-  constructor(session: WaddleSession, persistence?: ResumePersistence) {
+  constructor(
+    session: WaddleSession,
+    persistence?: ResumePersistence,
+    durableOutboundStore?: DurableOutboundStore,
+  ) {
     this.session = session;
     this.mucServiceJid = `muc.${jidDomain(session.jid)}`;
     // Per-account so a logout/login on the same browser doesn't mix
@@ -559,8 +567,7 @@ export class BrowserXmppClient {
     // WASM client (live, same JS context), that takes precedence in
     // `doConnect`. The POD resume state is the only piece that
     // survives a full page reload, so hydrate it eagerly.
-    const restored = this.resume.consumePersisted();
-    this.resource = restored?.resource || createXmppResource();
+    this.resource = createXmppResource();
     this.outboundQueue = new OfflineSendQueue({
       queueScope: () => this.queueScope,
       events: this.events,
@@ -571,8 +578,12 @@ export class BrowserXmppClient {
       roomMemberJids: (roomJid) => this.memberJidsFor(roomJid),
       sendDirect: (peerJid, body, opts) => this.sendQueuedDirectMessage(peerJid, body, opts),
       sendRoom: (roomJid, body, opts) => this.sendQueuedRoomMessage(roomJid, body, opts),
+      ...(durableOutboundStore ? { durableStore: durableOutboundStore } : {}),
     });
-    this.outboundQueue.seedFromResumeState(restored);
+    this.outboundQueueHydration = this.resume.consumePersisted().then(async (restored) => {
+      if (restored?.resource) this.resource = restored.resource;
+      await this.outboundQueue.seedFromResumeState(restored);
+    });
     this.mam = new MamPager({
       sessionJid: () => this.session.jid,
       fullJid: () => this.fullJid,
@@ -860,8 +871,8 @@ export class BrowserXmppClient {
     this.onlineRecoveryListener = null;
   }
 
-  private clearResumeState() {
-    this.resume.clearAll();
+  private async clearResumeState(): Promise<void> {
+    await this.resume.clearAll();
     // Only called from the `destroying` path — i.e. intentional
     // logout / shutdown. Drop the catch-up cursors too so a future
     // login on the same account (same browser) doesn't replay
@@ -912,6 +923,8 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const epoch = ++this.connectEpoch;
+    this.outboundQueue.beginConnectionGeneration(epoch);
+    await this.outboundQueueHydration;
     const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
@@ -927,15 +940,22 @@ export class BrowserXmppClient {
     );
     if (this.resume.handle && typeof config.with_resume_state_handle === "function") {
       config.with_resume_state_handle(this.resume.handle);
-      this.clearResumeState();
+      await this.clearResumeState();
     } else if (this.resume.state) {
       applyResumeStateToWasmConfig(config, this.resume.state);
-      this.resume.discardState();
+      await this.resume.discardState();
     }
     const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
+    this.xmpp?.dispose?.();
     this.xmpp = xmpp;
     this.wireEvents(xmpp);
-    await xmpp.connect?.();
+    try {
+      await xmpp.connect?.();
+    } catch (error) {
+      if (this.xmpp === xmpp) this.xmpp = null;
+      xmpp.dispose?.();
+      throw error;
+    }
   }
 
   private onceConnected: (() => void) | null = null;
@@ -1050,7 +1070,9 @@ export class BrowserXmppClient {
           const stalled = this.xmpp;
           if (stalled) {
             this.xmpp = null;
-            void Promise.resolve(stalled.disconnect?.()).catch(() => undefined);
+            void Promise.resolve(stalled.disconnect?.())
+              .catch(() => undefined)
+              .finally(() => stalled.dispose?.());
           }
           // An armed terminal detail is stale by construction here: it
           // belongs to the handle we just destroyed, whose disconnect
@@ -1114,7 +1136,7 @@ export class BrowserXmppClient {
     // disconnect flip to a false terminal "sign in again".
     this.inTerminalErrorState = false;
     this.terminalDisconnectDetail = null;
-    this.clearResumeState();
+    await this.clearResumeState();
     // A user-explicit teardown drops the carried resume buffer too — a
     // later session on this instance must not replay another session's
     // stanzas.
@@ -1156,7 +1178,11 @@ export class BrowserXmppClient {
         } catch {}
       }
     }
-    await xmpp?.disconnect?.();
+    try {
+      await xmpp?.disconnect?.();
+    } finally {
+      xmpp?.dispose?.();
+    }
     this.emitStatus({ state: "offline", detail: "Disconnected" });
   }
 
@@ -1499,30 +1525,31 @@ export class BrowserXmppClient {
     const hasForumMetadata = !!opts.threadCreate?.title?.trim() || !!opts.threadReply?.threadId?.trim();
     if (!body.trim() && !hasFiles && !hasThreadMetadata && !hasForumMetadata) return null;
     const roomJid = this.roomJidForChannel(channelId);
+    await this.outboundQueueHydration;
     if (this.roomIsReady(roomJid) && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
-      this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
-      this.outboundQueue.beginAttempt(outboundId, "room");
+      const claim = await this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "room", claim);
       let id: string | null;
       try {
         id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
-        this.outboundQueue.rollbackAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
+        if (isNonRetryableWasmSendFailure(error)) await this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
       if (!id) {
-        this.outboundQueue.rollbackAttempt(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
         return { id: null, state: "queued" };
       }
       if (id !== outboundId) {
-        this.outboundQueue.rollbackAttempt(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
         throw new Error("XMPP send returned a different stanza id");
       }
       return { id, state: "sending" };
     }
-    const queued = this.outboundQueue.queueRoomMessage(roomJid, body, opts);
+    const queued = await this.outboundQueue.queueRoomMessage(roomJid, body, opts);
     void this.connect().then(() => this.switchRoom(spaceId, channelId)).then(() => this.flushQueuedRoomMessages(roomJid)).catch(() => undefined);
     return queued;
   }
@@ -1554,30 +1581,31 @@ export class BrowserXmppClient {
     // XEP-0045 §7.5: mark MUC PMs so the builder appends the muc#user
     // <x/> element (sent-carbon classification on our other devices).
     const mucPm = normalizedPeerJid.includes("/");
+    await this.outboundQueueHydration;
     if (this.canUseConnectedSession() && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
-      this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
-      this.outboundQueue.beginAttempt(outboundId, "dm");
+      const claim = await this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
+      this.outboundQueue.beginAttempt(outboundId, "dm", claim);
       let id: string | null;
       try {
         id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
-        this.outboundQueue.rollbackAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) this.outboundQueue.discardNonRetryable(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
+        if (isNonRetryableWasmSendFailure(error)) await this.outboundQueue.discardNonRetryable(outboundId);
         throw error;
       }
       if (!id) {
-        this.outboundQueue.rollbackAttempt(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
         return { id: null, state: "queued" };
       }
       if (id !== outboundId) {
-        this.outboundQueue.rollbackAttempt(outboundId);
+        await this.outboundQueue.rollbackAttempt(outboundId);
         throw new Error("XMPP send returned a different stanza id");
       }
       return { id, state: "sending" };
     }
-    return this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
+    return await this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
   }
 
   async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state, thread); }
@@ -2300,8 +2328,22 @@ export class BrowserXmppClient {
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
-  private handleMessageAck(id: string) { this.outboundQueue.handleAck(id); }
-  private handleMessageFailed(id: string) { this.outboundQueue.handleFailed(id); }
+  private handleMessageAck(id: string) {
+    void this.outboundQueue.handleAck(id).catch((error) => reportError("storage.write", error, {
+      recoverable: false,
+      detail: "outbound ack could not commit",
+      storage_area: "outbound-queue",
+      stanza_id: id,
+    }));
+  }
+  private handleMessageFailed(id: string) {
+    void this.outboundQueue.handleFailed(id).catch((error) => reportError("storage.write", error, {
+      recoverable: false,
+      detail: "outbound failure reconciliation could not commit",
+      storage_area: "outbound-queue",
+      stanza_id: id,
+    }));
+  }
   // `lifecycle` is the bare kind here — the emitted
   // `SessionLifecycleEvent` is built inside `runSessionReady`, where
   // the fresh variant gains its reconnect catch-up coverage (#1180).
@@ -2329,7 +2371,7 @@ export class BrowserXmppClient {
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
-      this.outboundQueue.clearInflight();
+      await this.outboundQueue.clearInflight();
       void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
@@ -2530,6 +2572,7 @@ export class BrowserXmppClient {
     // readiness without re-sending join presence (#1221).
     this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
     this.connected = false; this.stopSelfPing(); this.xmpp = null;
+    xmpp.dispose?.();
     // The wire is gone — no point trying to send session-terminate.
     // Clear the local call slot so the UI doesn't strand on a stale
     // active overlay across reconnect; the reconnect path doesn't
@@ -2564,7 +2607,15 @@ export class BrowserXmppClient {
     this.autoJoinAttemptedRoomKeys.clear();
     this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
-    if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
+    if (this.destroying) {
+      void this.clearResumeState().catch((clearError) => reportError("storage.write", clearError, {
+        recoverable: false,
+        detail: "SM state clear failed during disconnect",
+        storage_area: "sm-resume",
+      }));
+      this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" });
+      return;
+    }
     // #1164: a terminal failure (auth rejection, resource conflict)
     // means retrying is dishonest — surface `state: "error"` so the
     // connection notice tells the user to sign in again, and do NOT
@@ -2590,7 +2641,9 @@ export class BrowserXmppClient {
     // `ResumeStateStore.captureFromDisconnect` for the pagehide-handoff
     // rationale.
     const resumeState = this.resume.captureFromDisconnect(xmpp, this.resource);
-    this.outboundQueue.seedFromResumeState(resumeState);
+    this.outboundQueueHydration = this.outboundQueueHydration.then(
+      () => this.outboundQueue.seedFromResumeState(resumeState),
+    );
     this.emitStatus({ state: "reconnecting", detail: this.outboundQueue.persistedCount() > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.reconnect.schedule();

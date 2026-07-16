@@ -15,19 +15,33 @@
  * collaborators it needs from the client.
  */
 import {
-  countQueuedMessages,
   enqueueQueuedMessage,
-  listQueuedMessages,
-  listQueuedRoomMessages,
+  QUEUE_TTL_MS,
   removeQueuedMessage,
   type PersistedQueuedDmMessage,
+  type PersistedQueuedMessage,
+  type PersistedQueuedRoomMessage,
 } from "../outbound-queue-store";
+import {
+  IndexedDbDurableOutboundStore,
+  MemoryDurableOutboundStore,
+  OUTBOUND_CLAIM_LEASE_MS,
+  committedOrThrow,
+  createOutboundClaim,
+  type DurableOutboundStore,
+  type OutboundClaim,
+} from "../outbound-durable-store";
 import { barePeerJid } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
-import type { ResumePersistence } from "./resume-persistence";
+import type {
+  ResumePersistence,
+  XmppResumeEntry,
+  XmppResumeStanza,
+} from "./resume-persistence";
 import type { SendDirectMessageOptions, SendGroupMessageOptions } from "./send-types";
 import type { XmppStatusSnapshot } from "./types";
 import type { WasmSendMessageOutcome } from "./wasm-types";
+import { reportError } from "../telemetry";
 
 export type XmppResumeState = {
   previd: string;
@@ -37,11 +51,6 @@ export type XmppResumeState = {
   hasUnackedOutbound?: boolean;
   unhandledOutboundEntries?: XmppResumeEntry[];
   resource?: string;
-};
-
-type XmppResumeEntry = {
-  stanza: string;
-  sentAt: string;
 };
 
 export type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
@@ -85,17 +94,17 @@ export function compatWasmSendResult(result: string | WasmSendMessageOutcome): s
   return sentStanzaIdOrThrowFromWasmOutcome(result);
 }
 
-function messageStanzaIdFromSerializedXml(xml: string): string | null {
-  if (typeof DOMParser !== "undefined") {
-    try {
-      const doc = new DOMParser().parseFromString(xml, "application/xml");
-      const root = doc.documentElement;
-      if (root.localName === "message") return root.getAttribute("id");
-    } catch {}
-  }
-
-  const match = xml.match(/^<message\b[^>]*\sid=(["'])([^"']+)\1/i);
-  return match?.[2] ?? null;
+function messageStanzaIdFromResumeStanza(stanza: XmppResumeStanza): string | null {
+  if (stanza.stanzaKind !== "message") return null;
+  const root = stanza.tokens[0];
+  if (
+    root?.kind !== "start"
+    || root.name.namespace !== "jabber:client"
+    || root.name.localName !== "message"
+  ) return null;
+  return root.attributes.find((attribute) => (
+    attribute.name.namespace === "" && attribute.name.localName === "id"
+  ))?.value ?? null;
 }
 
 function validResumeMaxSeconds(value: number | undefined): number | undefined {
@@ -293,8 +302,11 @@ export class ResumeStateStore {
   }
 
   /** Hydrate the SM state persisted by a prior tab session (one-shot). */
-  consumePersisted(): XmppResumeState | null {
-    this.stateValue = this.persistence.consumeSm();
+  async consumePersisted(): Promise<XmppResumeState | null> {
+    this.stateValue = committedOrThrow(
+      "sm-consume",
+      await this.persistence.consumeSm(),
+    );
     return this.stateValue;
   }
 
@@ -308,16 +320,16 @@ export class ResumeStateStore {
   }
 
   /** Drop the in-memory POD state and its persisted copy; the handle is untouched. */
-  discardState(): void {
+  async discardState(): Promise<void> {
     this.stateValue = null;
-    this.persistence.clearSm();
+    committedOrThrow("sm-clear", await this.persistence.clearSm());
   }
 
   /** Full teardown: state, handle, persisted SM slot, and retained-room list. */
-  clearAll(): void {
+  async clearAll(): Promise<void> {
     this.stateValue = null;
     this.setHandle(null);
-    this.persistence.clearSm();
+    committedOrThrow("sm-clear-all", await this.persistence.clearSm());
     this.persistence.clearJoinedRooms();
   }
 
@@ -346,13 +358,29 @@ export class ResumeStateStore {
     if (state) {
       if (state.hasUnackedOutbound && !state.unhandledOutboundEntries?.length) {
         this.stateValue = null;
-        this.persistence.clearSm();
+        void this.persistence.clearSm().then((outcome) => {
+          if (outcome.kind === "failed") {
+            reportError("storage.write", outcome.cause, {
+              recoverable: false,
+              detail: "pagehide SM clear failed",
+              storage_area: "sm-resume",
+            });
+          }
+        });
         persistJoinedRooms();
         return;
       }
       const snapshot = { ...state, resource };
       this.stateValue = snapshot;
-      this.persistence.saveSm(snapshot);
+      void this.persistence.saveSm(snapshot).then((outcome) => {
+        if (outcome.kind === "failed") {
+          reportError("storage.write", outcome.cause, {
+            recoverable: false,
+            detail: "pagehide SM snapshot failed",
+            storage_area: "sm-resume",
+          });
+        }
+      });
     }
     persistJoinedRooms();
   }
@@ -383,11 +411,12 @@ type OfflineSendQueueDeps = {
     body: string,
     opts: SendGroupMessageOptions & { id: string },
   ) => Promise<string | null>;
+  durableStore?: DurableOutboundStore;
 };
 
 type NativeQueueOwnership =
-  | { kind: "resume-replay" }
-  | { kind: "fresh-fallback" };
+  | { kind: "resume-replay"; claim: OutboundClaim }
+  | { kind: "fresh-fallback"; claim: OutboundClaim };
 
 /**
  * Persisted offline outbound queue + drain logic. Owns in-flight and
@@ -404,13 +433,61 @@ export class OfflineSendQueue {
    */
   private readonly nativeQueueOwnership = new Map<string, NativeQueueOwnership>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
+  private readonly durableMessages = new Map<string, PersistedQueuedMessage>();
+  private readonly claims = new Map<string, OutboundClaim>();
+  private readonly durableStore: DurableOutboundStore;
+  private readonly durableHydration: Promise<void>;
+  private readonly ownerId = crypto.randomUUID();
+  private connectionGeneration = 0;
+  private renewalTimer: ReturnType<typeof setInterval> | null = null;
   private directFlushPromise: Promise<void> | null = null;
   private readonly roomFlushes = new Map<string, Promise<void>>();
 
-  constructor(private readonly deps: OfflineSendQueueDeps) {}
+  constructor(private readonly deps: OfflineSendQueueDeps) {
+    this.durableStore = deps.durableStore
+      ?? (Reflect.has(globalThis, "Bun")
+        ? new MemoryDurableOutboundStore()
+        : new IndexedDbDurableOutboundStore());
+    this.durableHydration = this.hydrateDurableMessages();
+  }
+
+  beginConnectionGeneration(generation?: number): number {
+    this.connectionGeneration = generation ?? this.connectionGeneration + 1;
+    return this.connectionGeneration;
+  }
+
+  private async hydrateDurableMessages(): Promise<void> {
+    const messages = committedOrThrow(
+      "hydrate-outbound-queue",
+      await this.durableStore.list(this.deps.queueScope()),
+    );
+    const cutoff = Date.now() - QUEUE_TTL_MS;
+    for (const message of messages) {
+      const createdAt = Date.parse(message.createdAt);
+      if (Number.isFinite(createdAt) && createdAt < cutoff) {
+        committedOrThrow(
+          "expire-outbound-row",
+          await this.durableStore.delete(this.deps.queueScope(), message.id),
+        );
+        removeQueuedMessage(this.deps.queueScope(), message.id);
+        continue;
+      }
+      this.durableMessages.set(message.id, message);
+      // Presentation-only repair. A quota/private-mode failure here cannot
+      // change durable resend, ordering, claim, or acknowledgement behavior.
+      enqueueQueuedMessage(this.deps.queueScope(), message);
+    }
+  }
+
+  private orderedDurableMessages(): PersistedQueuedMessage[] {
+    return [...this.durableMessages.values()].sort((left, right) => {
+      const createdAt = left.createdAt.localeCompare(right.createdAt);
+      return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
+    });
+  }
 
   persistedCount(): number {
-    return countQueuedMessages(this.deps.queueScope());
+    return this.durableMessages.size;
   }
 
   /**
@@ -419,15 +496,26 @@ export class OfflineSendQueue {
    * resolving that promise, so both persistence ownership and latency state
    * must already exist when the callback runs.
    */
-  beginAttempt(id: string, kind: "room" | "dm"): void {
+  beginAttempt(id: string, kind: "room" | "dm", claim?: OutboundClaim): void {
     const wasInflight = this.inflightQueuedIds.has(id);
     this.inflightQueuedIds.add(id);
+    if (claim) this.trackClaim(id, claim);
     this.pendingSendAt.set(id, { at: performance.now(), kind });
     if (!wasInflight) this.emitQueueDepth();
   }
 
   /** A rejected or null send did not transfer responsibility to XEP-0198. */
-  rollbackAttempt(id: string): void {
+  async rollbackAttempt(id: string): Promise<void> {
+    await this.durableHydration;
+    const claim = this.claims.get(id);
+    if (claim) {
+      const released = committedOrThrow(
+        "release",
+        await this.durableStore.release(this.deps.queueScope(), id, claim),
+      );
+      if (!released) throw new Error("Outbound queue claim changed before release");
+      this.untrackClaim(id);
+    }
     const wasInflight = this.inflightQueuedIds.delete(id);
     this.pendingSendAt.delete(id);
     if (wasInflight) {
@@ -437,45 +525,85 @@ export class OfflineSendQueue {
   }
 
   /** Fresh session: pre-resume in-flight sends will never be acked. */
-  clearInflight(): void {
+  async clearInflight(): Promise<void> {
+    await this.durableHydration;
+    for (const [id, ownership] of [...this.nativeQueueOwnership]) {
+      if (ownership.kind !== "resume-replay") continue;
+      const released = committedOrThrow(
+        "release-resume-replay",
+        await this.durableStore.release(this.deps.queueScope(), id, ownership.claim),
+      );
+      if (!released) throw new Error("Resume replay claim changed before fresh-session release");
+      this.nativeQueueOwnership.delete(id);
+      this.untrackClaim(id);
+    }
     const hadInflight = this.inflightQueuedIds.size > 0;
     this.inflightQueuedIds.clear();
     this.pendingSendAt.clear();
-    let releasedResumeReplay = false;
-    // A plain fresh bind (for example when the new server advertises no SM)
-    // never emits a resume `<failed/>`; release only those never-transferred
-    // replay claims so the durable browser queue can recover them. Explicit
-    // fresh-fallback ownership remains fenced until the native retry settles.
-    for (const [id, ownership] of this.nativeQueueOwnership) {
-      if (ownership.kind === "resume-replay") {
-        this.nativeQueueOwnership.delete(id);
-        releasedResumeReplay = true;
-      }
-    }
-    if (hadInflight || releasedResumeReplay) this.emitQueueDepth();
+    if (hadInflight) this.emitQueueDepth();
   }
 
   /**
    * Native XEP-0198 replay: stanzas the WASM client will re-send itself
    * on resume are tracked so their acks clear the persisted queue copy.
    */
-  seedFromResumeState(state: XmppResumeState | null | undefined): void {
+  async seedFromResumeState(state: XmppResumeState | null | undefined): Promise<void> {
+    await this.durableHydration;
+    const authoritativeIds = new Set<string>();
     for (const entry of state?.unhandledOutboundEntries ?? []) {
-      const id = messageStanzaIdFromSerializedXml(entry.stanza);
+      const id = messageStanzaIdFromResumeStanza(entry.stanza);
       if (id) {
+        authoritativeIds.add(id);
+        const existing = this.nativeQueueOwnership.get(id);
+        if (existing?.kind === "fresh-fallback") continue;
+        const claim = createOutboundClaim(
+          this.ownerId,
+          this.connectionGeneration,
+          "resume-replay",
+        );
+        const adopted = committedOrThrow(
+          "adopt-resume-replay",
+          await this.durableStore.adopt(this.deps.queueScope(), id, claim),
+        );
+        if (!adopted) continue;
         this.inflightQueuedIds.add(id);
-        this.nativeQueueOwnership.set(id, { kind: "resume-replay" });
+        this.nativeQueueOwnership.set(id, { kind: "resume-replay", claim: adopted });
+        this.trackClaim(id, adopted);
       }
     }
+
+    // The disconnect snapshot is authoritative for claims owned by this
+    // browser instance. Anything absent can no longer be replayed by the
+    // native runtime and must be durably returned to the browser queue.
+    for (const [id, ownership] of [...this.nativeQueueOwnership]) {
+      if (authoritativeIds.has(id) || ownership.kind === "fresh-fallback") continue;
+      const released = committedOrThrow(
+        "reconcile-resume-claim",
+        await this.durableStore.release(this.deps.queueScope(), id, ownership.claim),
+      );
+      if (!released) throw new Error("Resume replay claim changed during reconciliation");
+      this.nativeQueueOwnership.delete(id);
+      this.inflightQueuedIds.delete(id);
+      this.untrackClaim(id);
+      this.deps.events.emit("queuedMessageStatus", id, "queued");
+    }
+    this.emitQueueDepth();
   }
 
-  handleAck(id: string): void {
+  async handleAck(id: string): Promise<void> {
+    await this.durableHydration;
+    const wasPersisted = committedOrThrow(
+      "ack-delete",
+      await this.durableStore.delete(this.deps.queueScope(), id),
+    );
+    // An unrelated/duplicate acknowledgement is a true no-op: no projection
+    // rewrite, no UI acknowledgement, and no telemetry claiming progress.
+    if (!wasPersisted) return;
+    this.durableMessages.delete(id);
     const wasQueued = this.inflightQueuedIds.delete(id);
     const wasNativeOwned = this.nativeQueueOwnership.delete(id);
-    // The callback can arrive after a reload or synchronously inside the
-    // awaited send. Persisted identity is authoritative; ephemeral Set
-    // membership is never a prerequisite for deleting the durable copy.
-    const wasPersisted = removeQueuedMessage(this.deps.queueScope(), id);
+    this.untrackClaim(id);
+    removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageAck", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
@@ -485,7 +613,8 @@ export class OfflineSendQueue {
     if (wasQueued || wasNativeOwned || wasPersisted) this.emitQueueDepth();
   }
 
-  handleFailed(id: string): void {
+  async handleFailed(id: string): Promise<void> {
+    await this.durableHydration;
     const wasQueued = this.inflightQueuedIds.delete(id);
     const nativeOwnership = this.nativeQueueOwnership.get(id);
     if (nativeOwnership?.kind === "resume-replay") {
@@ -493,12 +622,32 @@ export class OfflineSendQueue {
       // the same stanza id on its conformant fresh-stream fallback. Keep the
       // browser row crash-durable and keep browser flushing fenced off until
       // the native path acks it or reports a subsequent terminal failure.
-      this.nativeQueueOwnership.set(id, { kind: "fresh-fallback" });
+      const transitioned = committedOrThrow(
+        "resume-to-fallback",
+        await this.durableStore.transition(
+          this.deps.queueScope(),
+          id,
+          nativeOwnership.claim,
+          "fresh-fallback",
+        ),
+      );
+      if (!transitioned) throw new Error("Resume replay claim changed before fallback transfer");
+      this.nativeQueueOwnership.set(id, { kind: "fresh-fallback", claim: transitioned });
+      this.trackClaim(id, transitioned);
       this.deps.events.emit("queuedMessageStatus", id, "sending");
       if (wasQueued) this.emitQueueDepth();
       return;
     }
+    const claim = nativeOwnership?.claim ?? this.claims.get(id);
+    if (claim) {
+      const released = committedOrThrow(
+        "delivery-failure-release",
+        await this.durableStore.release(this.deps.queueScope(), id, claim),
+      );
+      if (!released) throw new Error("Outbound claim changed before delivery failure");
+    }
     const wasNativeOwned = this.nativeQueueOwnership.delete(id);
+    this.untrackClaim(id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
     if (pending) {
@@ -508,9 +657,17 @@ export class OfflineSendQueue {
     if (wasQueued || wasNativeOwned) this.emitQueueDepth();
   }
 
-  discardNonRetryable(id: string): void {
+  async discardNonRetryable(id: string): Promise<void> {
+    await this.durableHydration;
+    const removed = committedOrThrow(
+      "terminal-delete",
+      await this.durableStore.delete(this.deps.queueScope(), id),
+    );
+    if (!removed) return;
+    this.durableMessages.delete(id);
     this.inflightQueuedIds.delete(id);
     this.nativeQueueOwnership.delete(id);
+    this.untrackClaim(id);
     removeQueuedMessage(this.deps.queueScope(), id);
     this.deps.events.emit("messageDeliveryFailure", id);
     const pending = this.pendingSendAt.get(id);
@@ -521,9 +678,10 @@ export class OfflineSendQueue {
     this.emitQueueDepth();
   }
 
-  queueRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions): OutboundSendResult {
+  async queueRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<OutboundSendResult> {
+    await this.durableHydration;
     const queuedId = opts.id ?? crypto.randomUUID();
-    enqueueQueuedMessage(this.deps.queueScope(), {
+    const message: PersistedQueuedMessage = {
       kind: "room",
       id: queuedId,
       createdAt: new Date().toISOString(),
@@ -538,7 +696,13 @@ export class OfflineSendQueue {
       ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
       ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}),
       ...(opts.threadReply ? { threadReply: opts.threadReply } : {}),
-    });
+    };
+    committedOrThrow(
+      "enqueue-room",
+      await this.durableStore.persistReady(this.deps.queueScope(), message),
+    );
+    this.durableMessages.set(message.id, message);
+    enqueueQueuedMessage(this.deps.queueScope(), message);
     this.deps.events.emit("queuedMessageStatus", queuedId, "queued");
     this.noteQueuedMessage();
     this.deps.events.emitSafe("sendEnqueued", { kind: "room", reason: this.deps.enqueueReason() });
@@ -546,9 +710,10 @@ export class OfflineSendQueue {
     return { id: queuedId, state: "queued" };
   }
 
-  queueDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions): OutboundSendResult {
+  async queueDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<OutboundSendResult> {
+    await this.durableHydration;
     const queuedId = opts.id ?? crypto.randomUUID();
-    enqueueQueuedMessage(this.deps.queueScope(), {
+    const message: PersistedQueuedMessage = {
       kind: "dm",
       id: queuedId,
       createdAt: new Date().toISOString(),
@@ -564,7 +729,13 @@ export class OfflineSendQueue {
       ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
       ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
-    });
+    };
+    committedOrThrow(
+      "enqueue-direct",
+      await this.durableStore.persistReady(this.deps.queueScope(), message),
+    );
+    this.durableMessages.set(message.id, message);
+    enqueueQueuedMessage(this.deps.queueScope(), message);
     this.deps.events.emit("queuedMessageStatus", queuedId, "queued");
     this.noteQueuedMessage();
     this.deps.events.emitSafe("sendEnqueued", { kind: "dm", reason: this.deps.enqueueReason() });
@@ -573,8 +744,9 @@ export class OfflineSendQueue {
   }
 
   /** Persist an optimistic live room send so a crash before the ack replays it. */
-  persistPendingRoomSend(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): void {
-    enqueueQueuedMessage(this.deps.queueScope(), {
+  async persistPendingRoomSend(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): Promise<OutboundClaim> {
+    await this.durableHydration;
+    const message: PersistedQueuedMessage = {
       kind: "room",
       id: opts.id,
       createdAt: new Date().toISOString(),
@@ -589,13 +761,23 @@ export class OfflineSendQueue {
       ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
       ...(opts.threadCreate ? { threadCreate: opts.threadCreate } : {}),
       ...(opts.threadReply ? { threadReply: opts.threadReply } : {}),
-    });
+    };
+    const claim = createOutboundClaim(this.ownerId, this.connectionGeneration, "sending");
+    const committedClaim = committedOrThrow(
+      "persist-live-room",
+      await this.durableStore.persistClaimed(this.deps.queueScope(), message, claim),
+    );
+    this.durableMessages.set(message.id, message);
+    enqueueQueuedMessage(this.deps.queueScope(), message);
+    this.trackClaim(opts.id, committedClaim);
     this.emitQueueDepth();
+    return committedClaim;
   }
 
   /** Persist an optimistic live DM send so a crash before the ack replays it. */
-  persistPendingDirectSend(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): void {
-    enqueueQueuedMessage(this.deps.queueScope(), {
+  async persistPendingDirectSend(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): Promise<OutboundClaim> {
+    await this.durableHydration;
+    const message: PersistedQueuedMessage = {
       kind: "dm",
       id: opts.id,
       createdAt: new Date().toISOString(),
@@ -609,35 +791,54 @@ export class OfflineSendQueue {
       ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
       ...(opts.threadId ? { threadId: opts.threadId } : {}),
       ...(opts.parentThreadId ? { parentThreadId: opts.parentThreadId } : {}),
-    });
+    };
+    const claim = createOutboundClaim(this.ownerId, this.connectionGeneration, "sending");
+    const committedClaim = committedOrThrow(
+      "persist-live-direct",
+      await this.durableStore.persistClaimed(this.deps.queueScope(), message, claim),
+    );
+    this.durableMessages.set(message.id, message);
+    enqueueQueuedMessage(this.deps.queueScope(), message);
+    this.trackClaim(opts.id, committedClaim);
     this.emitQueueDepth();
+    return committedClaim;
   }
 
   async flushDirect(): Promise<void | undefined> {
+    await this.durableHydration;
     if (this.directFlushPromise) return this.directFlushPromise;
     if (!this.deps.canUseConnectedSession()) return;
     const promise = (async () => {
-      const entries = listQueuedMessages(this.deps.queueScope()).filter((entry): entry is PersistedQueuedDmMessage => entry.kind === "dm");
+      const entries = this.orderedDurableMessages()
+        .filter((entry): entry is PersistedQueuedDmMessage => entry.kind === "dm");
       for (const entry of entries) {
         if (!this.deps.canUseConnectedSession()) break;
         if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
+        const requestedClaim = createOutboundClaim(this.ownerId, this.connectionGeneration, "sending");
+        const claim = committedOrThrow(
+          "claim-direct",
+          await this.durableStore.claim(this.deps.queueScope(), entry.id, requestedClaim),
+        );
+        // Stable queue order: another tab owns the head, so later rows must
+        // wait instead of overtaking it.
+        if (!claim) break;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
-        this.beginAttempt(entry.id, "dm");
+        this.beginAttempt(entry.id, "dm", claim);
         let messageId: string | null;
         try {
           messageId = await this.deps.sendDirect(entry.mucPm ? entry.peerJid : barePeerJid(entry.peerJid), entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.mucPm ? { mucPm: true } : {}), id: entry.id });
         } catch (error) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
           if (isNonRetryableWasmSendFailure(error)) {
-            this.discardNonRetryable(entry.id);
+            await this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
         if (!messageId) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
         } else if (messageId !== entry.id) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
           throw new Error("XMPP send returned a different stanza id");
         }
       }
@@ -650,31 +851,41 @@ export class OfflineSendQueue {
   }
 
   async flushRoom(roomJid: string): Promise<void | undefined> {
+    await this.durableHydration;
     const inflight = this.roomFlushes.get(roomJid);
     if (inflight) return inflight;
     if (!this.deps.roomIsReady(roomJid)) return;
     const promise = (async () => {
-      const entries = listQueuedRoomMessages(this.deps.queueScope(), roomJid);
+      const entries = this.orderedDurableMessages().filter(
+        (entry): entry is PersistedQueuedRoomMessage =>
+          entry.kind === "room" && entry.roomJid === roomJid,
+      );
       for (const entry of entries) {
         if (!this.deps.roomIsReady(roomJid)) break;
         if (this.inflightQueuedIds.has(entry.id) || this.nativeQueueOwnership.has(entry.id)) continue;
+        const requestedClaim = createOutboundClaim(this.ownerId, this.connectionGeneration, "sending");
+        const claim = committedOrThrow(
+          "claim-room",
+          await this.durableStore.claim(this.deps.queueScope(), entry.id, requestedClaim),
+        );
+        if (!claim) break;
         this.deps.events.emit("queuedMessageStatus", entry.id, "sending");
-        this.beginAttempt(entry.id, "room");
+        this.beginAttempt(entry.id, "room", claim);
         let messageId: string | null;
         try {
           messageId = await this.deps.sendRoom(roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         } catch (error) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
           if (isNonRetryableWasmSendFailure(error)) {
-            this.discardNonRetryable(entry.id);
+            await this.discardNonRetryable(entry.id);
             continue;
           }
           throw error;
         }
         if (!messageId) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
         } else if (messageId !== entry.id) {
-          this.rollbackAttempt(entry.id);
+          await this.rollbackAttempt(entry.id);
           throw new Error("XMPP send returned a different stanza id");
         }
       }
@@ -686,8 +897,53 @@ export class OfflineSendQueue {
     return trackedPromise;
   }
 
+  private trackClaim(id: string, claim: OutboundClaim): void {
+    this.claims.set(id, claim);
+    if (this.renewalTimer) return;
+    this.renewalTimer = setInterval(() => {
+      void this.renewClaims().catch((error) => reportError("storage.write", error, {
+        recoverable: false,
+        detail: "outbound claim renewal failed",
+        storage_area: "outbound-queue",
+      }));
+    }, Math.floor(OUTBOUND_CLAIM_LEASE_MS / 3));
+    (this.renewalTimer as { unref?: () => void }).unref?.();
+  }
+
+  private untrackClaim(id: string): void {
+    this.claims.delete(id);
+    if (this.claims.size !== 0 || !this.renewalTimer) return;
+    clearInterval(this.renewalTimer);
+    this.renewalTimer = null;
+  }
+
+  private async renewClaims(): Promise<void> {
+    for (const [id, claim] of [...this.claims]) {
+      const renewed = committedOrThrow(
+        "renew-claim",
+        await this.durableStore.renew(
+          this.deps.queueScope(),
+          id,
+          claim,
+          Date.now() + OUTBOUND_CLAIM_LEASE_MS,
+        ),
+      );
+      if (!renewed) {
+        this.untrackClaim(id);
+        this.inflightQueuedIds.delete(id);
+        this.nativeQueueOwnership.delete(id);
+        continue;
+      }
+      this.claims.set(id, renewed);
+      const ownership = this.nativeQueueOwnership.get(id);
+      if (ownership) {
+        this.nativeQueueOwnership.set(id, { ...ownership, claim: renewed });
+      }
+    }
+  }
+
   private emitQueueDepth(): void {
-    const entries = listQueuedMessages(this.deps.queueScope());
+    const entries = this.orderedDurableMessages();
     for (const kind of ["dm", "room"] as const) {
       const kindEntries = entries.filter((entry) => entry.kind === kind);
       const oldestCreatedAt = kindEntries.reduce<number | undefined>((oldest, entry) => {
@@ -716,7 +972,7 @@ export class OfflineSendQueue {
     // drains on join, not on reconnect. Only report a degraded status
     // when the session itself is unusable.
     if (this.deps.canUseConnectedSession()) return;
-    const queueCount = countQueuedMessages(this.deps.queueScope());
+    const queueCount = this.durableMessages.size;
     this.deps.emitStatus({
       state: browserOffline() ? "offline" : "reconnecting",
       detail: queueCount === 1 ? "Message queued until the connection returns" : `${queueCount} messages queued until the connection returns`,

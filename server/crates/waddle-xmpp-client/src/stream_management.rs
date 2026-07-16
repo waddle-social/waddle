@@ -1,7 +1,9 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use minidom::Element;
+use minidom::{Element, Node};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
@@ -12,6 +14,295 @@ const NS_DELAY: &str = "urn:xmpp:delay";
 const ACK_RETRY_DELAYS_MS: [u64; 5] = [250, 500, 1_000, 2_000, 5_000];
 const ACK_RESPONSE_TIMEOUT_MS: u64 = 5_000;
 const ACK_PROGRESS_TIMEOUT_MS: u64 = 30_000;
+const NS_CLIENT: &str = "jabber:client";
+const MAX_RESUME_XML_TOKENS: usize = 16_384;
+const MAX_RESUME_XML_DEPTH: usize = 64;
+const MAX_RESUME_XML_ATTRIBUTES: usize = 16_384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResumeStanzaKind {
+    Message,
+    Presence,
+    Iq,
+}
+
+impl ResumeStanzaKind {
+    fn from_element(element: &Element) -> Result<Self, ResumeStanzaError> {
+        if element.ns() != NS_CLIENT {
+            return Err(ResumeStanzaError::UnsupportedRoot);
+        }
+        match element.name() {
+            "message" => Ok(Self::Message),
+            "presence" => Ok(Self::Presence),
+            "iq" => Ok(Self::Iq),
+            _ => Err(ResumeStanzaError::UnsupportedRoot),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ResumeXmlNamespace(String);
+
+impl ResumeXmlNamespace {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ResumeXmlLocalName(String);
+
+impl ResumeXmlLocalName {
+    pub fn new(value: impl Into<String>) -> Result<Self, ResumeStanzaError> {
+        let value = value.into();
+        let _: minidom::rxml::NcName = value
+            .as_str()
+            .try_into()
+            .map_err(|_| ResumeStanzaError::InvalidName)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ResumeXmlValue(String);
+
+impl ResumeXmlValue {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeXmlName {
+    pub namespace: ResumeXmlNamespace,
+    pub local_name: ResumeXmlLocalName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeXmlAttribute {
+    pub name: ResumeXmlName,
+    pub value: ResumeXmlValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ResumeXmlToken {
+    Start {
+        name: ResumeXmlName,
+        attributes: Vec<ResumeXmlAttribute>,
+    },
+    Text {
+        value: ResumeXmlValue,
+    },
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeStanzaSnapshot {
+    pub stanza_kind: ResumeStanzaKind,
+    pub tokens: Vec<ResumeXmlToken>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeStanza {
+    kind: ResumeStanzaKind,
+    element: Element,
+}
+
+impl ResumeStanza {
+    pub fn try_from_element(element: Element) -> Result<Self, ResumeStanzaError> {
+        let kind = ResumeStanzaKind::from_element(&element)?;
+        Ok(Self { kind, element })
+    }
+
+    pub fn kind(&self) -> ResumeStanzaKind {
+        self.kind
+    }
+
+    pub fn element(&self) -> &Element {
+        &self.element
+    }
+
+    pub fn snapshot(&self) -> ResumeStanzaSnapshot {
+        let mut tokens = Vec::new();
+        push_resume_tokens(&self.element, &mut tokens);
+        ResumeStanzaSnapshot {
+            stanza_kind: self.kind,
+            tokens,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: ResumeStanzaSnapshot) -> Result<Self, ResumeStanzaError> {
+        if snapshot.tokens.len() > MAX_RESUME_XML_TOKENS {
+            return Err(ResumeStanzaError::TokenLimit);
+        }
+        let element = element_from_resume_tokens(snapshot.tokens)?;
+        let stanza = Self::try_from_element(element)?;
+        if stanza.kind != snapshot.stanza_kind {
+            return Err(ResumeStanzaError::KindMismatch);
+        }
+        Ok(stanza)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ResumeStanzaError {
+    #[error("resume stanza root must be a jabber:client message, presence, or iq")]
+    UnsupportedRoot,
+    #[error("resume stanza snapshot contains an invalid XML name")]
+    InvalidName,
+    #[error("resume stanza snapshot token sequence is malformed")]
+    InvalidTokenSequence,
+    #[error("resume stanza snapshot exceeds the token limit")]
+    TokenLimit,
+    #[error("resume stanza snapshot exceeds the depth limit")]
+    DepthLimit,
+    #[error("resume stanza snapshot exceeds the attribute limit")]
+    AttributeLimit,
+    #[error("resume stanza element contains a duplicate expanded attribute name")]
+    DuplicateAttribute,
+    #[error("resume stanza kind does not match its root element")]
+    KindMismatch,
+}
+
+fn push_resume_tokens(element: &Element, tokens: &mut Vec<ResumeXmlToken>) {
+    let attributes = element
+        .attrs()
+        .iter()
+        .map(|((namespace, local_name), value)| ResumeXmlAttribute {
+            name: ResumeXmlName {
+                namespace: ResumeXmlNamespace::new(namespace.as_str()),
+                local_name: ResumeXmlLocalName(local_name.as_str().to_owned()),
+            },
+            value: ResumeXmlValue::new(value),
+        })
+        .collect();
+    tokens.push(ResumeXmlToken::Start {
+        name: ResumeXmlName {
+            namespace: ResumeXmlNamespace::new(element.ns()),
+            local_name: ResumeXmlLocalName(element.name().to_owned()),
+        },
+        attributes,
+    });
+    for node in element.nodes() {
+        match node {
+            Node::Element(child) => push_resume_tokens(child, tokens),
+            Node::Text(value) => tokens.push(ResumeXmlToken::Text {
+                value: ResumeXmlValue::new(value),
+            }),
+        }
+    }
+    tokens.push(ResumeXmlToken::End);
+}
+
+fn element_from_resume_tokens(tokens: Vec<ResumeXmlToken>) -> Result<Element, ResumeStanzaError> {
+    struct PendingElement {
+        name: ResumeXmlName,
+        attributes: Vec<ResumeXmlAttribute>,
+        children: Vec<Node>,
+    }
+
+    let mut stack: Vec<PendingElement> = Vec::new();
+    let mut root = None;
+    let mut attribute_count: usize = 0;
+    for token in tokens {
+        match token {
+            ResumeXmlToken::Start { name, attributes } => {
+                if stack.len() >= MAX_RESUME_XML_DEPTH {
+                    return Err(ResumeStanzaError::DepthLimit);
+                }
+                let _: minidom::rxml::NcName = name
+                    .local_name
+                    .as_str()
+                    .try_into()
+                    .map_err(|_| ResumeStanzaError::InvalidName)?;
+                attribute_count = attribute_count
+                    .checked_add(attributes.len())
+                    .ok_or(ResumeStanzaError::AttributeLimit)?;
+                if attribute_count > MAX_RESUME_XML_ATTRIBUTES {
+                    return Err(ResumeStanzaError::AttributeLimit);
+                }
+                let mut expanded_names = HashSet::new();
+                for attribute in &attributes {
+                    let expanded_name = (
+                        attribute.name.namespace.as_str(),
+                        attribute.name.local_name.as_str(),
+                    );
+                    if !expanded_names.insert(expanded_name) {
+                        return Err(ResumeStanzaError::DuplicateAttribute);
+                    }
+                }
+                drop(expanded_names);
+                stack.push(PendingElement {
+                    name,
+                    attributes,
+                    children: Vec::new(),
+                });
+            }
+            ResumeXmlToken::Text { value } => {
+                let Some(parent) = stack.last_mut() else {
+                    return Err(ResumeStanzaError::InvalidTokenSequence);
+                };
+                parent.children.push(Node::Text(value.0));
+            }
+            ResumeXmlToken::End => {
+                let Some(pending) = stack.pop() else {
+                    return Err(ResumeStanzaError::InvalidTokenSequence);
+                };
+                let mut builder = Element::builder(
+                    pending.name.local_name.as_str(),
+                    pending.name.namespace.as_str(),
+                );
+                for attribute in pending.attributes {
+                    let local_name: minidom::rxml::NcName = attribute
+                        .name
+                        .local_name
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| ResumeStanzaError::InvalidName)?;
+                    builder = if attribute.name.namespace.as_str().is_empty() {
+                        builder.attr(local_name, attribute.value.as_str())
+                    } else {
+                        builder.attr_ns(
+                            minidom::rxml::Namespace::from(attribute.name.namespace.0),
+                            local_name,
+                            attribute.value.as_str(),
+                        )
+                    };
+                }
+                let element = builder.append_all(pending.children).build();
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(Node::Element(element));
+                } else if root.replace(element).is_some() {
+                    return Err(ResumeStanzaError::InvalidTokenSequence);
+                }
+            }
+        }
+    }
+    if !stack.is_empty() {
+        return Err(ResumeStanzaError::InvalidTokenSequence);
+    }
+    root.ok_or(ResumeStanzaError::InvalidTokenSequence)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SentStanzaKind {
@@ -75,17 +366,28 @@ struct QueuedOutboundStanza {
 /// the original timestamp after a page reload without mutating normal replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmResumeEntry {
-    element: Element,
+    stanza: ResumeStanza,
     sent_at: DateTime<Utc>,
 }
 
 impl SmResumeEntry {
-    pub fn new(element: Element, sent_at: DateTime<Utc>) -> Self {
-        Self { element, sent_at }
+    pub fn new(stanza: ResumeStanza, sent_at: DateTime<Utc>) -> Self {
+        Self { stanza, sent_at }
+    }
+
+    pub fn try_from_element(
+        element: Element,
+        sent_at: DateTime<Utc>,
+    ) -> Result<Self, ResumeStanzaError> {
+        Ok(Self::new(ResumeStanza::try_from_element(element)?, sent_at))
+    }
+
+    pub fn stanza(&self) -> &ResumeStanza {
+        &self.stanza
     }
 
     pub fn element(&self) -> &Element {
-        &self.element
+        self.stanza.element()
     }
 
     pub fn sent_at(&self) -> DateTime<Utc> {
@@ -145,10 +447,10 @@ impl SmResumeState {
             .into_iter()
             .map(|element| {
                 let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
-                SmResumeEntry::new(element, sent_at)
+                SmResumeEntry::try_from_element(element, sent_at)
+                    .map(QueuedOutboundStanza::from_entry)
             })
-            .map(QueuedOutboundStanza::from_entry)
-            .collect();
+            .collect::<Result<VecDeque<_>, _>>()?;
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
@@ -284,7 +586,10 @@ impl SmState {
     /// numeric and injected makes this state identical on native and WASM and
     /// lets tests advance every timeout without sleeping.
     pub fn record_sent_stanza_at(&mut self, element: &Element, now_ms: u64) -> SentStanzaResult {
-        if !self.outbound_enabled || !matches!(element.name(), "iq" | "message" | "presence") {
+        if !self.outbound_enabled
+            || element.ns() != NS_CLIENT
+            || !matches!(element.name(), "iq" | "message" | "presence")
+        {
             return SentStanzaResult {
                 kind: SentStanzaKind::NotCountable,
                 request: None,
@@ -296,10 +601,11 @@ impl SmState {
         } else {
             self.record_sent(1);
             let sent_at = existing_delay_stamp(element).unwrap_or_else(Utc::now);
+            let stanza = ResumeStanza::try_from_element(element.clone())
+                .expect("countable jabber:client stanzas are valid resume stanzas");
             self.outbound_queue
                 .push_back(QueuedOutboundStanza::from_entry(SmResumeEntry::new(
-                    element.clone(),
-                    sent_at,
+                    stanza, sent_at,
                 )));
             SentStanzaKind::New
         };
@@ -1061,6 +1367,53 @@ mod tests {
     }
 
     #[test]
+    fn typed_resume_stanza_round_trips_mixed_content_and_namespaced_attributes() {
+        let element: Element = "<message xmlns='jabber:client' id='mixed-1' xml:lang='en' \
+             xmlns:fixture='urn:waddle:test:resume' fixture:flag='kept'>\
+             prefix<body>hello<em xmlns='urn:waddle:test:resume'>typed</em>tail</body>suffix\
+             </message>"
+            .parse()
+            .expect("valid stanza");
+        let stanza = ResumeStanza::try_from_element(element.clone()).expect("typed stanza");
+        let snapshot = stanza.snapshot();
+
+        assert_eq!(snapshot.stanza_kind, ResumeStanzaKind::Message);
+        let restored = ResumeStanza::from_snapshot(snapshot).expect("snapshot restores");
+        assert_eq!(restored.element(), &element);
+    }
+
+    #[test]
+    fn typed_resume_stanza_rejects_kind_mismatch_and_malformed_tokens() {
+        let name = ResumeXmlName {
+            namespace: ResumeXmlNamespace::new(NS_CLIENT),
+            local_name: ResumeXmlLocalName::new("message").expect("valid name"),
+        };
+        let mismatch = ResumeStanzaSnapshot {
+            stanza_kind: ResumeStanzaKind::Presence,
+            tokens: vec![
+                ResumeXmlToken::Start {
+                    name,
+                    attributes: Vec::new(),
+                },
+                ResumeXmlToken::End,
+            ],
+        };
+        assert_eq!(
+            ResumeStanza::from_snapshot(mismatch),
+            Err(ResumeStanzaError::KindMismatch)
+        );
+
+        let malformed = ResumeStanzaSnapshot {
+            stanza_kind: ResumeStanzaKind::Message,
+            tokens: vec![ResumeXmlToken::End],
+        };
+        assert_eq!(
+            ResumeStanza::from_snapshot(malformed),
+            Err(ResumeStanzaError::InvalidTokenSequence)
+        );
+    }
+
+    #[test]
     fn persisted_resume_entry_keeps_original_send_time_for_failed_resume_fallback() {
         let sent_at = DateTime::parse_from_rfc3339("2026-07-16T08:09:10.123Z")
             .expect("T0")
@@ -1072,7 +1425,7 @@ mod tests {
             "previous-stream",
             4,
             9,
-            [SmResumeEntry::new(stanza, sent_at)],
+            [SmResumeEntry::try_from_element(stanza, sent_at).expect("typed resume stanza")],
         )
         .expect("persisted resume state");
 

@@ -2,16 +2,21 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
+import social.waddle.android.client.prefs.NativeOutboundPhase
+import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleResumeStanzaKind
+import social.waddle.client.ffi.WaddleResumeXmlToken
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
- * Outbound message sends plus the persisted offline queue:
- * [sendOrEnqueue] is the single manager-level send, and
- * [drainOutboundQueue] replays the queue on `SessionReady`.
+ * Outbound message sends plus the durable journal: [sendOrEnqueue] is the
+ * single manager-level send, and [drainOutboundQueue] replays eligible
+ * rows on `SessionReady`.
  */
 internal class OutboundMessenger(
     private val activeSession: ActiveSession,
@@ -24,12 +29,11 @@ internal class OutboundMessenger(
     /**
      * One manager-level send: the client stanza id is generated HERE
      * (not by the FFI) so a queued replay can resend under the same
-     * XEP-0359 origin-id. `NotConnected`/`TransportError` mean no live
-     * session carried the message — those enqueue for replay on the
-     * next `SessionReady` and hand the queue id back via
-     * [SendResult.queuedId]; every other outcome passes through
-     * untouched (a live session rejected the payload — replaying the
-     * identical stanza cannot succeed).
+     * XEP-0359 origin-id. Every send is first journaled for one exact
+     * connection generation. `NotConnected` and `TransportError` release
+     * the row for replay; a possibly-written transport error remains
+     * uncertain until SM-state/generation reconciliation. Other failures
+     * discard the row because replaying the rejected payload cannot help.
      */
     suspend fun sendOrEnqueue(
         conversationJid: String,
@@ -37,68 +41,97 @@ internal class OutboundMessenger(
         body: String,
         extras: MessageSendExtras? = null,
     ): SendResult {
-        val clientStanzaId = newClientStanzaId()
-        val outcome = sendMessage(conversationJid, isGroupchat, body, clientStanzaId, extras)
-        if (!isQueueableFailure(outcome)) return SendResult(outcome)
-        // A logout can race this persist (reply-receiver sends run on the
-        // process scope): never enqueue without an owner, and the owned
-        // entry gets pruned by the next account's drain if it survives
-        // the teardown window. Process-death revivals (notification
-        // direct replies) have no in-memory owner yet — fall back to the
-        // persisted one so the reply queues instead of being discarded;
-        // logout clears that key too, keeping the teardown race safe.
         val owner = activeSession.ownBareJid
             ?: runCatching { sessionPrefs.ownerBareJid.first() }.getOrNull()
-            ?: return SendResult(outcome)
-        val evicted = try {
-            outboundQueue.enqueue(
-                QueuedOutboundMessage(
-                    ownerBareJid = owner,
-                    conversationJid = conversationJid,
-                    isGroupchat = isGroupchat,
-                    body = body,
-                    clientStanzaId = clientStanzaId,
-                    enqueuedAtMillis = System.currentTimeMillis(),
-                    replyToId = extras?.replyToId,
-                    replyToAuthorJid = extras?.replyToAuthorJid,
-                    replyParentBody = extras?.replyParentBody,
-                    threadId = extras?.threadId,
-                    threadParent = extras?.threadParent,
-                    sharedFiles = extras?.sharedFiles.orEmpty(),
-                    mentions = extras?.mentions.orEmpty(),
-                ),
-            )
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // Persistence is best-effort: a failed enqueue write behaves
-            // like the pre-queue behavior (the outcome already reports
-            // the failure) instead of crashing the sender's scope.
+            ?: return SendResult(WaddleSendMessageOutcome.NotConnected)
+        val queued = queuedMessage(owner, conversationJid, isGroupchat, body, extras)
+        val connectionGeneration = activeSession.connectionGeneration
+        val ownership = OutboundOwnership.NativeOwned(
+            connectionGeneration = connectionGeneration,
+            phase = NativeOutboundPhase.FRESH,
+        )
+        val enqueue = persistQueueMutation {
+            outboundQueue.enqueueClaimed(queued, ownership)
+        } ?: return SendResult(WaddleSendMessageOutcome.Error)
+        if (!enqueue.stored) {
+            return SendResult(WaddleSendMessageOutcome.Error)
+        }
+        enqueue.evicted?.let { reportDroppedQueuedMessage(it, DROP_REASON_QUEUE_FULL) }
+
+        val outcome = sendMessage(queued.copy(ownership = ownership), connectionGeneration)
+        return reconcileInitialOutcome(queued.clientStanzaId, ownership, outcome)
+    }
+
+    private fun queuedMessage(
+        owner: String,
+        conversationJid: String,
+        isGroupchat: Boolean,
+        body: String,
+        extras: MessageSendExtras?,
+    ): QueuedOutboundMessage = QueuedOutboundMessage(
+        ownerBareJid = owner,
+        conversationJid = conversationJid,
+        isGroupchat = isGroupchat,
+        body = body,
+        clientStanzaId = newClientStanzaId(),
+        enqueuedAtMillis = System.currentTimeMillis(),
+        replyToId = extras?.replyToId,
+        replyToAuthorJid = extras?.replyToAuthorJid,
+        replyParentBody = extras?.replyParentBody,
+        threadId = extras?.threadId,
+        threadParent = extras?.threadParent,
+        sharedFiles = extras?.sharedFiles.orEmpty(),
+        mentions = extras?.mentions.orEmpty(),
+    )
+
+    private suspend fun reconcileInitialOutcome(
+        stanzaId: String,
+        ownership: OutboundOwnership.NativeOwned,
+        outcome: WaddleSendMessageOutcome,
+    ): SendResult {
+        if (outcome is WaddleSendMessageOutcome.Sent) {
             return SendResult(outcome)
         }
-        evicted?.let { reportDroppedQueuedMessage(it, DROP_REASON_QUEUE_FULL) }
-        return SendResult(outcome, queuedId = clientStanzaId)
+        val queueable = isQueueableFailure(outcome)
+        val reconciled = persistQueueMutation {
+            if (queueable) {
+                outboundQueue.release(stanzaId, ownership)
+            } else {
+                outboundQueue.removeOwned(stanzaId, ownership)
+            }
+        }
+        if (reconciled != true) {
+            return SendResult(WaddleSendMessageOutcome.Error)
+        }
+        return if (queueable) {
+            SendResult(outcome, queuedId = stanzaId)
+        } else {
+            SendResult(outcome)
+        }
+    }
+
+    private suspend fun <T> persistQueueMutation(block: suspend () -> T): T? = try {
+        block()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        null
     }
 
     /**
-     * Replays the persisted outbound queue through the live attempt's
-     * client. Runs unconditionally on every `SessionReady` (a resumed
-     * stream replays 0198-unacked stanzas itself, but the persisted
-     * queue only ever holds messages NO stream accepted, so replaying
-     * them here can never duplicate a resume replay).
+     * Replays only Ready rows through the live attempt. NativeOwned rows
+     * remain fenced to their exact generation while XEP-0198 resume or
+     * fresh fallback owns them. Without SM, handling is unknowable, so a
+     * reconnect may release and replay the same stable XEP-0359 identity.
      */
     suspend fun drainOutboundQueue() {
         val owner = activeSession.ownBareJid ?: return
+        val connectionGeneration = activeSession.connectionGeneration
         outboundQueue.drain(
             ownerBareJid = owner,
+            connectionGeneration = connectionGeneration,
             send = { queued ->
-                sendMessage(
-                    conversationJid = queued.conversationJid,
-                    isGroupchat = queued.isGroupchat,
-                    body = queued.body,
-                    stanzaId = queued.clientStanzaId,
-                    extras = queued.sendExtras(),
-                )
+                sendMessage(queued, connectionGeneration)
             },
             onDropped = { queued, outcome ->
                 reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
@@ -106,15 +139,57 @@ internal class OutboundMessenger(
         )
     }
 
+    suspend fun reconcileAttempt(state: WaddleSmResumeState?, connectionGeneration: Long) {
+        val owner = activeSession.ownBareJid ?: return
+        val resumeIds = state?.queuedEntries
+            .orEmpty()
+            .mapNotNull { entry ->
+                if (entry.stanza.stanzaKind != WaddleResumeStanzaKind.MESSAGE) return@mapNotNull null
+                val root = entry.stanza.tokens.firstOrNull() as? WaddleResumeXmlToken.Start
+                    ?: return@mapNotNull null
+                if (
+                    root.name.namespace.value != "jabber:client" ||
+                    root.name.localName.value != "message"
+                ) {
+                    return@mapNotNull null
+                }
+                root.attributes.firstOrNull { attribute ->
+                    attribute.name.namespace.value.isEmpty() &&
+                        attribute.name.localName.value == "id"
+                }?.value?.value
+            }
+            .toSet()
+        outboundQueue.reconcileAttempt(owner, connectionGeneration, resumeIds)
+    }
+
+    /** Commit exact-generation durable ownership before the event reaches
+     * stores/UI. Returns false for stale events and the first resume failure,
+     * which transfers native ownership to fresh-stream fallback. */
+    suspend fun reconcileDeliveryEvent(event: XmppEvent, connectionGeneration: Long): Boolean =
+        when (event) {
+            is XmppEvent.DeliveryAcked ->
+                outboundQueue.acknowledge(event.stanzaId, connectionGeneration)
+            is XmppEvent.DeliveryFailed ->
+                when (outboundQueue.failNative(event.stanzaId, connectionGeneration)) {
+                    OutboundQueue.FailureResolution.RELEASED -> true
+                    OutboundQueue.FailureResolution.STALE,
+                    OutboundQueue.FailureResolution.TRANSFERRED_TO_FALLBACK,
+                    -> false
+                }
+            else -> true
+        }
+
     private suspend fun sendMessage(
-        conversationJid: String,
-        isGroupchat: Boolean,
-        body: String,
-        stanzaId: String,
-        extras: MessageSendExtras? = null,
+        queued: QueuedOutboundMessage,
+        connectionGeneration: Long,
     ): WaddleSendMessageOutcome {
+        val conversationJid = queued.conversationJid
+        val isGroupchat = queued.isGroupchat
+        val body = queued.body
+        val stanzaId = queued.clientStanzaId
+        val extras = queued.sendExtras()
         val (finalBody, options) = preparedSend(stanzaId, body, extras)
-        val outcome = activeSession.send { client ->
+        val outcome = activeSession.sendAtGeneration(connectionGeneration) { client ->
             if (isGroupchat) {
                 client.sendGroupchatMessage(conversationJid, finalBody, options)
             } else {

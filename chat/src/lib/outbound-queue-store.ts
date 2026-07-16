@@ -16,7 +16,7 @@ const PREFIX = "waddle.chat.outbound-queue";
  * intending. 7 days bounds the per-account storage footprint
  * without losing same-session retries.
  */
-const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const QUEUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface PersistedQueuedMessageBase {
   id: string;
@@ -49,7 +49,7 @@ export interface PersistedQueuedDmMessage extends PersistedQueuedMessageBase {
   mucPm?: boolean;
 }
 
-type PersistedQueuedMessage =
+export type PersistedQueuedMessage =
   | PersistedQueuedRoomMessage
   | PersistedQueuedDmMessage;
 
@@ -62,8 +62,16 @@ function storage(): Storage | null {
   }
 }
 
-function queueKey(accountKey: string): string {
+function legacyQueueKey(accountKey: string): string {
   return `${PREFIX}.${accountKey}`;
+}
+
+function queueRowPrefix(accountKey: string): string {
+  return `${PREFIX}.v2.${accountKey.length}:${accountKey}.`;
+}
+
+function queueRowKey(accountKey: string, messageId: string): string {
+  return `${queueRowPrefix(accountKey)}${encodeURIComponent(messageId)}`;
 }
 
 function sortQueue(messages: PersistedQueuedMessage[]): PersistedQueuedMessage[] {
@@ -99,18 +107,40 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
   const s = storage();
   if (!s) return [];
   try {
-    const raw = s.getItem(queueKey(accountKey));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const persisted = parsed.filter(isPersistedQueuedMessage);
+    const prefix = queueRowPrefix(accountKey);
+    const persisted: PersistedQueuedMessage[] = [];
+    for (let index = 0; index < s.length; index += 1) {
+      const key = s.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      const raw = s.getItem(key);
+      if (!raw) continue;
+      const parsed: unknown = JSON.parse(raw);
+      if (isPersistedQueuedMessage(parsed)) persisted.push(parsed);
+    }
+
+    // Expand the old whole-array projection once. New writes are one key per
+    // stanza so concurrent tabs can never overwrite an unrelated row.
+    const legacyRaw = s.getItem(legacyQueueKey(accountKey));
+    if (persisted.length === 0 && legacyRaw) {
+      const legacy: unknown = JSON.parse(legacyRaw);
+      if (Array.isArray(legacy)) {
+        for (const entry of legacy.filter(isPersistedQueuedMessage)) {
+          writeProjection(s, accountKey, entry);
+          persisted.push(entry);
+        }
+      }
+      s.removeItem(legacyQueueKey(accountKey));
+    }
+
     const strippedLegacyPreviewTokens = persisted.some(
       (entry) =>
         "linkPreviewToken" in (entry as unknown as Record<string, unknown>)
         || "linkPreviewExpiresAt" in (entry as unknown as Record<string, unknown>),
     );
     const all = sortQueue(persisted.map(stripLegacyPreviewToken));
-    if (strippedLegacyPreviewTokens) writeQueue(accountKey, all);
+    if (strippedLegacyPreviewTokens) {
+      for (const entry of all) writeProjection(s, accountKey, entry);
+    }
     return pruneStaleEntries(s, accountKey, all);
   } catch (err) {
     // Storage read failure usually means corrupt JSON or privacy-mode
@@ -157,13 +187,10 @@ function pruneStaleEntries(
   const cutoff = Date.now() - QUEUE_TTL_MS;
   const fresh = all.filter((entry) => parseCreatedAt(entry.createdAt) >= cutoff);
   if (fresh.length === all.length) return all;
-  const dropped = all.length - fresh.length;
+  const stale = all.filter((entry) => !fresh.some((candidate) => candidate.id === entry.id));
+  const dropped = stale.length;
   try {
-    if (fresh.length === 0) {
-      s.removeItem(queueKey(accountKey));
-    } else {
-      s.setItem(queueKey(accountKey), JSON.stringify(fresh));
-    }
+    for (const entry of stale) s.removeItem(queueRowKey(accountKey, entry.id));
   } catch (err) {
     // Best-effort prune; surface to Faro but still hand back the
     // pruned list to the caller so the stale entries are not used
@@ -197,28 +224,23 @@ function parseCreatedAt(value: string): number {
   return Number.isFinite(ms) ? ms : Date.now();
 }
 
-function writeQueue(accountKey: string, messages: PersistedQueuedMessage[]): void {
-  const s = storage();
-  if (!s) return;
+function writeProjection(
+  s: Storage,
+  accountKey: string,
+  message: PersistedQueuedMessage,
+): void {
   try {
-    const sorted = sortQueue(messages);
-    if (sorted.length === 0) {
-      s.removeItem(queueKey(accountKey));
-      return;
-    }
-    s.setItem(queueKey(accountKey), JSON.stringify(sorted));
+    s.setItem(queueRowKey(accountKey, message.id), JSON.stringify(message));
   } catch (err) {
-    // Best effort only — if storage is unavailable the in-memory optimistic
-    // state still reflects the queued send for the current page lifetime.
-    // Still worth reporting: localStorage quota errors are a leading cause
-    // of silent message-loss across reloads.
+    // IndexedDB is the durable source of truth. This synchronous per-row
+    // projection exists only so conversation composables can paint queued
+    // rows without awaiting startup hydration.
     const name = err instanceof Error ? err.name : "";
     const kind = name === "QuotaExceededError" ? "storage.quota" : "storage.write";
     reportError(kind, err, {
       recoverable: true,
-      detail: "outbound-queue write failed",
-      storage_area: "outbound-queue",
-      queueSize: messages.length,
+      detail: "outbound-queue projection write failed",
+      storage_area: "outbound-queue-projection",
     });
   }
 }
@@ -266,21 +288,34 @@ export function enqueueQueuedMessage(
   accountKey: string,
   message: PersistedQueuedMessage,
 ): void {
-  const next = readQueue(accountKey).filter((entry) => entry.id !== message.id);
-  next.push(message.kind === "dm"
+  const s = storage();
+  if (!s) return;
+  const normalized = message.kind === "dm"
     ? {
         ...message,
         peerJid: dmQueuePeerKey(message.peerJid, message.mucPm === true),
       }
-    : message);
-  writeQueue(accountKey, next);
+    : message;
+  writeProjection(s, accountKey, normalized);
 }
 
 export function removeQueuedMessage(accountKey: string, messageId: string): boolean {
-  const current = readQueue(accountKey);
-  const next = current.filter((message) => message.id !== messageId);
-  writeQueue(accountKey, next);
-  return next.length !== current.length;
+  const s = storage();
+  if (!s) return false;
+  const key = queueRowKey(accountKey, messageId);
+  const existed = s.getItem(key) !== null;
+  if (!existed) return false;
+  try {
+    s.removeItem(key);
+    return true;
+  } catch (err) {
+    reportError("storage.write", err, {
+      recoverable: true,
+      detail: "outbound-queue projection delete failed",
+      storage_area: "outbound-queue-projection",
+    });
+    return false;
+  }
 }
 
 export function countQueuedMessages(accountKey: string): number {

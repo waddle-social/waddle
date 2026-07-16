@@ -15,10 +15,35 @@ import {
   type XmppResumeState,
 } from "../src/lib/xmpp/client-connection";
 import { listQueuedMessages } from "../src/lib/outbound-queue-store";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import {
+  MemoryDurableOutboundStore,
+  OUTBOUND_CLAIM_LEASE_MS,
+  type DurableOutboundStore,
+} from "../src/lib/outbound-durable-store";
+import type {
+  ResumePersistence,
+  XmppResumeEntry,
+} from "../src/lib/xmpp/resume-persistence";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 const SCOPE = "alice@example.com";
+
+function messageResumeEntry(id: string): XmppResumeEntry {
+  return {
+    stanza: {
+      stanzaKind: "message",
+      tokens: [
+        {
+          kind: "start",
+          name: { namespace: "jabber:client", localName: "message" },
+          attributes: [{ name: { namespace: "", localName: "id" }, value: id }],
+        },
+        { kind: "end" },
+      ],
+    },
+    sentAtEpochMs: Date.parse("2026-07-16T08:09:10.123Z"),
+  };
+}
 
 function createStorageMock() {
   const values = new Map<string, string>();
@@ -35,13 +60,21 @@ function createStorageMock() {
     clear() {
       values.clear();
     },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
+    },
+    get length() {
+      return values.size;
+    },
   };
 }
 
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
+let durableStore: MemoryDurableOutboundStore;
 
 beforeEach(() => {
+  durableStore = new MemoryDurableOutboundStore();
   const storage = createStorageMock();
   (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
   (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
@@ -71,6 +104,7 @@ type QueueOverrides = {
   sendDirect?: (peerJid: string, body: string, opts: { id: string }) => Promise<string | null>;
   sendRoom?: (roomJid: string, body: string, opts: { id: string }) => Promise<string | null>;
   emitStatus?: (snapshot: XmppStatusSnapshot) => void;
+  durableStore?: DurableOutboundStore;
 };
 
 function createQueue(overrides: QueueOverrides = {}) {
@@ -86,6 +120,7 @@ function createQueue(overrides: QueueOverrides = {}) {
     roomMemberJids: () => ({}),
     sendDirect: overrides.sendDirect ?? (async (_peer, _body, opts) => opts.id),
     sendRoom: overrides.sendRoom ?? (async (_room, _body, opts) => opts.id),
+    durableStore: overrides.durableStore ?? durableStore,
   });
   return { queue, events, statuses };
 }
@@ -102,9 +137,9 @@ describe("OfflineSendQueue drain ordering", () => {
     const statusEvents: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queuedMessageStatus", (id, status) => statusEvents.push({ id, status }));
 
-    queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
-    queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
-    queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
+    await queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
+    await queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
+    await queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
 
     await queue.flushDirect();
 
@@ -124,8 +159,8 @@ describe("OfflineSendQueue drain ordering", () => {
       },
     });
 
-    queue.queueDirectMessage("room@muc.example.com/juliet", "psst", { id: "pm-1", mucPm: true });
-    queue.queueDirectMessage("bob@example.com/desktop", "hi", { id: "dm-1" });
+    await queue.queueDirectMessage("room@muc.example.com/juliet", "psst", { id: "pm-1", mucPm: true });
+    await queue.queueDirectMessage("bob@example.com/desktop", "hi", { id: "dm-1" });
 
     await queue.flushDirect();
 
@@ -149,9 +184,9 @@ describe("OfflineSendQueue drain ordering", () => {
       },
     });
 
-    queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
-    queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
-    queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
+    await queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
+    await queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
+    await queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
     queue.beginAttempt("dm-1", "dm");
 
     await queue.flushDirect();
@@ -167,9 +202,9 @@ describe("OfflineSendQueue drain ordering", () => {
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
 
-    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-1" });
+    await queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-1" });
     await queue.flushDirect();
-    queue.handleAck("dm-1");
+    await queue.handleAck("dm-1");
 
     expect(listQueuedMessages(SCOPE)).toHaveLength(0);
     expect(acked).toEqual([{ id: "dm-1", kind: "dm" }]);
@@ -183,7 +218,7 @@ describe("OfflineSendQueue drain ordering", () => {
     let queue!: OfflineSendQueue;
     const created = createQueue({
       sendDirect: async (_peer, _body, opts) => {
-        queue.handleAck(opts.id);
+        await queue.handleAck(opts.id);
         return opts.id;
       },
     });
@@ -191,7 +226,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const acked: string[] = [];
     created.events.on("messageAcked", (id) => acked.push(id));
 
-    queue.queueDirectMessage("bob@example.com", "fast ack", { id: "dm-fast" });
+    await queue.queueDirectMessage("bob@example.com", "fast ack", { id: "dm-fast" });
     await queue.flushDirect();
 
     expect(listQueuedMessages(SCOPE)).toEqual([]);
@@ -202,13 +237,13 @@ describe("OfflineSendQueue drain ordering", () => {
     let queue!: OfflineSendQueue;
     const created = createQueue({
       sendRoom: async (_room, _body, opts) => {
-        queue.handleAck(opts.id);
+        await queue.handleAck(opts.id);
         return opts.id;
       },
     });
     queue = created.queue;
 
-    queue.queueRoomMessage("general@muc.example.com", "fast ack", { id: "room-fast" });
+    await queue.queueRoomMessage("general@muc.example.com", "fast ack", { id: "room-fast" });
     await queue.flushRoom("general@muc.example.com");
 
     expect(listQueuedMessages(SCOPE)).toEqual([]);
@@ -227,7 +262,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
-    queue.queueDirectMessage("bob@example.com", "retry me", { id: "dm-retry" });
+    await queue.queueDirectMessage("bob@example.com", "retry me", { id: "dm-retry" });
 
     await expect(queue.flushDirect()).rejects.toThrow("socket unavailable");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["dm-retry"]);
@@ -235,7 +270,7 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(statuses.at(-1)).toEqual({ id: "dm-retry", status: "queued" });
 
     await queue.flushDirect();
-    queue.handleAck("dm-retry");
+    await queue.handleAck("dm-retry");
     expect(attempt).toBe(2);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
@@ -257,7 +292,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const failures: string[] = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageDeliveryFailure", (id) => failures.push(id));
-    queue.queueDirectMessage("bob@example.com", "confirmed before control failure", {
+    await queue.queueDirectMessage("bob@example.com", "confirmed before control failure", {
       id: "dm-confirmed-control-failure",
     });
 
@@ -290,7 +325,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const queuedIds = () => listQueuedMessages(SCOPE).map((message) => message.id);
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
-    queue.queueDirectMessage("bob@example.com", "retry DM", { id: "dm-null-mismatch" });
+    await queue.queueDirectMessage("bob@example.com", "retry DM", { id: "dm-null-mismatch" });
 
     await queue.flushDirect();
     expect(queuedIds()).toEqual(["dm-null-mismatch"]);
@@ -304,7 +339,7 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
 
     await queue.flushDirect();
-    queue.handleAck("dm-null-mismatch");
+    await queue.handleAck("dm-null-mismatch");
     expect(attempt).toBe(3);
     expect(queuedIds()).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
@@ -323,7 +358,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
-    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-rejected" });
+    await queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-rejected" });
 
     await expect(queue.flushRoom("general@muc.example.com"))
       .rejects.toThrow("room socket unavailable");
@@ -332,7 +367,7 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(statuses.at(-1)).toEqual({ id: "room-rejected", status: "queued" });
 
     await queue.flushRoom("general@muc.example.com");
-    queue.handleAck("room-rejected");
+    await queue.handleAck("room-rejected");
     expect(attempt).toBe(2);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
@@ -352,7 +387,7 @@ describe("OfflineSendQueue drain ordering", () => {
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
-    queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-retry" });
+    await queue.queueRoomMessage("general@muc.example.com", "retry room", { id: "room-retry" });
 
     await queue.flushRoom("general@muc.example.com");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
@@ -366,19 +401,120 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
 
     await queue.flushRoom("general@muc.example.com");
-    queue.handleAck("room-retry");
+    await queue.handleAck("room-retry");
     expect(attempt).toBe(3);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
 
-  test("an ack after reload deletes persistence without ephemeral inflight state", () => {
+  test("an ack after reload deletes persistence without ephemeral inflight state", async () => {
     const { queue } = createQueue();
-    queue.queueDirectMessage("bob@example.com", "already handled", { id: "dm-reloaded" });
+    await queue.queueDirectMessage("bob@example.com", "already handled", { id: "dm-reloaded" });
 
-    queue.handleAck("dm-reloaded");
+    await queue.handleAck("dm-reloaded");
 
     expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
+  test("projection loss cannot suppress durable resend or fabricate an acknowledgement", async () => {
+    const storage = window.localStorage;
+    const originalSetItem = storage.setItem.bind(storage);
+    storage.setItem = ((key: string, value: string) => {
+      if (key.startsWith("waddle.chat.outbound-queue.v2.")) {
+        throw new DOMException("projection quota", "QuotaExceededError");
+      }
+      originalSetItem(key, value);
+    }) as Storage["setItem"];
+
+    const sent: string[] = [];
+    try {
+      const { queue } = createQueue({
+        sendDirect: async (_peer, _body, opts) => {
+          sent.push(opts.id);
+          return opts.id;
+        },
+      });
+      await queue.queueDirectMessage("bob@example.com", "durable only", { id: "dm-no-projection" });
+      expect(listQueuedMessages(SCOPE)).toEqual([]);
+
+      await queue.flushDirect();
+      expect(sent).toEqual(["dm-no-projection"]);
+      await queue.handleAck("dm-no-projection");
+
+      const reconstructed = createQueue({
+        sendDirect: async (_peer, _body, opts) => {
+          sent.push(opts.id);
+          return opts.id;
+        },
+      }).queue;
+      await reconstructed.flushDirect();
+      expect(sent).toEqual(["dm-no-projection"]);
+    } finally {
+      storage.setItem = originalSetItem;
+    }
+  });
+
+  test("durable enqueue failure emits no optimistic queue state and never reaches the wire", async () => {
+    const failingStore = new MemoryDurableOutboundStore();
+    failingStore.persistReady = async () => ({
+      kind: "failed",
+      reason: "quota",
+      cause: new DOMException("durable quota", "QuotaExceededError"),
+    });
+    const sent: string[] = [];
+    const { queue, events } = createQueue({
+      durableStore: failingStore,
+      sendDirect: async (_peer, _body, opts) => {
+        sent.push(opts.id);
+        return opts.id;
+      },
+    });
+    const statuses: string[] = [];
+    events.on("queuedMessageStatus", (id, status) => statuses.push(`${id}:${status}`));
+
+    await expect(queue.queueDirectMessage("bob@example.com", "must persist", { id: "dm-quota" }))
+      .rejects.toThrow("Outbound persistence enqueue-direct failed: quota");
+    await queue.flushDirect();
+
+    expect(sent).toEqual([]);
+    expect(statuses).toEqual([]);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+  });
+
+  test("durable ack delete failure retains ownership and emits no false acknowledgement", async () => {
+    const store = new MemoryDurableOutboundStore();
+    const { queue, events } = createQueue({ durableStore: store });
+    const acknowledgements: string[] = [];
+    events.on("messageAck", (id) => acknowledgements.push(id));
+    await queue.queueDirectMessage("bob@example.com", "retain until commit", { id: "dm-delete-fail" });
+    await queue.flushDirect();
+    store.delete = async () => ({
+      kind: "failed",
+      reason: "aborted",
+      cause: new DOMException("delete aborted", "AbortError"),
+    });
+
+    await expect(queue.handleAck("dm-delete-fail"))
+      .rejects.toThrow("Outbound persistence ack-delete failed: aborted");
+
+    expect(acknowledgements).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-delete-fail"]);
+  });
+
+  test("two same-account tabs cannot claim and send the same durable row", async () => {
+    const store = new MemoryDurableOutboundStore();
+    const sends: string[] = [];
+    const sendDirect = async (_peer: string, _body: string, opts: { id: string }) => {
+      sends.push(opts.id);
+      return opts.id;
+    };
+    const first = createQueue({ durableStore: store, sendDirect }).queue;
+    await first.queueDirectMessage("bob@example.com", "once", { id: "dm-cross-tab" });
+    const second = createQueue({ durableStore: store, sendDirect }).queue;
+
+    await Promise.all([first.flushDirect(), second.flushDirect()]);
+
+    expect(sends).toEqual(["dm-cross-tab"]);
   });
 
   test("non-retryable send failures are discarded instead of retried forever", async () => {
@@ -393,8 +529,8 @@ describe("OfflineSendQueue drain ordering", () => {
     const failures: string[] = [];
     events.on("messageDeliveryFailure", (id) => failures.push(id));
 
-    queue.queueDirectMessage("bob@example.com", "bad recipient", { id: "dm-bad" });
-    queue.queueDirectMessage("bob@example.com", "fine", { id: "dm-ok" });
+    await queue.queueDirectMessage("bob@example.com", "bad recipient", { id: "dm-bad" });
+    await queue.queueDirectMessage("bob@example.com", "fine", { id: "dm-ok" });
 
     await queue.flushDirect();
 
@@ -413,8 +549,8 @@ describe("OfflineSendQueue drain ordering", () => {
       },
     });
 
-    queue.queueRoomMessage("general@muc.example.com", "to general", { id: "room-1" });
-    queue.queueRoomMessage("random@muc.example.com", "to random", { id: "room-2" });
+    await queue.queueRoomMessage("general@muc.example.com", "to general", { id: "room-1" });
+    await queue.queueRoomMessage("random@muc.example.com", "to random", { id: "room-2" });
 
     await queue.flushRoom("general@muc.example.com");
     await queue.flushRoom("random@muc.example.com");
@@ -422,48 +558,45 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(sends).toEqual([{ roomJid: "general@muc.example.com", body: "to general" }]);
   });
 
-  test("queueing while connected (room not joined) does not emit a reconnecting status (#1164)", () => {
+  test("queueing while connected (room not joined) does not emit a reconnecting status (#1164)", async () => {
     const { queue, statuses } = createQueue({
       canUseConnectedSession: () => true,
       roomIsReady: () => false,
     });
 
-    queue.queueRoomMessage("general@muc.example.com", "hello", { id: "room-q1" });
+    await queue.queueRoomMessage("general@muc.example.com", "hello", { id: "room-q1" });
 
     // The message still queues, but the global banner must stay online.
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["room-q1"]);
     expect(statuses).toHaveLength(0);
   });
 
-  test("queueing while the session is unusable still reports the reconnecting status", () => {
+  test("queueing while the session is unusable still reports the reconnecting status", async () => {
     const { queue, statuses } = createQueue({
       canUseConnectedSession: () => false,
     });
 
-    queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-q1" });
+    await queue.queueDirectMessage("bob@example.com", "hello", { id: "dm-q1" });
 
     expect(statuses).toEqual([
       { state: "reconnecting", detail: "Message queued until the connection returns" },
     ]);
   });
 
-  test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", () => {
+  test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", async () => {
     const { queue, events } = createQueue();
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
-    queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
-    queue.seedFromResumeState({
+    await queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
+    await queue.seedFromResumeState({
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [{
-        stanza: '<message id="dm-native" to="bob@example.com"><body>native replay</body></message>',
-        sentAt: "2026-07-16T08:09:10.123Z",
-      }],
+      unhandledOutboundEntries: [messageResumeEntry("dm-native")],
     });
 
-    queue.handleAck("dm-native");
+    await queue.handleAck("dm-native");
 
     expect(listQueuedMessages(SCOPE)).toHaveLength(0);
     expect(depths.slice(-2)).toEqual([
@@ -485,19 +618,16 @@ describe("OfflineSendQueue drain ordering", () => {
     events.on("messageDeliveryFailure", (id) => failures.push(id));
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
-    queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native-fallback" });
-    queue.seedFromResumeState({
+    await queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native-fallback" });
+    await queue.seedFromResumeState({
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [{
-        stanza: '<message id="dm-native-fallback" to="bob@example.com"><body>native fallback</body></message>',
-        sentAt: "2026-07-16T08:09:10.123Z",
-      }],
+      unhandledOutboundEntries: [messageResumeEntry("dm-native-fallback")],
     });
 
-    queue.handleFailed("dm-native-fallback");
-    queue.clearInflight();
+    await queue.handleFailed("dm-native-fallback");
+    await queue.clearInflight();
     await queue.flushDirect();
 
     expect(sent).toEqual([]);
@@ -505,7 +635,7 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
     expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
 
-    queue.handleAck("dm-native-fallback");
+    await queue.handleAck("dm-native-fallback");
     expect(listQueuedMessages(SCOPE)).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
@@ -518,18 +648,15 @@ describe("OfflineSendQueue drain ordering", () => {
         return opts.id;
       },
     });
-    queue.queueDirectMessage("bob@example.com", "fresh without SM", { id: "dm-no-resume" });
-    queue.seedFromResumeState({
+    await queue.queueDirectMessage("bob@example.com", "fresh without SM", { id: "dm-no-resume" });
+    await queue.seedFromResumeState({
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [{
-        stanza: '<message id="dm-no-resume" to="bob@example.com"><body>fresh without SM</body></message>',
-        sentAt: "2026-07-16T08:09:10.123Z",
-      }],
+      unhandledOutboundEntries: [messageResumeEntry("dm-no-resume")],
     });
 
-    queue.clearInflight();
+    await queue.clearInflight();
     await queue.flushDirect();
 
     expect(sent).toEqual(["dm-no-resume"]);
@@ -538,17 +665,14 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a reconstructed queue reclaims a retained failed-resume row after an immediate or mid-write crash", async () => {
     const original = createQueue().queue;
-    original.queueDirectMessage("bob@example.com", "survive fallback crash", { id: "dm-crash-fallback" });
-    original.seedFromResumeState({
+    await original.queueDirectMessage("bob@example.com", "survive fallback crash", { id: "dm-crash-fallback" });
+    await original.seedFromResumeState({
       previd: "p",
       inboundH: 3,
       outboundH: 4,
-      unhandledOutboundEntries: [{
-        stanza: '<message id="dm-crash-fallback" to="bob@example.com"><body>survive fallback crash</body></message>',
-        sentAt: "2026-07-16T08:09:10.123Z",
-      }],
+      unhandledOutboundEntries: [messageResumeEntry("dm-crash-fallback")],
     });
-    original.handleFailed("dm-crash-fallback");
+    await original.handleFailed("dm-crash-fallback");
 
     const reclaimed: string[] = [];
     const reconstructed = createQueue({
@@ -558,17 +682,23 @@ describe("OfflineSendQueue drain ordering", () => {
       },
     }).queue;
 
-    await reconstructed.flushDirect();
+    const actualNow = Date.now;
+    Date.now = () => actualNow() + OUTBOUND_CLAIM_LEASE_MS + 1;
+    try {
+      await reconstructed.flushDirect();
+    } finally {
+      Date.now = actualNow;
+    }
 
     expect(reclaimed).toEqual(["dm-crash-fallback"]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-crash-fallback"]);
-    reconstructed.handleAck("dm-crash-fallback");
+    await reconstructed.handleAck("dm-crash-fallback");
     expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 });
 
 describe("ReconnectScheduler", () => {
-  test("backs off exponentially and coalesces while a timer is pending", () => {
+  test("backs off exponentially and coalesces while a timer is pending", async () => {
     const scheduled: Array<{ attempt: number; delayMs: number }> = [];
     const scheduler = new ReconnectScheduler({
       isDestroying: () => false,
@@ -594,7 +724,7 @@ describe("ReconnectScheduler", () => {
     expect(scheduled.at(-1)).toEqual({ attempt: 1, delayMs: 2000 });
   });
 
-  test("caps attempts at 10 and reports exhaustion instead of scheduling forever (#1164)", () => {
+  test("caps attempts at 10 and reports exhaustion instead of scheduling forever (#1164)", async () => {
     const scheduled: Array<{ attempt: number; delayMs: number }> = [];
     let exhausted = 0;
     const scheduler = new ReconnectScheduler({
@@ -620,7 +750,7 @@ describe("ReconnectScheduler", () => {
     expect(scheduled.at(-1)).toEqual({ attempt: 1, delayMs: 2000 });
   });
 
-  test("does not schedule while destroying and reports reconnect duration on completion", () => {
+  test("does not schedule while destroying and reports reconnect duration on completion", async () => {
     const scheduled: Array<{ attempt: number; delayMs: number }> = [];
     const scheduler = new ReconnectScheduler({
       isDestroying: () => true,
@@ -646,18 +776,21 @@ function createRecordingPersistence() {
     loadCatchup: () => null,
     saveCatchup: () => undefined,
     clearCatchup: () => undefined,
-    loadSm: () => saved,
-    consumeSm: () => {
+    loadSm: async () => ({ kind: "committed", value: saved }),
+    consumeSm: async () => {
       calls.push("consumeSm");
-      return saved;
+      return { kind: "committed", value: saved };
     },
-    saveSm: (state) => {
+    saveSm: async (state) => {
       calls.push("saveSm");
       saved = state;
+      return { kind: "committed", value: undefined };
     },
-    clearSm: () => {
+    clearSm: async () => {
       calls.push("clearSm");
+      const removed = saved !== null;
       saved = null;
+      return { kind: "committed", value: removed };
     },
     preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
     reclaimPagehideOwnership: () => calls.push("reclaimPagehideOwnership"),
@@ -669,7 +802,7 @@ function createRecordingPersistence() {
 }
 
 describe("ResumeStateStore", () => {
-  test("persistForPageHide snapshots the live state with the session resource", () => {
+  test("persistForPageHide snapshots the live state with the session resource", async () => {
     const { persistence, calls, getSaved } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     let persistedRooms = 0;
@@ -679,13 +812,14 @@ describe("ResumeStateStore", () => {
       "web-abc",
       () => { persistedRooms += 1; },
     );
+    await Promise.resolve();
 
     expect(calls).toEqual(["preparePagehideHandoff", "saveSm"]);
     expect(getSaved()).toEqual({ previd: "p1", inboundH: 3, outboundH: 4, resource: "web-abc" });
     expect(persistedRooms).toBe(1);
   });
 
-  test("persistForPageHide drops unacked-outbound state it cannot replay", () => {
+  test("persistForPageHide drops unacked-outbound state it cannot replay", async () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     let persistedRooms = 0;
@@ -695,13 +829,14 @@ describe("ResumeStateStore", () => {
       "web-abc",
       () => { persistedRooms += 1; },
     );
+    await Promise.resolve();
 
     expect(calls).toEqual(["preparePagehideHandoff", "clearSm"]);
     expect(store.state).toBeNull();
     expect(persistedRooms).toBe(1);
   });
 
-  test("captureFromDisconnect stamps the resource and keeps state in memory only", () => {
+  test("captureFromDisconnect stamps the resource and keeps state in memory only", async () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
 
@@ -716,7 +851,7 @@ describe("ResumeStateStore", () => {
     expect(calls).toEqual([]);
   });
 
-  test("discardState clears the persisted slot; clearAll also drops joined rooms + handle", () => {
+  test("discardState clears the persisted slot; clearAll also drops joined rooms + handle", async () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     store.captureFromDisconnect(
@@ -724,13 +859,13 @@ describe("ResumeStateStore", () => {
       "web-r",
     );
 
-    store.discardState();
+    await store.discardState();
     expect(store.state).toBeNull();
     expect(calls).toEqual(["clearSm"]);
 
     let freed = 0;
     store.setHandle({ free: () => { freed += 1; } } as never);
-    store.clearAll();
+    await store.clearAll();
     expect(freed).toBe(1);
     expect(store.handle).toBeNull();
   });

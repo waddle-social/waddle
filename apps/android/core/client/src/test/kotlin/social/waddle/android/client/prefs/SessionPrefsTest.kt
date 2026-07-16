@@ -58,7 +58,20 @@ class SessionPrefsTest {
             outboundH = 7u,
             maxResumeSeconds = 300u,
             queuedEntries = listOf(
-                SmResumeEntrySnapshot("<message/>", 1_752_573_540L, 123_000_000),
+                SmResumeEntrySnapshot(
+                    stanza = SmResumeStanzaSnapshot(
+                        stanzaKind = SmResumeStanzaKind.MESSAGE,
+                        tokens = listOf(
+                            SmResumeXmlToken.Start(
+                                name = SmResumeXmlName("jabber:client", "message"),
+                                attributes = emptyList(),
+                            ),
+                            SmResumeXmlToken.End,
+                        ),
+                    ),
+                    sentAtEpochSeconds = 1_752_573_540L,
+                    sentAtNanoseconds = 123_000_000,
+                ),
             ),
         )
 
@@ -85,6 +98,31 @@ class SessionPrefsTest {
 
         prefs.updateOutboundQueue { current -> current.filterNot { it.clientStanzaId == "q-1" } }
         assertTrue(prefs.outboundQueue.first().isEmpty())
+    }
+
+    @Test
+    fun `outbound ownership discriminators and every native phase round trip`() = runBlocking {
+        val prefs = newPrefs()
+        val ownerships = listOf(
+            OutboundOwnership.Ready,
+            OutboundOwnership.NativeOwned(7L, NativeOutboundPhase.FRESH),
+            OutboundOwnership.NativeOwned(8L, NativeOutboundPhase.RESUME),
+            OutboundOwnership.NativeOwned(9L, NativeOutboundPhase.FALLBACK),
+        )
+        val messages = ownerships.mapIndexed { index, ownership ->
+            QueuedOutboundMessage(
+                conversationJid = "alice@waddle.test",
+                isGroupchat = false,
+                body = "message-$index",
+                clientStanzaId = "q-ownership-$index",
+                enqueuedAtMillis = index.toLong(),
+                ownership = ownership,
+            )
+        }
+
+        prefs.updateOutboundQueue { messages }
+
+        assertEquals(messages, prefs.outboundQueue.first())
     }
 
     @Test

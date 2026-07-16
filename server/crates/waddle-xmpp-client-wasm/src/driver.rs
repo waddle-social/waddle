@@ -1229,6 +1229,7 @@ mod tests {
                 resume_state: None,
             },
             command_owner: Weak::new(),
+            disposed: false,
             on_message: None,
             on_presence: None,
             on_connected: None,
@@ -1740,6 +1741,75 @@ mod tests {
             assert!(task.websocket_close_started);
             assert!(task.runtime.stream_close_complete());
             assert!(inner.borrow().resume_state.is_none());
+        });
+    }
+
+    #[test]
+    fn wasm_peer_stream_error_writes_one_close_and_fences_all_later_xml() {
+        block_on(async {
+            let (mut task, wire, mut events, _inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let stream_error = Element::builder("error", waddle_xmpp_client::NS_STREAMS)
+                .append(
+                    Element::builder(
+                        "internal-server-error",
+                        "urn:ietf:params:xml:ns:xmpp-streams",
+                    )
+                    .build(),
+                )
+                .build();
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Element(stream_error),
+                ))
+                .await
+            );
+
+            assert!(matches!(
+                wire.take_messages().as_slice(),
+                [TransportMessage::Close(_)]
+            ));
+            assert_eq!(wire.close_count.get(), 0);
+            assert!(!task.websocket_close_started);
+            let observed = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+            assert!(observed.iter().any(|event| matches!(
+                event,
+                DriverEvent::Client(client_event)
+                    if matches!(
+                        client_event.as_ref(),
+                        ClientEvent::Connection(ConnectionEvent::StreamError {
+                            condition: waddle_xmpp_client::StreamErrorCondition::InternalServerError,
+                            ..
+                        })
+                    )
+            )));
+
+            for late in [
+                waddle_xmpp_client::stream_management::SmState::build_request_ack(),
+                Element::builder("message", NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "wasm-too-late")
+                    .build(),
+            ] {
+                assert!(
+                    task.apply_transport_event(TransportEvent::MessageReceived(
+                        TransportMessage::Element(late),
+                    ))
+                    .await
+                );
+            }
+            assert!(task.handle_stream_management_timer_at(u64::MAX).await);
+            assert!(wire.take_messages().is_empty());
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+            assert_eq!(wire.close_count.get(), 1);
+            assert!(task.websocket_close_started);
         });
     }
 

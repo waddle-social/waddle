@@ -12,10 +12,9 @@ pub struct WaddleConfig {
     pub resume_state: Option<WaddleSmResumeState>,
 }
 
-/// XEP-0198 client resume snapshot crossing the FFI as an opaque
-/// persistence round-trip: the Swift app stores it on disconnect and
-/// feeds it back through [`WaddleConfig`] on the next connect. Queued
-/// outbound entries carry serialized XML plus their original send instant.
+/// XEP-0198 client resume snapshot crossing the FFI as a typed persistence
+/// round-trip. The app stores it on disconnect and feeds it back through
+/// [`WaddleConfig`] on the next connect.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleSmResumeState {
     /// SM resumption token from `<enabled id='…'/>`.
@@ -30,13 +29,63 @@ pub struct WaddleSmResumeState {
     pub queued_entries: Vec<WaddleSmResumeEntry>,
 }
 
-/// UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
-/// parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
-/// native timestamp type before Rust converts it to `DateTime<Utc>`.
+/// UniFFI boundary representation of one typed XEP-0198 resume entry.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleSmResumeEntry {
-    pub stanza_xml: String,
+    pub stanza: WaddleResumeStanza,
     pub sent_at: std::time::SystemTime,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleResumeStanzaKind {
+    Message,
+    Presence,
+    Iq,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeXmlNamespace {
+    pub value: String,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeXmlLocalName {
+    pub value: String,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeXmlValue {
+    pub value: String,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeXmlName {
+    pub namespace: WaddleResumeXmlNamespace,
+    pub local_name: WaddleResumeXmlLocalName,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeXmlAttribute {
+    pub name: WaddleResumeXmlName,
+    pub value: WaddleResumeXmlValue,
+}
+
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum WaddleResumeXmlToken {
+    Start {
+        name: WaddleResumeXmlName,
+        attributes: Vec<WaddleResumeXmlAttribute>,
+    },
+    Text {
+        value: WaddleResumeXmlValue,
+    },
+    End,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleResumeStanza {
+    pub stanza_kind: WaddleResumeStanzaKind,
+    pub tokens: Vec<WaddleResumeXmlToken>,
 }
 
 #[derive(uniffi::Record, Clone)]

@@ -1,5 +1,6 @@
 package social.waddle.android.client.prefs
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.MentionRef
@@ -19,11 +20,34 @@ data class SharedFileRef(
     val disposition: FileDisposition = FileDisposition.ATTACHMENT,
 )
 
+@Serializable
+enum class NativeOutboundPhase {
+    FRESH,
+    RESUME,
+    FALLBACK,
+}
+
+/** Durable authority for an outbound row. Invalid owner/phase combinations
+ * are unrepresentable: browser/Kotlin replay may send [Ready] rows, while an
+ * exact native connection generation exclusively owns [NativeOwned] rows. */
+@Serializable
+sealed interface OutboundOwnership {
+    @Serializable
+    @SerialName("ready")
+    data object Ready : OutboundOwnership
+
+    @Serializable
+    @SerialName("native-owned")
+    data class NativeOwned(
+        val connectionGeneration: Long,
+        val phase: NativeOutboundPhase,
+    ) : OutboundOwnership
+}
+
 /**
- * One persisted outbound send awaiting replay, stored as a JSON list in
- * [SessionPrefs] (the Android analog of web localStorage
- * `waddle.chat.outbound-queue`). Survives process death; replayed in
- * enqueue order on the next `SessionReady`.
+ * One persisted outbound send in [SessionPrefs]. Ready rows await Kotlin
+ * replay; NativeOwned rows await native acknowledgement/failure or
+ * reconnect reconciliation. Both survive process death.
  */
 @Serializable
 data class QueuedOutboundMessage(
@@ -44,6 +68,7 @@ data class QueuedOutboundMessage(
      */
     val clientStanzaId: String,
     val enqueuedAtMillis: Long,
+    val ownership: OutboundOwnership = OutboundOwnership.Ready,
     /** XEP-0461 reply annotation (see `MessageSendExtras`). */
     val replyToId: String? = null,
     val replyToAuthorJid: String? = null,

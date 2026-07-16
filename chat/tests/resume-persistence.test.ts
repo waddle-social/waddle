@@ -18,11 +18,18 @@ import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
+  MemoryDurableOutboundStore,
+  type DurableOutcome,
+} from "../src/lib/outbound-durable-store";
+import { MemoryDurableSmResumeStore } from "../src/lib/xmpp/sm-resume-durable-store";
+import {
   createLocalStorageResumePersistence,
   nullResumePersistence,
   type PersistedReconnectCatchup,
   type PersistedSmResumeState,
   type ResumePersistence,
+  type XmppResumeEntry,
+  type XmppResumeStanzaKind,
 } from "../src/lib/xmpp/resume-persistence";
 
 // Bun's default test env is Node-like (no `window` / `localStorage`).
@@ -38,7 +45,26 @@ import {
 // path; a leaked shim would activate localStorage in those tests
 // and corrupt state across runs.
 const WINDOW_SENTINEL = Symbol("test-installed-window");
-const RESUME_SENT_AT = "2026-07-16T08:09:10.123Z";
+const RESUME_SENT_AT_EPOCH_MS = Date.parse("2026-07-16T08:09:10.123Z");
+
+function resumeEntry(kind: XmppResumeStanzaKind, id?: string): XmppResumeEntry {
+  return {
+    stanza: {
+      stanzaKind: kind,
+      tokens: [
+        {
+          kind: "start",
+          name: { namespace: "jabber:client", localName: kind },
+          attributes: id
+            ? [{ name: { namespace: "", localName: "id" }, value: id }]
+            : [],
+        },
+        { kind: "end" },
+      ],
+    },
+    sentAtEpochMs: RESUME_SENT_AT_EPOCH_MS,
+  };
+}
 type ShimmedGlobal = typeof globalThis & {
   window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
@@ -97,14 +123,22 @@ function inMemoryPersistence(): ResumePersistence & {
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
-    loadSm: () => sm,
-    consumeSm: () => {
+    loadSm: async () => ({ kind: "committed", value: sm }),
+    consumeSm: async () => {
       const current = sm;
       sm = null;
-      return current;
+      return { kind: "committed", value: current };
     },
-    saveSm: (state) => { sm = state; },
-    clearSm: () => { smClears += 1; sm = null; },
+    saveSm: async (state) => {
+      sm = state;
+      return { kind: "committed", value: undefined };
+    },
+    clearSm: async () => {
+      smClears += 1;
+      const removed = sm !== null;
+      sm = null;
+      return { kind: "committed", value: removed };
+    },
     preparePagehideHandoff: () => undefined,
     reclaimPagehideOwnership: () => undefined,
     loadJoinedRooms: () => [...joinedRooms],
@@ -115,6 +149,17 @@ function inMemoryPersistence(): ResumePersistence & {
     joinedRoomsSnapshot: () => [...joinedRooms],
     clearSmCount: () => smClears,
   };
+}
+
+async function committed<T>(operation: Promise<DurableOutcome<T>>): Promise<T> {
+  const outcome = await operation;
+  expect(outcome.kind).toBe("committed");
+  if (outcome.kind !== "committed") throw new Error(`durable operation failed: ${outcome.reason}`);
+  return outcome.value;
+}
+
+async function waitForClientStartup(client: BrowserXmppClient): Promise<void> {
+  await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
 }
 
 async function flushMicrotasks() {
@@ -128,7 +173,7 @@ function catchupShardKey(accountKey: string, ownerId: string): string {
 }
 
 describe("ReconnectCatchup persistence — hydrate from snapshot on construct", () => {
-  test("hydrates DM + room cursors from the persistence snapshot", () => {
+  test("hydrates DM + room cursors from the persistence snapshot", async () => {
     const persistence = inMemoryPersistence();
     persistence.saveCatchup({
       dmLastSeen: [
@@ -145,7 +190,7 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     expect(c.getRoomLastSeen("general@muc.example.com")).toBe("2026-05-20T11:00:00.000Z");
   });
 
-  test("canonicalized hydrate collisions merge cursor progress instead of using persistence order", () => {
+  test("canonicalized hydrate collisions merge cursor progress instead of using persistence order", async () => {
     const persistence = inMemoryPersistence();
     persistence.saveCatchup({
       dmLastSeen: [
@@ -165,7 +210,7 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     }]);
   });
 
-  test("hydrated instance returns cursors on the *first* onSessionStarted (PR3 whole point)", () => {
+  test("hydrated instance returns cursors on the *first* onSessionStarted (PR3 whole point)", async () => {
     // A hydrated `ReconnectCatchup` represents a prior tab session
     // that left cursors behind in localStorage. The next page load
     // gets a fresh instance, but the very first `session:started`
@@ -185,14 +230,14 @@ describe("ReconnectCatchup persistence — hydrate from snapshot on construct", 
     ]);
   });
 
-  test("a fresh (un-hydrated) instance still treats the first onSessionStarted as initial login", () => {
+  test("a fresh (un-hydrated) instance still treats the first onSessionStarted as initial login", async () => {
     // Unchanged from pre-PR3 behavior: a brand-new account / first-
     // ever login has nothing to catch up on.
     const c = new ReconnectCatchup(nullResumePersistence);
     expect(c.onSessionStarted()).toEqual([]);
   });
 
-  test("missing snapshot is a no-op (legacy / first-ever load)", () => {
+  test("missing snapshot is a no-op (legacy / first-ever load)", async () => {
     const c = new ReconnectCatchup(nullResumePersistence);
     expect(c.getDmLastSeen("bob@example.com")).toBeUndefined();
   });
@@ -292,7 +337,7 @@ describe("applyResumeStateToWasmConfig", () => {
     return { config, calls };
   }
 
-  test("uses max-aware timestamped resume entries when unhandled work and max are available", () => {
+  test("uses max-aware timestamped resume entries when unhandled work and max are available", async () => {
     const { config, calls } = configWith([
       "with_resume_state_entries_with_max",
       "with_resume_state_entries",
@@ -305,18 +350,18 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
+      unhandledOutboundEntries: [resumeEntry("message")],
     });
 
     expect(calls).toEqual([
       {
         method: "with_resume_state_entries_with_max",
-        args: ["prev-1", 7, 11, [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }], 300],
+        args: ["prev-1", 7, 11, [resumeEntry("message")], 300],
       },
     ]);
   });
 
-  test("uses max-aware resume when no unhandled stanzas need replay", () => {
+  test("uses max-aware resume when no unhandled stanzas need replay", async () => {
     const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
@@ -334,7 +379,7 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
-  test("uses timestamped resume entries without a max-aware entry method", () => {
+  test("uses timestamped resume entries without a max-aware entry method", async () => {
     const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
@@ -342,28 +387,28 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }],
+      unhandledOutboundEntries: [resumeEntry("presence")],
     });
 
     expect(calls).toEqual([
       {
         method: "with_resume_state_entries",
-        args: ["prev-3", 1, 2, [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }]],
+        args: ["prev-3", 1, 2, [resumeEntry("presence")]],
       },
     ]);
   });
 
-  test("fails closed instead of dropping timestamped unhandled entries", () => {
+  test("fails closed instead of dropping timestamped unhandled entries", async () => {
     const { config } = configWith(["with_resume_state"]);
     expect(() => applyResumeStateToWasmConfig(config, {
       previd: "prev-missing-entry-api",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
+      unhandledOutboundEntries: [resumeEntry("message")],
     })).toThrow("cannot restore timestamped XEP-0198 resume entries");
   });
 
-  test("falls back to old plain resume when generated WASM has only the legacy method", () => {
+  test("falls back to old plain resume when generated WASM has only the legacy method", async () => {
     const { config, calls } = configWith(["with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
@@ -383,7 +428,7 @@ describe("applyResumeStateToWasmConfig", () => {
 });
 
 describe("createLocalStorageResumePersistence — localStorage adapter", () => {
-  test("round-trips a catchup snapshot through localStorage", () => {
+  test("round-trips a catchup snapshot through localStorage", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const snapshot: PersistedReconnectCatchup = {
       dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z" }]],
@@ -393,24 +438,21 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(persistence.loadCatchup()).toEqual(snapshot);
   });
 
-  test("round-trips an SM resume state through localStorage (with internal savedAt)", () => {
+  test("round-trips an SM resume state through localStorage (with internal savedAt)", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const state = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundEntries: [{
-        stanza: "<message xmlns='jabber:client' id='m1'/>",
-        sentAt: RESUME_SENT_AT,
-      }],
+      unhandledOutboundEntries: [resumeEntry("message", "m1")],
     };
-    persistence.saveSm(state);
+    await committed(persistence.saveSm(state));
     // Round-trip strips the internal `savedAt` so the caller gets
     // the same shape it passed in.
-    expect(persistence.loadSm()).toEqual(state);
+    expect(await committed(persistence.loadSm())).toEqual(state);
   });
 
-  test("round-trips the bound resource with SM resume state", () => {
+  test("round-trips the bound resource with SM resume state", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const state = {
       previd: "abc-123",
@@ -418,11 +460,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    persistence.saveSm(state);
-    expect(persistence.loadSm()).toEqual(state);
+    await committed(persistence.saveSm(state));
+    expect(await committed(persistence.loadSm())).toEqual(state);
   });
 
-  test("consumeSm claims and clears the stored resource for only one client", () => {
+  test("consumeSm claims and clears the stored resource for only one client", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com");
     const state = {
       previd: "abc-123",
@@ -430,13 +472,13 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    persistence.saveSm(state);
-    expect(persistence.consumeSm()).toEqual(state);
-    expect(persistence.consumeSm()).toBeNull();
-    expect(persistence.loadSm()).toBeNull();
+    await committed(persistence.saveSm(state));
+    expect(await committed(persistence.consumeSm())).toEqual(state);
+    expect(await committed(persistence.consumeSm())).toBeNull();
+    expect(await committed(persistence.loadSm())).toBeNull();
   });
 
-  test("consumeSm is scoped to the tab owner", () => {
+  test("consumeSm is scoped to the tab owner", async () => {
     const tabA = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     const tabB = createLocalStorageResumePersistence("alice@example.com", "tab-b");
     const state = {
@@ -445,15 +487,15 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    tabA.saveSm(state);
+    await committed(tabA.saveSm(state));
 
-    expect(tabB.loadSm()).toBeNull();
-    expect(tabB.consumeSm()).toBeNull();
-    expect(tabA.consumeSm()).toEqual(state);
-    expect(tabA.consumeSm()).toBeNull();
+    expect(await committed(tabB.loadSm())).toBeNull();
+    expect(await committed(tabB.consumeSm())).toBeNull();
+    expect(await committed(tabA.consumeSm())).toEqual(state);
+    expect(await committed(tabA.consumeSm())).toBeNull();
   });
 
-  test("a duplicated tab rotates a copied live owner before it can claim SM state", () => {
+  test("a duplicated tab rotates a copied live owner before it can claim SM state", async () => {
     const copiedOwner = "copied-live-owner";
     const state = {
       previd: "abc-123",
@@ -461,7 +503,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state);
+    await committed(createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state));
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", copiedOwner);
     window.localStorage.setItem(
       `waddle.chat.sm-resume.owner-lease.${copiedOwner}`,
@@ -474,11 +516,11 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     const duplicatedTab = createLocalStorageResumePersistence("alice@example.com");
 
-    expect(duplicatedTab.consumeSm()).toBeNull();
-    expect(createLocalStorageResumePersistence("alice@example.com", copiedOwner).consumeSm()).toEqual(state);
+    expect(await committed(duplicatedTab.consumeSm())).toBeNull();
+    expect(await committed(createLocalStorageResumePersistence("alice@example.com", copiedOwner).consumeSm())).toEqual(state);
   });
 
-  test("a pagehide handoff keeps the copied owner for same-tab reload consumption", () => {
+  test("a pagehide handoff keeps the copied owner for same-tab reload consumption", async () => {
     const reloadOwner = "reload-owner";
     const state = {
       previd: "abc-123",
@@ -487,7 +529,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       resource: "web-existing-resource",
     };
     const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
-    previousPage.saveSm(state);
+    await committed(previousPage.saveSm(state));
     previousPage.preparePagehideHandoff();
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
     window.localStorage.setItem(
@@ -501,16 +543,17 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
 
-    expect(reloadedPage.consumeSm()).toEqual(state);
+    expect(await committed(reloadedPage.consumeSm())).toEqual(state);
   });
 
-  test("BFCache pagehide persists before eviction and pageshow reclaims owner handoff", () => {
+  test("BFCache pagehide persists before eviction and pageshow reclaims owner handoff", async () => {
     const ownerId = "bfcache-owner";
     const persistence = createLocalStorageResumePersistence("alice@example.com", ownerId);
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
     );
+    await waitForClientStartup(client);
     const activeResource = (client as unknown as { resource: string }).resource;
     (client as unknown as {
       xmpp: {
@@ -546,7 +589,8 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     };
 
     dispatch("pagehide");
-    expect(persistence.loadSm()).toMatchObject({
+    await flushMicrotasks();
+    expect(await committed(persistence.loadSm())).toMatchObject({
       previd: "bfcache-stream",
       inboundH: 12,
       outboundH: 8,
@@ -561,15 +605,17 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     // A later BFCache eviction creates a fresh JS context. The synchronous
     // pagehide snapshot remains consumable and preserves the bound resource.
     dispatch("pagehide");
+    await flushMicrotasks();
     const reloaded = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       createLocalStorageResumePersistence("alice@example.com", ownerId),
     );
+    await waitForClientStartup(reloaded);
     expect((reloaded as unknown as { resource: string }).resource).toBe(activeResource);
     remove();
   });
 
-  test("a slow same-tab reload keeps the owner until the prior lease expires", () => {
+  test("a slow same-tab reload keeps the owner until the prior lease expires", async () => {
     const realNow = Date.now;
     let now = 1_000_000;
     Date.now = () => now;
@@ -583,7 +629,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         resource: "web-existing-resource",
       };
       const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
-      previousPage.saveSm(state);
+      await committed(previousPage.saveSm(state));
       previousPage.saveJoinedRooms(["general@conference.example.com"]);
       previousPage.preparePagehideHandoff();
       window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
@@ -600,35 +646,37 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
 
       expect(reloadedPage.loadJoinedRooms()).toEqual(["general@conference.example.com"]);
-      expect(reloadedPage.consumeSm()).toEqual(state);
+      expect(await committed(reloadedPage.consumeSm())).toEqual(state);
     } finally {
       Date.now = realNow;
     }
   });
 
-  test("BrowserXmppClient only reuses a refreshed resource for the owning tab", () => {
+  test("BrowserXmppClient only reuses a refreshed resource for the owning tab", async () => {
     const state = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
       resource: "web-existing-resource",
     };
-    createLocalStorageResumePersistence("alice@example.com", "tab-a").saveSm(state);
+    await committed(createLocalStorageResumePersistence("alice@example.com", "tab-a").saveSm(state));
 
     const tabB = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       createLocalStorageResumePersistence("alice@example.com", "tab-b"),
     );
+    await waitForClientStartup(tabB);
     expect(tabB.fullJid).not.toBe("alice@example.com/web-existing-resource");
 
     const tabA = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       createLocalStorageResumePersistence("alice@example.com", "tab-a"),
     );
+    await waitForClientStartup(tabA);
     expect(tabA.fullJid).toBe("alice@example.com/web-existing-resource");
   });
 
-  test("BrowserXmppClient does not persist lossy SM state while outbound stanzas are unacked", () => {
+  test("BrowserXmppClient does not persist lossy SM state while outbound stanzas are unacked", async () => {
     const persistence = inMemoryPersistence();
     persistence.saveJoinedRooms(["general@conference.example.com"]);
     const consumedClearCount = persistence.clearSmCount();
@@ -636,6 +684,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
     );
+    await waitForClientStartup(client);
     (client as unknown as {
       xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
@@ -649,18 +698,20 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     };
 
     client.persistResumeStateForPageHide();
+    await flushMicrotasks();
 
     expect(persistence.smSnapshot()).toBeNull();
     expect(persistence.clearSmCount()).toBe(consumedClearCount + 1);
     expect(persistence.joinedRoomsSnapshot()).toEqual(["general@conference.example.com"]);
   });
 
-  test("BrowserXmppClient persists SM state when unacked outbound stanzas are serializable", () => {
+  test("BrowserXmppClient persists SM state when unacked outbound stanzas are serializable", async () => {
     const persistence = inMemoryPersistence();
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
     );
+    await waitForClientStartup(client);
     (client as unknown as {
       xmpp: {
         get_resume_state: () => {
@@ -669,7 +720,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundEntries: Array<{ stanza: string; sentAt: string }>;
+          unhandledOutboundEntries: XmppResumeEntry[];
         };
       };
     }).xmpp = {
@@ -679,92 +730,94 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundEntries: [{
-          stanza: "<message xmlns='jabber:client' id='unacked'/>",
-          sentAt: RESUME_SENT_AT,
-        }],
+        unhandledOutboundEntries: [resumeEntry("message", "unacked")],
       }),
     };
 
     client.persistResumeStateForPageHide();
+    await flushMicrotasks();
 
     expect(persistence.smSnapshot()).toMatchObject({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundEntries: [{
-        stanza: "<message xmlns='jabber:client' id='unacked'/>",
-        sentAt: RESUME_SENT_AT,
-      }],
+      unhandledOutboundEntries: [resumeEntry("message", "unacked")],
     });
   });
 
-  test("BrowserXmppClient treats restored SM message stanzas as inflight queued sends", () => {
+  test("BrowserXmppClient treats restored SM message stanzas as inflight queued sends", async () => {
     const persistence = inMemoryPersistence();
-    persistence.saveSm({
+    const durableOutboundStore = new MemoryDurableOutboundStore();
+    await committed(persistence.saveSm({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundEntries: [{
-        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
-        sentAt: RESUME_SENT_AT,
-      }],
-    });
-    enqueueQueuedMessage("alice@example.com", {
+      unhandledOutboundEntries: [resumeEntry("message", "dm-live-1")],
+    }));
+    const queued = {
       kind: "dm",
       id: "dm-live-1",
       createdAt: new Date().toISOString(),
       peerJid: "bob@example.com",
       body: "hello",
-    });
+    } as const;
+    await committed(durableOutboundStore.persistReady("alice@example.com", queued));
+    enqueueQueuedMessage("alice@example.com", queued);
 
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
+      durableOutboundStore,
     );
+    await waitForClientStartup(client);
 
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+    await flushMicrotasks();
 
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
-  test("BrowserXmppClient retains restored SM queue entries while native fallback retry owns resend", () => {
+  test("BrowserXmppClient retains restored SM queue entries while native fallback retry owns resend", async () => {
     const persistence = inMemoryPersistence();
-    persistence.saveSm({
+    const durableOutboundStore = new MemoryDurableOutboundStore();
+    await committed(persistence.saveSm({
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundEntries: [{
-        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
-        sentAt: RESUME_SENT_AT,
-      }],
-    });
-    enqueueQueuedMessage("alice@example.com", {
+      unhandledOutboundEntries: [resumeEntry("message", "dm-live-1")],
+    }));
+    const queued = {
       kind: "dm",
       id: "dm-live-1",
       createdAt: new Date().toISOString(),
       peerJid: "bob@example.com",
       body: "hello",
-    });
+    } as const;
+    await committed(durableOutboundStore.persistReady("alice@example.com", queued));
+    enqueueQueuedMessage("alice@example.com", queued);
 
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
+      durableOutboundStore,
     );
+    await waitForClientStartup(client);
 
     (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
+    await flushMicrotasks();
 
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))
       .toEqual(["dm-live-1"]);
   });
 
-  test("BrowserXmppClient persists SM state when the native replay queue is empty", () => {
+  test("BrowserXmppClient persists SM state when the native replay queue is empty", async () => {
     const persistence = inMemoryPersistence();
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
       persistence,
     );
+    await waitForClientStartup(client);
     (client as unknown as {
       xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
@@ -778,6 +831,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     };
 
     client.persistResumeStateForPageHide();
+    await flushMicrotasks();
 
     expect(persistence.smSnapshot()).toMatchObject({
       previd: "live-sm-id",
@@ -787,7 +841,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     });
   });
 
-  test("round-trips retained joined rooms for refresh-time group call discovery", () => {
+  test("round-trips retained joined rooms for refresh-time group call discovery", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     const otherTab = createLocalStorageResumePersistence("alice@example.com", "tab-b");
     persistence.saveJoinedRooms([
@@ -806,9 +860,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(persistence.loadJoinedRooms()).toEqual([]);
   });
 
-  test("consumeSm rejects a delayed claimant that observed the same original resource", () => {
-    const first = createLocalStorageResumePersistence("alice@example.com");
-    const second = createLocalStorageResumePersistence("alice@example.com");
+  test("consumeSm rejects a delayed claimant that observed the same original resource", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const first = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const second = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const state: PersistedSmResumeState = {
       previd: "abc-123",
       inboundH: 42,
@@ -816,107 +871,209 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       maxResumeSeconds: 300,
       resource: "web-existing-resource",
     };
-    first.saveSm(state);
+    await committed(first.saveSm(state));
 
-    const storage = window.localStorage;
-    const originalSetItem = storage.setItem.bind(storage);
-    let reentered = false;
-    let secondResult: PersistedSmResumeState | null | undefined;
-    storage.setItem = ((key: string, value: string) => {
-      if (
-        key === "waddle.chat.sm-resume.alice@example.com"
-        && value.includes('"claimId"')
-        && !reentered
-      ) {
-        reentered = true;
-        secondResult = second.consumeSm();
-      }
-      originalSetItem(key, value);
-    }) as Storage["setItem"];
+    const [firstResult, secondResult] = await Promise.all([
+      committed(first.consumeSm()),
+      committed(second.consumeSm()),
+    ]);
 
-    try {
-      const firstResult = first.consumeSm();
-
-      expect(secondResult).toEqual(state);
-      expect(firstResult).toBeNull();
-      expect(first.loadSm()).toBeNull();
-      expect(first.consumeSm()).toBeNull();
-    } finally {
-      storage.setItem = originalSetItem;
-    }
+    expect([firstResult, secondResult].filter((result) => result !== null)).toEqual([state]);
+    expect(await committed(first.loadSm())).toBeNull();
+    expect(await committed(first.consumeSm())).toBeNull();
   });
 
-  test("SM TTL: an old envelope without advertised max uses the default resume window", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+  test("a consumed snapshot cannot become reusable when the replacement save aborts", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const original: PersistedSmResumeState = {
+      previd: "s0",
+      inboundH: 7,
+      outboundH: 9,
+    };
+    await committed(persistence.saveSm(original));
+    expect(await committed(persistence.consumeSm())).toEqual(original);
+
+    store.save = async () => ({
+      kind: "failed",
+      reason: "aborted",
+      cause: new DOMException("replacement aborted", "AbortError"),
+    });
+    const replacement = await persistence.saveSm({
+      previd: "s1",
+      inboundH: 8,
+      outboundH: 10,
+    });
+
+    expect(replacement.kind).toBe("failed");
+    expect(await committed(persistence.loadSm())).toBeNull();
+    expect(await committed(persistence.consumeSm())).toBeNull();
+  });
+
+  test("SM TTL: an old envelope without advertised max uses the default resume window", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const justOverDefaultResumeWindow = Date.now() - 301_000;
-    window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({ previd: "stale", inboundH: 1, outboundH: 1, savedAt: justOverDefaultResumeWindow }),
-    );
-    expect(persistence.loadSm()).toBeNull();
-    // Stale entries are pruned on read so the next load doesn't
-    // pay the validation cost again.
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    await committed(store.save(
+      "alice@example.com",
+      "tab-a",
+      { previd: "stale", inboundH: 1, outboundH: 1 },
+      justOverDefaultResumeWindow,
+    ));
+    expect(await committed(persistence.loadSm())).toBeNull();
   });
 
-  test("SM TTL: advertised maxResumeSeconds controls persisted resume expiry", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+  test("SM TTL: advertised maxResumeSeconds controls persisted resume expiry", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const twoSecondsAgo = Date.now() - 2_000;
-    window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({
+    await committed(store.save(
+      "alice@example.com",
+      "tab-a",
+      {
         previd: "stale",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 1,
-        savedAt: twoSecondsAgo,
-      }),
-    );
+      },
+      twoSecondsAgo,
+    ));
 
-    expect(persistence.consumeSm()).toBeNull();
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    expect(await committed(persistence.consumeSm())).toBeNull();
   });
 
-  test("SM TTL: future-dated envelopes fail closed and are pruned", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
+  test("SM TTL: future-dated envelopes fail closed", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const farFuture = Date.now() + 120_000;
-    window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({
+    await committed(store.save(
+      "alice@example.com",
+      "tab-a",
+      {
         previd: "from-the-future",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 300,
-        savedAt: farFuture,
-      }),
-    );
+      },
+      farFuture,
+    ));
 
-    expect(persistence.loadSm()).toBeNull();
-    expect(window.localStorage.getItem("waddle.chat.sm-resume.alice@example.com")).toBeNull();
+    expect(await committed(persistence.loadSm())).toBeNull();
   });
 
-  test("SM state rejects non-u32 stanza counters", () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com");
-    window.localStorage.setItem(
-      "waddle.chat.sm-resume.alice@example.com",
-      JSON.stringify({
+  test("SM state rejects non-u32 stanza counters", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    await committed(store.save(
+      "alice@example.com",
+      "tab-a",
+      {
         previd: "bad-counter",
         inboundH: 1.5,
         outboundH: 1,
-        savedAt: Date.now(),
-      }),
-    );
+      } as PersistedSmResumeState,
+      Date.now(),
+    ));
 
-    expect(persistence.loadSm()).toBeNull();
+    expect(await committed(persistence.loadSm())).toBeNull();
   });
 
-  test("loadCatchup returns null for malformed JSON", () => {
+  test("SM state rejects legacy raw XML entries and unknown structural fields", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const rawXml = {
+      previd: "raw-xml",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client'/>",
+        sentAtEpochMs: RESUME_SENT_AT_EPOCH_MS,
+      }],
+    } as unknown as PersistedSmResumeState;
+    await committed(store.save("alice@example.com", "tab-a", rawXml, Date.now()));
+    expect(await committed(persistence.loadSm())).toBeNull();
+
+    const unknown = resumeEntry("message", "unknown-field");
+    (unknown.stanza.tokens[0] as unknown as Record<string, unknown>).stanzaXml = "<message/>";
+    await committed(store.save("alice@example.com", "tab-a", {
+      previd: "unknown-field",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [unknown],
+    }, Date.now()));
+    expect(await committed(persistence.loadSm())).toBeNull();
+  });
+
+  test("SM state rejects unbalanced, over-depth, and oversized typed stanza tokens", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const candidates: PersistedSmResumeState[] = [];
+
+    const unbalanced = resumeEntry("message", "unbalanced");
+    unbalanced.stanza.tokens.pop();
+    candidates.push({
+      previd: "unbalanced",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [unbalanced],
+    });
+
+    const tooDeep = resumeEntry("message", "too-deep");
+    const end = tooDeep.stanza.tokens.pop()!;
+    for (let depth = 0; depth < 64; depth += 1) {
+      tooDeep.stanza.tokens.push({
+        kind: "start",
+        name: { namespace: "urn:waddle:test:resume", localName: "nested" },
+        attributes: [],
+      });
+    }
+    for (let depth = 0; depth < 64; depth += 1) tooDeep.stanza.tokens.push({ kind: "end" });
+    tooDeep.stanza.tokens.push(end);
+    candidates.push({
+      previd: "too-deep",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [tooDeep],
+    });
+
+    const oversized = resumeEntry("message", "oversized");
+    oversized.stanza.tokens = Array.from({ length: 16_385 }, () => ({ kind: "end" as const }));
+    candidates.push({
+      previd: "oversized",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [oversized],
+    });
+
+    for (const candidate of candidates) {
+      await committed(store.save("alice@example.com", "tab-a", candidate, Date.now()));
+      expect(await committed(persistence.loadSm())).toBeNull();
+    }
+  });
+
+  test("SM typed entry preserves exact safe-integer millisecond precision", async () => {
+    const store = new MemoryDurableSmResumeStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const entry = resumeEntry("message", "precise-time");
+    entry.sentAtEpochMs = 1_748_779_140_123;
+    const state: PersistedSmResumeState = {
+      previd: "precise-time",
+      inboundH: 1,
+      outboundH: 1,
+      unhandledOutboundEntries: [entry],
+    };
+    await committed(persistence.saveSm(state));
+    expect((await committed(persistence.loadSm()))?.unhandledOutboundEntries?.[0]?.sentAtEpochMs)
+      .toBe(1_748_779_140_123);
+  });
+
+  test("loadCatchup returns null for malformed JSON", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     window.localStorage.setItem(catchupShardKey("alice@example.com", "tab-a"), "{not valid json");
     expect(persistence.loadCatchup()).toBeNull();
   });
 
-  test("loadCatchup rejects payloads with the wrong shape", () => {
+  test("loadCatchup rejects payloads with the wrong shape", async () => {
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     window.localStorage.setItem(
       catchupShardKey("alice@example.com", "tab-a"),
@@ -949,7 +1106,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-b"))).not.toBeNull();
   });
 
-  test("account shard prefixes cannot read or clear a longer JID", () => {
+  test("account shard prefixes cannot read or clear a longer JID", async () => {
     const alice = createLocalStorageResumePersistence("alice@example.com", "tab-a");
     const evil = createLocalStorageResumePersistence("alice@example.com.evil", "tab-b");
     alice.saveCatchup({

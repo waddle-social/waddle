@@ -13,6 +13,14 @@ import social.waddle.client.ffi.WaddleMucRole
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleResumeStanza
+import social.waddle.client.ffi.WaddleResumeStanzaKind
+import social.waddle.client.ffi.WaddleResumeXmlAttribute
+import social.waddle.client.ffi.WaddleResumeXmlLocalName
+import social.waddle.client.ffi.WaddleResumeXmlName
+import social.waddle.client.ffi.WaddleResumeXmlNamespace
+import social.waddle.client.ffi.WaddleResumeXmlToken
+import social.waddle.client.ffi.WaddleResumeXmlValue
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -208,6 +216,7 @@ fun testResumeState(
     previd: String = "prev-1",
     inboundH: UInt = 5u,
     outboundH: UInt = 7u,
+    queuedStanzaId: String? = null,
 ): WaddleSmResumeState = WaddleSmResumeState(
     previd = previd,
     inboundH = inboundH,
@@ -215,7 +224,29 @@ fun testResumeState(
     maxResumeSeconds = 300u,
     queuedEntries = listOf(
         social.waddle.client.ffi.WaddleSmResumeEntry(
-            stanzaXml = "<message/>",
+            stanza = WaddleResumeStanza(
+                stanzaKind = WaddleResumeStanzaKind.MESSAGE,
+                tokens = listOf(
+                    WaddleResumeXmlToken.Start(
+                        name = WaddleResumeXmlName(
+                            namespace = WaddleResumeXmlNamespace("jabber:client"),
+                            localName = WaddleResumeXmlLocalName("message"),
+                        ),
+                        attributes = queuedStanzaId?.let { stanzaId ->
+                            listOf(
+                                WaddleResumeXmlAttribute(
+                                    name = WaddleResumeXmlName(
+                                        namespace = WaddleResumeXmlNamespace(""),
+                                        localName = WaddleResumeXmlLocalName("id"),
+                                    ),
+                                    value = WaddleResumeXmlValue(stanzaId),
+                                ),
+                            )
+                        }.orEmpty(),
+                    ),
+                    WaddleResumeXmlToken.End,
+                ),
+            ),
             sentAt = java.time.Instant.parse("2026-07-15T09:59:00.123Z"),
         ),
     ),

@@ -440,7 +440,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nenv -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift \"$SRCROOT/scripts/sync_brand_assets.swift\"\n";
+			shellScript = "set -euo pipefail\n/usr/bin/env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift \"$SRCROOT/scripts/sync_brand_assets.swift\"\n";
 		};
 		E0DF4C6043F37184AB4366D2 /* Sync Waddle Brand Assets */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -458,7 +458,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nenv -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift \"$SRCROOT/scripts/sync_brand_assets.swift\"\n";
+			shellScript = "set -euo pipefail\n/usr/bin/env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift \"$SRCROOT/scripts/sync_brand_assets.swift\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

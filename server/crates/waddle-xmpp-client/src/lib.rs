@@ -98,7 +98,11 @@ pub use request::{
 };
 pub use runtime::{RuntimeStatus, XmppRuntime};
 pub use state::{ClientState, SessionBinding, SessionPhase, SessionSnapshot, StreamId};
-pub use stream_management::{SmResumeEntry, SmResumeState};
+pub use stream_management::{
+    ResumeStanza, ResumeStanzaError, ResumeStanzaKind, ResumeStanzaSnapshot, ResumeXmlAttribute,
+    ResumeXmlLocalName, ResumeXmlName, ResumeXmlNamespace, ResumeXmlToken, ResumeXmlValue,
+    SmResumeEntry, SmResumeState,
+};
 pub use transport::{
     decode_message, encode_message, StreamClose, StreamOpen, TransportCapabilities, TransportEvent,
     TransportKind, TransportMessage, TransportState,

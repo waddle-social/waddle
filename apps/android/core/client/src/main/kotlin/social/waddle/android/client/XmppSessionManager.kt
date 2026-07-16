@@ -18,6 +18,8 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
+import social.waddle.android.client.session.ConnectionLoopCallbacks
+import social.waddle.android.client.session.ConnectionLoopSettings
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
@@ -94,10 +96,15 @@ class XmppSessionManager(
         sessionPrefs = sessionPrefs,
         activeSession = activeSession,
         router = router,
-        onReady = ::onSessionReady,
-        onTerminalAuthFailure = ::onTerminalAuthFailure,
-        reconnectPolicy = reconnectPolicy,
-        connectTimeoutMillis = connectTimeoutMillis,
+        messenger = messenger,
+        callbacks = ConnectionLoopCallbacks(
+            onReady = ::onSessionReady,
+            onTerminalAuthFailure = ::onTerminalAuthFailure,
+        ),
+        settings = ConnectionLoopSettings(
+            reconnectPolicy = reconnectPolicy,
+            connectTimeoutMillis = connectTimeoutMillis,
+        ),
     )
 
     val connectionState: StateFlow<ConnectionState> = loop.state

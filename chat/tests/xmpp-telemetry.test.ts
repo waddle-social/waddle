@@ -32,6 +32,10 @@ import {
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
+import {
+  committedOrThrow,
+  MemoryDurableOutboundStore,
+} from "../src/lib/outbound-durable-store";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -64,7 +68,58 @@ function createStorageMock() {
     clear() {
       values.clear();
     },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
+    },
+    get length() {
+      return values.size;
+    },
   };
+}
+
+async function clientWithDurableRows(
+  rows: Array<{ id: string; kind: "room" | "dm" }> = [],
+): Promise<BrowserXmppClient> {
+  const durableStore = new MemoryDurableOutboundStore();
+  for (const row of rows) {
+    committedOrThrow(
+      "test-seed-telemetry-row",
+      await durableStore.persistReady("alice@example.com", row.kind === "room"
+        ? {
+            kind: "room",
+            id: row.id,
+            createdAt: new Date().toISOString(),
+            roomJid: "room@example.com",
+            body: "telemetry fixture",
+          }
+        : {
+            kind: "dm",
+            id: row.id,
+            createdAt: new Date().toISOString(),
+            peerJid: "bob@example.com",
+            body: "telemetry fixture",
+          }),
+    );
+  }
+  const client = new BrowserXmppClient(session(), undefined, durableStore);
+  await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+  return client;
+}
+
+function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
+  return new Promise((resolve) => {
+    client.onMessageAcked((ackedId) => {
+      if (ackedId === stanzaId) resolve();
+    });
+  });
+}
+
+function nextMessageFailure(client: BrowserXmppClient, stanzaId: string): Promise<void> {
+  return new Promise((resolve) => {
+    client.onMessageDeliveryFailed((failedId) => {
+      if (failedId === stanzaId) resolve();
+    });
+  });
 }
 
 /**
@@ -780,8 +835,8 @@ describe("telemetry module no-op behaviour", () => {
 });
 
 describe("BrowserXmppClient telemetry hooks", () => {
-  test("hooks fire in addition to primary handlers", () => {
-    const client = new BrowserXmppClient(session());
+  test("hooks fire in addition to primary handlers", async () => {
+    const client = await clientWithDurableRows([{ id: "room-1", kind: "room" }]);
 
     const primaryAcks: string[] = [];
     const hookAcks: Array<{ id: string; kind: "room" | "dm"; latencyMs: number }> = [];
@@ -812,7 +867,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.wireEvents(stubXmpp);
     internal.outboundQueue.beginAttempt("room-1", "room");
 
+    const acked = nextMessageAck(client, "room-1");
     stubXmpp.emit("message:acked", { id: "room-1" });
+    await acked;
 
     expect(primaryAcks).toEqual(["room-1"]);
     expect(hookAcks).toHaveLength(1);
@@ -821,11 +878,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(hookAcks[0].latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  test("installInstrumentation forwards client hooks to Faro api", () => {
+  test("installInstrumentation forwards client hooks to Faro api", async () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
-    const client = new BrowserXmppClient(session());
+    const client = await clientWithDurableRows([
+      { id: "dm-9", kind: "dm" },
+      { id: "live-1", kind: "dm" },
+    ]);
     installInstrumentation(client);
 
     const internal = client as unknown as {
@@ -863,9 +923,12 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.outboundQueue.beginAttempt("live-1", "dm");
 
     // Ack → Faro event + measurement
+    const acked = nextMessageAck(client, "dm-9");
     (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
     // Fail → Faro event
+    const failed = nextMessageFailure(client, "live-1");
     (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:failed", { id: "live-1" });
+    await Promise.all([acked, failed]);
     // Session lifecycle + status
     internal.emitSessionLifecycle({ type: "resumed" });
     internal.emitStatus({ state: "reconnecting", detail: "ws dropped" });
@@ -1403,7 +1466,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
   });
 
   test("enqueuing a send fires onSendEnqueued + onQueueDepthChange", async () => {
-    const client = new BrowserXmppClient(session());
+    const client = await clientWithDurableRows();
     // Force the slow path: make connect throw so we stay in "no-client" reason.
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
@@ -1426,8 +1489,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(depths.find((depth) => depth.kind === "room")?.persisted).toBe(0);
   });
 
-  test("hook exceptions are swallowed and do not break chat", () => {
-    const client = new BrowserXmppClient(session());
+  test("hook exceptions are swallowed and do not break chat", async () => {
+    const client = await clientWithDurableRows([{ id: "m-bad", kind: "dm" }]);
     client.onMessageAcked(() => {
       throw new Error("hook failure");
     });
@@ -1454,13 +1517,17 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.wireEvents(stubXmpp);
     internal.outboundQueue.beginAttempt("m-bad", "dm");
 
-    expect(() => {
-      (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
-    }).not.toThrow();
+    const acknowledged = new Promise<void>((resolve) => {
+      client.setMessageAckHandler((id) => {
+        if (id === "m-bad") resolve();
+      });
+    });
+    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
+    await acknowledged;
   });
 
-  test("message:failed emits queue depth and preserves recorded DM kind", () => {
-    const client = new BrowserXmppClient(session());
+  test("message:failed emits queue depth and preserves recorded DM kind", async () => {
+    const client = await clientWithDurableRows([{ id: "dm-fail-1", kind: "dm" }]);
 
     const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
@@ -1489,7 +1556,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.wireEvents(stubXmpp);
     internal.outboundQueue.beginAttempt("dm-fail-1", "dm");
 
+    const failed = nextMessageFailure(client, "dm-fail-1");
     stubXmpp.emit("message:failed", { id: "dm-fail-1" });
+    await failed;
 
     expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
     expect(depths).toHaveLength(4);

@@ -6,11 +6,29 @@ import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
+import { committedOrThrow, MemoryDurableOutboundStore } from "../src/lib/outbound-durable-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import type { ResumePersistence, XmppResumeEntry } from "../src/lib/xmpp/resume-persistence";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
+
+function messageResumeEntry(id: string): XmppResumeEntry {
+  return {
+    stanza: {
+      stanzaKind: "message",
+      tokens: [
+        {
+          kind: "start",
+          name: { namespace: "jabber:client", localName: "message" },
+          attributes: [{ name: { namespace: "", localName: "id" }, value: id }],
+        },
+        { kind: "end" },
+      ],
+    },
+    sentAtEpochMs: Date.parse("2026-07-16T08:09:10.123Z"),
+  };
+}
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -40,6 +58,12 @@ function createStorageMock() {
     },
     clear() {
       values.clear();
+    },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
+    },
+    get length() {
+      return values.size;
     },
   };
 }
@@ -94,6 +118,18 @@ function dmMessage(partial: Partial<LiveDmMessage> = {}): LiveDmMessage {
 
 async function settleReconnectCatchup(turns = 6): Promise<void> {
   for (let i = 0; i < turns; i += 1) await Promise.resolve();
+}
+
+async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void> {
+  await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+}
+
+function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
+  return new Promise((resolve) => {
+    client.setMessageAckHandler((ackedId) => {
+      if (ackedId === stanzaId) resolve();
+    });
+  });
 }
 
 const originalWindow = globalThis.window;
@@ -342,7 +378,9 @@ describe("client send readiness", () => {
       result?.id,
     ]);
 
+    const acked = nextMessageAck(client, result!.id!);
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck(result!.id!);
+    await acked;
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
@@ -361,7 +399,9 @@ describe("client send readiness", () => {
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
     (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
 
+    const acked = nextMessageAck(client, "room-fast-live");
     const result = await client.sendGroupMessage("w1", "c1", "fast ack", { id: "room-fast-live" });
+    await acked;
 
     expect(result).toEqual({ id: "room-fast-live", state: "sending" });
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
@@ -416,8 +456,10 @@ describe("client send readiness", () => {
     expect(await client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
       .toEqual({ id: "room-live-retry", state: "sending" });
     expect(attempt).toBe(4);
+    const acked = nextMessageAck(client, "room-live-retry");
     (client as unknown as { handleMessageAck: (id: string) => void })
       .handleMessageAck("room-live-retry");
+    await acked;
     expect(queuedIds()).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
@@ -500,17 +542,23 @@ describe("client send readiness", () => {
 
   test("room queue replay rejects typed WASM failures so queued sends stay retryable", async () => {
     const xmpp = { send_groupchat_message: mock(async () => ({ kind: "transport-error" })) };
-    const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
-    const statuses: Array<[string, "queued" | "sending"]> = [];
-    client.setQueuedMessageStatusHandler((id, status) => statuses.push([id, status]));
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "room",
+    const durableStore = new MemoryDurableOutboundStore();
+    const queued = {
+      kind: "room" as const,
       id: "room-replay-1",
       createdAt: new Date().toISOString(),
       roomJid,
       body: "queued room",
-    });
+    };
+    committedOrThrow(
+      "test-seed-room-replay",
+      await durableStore.persistReady("alice@example.com", queued),
+    );
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
+    const statuses: Array<[string, "queued" | "sending"]> = [];
+    client.setQueuedMessageStatusHandler((id, status) => statuses.push([id, status]));
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
@@ -1021,15 +1069,20 @@ describe("client send readiness", () => {
   });
 
   test("session-ready room queue flush waits for current-room rejoin", async () => {
-    const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "room",
+    const durableStore = new MemoryDurableOutboundStore();
+    committedOrThrow(
+      "test-seed-session-ready-room",
+      await durableStore.persistReady("alice@example.com", {
+      kind: "room" as const,
       id: "queued-room-after-resume",
       createdAt: new Date().toISOString(),
       roomJid,
       body: "queued while reconnecting",
-    });
+      }),
+    );
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
     let onPresence: ((presence: {
       from?: string;
       presence_type?: string;
@@ -1116,10 +1169,10 @@ describe("client send readiness", () => {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
-      loadSm: () => null,
-      consumeSm: () => null,
-      saveSm: () => undefined,
-      clearSm: () => undefined,
+      loadSm: async () => ({ kind: "committed", value: null }),
+      consumeSm: async () => ({ kind: "committed", value: null }),
+      saveSm: async () => ({ kind: "committed", value: undefined }),
+      clearSm: async () => ({ kind: "committed", value: false }),
       preparePagehideHandoff: () => undefined,
       reclaimPagehideOwnership: () => undefined,
       loadJoinedRooms: () => [roomJid],
@@ -1204,7 +1257,9 @@ describe("client send readiness", () => {
       "dm-live-1",
     ]);
 
+    const acked = nextMessageAck(client, "dm-live-1");
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+    await acked;
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
@@ -1220,7 +1275,9 @@ describe("client send readiness", () => {
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { connected: boolean }).connected = true;
 
+    const acked = nextMessageAck(client, "dm-fast-live");
     const result = await client.sendDirectMessage("bob@example.com", "fast ack", { id: "dm-fast-live" });
+    await acked;
 
     expect(result).toEqual({ id: "dm-fast-live", state: "sending" });
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
@@ -1271,7 +1328,9 @@ describe("client send readiness", () => {
     expect(await client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
       .toEqual({ id: "dm-live-retry", state: "sending" });
     expect(attempt).toBe(4);
+    const acked = nextMessageAck(client, "dm-live-retry");
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-retry");
+    await acked;
     expect(queuedIds()).toEqual([]);
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
@@ -1403,10 +1462,7 @@ describe("client send readiness", () => {
         inboundH: 4,
         outboundH: 9,
         hasUnackedOutbound: true,
-        unhandledOutboundEntries: [{
-          stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
-          sentAt: "2026-07-16T08:09:10.123Z",
-        }],
+        unhandledOutboundEntries: [messageResumeEntry("dm-live-1")],
       }),
     };
     const client = new BrowserXmppClient(session());
@@ -1415,7 +1471,10 @@ describe("client send readiness", () => {
 
     await client.sendDirectMessage("bob@example.com", "hello", { id: "dm-live-1" });
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
-    (client as unknown as { handleMessageFailed: (id: string) => void }).handleMessageFailed("dm-live-1");
+    await waitForOutboundHydration(client);
+    await (client as unknown as {
+      outboundQueue: { handleFailed: (id: string) => Promise<void> };
+    }).outboundQueue.handleFailed("dm-live-1");
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((entry) => entry.id))

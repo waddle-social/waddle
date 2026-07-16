@@ -5839,6 +5839,219 @@ public object FfiConverterTypeWaddleReplyTarget: FfiConverterRustBuffer<WaddleRe
 
 
 
+data class WaddleResumeStanza (
+    var `stanzaKind`: WaddleResumeStanzaKind
+    ,
+    var `tokens`: List<WaddleResumeXmlToken>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeStanza: FfiConverterRustBuffer<WaddleResumeStanza> {
+    override fun read(buf: ByteBuffer): WaddleResumeStanza {
+        return WaddleResumeStanza(
+            FfiConverterTypeWaddleResumeStanzaKind.read(buf),
+            FfiConverterSequenceTypeWaddleResumeXmlToken.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeStanza) = (
+            FfiConverterTypeWaddleResumeStanzaKind.allocationSize(value.`stanzaKind`) +
+            FfiConverterSequenceTypeWaddleResumeXmlToken.allocationSize(value.`tokens`)
+    )
+
+    override fun write(value: WaddleResumeStanza, buf: ByteBuffer) {
+            FfiConverterTypeWaddleResumeStanzaKind.write(value.`stanzaKind`, buf)
+            FfiConverterSequenceTypeWaddleResumeXmlToken.write(value.`tokens`, buf)
+    }
+}
+
+
+
+data class WaddleResumeXmlAttribute (
+    var `name`: WaddleResumeXmlName
+    ,
+    var `value`: WaddleResumeXmlValue
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlAttribute: FfiConverterRustBuffer<WaddleResumeXmlAttribute> {
+    override fun read(buf: ByteBuffer): WaddleResumeXmlAttribute {
+        return WaddleResumeXmlAttribute(
+            FfiConverterTypeWaddleResumeXmlName.read(buf),
+            FfiConverterTypeWaddleResumeXmlValue.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlAttribute) = (
+            FfiConverterTypeWaddleResumeXmlName.allocationSize(value.`name`) +
+            FfiConverterTypeWaddleResumeXmlValue.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleResumeXmlAttribute, buf: ByteBuffer) {
+            FfiConverterTypeWaddleResumeXmlName.write(value.`name`, buf)
+            FfiConverterTypeWaddleResumeXmlValue.write(value.`value`, buf)
+    }
+}
+
+
+
+data class WaddleResumeXmlLocalName (
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlLocalName: FfiConverterRustBuffer<WaddleResumeXmlLocalName> {
+    override fun read(buf: ByteBuffer): WaddleResumeXmlLocalName {
+        return WaddleResumeXmlLocalName(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlLocalName) = (
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleResumeXmlLocalName, buf: ByteBuffer) {
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+data class WaddleResumeXmlName (
+    var `namespace`: WaddleResumeXmlNamespace
+    ,
+    var `localName`: WaddleResumeXmlLocalName
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlName: FfiConverterRustBuffer<WaddleResumeXmlName> {
+    override fun read(buf: ByteBuffer): WaddleResumeXmlName {
+        return WaddleResumeXmlName(
+            FfiConverterTypeWaddleResumeXmlNamespace.read(buf),
+            FfiConverterTypeWaddleResumeXmlLocalName.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlName) = (
+            FfiConverterTypeWaddleResumeXmlNamespace.allocationSize(value.`namespace`) +
+            FfiConverterTypeWaddleResumeXmlLocalName.allocationSize(value.`localName`)
+    )
+
+    override fun write(value: WaddleResumeXmlName, buf: ByteBuffer) {
+            FfiConverterTypeWaddleResumeXmlNamespace.write(value.`namespace`, buf)
+            FfiConverterTypeWaddleResumeXmlLocalName.write(value.`localName`, buf)
+    }
+}
+
+
+
+data class WaddleResumeXmlNamespace (
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlNamespace: FfiConverterRustBuffer<WaddleResumeXmlNamespace> {
+    override fun read(buf: ByteBuffer): WaddleResumeXmlNamespace {
+        return WaddleResumeXmlNamespace(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlNamespace) = (
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleResumeXmlNamespace, buf: ByteBuffer) {
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+data class WaddleResumeXmlValue (
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlValue: FfiConverterRustBuffer<WaddleResumeXmlValue> {
+    override fun read(buf: ByteBuffer): WaddleResumeXmlValue {
+        return WaddleResumeXmlValue(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlValue) = (
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleResumeXmlValue, buf: ByteBuffer) {
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
 /**
  * Options bag attached to an outbound chat or groupchat send.
  */
@@ -6016,12 +6229,10 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
 
 
 /**
- * UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
- * parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
- * native timestamp type before Rust converts it to `DateTime<Utc>`.
+ * UniFFI boundary representation of one typed XEP-0198 resume entry.
  */
 data class WaddleSmResumeEntry (
-    var `stanzaXml`: kotlin.String
+    var `stanza`: WaddleResumeStanza
     ,
     var `sentAt`: java.time.Instant
 
@@ -6040,18 +6251,18 @@ data class WaddleSmResumeEntry (
 public object FfiConverterTypeWaddleSmResumeEntry: FfiConverterRustBuffer<WaddleSmResumeEntry> {
     override fun read(buf: ByteBuffer): WaddleSmResumeEntry {
         return WaddleSmResumeEntry(
-            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleResumeStanza.read(buf),
             FfiConverterTimestamp.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleSmResumeEntry) = (
-            FfiConverterString.allocationSize(value.`stanzaXml`) +
+            FfiConverterTypeWaddleResumeStanza.allocationSize(value.`stanza`) +
             FfiConverterTimestamp.allocationSize(value.`sentAt`)
     )
 
     override fun write(value: WaddleSmResumeEntry, buf: ByteBuffer) {
-            FfiConverterString.write(value.`stanzaXml`, buf)
+            FfiConverterTypeWaddleResumeStanza.write(value.`stanza`, buf)
             FfiConverterTimestamp.write(value.`sentAt`, buf)
     }
 }
@@ -6059,10 +6270,9 @@ public object FfiConverterTypeWaddleSmResumeEntry: FfiConverterRustBuffer<Waddle
 
 
 /**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound entries carry serialized XML plus their original send instant.
+ * XEP-0198 client resume snapshot crossing the FFI as a typed persistence
+ * round-trip. The app stores it on disconnect and feeds it back through
+ * [`WaddleConfig`] on the next connect.
  */
 data class WaddleSmResumeState (
     /**
@@ -7785,6 +7995,142 @@ public object FfiConverterTypeWaddleReferenceType : FfiConverterRustBuffer<Waddl
             is WaddleReferenceType.Other -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`value`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class WaddleResumeStanzaKind {
+
+    MESSAGE,
+    PRESENCE,
+    IQ;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeStanzaKind: FfiConverterRustBuffer<WaddleResumeStanzaKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleResumeStanzaKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleResumeStanzaKind) = 4UL
+
+    override fun write(value: WaddleResumeStanzaKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class WaddleResumeXmlToken {
+
+    data class Start(
+        val `name`: social.waddle.client.ffi.WaddleResumeXmlName,
+        val `attributes`: List<social.waddle.client.ffi.WaddleResumeXmlAttribute>) : WaddleResumeXmlToken()
+
+    {
+
+
+        companion object
+    }
+
+    data class Text(
+        val `value`: social.waddle.client.ffi.WaddleResumeXmlValue) : WaddleResumeXmlToken()
+
+    {
+
+
+        companion object
+    }
+
+    object End : WaddleResumeXmlToken()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleResumeXmlToken : FfiConverterRustBuffer<WaddleResumeXmlToken>{
+    override fun read(buf: ByteBuffer): WaddleResumeXmlToken {
+        return when(buf.getInt()) {
+            1 -> WaddleResumeXmlToken.Start(
+                FfiConverterTypeWaddleResumeXmlName.read(buf),
+                FfiConverterSequenceTypeWaddleResumeXmlAttribute.read(buf),
+                )
+            2 -> WaddleResumeXmlToken.Text(
+                FfiConverterTypeWaddleResumeXmlValue.read(buf),
+                )
+            3 -> WaddleResumeXmlToken.End
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleResumeXmlToken) = when(value) {
+        is WaddleResumeXmlToken.Start -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleResumeXmlName.allocationSize(value.`name`)
+                + FfiConverterSequenceTypeWaddleResumeXmlAttribute.allocationSize(value.`attributes`)
+            )
+        }
+        is WaddleResumeXmlToken.Text -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleResumeXmlValue.allocationSize(value.`value`)
+            )
+        }
+        is WaddleResumeXmlToken.End -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleResumeXmlToken, buf: ByteBuffer) {
+        when(value) {
+            is WaddleResumeXmlToken.Start -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleResumeXmlName.write(value.`name`, buf)
+                FfiConverterSequenceTypeWaddleResumeXmlAttribute.write(value.`attributes`, buf)
+                Unit
+            }
+            is WaddleResumeXmlToken.Text -> {
+                buf.putInt(2)
+                FfiConverterTypeWaddleResumeXmlValue.write(value.`value`, buf)
+                Unit
+            }
+            is WaddleResumeXmlToken.End -> {
+                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9692,6 +10038,34 @@ public object FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuffer<Li
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleResumeXmlAttribute: FfiConverterRustBuffer<List<WaddleResumeXmlAttribute>> {
+    override fun read(buf: ByteBuffer): List<WaddleResumeXmlAttribute> {
+        val len = buf.getInt()
+        return List<WaddleResumeXmlAttribute>(len) {
+            FfiConverterTypeWaddleResumeXmlAttribute.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleResumeXmlAttribute>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleResumeXmlAttribute.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleResumeXmlAttribute>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleResumeXmlAttribute.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer<List<WaddleSharedFile>> {
     override fun read(buf: ByteBuffer): List<WaddleSharedFile> {
         val len = buf.getInt()
@@ -9822,6 +10196,34 @@ public object FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustBuffer
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleUploadHeader.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleResumeXmlToken: FfiConverterRustBuffer<List<WaddleResumeXmlToken>> {
+    override fun read(buf: ByteBuffer): List<WaddleResumeXmlToken> {
+        val len = buf.getInt()
+        return List<WaddleResumeXmlToken>(len) {
+            FfiConverterTypeWaddleResumeXmlToken.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleResumeXmlToken>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleResumeXmlToken.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleResumeXmlToken>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleResumeXmlToken.write(it, buf)
         }
     }
 }

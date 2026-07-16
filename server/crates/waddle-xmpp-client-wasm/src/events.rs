@@ -12,10 +12,6 @@ pub(crate) async fn event_dispatch_loop(
             }
             DriverEvent::Error(description) => emit_error_callback(&inner, &description),
             DriverEvent::Disconnected => {
-                let command_owner = inner.borrow().command_owner.upgrade();
-                if let Some(command_owner) = command_owner {
-                    command_owner.borrow_mut().take();
-                }
                 // Clone the callback before invoking it so a JS handler that
                 // synchronously re-enters the WaddleClient via a `send_*`
                 // method (which takes `borrow_mut`) does not panic on an
@@ -23,6 +19,7 @@ pub(crate) async fn event_dispatch_loop(
                 // same pattern is applied to every other `on_*` dispatch site
                 // below.
                 let callback = inner.borrow().on_disconnected.clone();
+                inner.borrow_mut().retire();
                 if let Some(callback) = callback {
                     let _ = callback.call0(&JsValue::NULL);
                 }
@@ -32,6 +29,9 @@ pub(crate) async fn event_dispatch_loop(
 }
 
 pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, event: ClientEvent) {
+    if inner.borrow().disposed {
+        return;
+    }
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => {
             // Snapshot both callbacks BEFORE invoking either; a JS handler

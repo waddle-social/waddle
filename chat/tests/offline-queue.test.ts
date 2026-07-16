@@ -9,6 +9,10 @@ import {
   listQueuedDmMessages,
   listQueuedRoomMessages,
 } from "../src/lib/outbound-queue-store";
+import {
+  committedOrThrow,
+  MemoryDurableOutboundStore,
+} from "../src/lib/outbound-durable-store";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -35,7 +39,25 @@ function createStorageMock() {
     clear() {
       values.clear();
     },
+    key(index: number) {
+      return [...values.keys()][index] ?? null;
+    },
+    get length() {
+      return values.size;
+    },
   };
+}
+
+async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void> {
+  await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+}
+
+function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
+  return new Promise((resolve) => {
+    client.setMessageAckHandler((ackedId) => {
+      if (ackedId === stanzaId) resolve();
+    });
+  });
 }
 
 const originalWindow = globalThis.window;
@@ -67,7 +89,9 @@ afterEach(() => {
 
 describe("offline outbound queue replay", () => {
   test("does not persist decodable link preview tokens for queued sends", async () => {
-    const client = new BrowserXmppClient(session());
+    const durableStore = new MemoryDurableOutboundStore();
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -78,7 +102,10 @@ describe("offline outbound queue replay", () => {
       linkPreviewExpiresAt: "2999-01-01T00:00:00.000Z",
     });
 
-    const raw = localStorage.getItem("waddle.chat.outbound-queue.alice@example.com");
+    const raw = JSON.stringify(committedOrThrow(
+      "test-list-preview-queue",
+      await durableStore.list("alice@example.com"),
+    ));
     expect(raw).toContain("dm-preview-queued");
     expect(raw).not.toContain("plaintext-token");
     expect(raw).not.toContain("linkPreviewToken");
@@ -86,14 +113,16 @@ describe("offline outbound queue replay", () => {
   });
 
   test("does not reacquire link preview metadata when replaying queued URL sends", async () => {
-    const client = new BrowserXmppClient(session());
-    enqueueQueuedMessage("alice@example.com", {
+    const durableStore = new MemoryDurableOutboundStore();
+    committedOrThrow("test-seed-preview-replay", await durableStore.persistReady("alice@example.com", {
       kind: "dm",
       id: "dm-preview-replay",
       createdAt: new Date().toISOString(),
       peerJid: " Bob@Example.COM/desktop ",
       body: "read https://example.com/article",
-    });
+    }));
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
 
     const xmpp = {
       send_raw_iq: mock(async () => {
@@ -113,7 +142,9 @@ describe("offline outbound queue replay", () => {
   });
 
   test("replays queued DM messages in order when the session returns", async () => {
-    const client = new BrowserXmppClient(session());
+    const durableStore = new MemoryDurableOutboundStore();
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -177,17 +208,23 @@ describe("offline outbound queue replay", () => {
 
     // Now simulate the server acking dm-1 — that entry drops out of the
     // persisted queue; dm-2 is still pending.
+    const firstAck = nextMessageAck(client, "dm-1");
     xmpp.emit("message:acked", { id: "dm-1" });
+    await firstAck;
     expect(
       listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-2"]);
 
+    const secondAck = nextMessageAck(client, "dm-2");
     xmpp.emit("message:acked", { id: "dm-2" });
+    await secondAck;
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("replays queued room messages in order after the room rejoins", async () => {
-    const client = new BrowserXmppClient(session());
+    const durableStore = new MemoryDurableOutboundStore();
+    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    await waitForOutboundHydration(client);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -244,8 +281,12 @@ describe("offline outbound queue replay", () => {
       listQueuedRoomMessages("alice@example.com", roomJid).map((message) => message.id),
     ).toEqual(["room-1", "room-2"]);
 
+    const firstAck = nextMessageAck(client, "room-1");
     xmpp.emit("message:acked", { id: "room-1" });
+    await firstAck;
+    const secondAck = nextMessageAck(client, "room-2");
     xmpp.emit("message:acked", { id: "room-2" });
+    await secondAck;
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 });

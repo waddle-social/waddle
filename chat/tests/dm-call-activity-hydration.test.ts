@@ -5,7 +5,10 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { WaddleSession } from "../src/lib/server-auth";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import type {
+  PersistedSmResumeState,
+  ResumePersistence,
+} from "../src/lib/xmpp/resume-persistence";
 
 function session(): WaddleSession {
   return {
@@ -14,6 +17,10 @@ function session(): WaddleSession {
     session_id: "tok",
     xmpp_websocket_url: "wss://example.com/ws",
   } as WaddleSession;
+}
+
+async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void> {
+  await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
 }
 
 describe("DM call activity hydration", () => {
@@ -25,28 +32,33 @@ describe("DM call activity hydration", () => {
     clearDmCallActivities();
   });
 
-  test("reuses and consumes the persisted SM resource so same-resource joins remain valid after reload", () => {
-    let sm: ReturnType<ResumePersistence["loadSm"]> = {
+  test("reuses and consumes the persisted SM resource so same-resource joins remain valid after reload", async () => {
+    let sm: PersistedSmResumeState | null = {
       previd: "prev",
       inboundH: 1,
       outboundH: 2,
       resource: "web-existing-resource",
     };
-    const consumedStates: NonNullable<typeof sm>[] = [];
+    const consumedStates: PersistedSmResumeState[] = [];
     const persistence: ResumePersistence = {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
-      loadSm: () => sm,
-      consumeSm: () => {
+      loadSm: async () => ({ kind: "committed", value: sm }),
+      consumeSm: async () => {
         const current = sm;
         sm = null;
         if (current) consumedStates.push(current);
-        return current;
+        return { kind: "committed", value: current };
       },
-      saveSm: () => undefined,
-      clearSm: () => {
+      saveSm: async (state) => {
+        sm = state;
+        return { kind: "committed", value: undefined };
+      },
+      clearSm: async () => {
+        const removed = sm !== null;
         sm = null;
+        return { kind: "committed", value: removed };
       },
       preparePagehideHandoff: () => undefined,
       reclaimPagehideOwnership: () => undefined,
@@ -57,31 +69,38 @@ describe("DM call activity hydration", () => {
 
     const client = new BrowserXmppClient(session(), persistence);
     const secondClient = new BrowserXmppClient(session(), persistence);
+    await Promise.all([
+      waitForOutboundHydration(client),
+      waitForOutboundHydration(secondClient),
+    ]);
 
     expect(client.fullJid).toBe("alice@example.com/web-existing-resource");
     expect(consumedStates).toHaveLength(1);
     expect(secondClient.fullJid).not.toBe("alice@example.com/web-existing-resource");
   });
 
-  test("does not publish transient reconnect resources into shared SM persistence", () => {
-    let sm: ReturnType<ResumePersistence["loadSm"]> = null;
-    const savedStates: NonNullable<typeof sm>[] = [];
+  test("does not publish transient reconnect resources into shared SM persistence", async () => {
+    let sm: PersistedSmResumeState | null = null;
+    const savedStates: PersistedSmResumeState[] = [];
     const persistence: ResumePersistence = {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
-      loadSm: () => sm,
-      consumeSm: () => {
+      loadSm: async () => ({ kind: "committed", value: sm }),
+      consumeSm: async () => {
         const current = sm;
         sm = null;
-        return current;
+        return { kind: "committed", value: current };
       },
-      saveSm: (state) => {
+      saveSm: async (state) => {
         savedStates.push(state);
         sm = state;
+        return { kind: "committed", value: undefined };
       },
-      clearSm: () => {
+      clearSm: async () => {
+        const removed = sm !== null;
         sm = null;
+        return { kind: "committed", value: removed };
       },
       preparePagehideHandoff: () => undefined,
       reclaimPagehideOwnership: () => undefined,
@@ -90,6 +109,7 @@ describe("DM call activity hydration", () => {
       clearJoinedRooms: () => undefined,
     };
     const client = new BrowserXmppClient(session(), persistence);
+    await waitForOutboundHydration(client);
     const resource = client.fullJid.split("/")[1];
     const xmpp = {
       get_resume_state_handle: () => ({ free: () => undefined }),
@@ -102,32 +122,36 @@ describe("DM call activity hydration", () => {
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
     const secondClient = new BrowserXmppClient(session(), persistence);
+    await waitForOutboundHydration(secondClient);
 
     expect(savedStates).toEqual([]);
     expect(secondClient.fullJid).not.toBe(`alice@example.com/${resource}`);
   });
 
-  test("pagehide persists real SM state with resource, including reconnect fallback state", () => {
-    let sm: ReturnType<ResumePersistence["loadSm"]> = null;
-    const savedStates: NonNullable<typeof sm>[] = [];
+  test("pagehide persists real SM state with resource, including reconnect fallback state", async () => {
+    let sm: PersistedSmResumeState | null = null;
+    const savedStates: PersistedSmResumeState[] = [];
     const pagehideOrder: string[] = [];
     const persistence: ResumePersistence = {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
-      loadSm: () => sm,
-      consumeSm: () => {
+      loadSm: async () => ({ kind: "committed", value: sm }),
+      consumeSm: async () => {
         const current = sm;
         sm = null;
-        return current;
+        return { kind: "committed", value: current };
       },
-      saveSm: (state) => {
+      saveSm: async (state) => {
         pagehideOrder.push("save-sm");
         savedStates.push(state);
         sm = state;
+        return { kind: "committed", value: undefined };
       },
-      clearSm: () => {
+      clearSm: async () => {
+        const removed = sm !== null;
         sm = null;
+        return { kind: "committed", value: removed };
       },
       preparePagehideHandoff: () => {
         pagehideOrder.push("prepare-handoff");
@@ -138,6 +162,7 @@ describe("DM call activity hydration", () => {
       clearJoinedRooms: () => undefined,
     };
     const client = new BrowserXmppClient(session(), persistence);
+    await waitForOutboundHydration(client);
     const resource = client.fullJid.split("/")[1];
     const requestStreamManagementAck = mock(async () => {
       pagehideOrder.push("request-ack");
@@ -163,6 +188,7 @@ describe("DM call activity hydration", () => {
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
     client.persistResumeStateForPageHide();
+    await Promise.resolve();
 
     expect(savedStates).toEqual([
       { previd: "prev-live", inboundH: 7, outboundH: 9, resource },

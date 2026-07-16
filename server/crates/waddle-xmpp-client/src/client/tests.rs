@@ -725,6 +725,78 @@ async fn peer_initiated_close_writes_reciprocal_before_websocket_close() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn native_peer_stream_error_writes_one_close_and_fences_all_later_xml() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    let sent_before_error = shared.sent_messages().len();
+    let stream_error = Element::builder("error", crate::NS_STREAMS)
+        .append(
+            Element::builder(
+                "internal-server-error",
+                "urn:ietf:params:xml:ns:xmpp-streams",
+            )
+            .build(),
+        )
+        .build();
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            stream_error
+        ),))
+            .await
+    );
+
+    let sent_after_error = shared.sent_messages();
+    assert_eq!(
+        sent_after_error[sent_before_error..]
+            .iter()
+            .filter(|message| matches!(message, TransportMessage::Close(_)))
+            .count(),
+        1
+    );
+    assert!(!sent_after_error[sent_before_error..]
+        .iter()
+        .any(|message| matches!(message, TransportMessage::Element(_))));
+    assert_eq!(shared.close_count(), 0);
+    assert!(!task.websocket_close_started);
+
+    let observed = drain_client_events(&mut events);
+    assert!(observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamError {
+            condition: crate::StreamErrorCondition::InternalServerError,
+            ..
+        })
+    )));
+
+    let sent_before_late_frames = shared.sent_messages().len();
+    for late in [
+        crate::stream_management::SmState::build_request_ack(),
+        message_stanza("native-too-late"),
+    ] {
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                late
+            ),))
+                .await
+        );
+    }
+    assert!(task.handle_stream_management_timer_at(u64::MAX).await);
+    assert_eq!(shared.sent_messages().len(), sent_before_late_frames);
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .await
+    );
+    assert_eq!(shared.close_count(), 1);
+    assert!(task.websocket_close_started);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn local_close_waits_for_peer_before_websocket_close_and_sm_destruction() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, _events) =

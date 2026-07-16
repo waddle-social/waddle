@@ -1,6 +1,8 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
 import social.waddle.client.ffi.WaddleClientInterface
@@ -17,6 +19,14 @@ import social.waddle.client.ffi.WaddleSmResumeState
 internal class ActiveSession(
     private val onResumeState: (WaddleSmResumeState?) -> Unit,
 ) {
+    /** Serializes attempt replacement against generation-fenced FFI sends. */
+    private val attemptMutex = Mutex()
+
+    data class Attempt(
+        val bridge: XmppEventBridge,
+        val connectionGeneration: Long,
+    )
+
     /**
      * The client of the attempt that reached `SessionReady`, while that
      * attempt is alive — the target of the UI passthroughs.
@@ -27,6 +37,10 @@ internal class ActiveSession(
 
     @Volatile
     var ownBareJid: String? = null
+
+    @Volatile
+    var connectionGeneration: Long = 0
+        private set
 
     /** The live attempt's bridge, for injecting locally-produced events. */
     @Volatile
@@ -42,22 +56,25 @@ internal class ActiveSession(
     var uploadService: String? = null
 
     /** Fresh bridge for a new attempt (the FFI client is one-shot). */
-    fun beginAttempt(): XmppEventBridge {
+    suspend fun beginAttempt(): Attempt = attemptMutex.withLock {
+        connectionGeneration += 1
+        client = null
         val attemptBridge = XmppEventBridge(onResumeState)
         bridge = attemptBridge
-        return attemptBridge
+        Attempt(attemptBridge, connectionGeneration)
     }
 
     /** The attempt reached `SessionReady`: expose its client, reset probes. */
-    fun onReady(readyClient: WaddleClientInterface) {
+    suspend fun onReady(readyClient: WaddleClientInterface, generation: Long) = attemptMutex.withLock {
+        if (generation != connectionGeneration) return@withLock
         client = readyClient
         mdsPublishSupported = null
         uploadService = null
     }
 
     /** The attempt ended; passthroughs fall back to their not-connected shape. */
-    fun endAttempt() {
-        client = null
+    suspend fun endAttempt(generation: Long) = attemptMutex.withLock {
+        if (generation == connectionGeneration) client = null
     }
 
     /** Fire-and-check verb shape: no client → [VerbResult.NotConnected],
@@ -79,6 +96,26 @@ internal class ActiveSession(
     ): WaddleSendMessageOutcome {
         val liveClient = client ?: return WaddleSendMessageOutcome.NotConnected
         return try {
+            op(liveClient)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            WaddleSendMessageOutcome.TransportError
+        }
+    }
+
+    /** Generation-fenced message send used by the durable outbound queue.
+     * The caller claims its row under [expectedGeneration] before invoking
+     * FFI; a replacement attempt therefore cannot inherit the old claim. */
+    suspend fun sendAtGeneration(
+        expectedGeneration: Long,
+        op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
+    ): WaddleSendMessageOutcome = attemptMutex.withLock {
+        val liveClient = client
+        if (liveClient == null || connectionGeneration != expectedGeneration) {
+            return@withLock WaddleSendMessageOutcome.NotConnected
+        }
+        try {
             op(liveClient)
         } catch (cancellation: CancellationException) {
             throw cancellation

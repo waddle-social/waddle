@@ -5291,6 +5291,318 @@ public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) 
 }
 
 
+public struct WaddleResumeStanza: Equatable, Hashable {
+    public var stanzaKind: WaddleResumeStanzaKind
+    public var tokens: [WaddleResumeXmlToken]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(stanzaKind: WaddleResumeStanzaKind, tokens: [WaddleResumeXmlToken]) {
+        self.stanzaKind = stanzaKind
+        self.tokens = tokens
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeStanza: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeStanza: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeStanza {
+        return
+            try WaddleResumeStanza(
+                stanzaKind: FfiConverterTypeWaddleResumeStanzaKind.read(from: &buf),
+                tokens: FfiConverterSequenceTypeWaddleResumeXmlToken.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeStanza, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleResumeStanzaKind.write(value.stanzaKind, into: &buf)
+        FfiConverterSequenceTypeWaddleResumeXmlToken.write(value.tokens, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeStanza_lift(_ buf: RustBuffer) throws -> WaddleResumeStanza {
+    return try FfiConverterTypeWaddleResumeStanza.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeStanza_lower(_ value: WaddleResumeStanza) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeStanza.lower(value)
+}
+
+
+public struct WaddleResumeXmlAttribute: Equatable, Hashable {
+    public var name: WaddleResumeXmlName
+    public var value: WaddleResumeXmlValue
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: WaddleResumeXmlName, value: WaddleResumeXmlValue) {
+        self.name = name
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlAttribute: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlAttribute: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlAttribute {
+        return
+            try WaddleResumeXmlAttribute(
+                name: FfiConverterTypeWaddleResumeXmlName.read(from: &buf),
+                value: FfiConverterTypeWaddleResumeXmlValue.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeXmlAttribute, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleResumeXmlName.write(value.name, into: &buf)
+        FfiConverterTypeWaddleResumeXmlValue.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlAttribute_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlAttribute {
+    return try FfiConverterTypeWaddleResumeXmlAttribute.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlAttribute_lower(_ value: WaddleResumeXmlAttribute) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlAttribute.lower(value)
+}
+
+
+public struct WaddleResumeXmlLocalName: Equatable, Hashable {
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlLocalName: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlLocalName: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlLocalName {
+        return
+            try WaddleResumeXmlLocalName(
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeXmlLocalName, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlLocalName_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlLocalName {
+    return try FfiConverterTypeWaddleResumeXmlLocalName.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlLocalName_lower(_ value: WaddleResumeXmlLocalName) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlLocalName.lower(value)
+}
+
+
+public struct WaddleResumeXmlName: Equatable, Hashable {
+    public var namespace: WaddleResumeXmlNamespace
+    public var localName: WaddleResumeXmlLocalName
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(namespace: WaddleResumeXmlNamespace, localName: WaddleResumeXmlLocalName) {
+        self.namespace = namespace
+        self.localName = localName
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlName: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlName: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlName {
+        return
+            try WaddleResumeXmlName(
+                namespace: FfiConverterTypeWaddleResumeXmlNamespace.read(from: &buf),
+                localName: FfiConverterTypeWaddleResumeXmlLocalName.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeXmlName, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleResumeXmlNamespace.write(value.namespace, into: &buf)
+        FfiConverterTypeWaddleResumeXmlLocalName.write(value.localName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlName_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlName {
+    return try FfiConverterTypeWaddleResumeXmlName.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlName_lower(_ value: WaddleResumeXmlName) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlName.lower(value)
+}
+
+
+public struct WaddleResumeXmlNamespace: Equatable, Hashable {
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlNamespace: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlNamespace: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlNamespace {
+        return
+            try WaddleResumeXmlNamespace(
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeXmlNamespace, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlNamespace_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlNamespace {
+    return try FfiConverterTypeWaddleResumeXmlNamespace.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlNamespace_lower(_ value: WaddleResumeXmlNamespace) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlNamespace.lower(value)
+}
+
+
+public struct WaddleResumeXmlValue: Equatable, Hashable {
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlValue: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlValue: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlValue {
+        return
+            try WaddleResumeXmlValue(
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleResumeXmlValue, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlValue_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlValue {
+    return try FfiConverterTypeWaddleResumeXmlValue.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlValue_lower(_ value: WaddleResumeXmlValue) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlValue.lower(value)
+}
+
+
 /**
  * Options bag attached to an outbound chat or groupchat send.
  */
@@ -5504,18 +5816,16 @@ public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) ->
 
 
 /**
- * UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
- * parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
- * native timestamp type before Rust converts it to `DateTime<Utc>`.
+ * UniFFI boundary representation of one typed XEP-0198 resume entry.
  */
 public struct WaddleSmResumeEntry: Equatable, Hashable {
-    public var stanzaXml: String
+    public var stanza: WaddleResumeStanza
     public var sentAt: Date
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(stanzaXml: String, sentAt: Date) {
-        self.stanzaXml = stanzaXml
+    public init(stanza: WaddleResumeStanza, sentAt: Date) {
+        self.stanza = stanza
         self.sentAt = sentAt
     }
 
@@ -5535,13 +5845,13 @@ public struct FfiConverterTypeWaddleSmResumeEntry: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSmResumeEntry {
         return
             try WaddleSmResumeEntry(
-                stanzaXml: FfiConverterString.read(from: &buf),
+                stanza: FfiConverterTypeWaddleResumeStanza.read(from: &buf),
                 sentAt: FfiConverterTimestamp.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleSmResumeEntry, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.stanzaXml, into: &buf)
+        FfiConverterTypeWaddleResumeStanza.write(value.stanza, into: &buf)
         FfiConverterTimestamp.write(value.sentAt, into: &buf)
     }
 }
@@ -5563,10 +5873,9 @@ public func FfiConverterTypeWaddleSmResumeEntry_lower(_ value: WaddleSmResumeEnt
 
 
 /**
- * XEP-0198 client resume snapshot crossing the FFI as an opaque
- * persistence round-trip: the Swift app stores it on disconnect and
- * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound entries carry serialized XML plus their original send instant.
+ * XEP-0198 client resume snapshot crossing the FFI as a typed persistence
+ * round-trip. The app stores it on disconnect and feeds it back through
+ * [`WaddleConfig`] on the next connect.
  */
 public struct WaddleSmResumeState: Equatable, Hashable {
     /**
@@ -7630,6 +7939,161 @@ public func FfiConverterTypeWaddleReferenceType_lower(_ value: WaddleReferenceTy
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleResumeStanzaKind: Equatable, Hashable {
+
+    case message
+    case presence
+    case iq
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeStanzaKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeStanzaKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleResumeStanzaKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeStanzaKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .message
+
+        case 2: return .presence
+
+        case 3: return .iq
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleResumeStanzaKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .message:
+            writeInt(&buf, Int32(1))
+
+
+        case .presence:
+            writeInt(&buf, Int32(2))
+
+
+        case .iq:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeStanzaKind_lift(_ buf: RustBuffer) throws -> WaddleResumeStanzaKind {
+    return try FfiConverterTypeWaddleResumeStanzaKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeStanzaKind_lower(_ value: WaddleResumeStanzaKind) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeStanzaKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleResumeXmlToken: Equatable, Hashable {
+
+    case start(name: WaddleResumeXmlName, attributes: [WaddleResumeXmlAttribute]
+    )
+    case text(value: WaddleResumeXmlValue
+    )
+    case end
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleResumeXmlToken: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleResumeXmlToken: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleResumeXmlToken
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleResumeXmlToken {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .start(name: try FfiConverterTypeWaddleResumeXmlName.read(from: &buf), attributes: try FfiConverterSequenceTypeWaddleResumeXmlAttribute.read(from: &buf)
+        )
+
+        case 2: return .text(value: try FfiConverterTypeWaddleResumeXmlValue.read(from: &buf)
+        )
+
+        case 3: return .end
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleResumeXmlToken, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .start(name,attributes):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleResumeXmlName.write(name, into: &buf)
+            FfiConverterSequenceTypeWaddleResumeXmlAttribute.write(attributes, into: &buf)
+
+
+        case let .text(value):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWaddleResumeXmlValue.write(value, into: &buf)
+
+
+        case .end:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlToken_lift(_ buf: RustBuffer) throws -> WaddleResumeXmlToken {
+    return try FfiConverterTypeWaddleResumeXmlToken.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleResumeXmlToken_lower(_ value: WaddleResumeXmlToken) -> RustBuffer {
+    return FfiConverterTypeWaddleResumeXmlToken.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
  * `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
@@ -9390,6 +9854,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleResumeXmlAttribute: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleResumeXmlAttribute]
+
+    public static func write(_ value: [WaddleResumeXmlAttribute], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleResumeXmlAttribute.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleResumeXmlAttribute] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleResumeXmlAttribute]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleResumeXmlAttribute.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleSharedFile]
 
@@ -9507,6 +9996,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustB
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleUploadHeader.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleResumeXmlToken: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleResumeXmlToken]
+
+    public static func write(_ value: [WaddleResumeXmlToken], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleResumeXmlToken.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleResumeXmlToken] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleResumeXmlToken]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleResumeXmlToken.read(from: &buf))
         }
         return seq
     }

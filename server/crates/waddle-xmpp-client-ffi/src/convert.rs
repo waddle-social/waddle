@@ -1,6 +1,4 @@
 use jid::Jid;
-use minidom::Element;
-
 use waddle_xmpp_client::{
     mds::MdsCatchupEntry,
     messaging::{
@@ -16,7 +14,9 @@ use waddle_xmpp_client::{
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
-    MessagingEvent, SmResumeEntry, SmResumeState,
+    MessagingEvent, ResumeStanza, ResumeStanzaKind, ResumeStanzaSnapshot, ResumeXmlAttribute,
+    ResumeXmlLocalName, ResumeXmlName, ResumeXmlNamespace, ResumeXmlToken, ResumeXmlValue,
+    SmResumeEntry, SmResumeState,
 };
 
 use crate::{
@@ -28,6 +28,8 @@ use crate::{
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
     WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
+    WaddleResumeStanza, WaddleResumeStanzaKind, WaddleResumeXmlAttribute, WaddleResumeXmlLocalName,
+    WaddleResumeXmlName, WaddleResumeXmlNamespace, WaddleResumeXmlToken, WaddleResumeXmlValue,
     WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeEntry,
     WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
 };
@@ -462,10 +464,7 @@ fn carbon_to_ffi(direction: CarbonDirection) -> WaddleCarbonDirection {
 
 // ── XEP-0198 resume snapshot round-trip ──────────────────────────────────────
 
-/// Serialize the typed resume snapshot for opaque persistence on the
-/// app side. Queued stanzas cross as XML strings — the message
-/// stanza-id is re-derived from each element on restore, so the
-/// round trip is lossless for replay identity.
+/// Serialize the typed resume snapshot for persistence on the app side.
 pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
     WaddleSmResumeState {
         previd: state.previd().to_string(),
@@ -475,28 +474,23 @@ pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
         queued_entries: state
             .unhandled_outbound_entries()
             .map(|entry| WaddleSmResumeEntry {
-                stanza_xml: String::from(entry.element()),
+                stanza: resume_stanza_to_ffi(entry.stanza()),
                 sent_at: entry.sent_at().into(),
             })
             .collect(),
     }
 }
 
-/// Rebuild the typed resume snapshot from persisted FFI data. Parsing
-/// the queued-stanza XML happens exactly once, here at the boundary;
-/// malformed persisted state is surfaced as a human-readable error
-/// (via the listener) rather than silently dropped.
+/// Rebuild the typed resume snapshot from persisted FFI data. Invalid token
+/// sequences are surfaced through the listener rather than silently dropped.
 pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResumeState, String> {
     let entries = state
         .queued_entries
         .into_iter()
         .map(|entry| {
-            let element = entry
-                .stanza_xml
-                .parse::<Element>()
-                .map_err(|err| format!("invalid resume stanza XML: {err}"))?;
+            let stanza = resume_stanza_from_ffi(entry.stanza)?;
             let sent_at = entry.sent_at.into();
-            Ok(SmResumeEntry::new(element, sent_at))
+            Ok(SmResumeEntry::new(stanza, sent_at))
         })
         .collect::<Result<Vec<_>, String>>()?;
     SmResumeState::from_unhandled_outbound_entries(
@@ -507,6 +501,101 @@ pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResu
     )
     .map(|resume| resume.with_max_resume_seconds(state.max_resume_seconds))
     .map_err(|err| err.to_string())
+}
+
+fn resume_stanza_to_ffi(stanza: &ResumeStanza) -> WaddleResumeStanza {
+    let snapshot = stanza.snapshot();
+    WaddleResumeStanza {
+        stanza_kind: match snapshot.stanza_kind {
+            ResumeStanzaKind::Message => WaddleResumeStanzaKind::Message,
+            ResumeStanzaKind::Presence => WaddleResumeStanzaKind::Presence,
+            ResumeStanzaKind::Iq => WaddleResumeStanzaKind::Iq,
+        },
+        tokens: snapshot
+            .tokens
+            .into_iter()
+            .map(resume_xml_token_to_ffi)
+            .collect(),
+    }
+}
+
+fn resume_xml_token_to_ffi(token: ResumeXmlToken) -> WaddleResumeXmlToken {
+    match token {
+        ResumeXmlToken::Start { name, attributes } => WaddleResumeXmlToken::Start {
+            name: resume_xml_name_to_ffi(name),
+            attributes: attributes
+                .into_iter()
+                .map(|attribute| WaddleResumeXmlAttribute {
+                    name: resume_xml_name_to_ffi(attribute.name),
+                    value: WaddleResumeXmlValue {
+                        value: attribute.value.as_str().to_owned(),
+                    },
+                })
+                .collect(),
+        },
+        ResumeXmlToken::Text { value } => WaddleResumeXmlToken::Text {
+            value: WaddleResumeXmlValue {
+                value: value.as_str().to_owned(),
+            },
+        },
+        ResumeXmlToken::End => WaddleResumeXmlToken::End,
+    }
+}
+
+fn resume_xml_name_to_ffi(name: ResumeXmlName) -> WaddleResumeXmlName {
+    WaddleResumeXmlName {
+        namespace: WaddleResumeXmlNamespace {
+            value: name.namespace.as_str().to_owned(),
+        },
+        local_name: WaddleResumeXmlLocalName {
+            value: name.local_name.as_str().to_owned(),
+        },
+    }
+}
+
+fn resume_stanza_from_ffi(stanza: WaddleResumeStanza) -> Result<ResumeStanza, String> {
+    ResumeStanza::from_snapshot(ResumeStanzaSnapshot {
+        stanza_kind: match stanza.stanza_kind {
+            WaddleResumeStanzaKind::Message => ResumeStanzaKind::Message,
+            WaddleResumeStanzaKind::Presence => ResumeStanzaKind::Presence,
+            WaddleResumeStanzaKind::Iq => ResumeStanzaKind::Iq,
+        },
+        tokens: stanza
+            .tokens
+            .into_iter()
+            .map(resume_xml_token_from_ffi)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn resume_xml_token_from_ffi(token: WaddleResumeXmlToken) -> Result<ResumeXmlToken, String> {
+    match token {
+        WaddleResumeXmlToken::Start { name, attributes } => Ok(ResumeXmlToken::Start {
+            name: resume_xml_name_from_ffi(name)?,
+            attributes: attributes
+                .into_iter()
+                .map(|attribute| {
+                    Ok(ResumeXmlAttribute {
+                        name: resume_xml_name_from_ffi(attribute.name)?,
+                        value: ResumeXmlValue::new(attribute.value.value),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        }),
+        WaddleResumeXmlToken::Text { value } => Ok(ResumeXmlToken::Text {
+            value: ResumeXmlValue::new(value.value),
+        }),
+        WaddleResumeXmlToken::End => Ok(ResumeXmlToken::End),
+    }
+}
+
+fn resume_xml_name_from_ffi(name: WaddleResumeXmlName) -> Result<ResumeXmlName, String> {
+    Ok(ResumeXmlName {
+        namespace: ResumeXmlNamespace::new(name.namespace.value),
+        local_name: ResumeXmlLocalName::new(name.local_name.value)
+            .map_err(|error| error.to_string())?,
+    })
 }
 
 fn call_media_to_ffi(media: CallMedia) -> WaddleCallMedia {
@@ -1909,22 +1998,22 @@ mod tests {
     fn resume_state_round_trips_through_session_config_and_snapshot() {
         use waddle_xmpp_client::stream_management::SmState;
 
-        // Serialize the queued stanza with the same writer the FFI
-        // uses so string equality is meaningful.
         let queued: Element = "<message xmlns='jabber:client' id='queued-1' type='chat' \
-                                to='bob@waddle.test'>\
-                                 <body>unacked</body>\
+                                to='bob@waddle.test' xml:lang='en' \
+                                xmlns:fixture='urn:waddle:test:resume' fixture:flag='kept'>\
+                                 prefix<body>unacked<em xmlns='urn:waddle:test:resume'>mixed</em>tail</body>\
                                  <delay xmlns='urn:xmpp:delay' stamp='2026-06-01T12:00:00Z'/>\
                                </message>"
             .parse()
             .expect("fixture parses");
+        let stanza = ResumeStanza::try_from_element(queued).expect("typed resume stanza");
         let original = WaddleSmResumeState {
             previd: "prev-stream".to_string(),
             inbound_h: 5,
             outbound_h: 9,
             max_resume_seconds: Some(300),
             queued_entries: vec![WaddleSmResumeEntry {
-                stanza_xml: String::from(&queued),
+                stanza: resume_stanza_to_ffi(&stanza),
                 sent_at: std::time::SystemTime::UNIX_EPOCH
                     + std::time::Duration::new(1_748_779_140, 123_000_000),
             }],
@@ -1940,7 +2029,7 @@ mod tests {
         assert_eq!(
             typed.unhandled_message_stanza_ids(),
             vec![StanzaId::new("queued-1").expect("stanza id")],
-            "message stanza-id must be re-derived from the persisted XML"
+            "message stanza-id must be re-derived from the typed stanza"
         );
         assert_eq!(
             std::time::SystemTime::from(
@@ -1966,19 +2055,127 @@ mod tests {
     }
 
     #[test]
-    fn resume_state_from_ffi_rejects_malformed_stanza_xml() {
+    fn resume_state_from_ffi_rejects_malformed_stanza_tokens() {
         let err = resume_state_from_ffi(WaddleSmResumeState {
             previd: "prev-stream".to_string(),
             inbound_h: 0,
             outbound_h: 1,
             max_resume_seconds: None,
             queued_entries: vec![WaddleSmResumeEntry {
-                stanza_xml: "<not-xml".to_string(),
+                stanza: WaddleResumeStanza {
+                    stanza_kind: WaddleResumeStanzaKind::Message,
+                    tokens: vec![WaddleResumeXmlToken::End],
+                },
                 sent_at: std::time::SystemTime::UNIX_EPOCH,
             }],
         })
-        .expect_err("malformed XML must be rejected");
-        assert!(err.contains("invalid resume stanza XML"), "err: {err}");
+        .expect_err("malformed token sequence must be rejected");
+        assert!(err.contains("token sequence is malformed"), "err: {err}");
+    }
+
+    #[test]
+    fn resume_state_from_ffi_enforces_depth_and_token_limits() {
+        fn name(namespace: &str, local_name: &str) -> WaddleResumeXmlName {
+            WaddleResumeXmlName {
+                namespace: WaddleResumeXmlNamespace {
+                    value: namespace.to_owned(),
+                },
+                local_name: WaddleResumeXmlLocalName {
+                    value: local_name.to_owned(),
+                },
+            }
+        }
+        fn state(tokens: Vec<WaddleResumeXmlToken>) -> WaddleSmResumeState {
+            WaddleSmResumeState {
+                previd: "prev-stream".to_owned(),
+                inbound_h: 0,
+                outbound_h: 1,
+                max_resume_seconds: None,
+                queued_entries: vec![WaddleSmResumeEntry {
+                    stanza: WaddleResumeStanza {
+                        stanza_kind: WaddleResumeStanzaKind::Message,
+                        tokens,
+                    },
+                    sent_at: std::time::SystemTime::UNIX_EPOCH,
+                }],
+            }
+        }
+
+        let mut too_deep = vec![WaddleResumeXmlToken::Start {
+            name: name("jabber:client", "message"),
+            attributes: Vec::new(),
+        }];
+        too_deep.extend((0..64).map(|_| WaddleResumeXmlToken::Start {
+            name: name("urn:waddle:test:resume", "nested"),
+            attributes: Vec::new(),
+        }));
+        too_deep.extend((0..65).map(|_| WaddleResumeXmlToken::End));
+        let depth_err = resume_state_from_ffi(state(too_deep))
+            .expect_err("FFI snapshots beyond the core depth bound must fail");
+        assert!(depth_err.contains("depth limit"), "err: {depth_err}");
+
+        let mut too_many = vec![WaddleResumeXmlToken::Start {
+            name: name("jabber:client", "message"),
+            attributes: Vec::new(),
+        }];
+        too_many.extend((0..16_383).map(|_| WaddleResumeXmlToken::Text {
+            value: WaddleResumeXmlValue {
+                value: "x".to_owned(),
+            },
+        }));
+        too_many.push(WaddleResumeXmlToken::End);
+        let token_err = resume_state_from_ffi(state(too_many))
+            .expect_err("FFI snapshots beyond the core token bound must fail");
+        assert!(token_err.contains("token limit"), "err: {token_err}");
+    }
+
+    #[test]
+    fn resume_state_from_ffi_rejects_kind_mismatch_and_invalid_names() {
+        let root_name = WaddleResumeXmlName {
+            namespace: WaddleResumeXmlNamespace {
+                value: "jabber:client".to_owned(),
+            },
+            local_name: WaddleResumeXmlLocalName {
+                value: "message".to_owned(),
+            },
+        };
+        let state_with = |stanza_kind, name| WaddleSmResumeState {
+            previd: "prev-stream".to_owned(),
+            inbound_h: 0,
+            outbound_h: 1,
+            max_resume_seconds: None,
+            queued_entries: vec![WaddleSmResumeEntry {
+                stanza: WaddleResumeStanza {
+                    stanza_kind,
+                    tokens: vec![
+                        WaddleResumeXmlToken::Start {
+                            name,
+                            attributes: Vec::new(),
+                        },
+                        WaddleResumeXmlToken::End,
+                    ],
+                },
+                sent_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
+        };
+
+        let kind_err = resume_state_from_ffi(state_with(
+            WaddleResumeStanzaKind::Presence,
+            root_name.clone(),
+        ))
+        .expect_err("declared kind must match the typed root");
+        assert!(kind_err.contains("kind does not match"), "err: {kind_err}");
+
+        let invalid_name = WaddleResumeXmlName {
+            local_name: WaddleResumeXmlLocalName {
+                value: "bad name".to_owned(),
+            },
+            ..root_name
+        };
+        let name_err =
+            resume_state_from_ffi(state_with(WaddleResumeStanzaKind::Message, invalid_name))
+                .expect_err("invalid XML names must fail at the typed boundary");
+        assert!(name_err.contains("invalid XML name"), "err: {name_err}");
     }
 
     /// In-test listener that captures every dispatched event in

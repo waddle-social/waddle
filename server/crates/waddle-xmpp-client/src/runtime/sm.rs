@@ -6,8 +6,12 @@ use crate::event::{
     StreamManagementEvent,
 };
 use crate::state::{SessionBinding, StreamId};
-use crate::transport::{StreamClose, TransportMessage};
+use crate::transport::TransportMessage;
 use minidom::Element;
+use xmpp_parsers::sm::HandledCountTooHigh;
+use xmpp_parsers::stream_error::{
+    DefinedCondition as XmppStreamErrorCondition, StreamError as XmppStreamError,
+};
 
 use super::{BootstrapState, XmppRuntime};
 
@@ -18,7 +22,7 @@ impl XmppRuntime {
         &mut self,
         element: &minidom::Element,
         events: &mut Vec<ClientEvent>,
-    ) {
+    ) -> ClientResult<()> {
         debug_assert_eq!(element.name(), "error");
         debug_assert_eq!(element.ns(), NS_STREAMS);
 
@@ -37,8 +41,13 @@ impl XmppRuntime {
         }
 
         if !matches!(self.bootstrap, BootstrapState::Ready | BootstrapState::Idle) {
-            self.discard_fallback_resume_state();
+            self.discard_fallback_resume_state(events);
         }
+
+        self.stream_close.peer_stream_error_received = true;
+        self.pending_ack_request = None;
+        self.sm_state.stop();
+        self.begin_local_stream_close(events)
     }
 
     pub(super) fn discard_failed_prebind_resume(&mut self, events: &mut Vec<ClientEvent>) {
@@ -62,10 +71,17 @@ impl XmppRuntime {
         )));
     }
 
-    fn discard_fallback_resume_state(&mut self) {
-        self.fallback_resume_state = None;
+    fn discard_fallback_resume_state(&mut self, events: &mut Vec<ClientEvent>) {
+        let failed = self
+            .fallback_resume_state
+            .take()
+            .map(|state| state.unhandled_message_stanza_ids())
+            .unwrap_or_default();
         self.pending_fallback_retries.clear();
         self.fallback_retry_writes_in_flight.clear();
+        events.extend(failed.into_iter().map(|stanza_id| {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+        }));
     }
 
     pub(super) fn handle_sm_element(
@@ -74,6 +90,10 @@ impl XmppRuntime {
         now_ms: u64,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
+        if self.stream_close.peer_stream_error_received {
+            return Ok(());
+        }
+
         if crate::stream_management::SmState::is_request_ack(element) {
             // RFC 7395 permits no XML after our confirmed close half. The
             // final peer `<a/>` remains useful below, but a late `<r/>`
@@ -91,7 +111,7 @@ impl XmppRuntime {
             )));
         } else if let Some(h) = crate::stream_management::SmState::parse_ack_h(element) {
             if self.sm_state.handled_count_too_high(h) {
-                self.handle_sm_handled_count_too_high(h, events);
+                self.handle_sm_handled_count_too_high(h, events)?;
                 return Ok(());
             }
             let processed = self.sm_state.process_ack_at(h, now_ms);
@@ -116,7 +136,7 @@ impl XmppRuntime {
             // XEP-0198 §5 counter reset below would drive the next
             // <a h/> backwards on the wire.
             if self.sm_state.enabled {
-                self.handle_sm_protocol_violation(events);
+                self.handle_sm_protocol_violation(events)?;
                 return Ok(());
             }
             let previd = crate::stream_management::SmState::parse_enabled(element);
@@ -136,21 +156,21 @@ impl XmppRuntime {
         } else if element.name() == "resumed" {
             self.pending_ack_request = None;
             let Some(h) = element.attr("h").and_then(|v| v.parse().ok()) else {
-                self.handle_sm_protocol_violation(events);
+                self.handle_sm_protocol_violation(events)?;
                 return Ok(());
             };
             let Some(previd) = element.attr("previd") else {
-                self.handle_sm_protocol_violation(events);
+                self.handle_sm_protocol_violation(events)?;
                 return Ok(());
             };
             if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
                 || self.sm_state.previd.as_deref() != Some(previd)
             {
-                self.handle_sm_protocol_violation(events);
+                self.handle_sm_protocol_violation(events)?;
                 return Ok(());
             }
             if self.sm_state.handled_count_too_high(h) {
-                self.handle_sm_handled_count_too_high(h, events);
+                self.handle_sm_handled_count_too_high(h, events)?;
                 return Ok(());
             }
             let processed = self.sm_state.process_ack_at(h, now_ms);
@@ -184,7 +204,7 @@ impl XmppRuntime {
             let resume_failed = matches!(self.bootstrap, BootstrapState::AwaitingResume);
             if let Some(h) = element.attr("h").and_then(|value| value.parse().ok()) {
                 if self.sm_state.handled_count_too_high(h) {
-                    self.handle_sm_handled_count_too_high(h, events);
+                    self.handle_sm_handled_count_too_high(h, events)?;
                     return Ok(());
                 }
                 let processed = self.sm_state.process_ack_at(h, now_ms);
@@ -218,19 +238,16 @@ impl XmppRuntime {
         Ok(())
     }
 
-    fn handle_sm_handled_count_too_high(&mut self, h: u32, events: &mut Vec<ClientEvent>) {
-        let error = Element::builder("error", NS_STREAMS)
-            .append(Element::builder("undefined-condition", NS_STREAM_ERRORS).build())
-            .append(
-                Element::builder("handled-count-too-high", crate::stream_management::NS_SM)
-                    .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
-                    .attr(
-                        minidom::rxml::xml_ncname!("send-count").to_owned(),
-                        self.sm_state.outbound_count.to_string(),
-                    )
-                    .build(),
-            )
-            .build();
+    fn handle_sm_handled_count_too_high(
+        &mut self,
+        h: u32,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let error: Element = XmppStreamError::from(HandledCountTooHigh {
+            h,
+            send_count: self.sm_state.outbound_count,
+        })
+        .into();
         self.sm_state.stop();
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(error),
@@ -238,15 +255,16 @@ impl XmppRuntime {
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
             StreamManagementEvent::Failed,
         )));
-        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-            TransportMessage::Close(StreamClose),
-        )));
+        self.begin_local_stream_close(events)
     }
 
-    fn handle_sm_protocol_violation(&mut self, events: &mut Vec<ClientEvent>) {
-        let error = Element::builder("error", NS_STREAMS)
-            .append(Element::builder("bad-request", NS_STREAM_ERRORS).build())
-            .build();
+    fn handle_sm_protocol_violation(&mut self, events: &mut Vec<ClientEvent>) -> ClientResult<()> {
+        let error: Element = XmppStreamError::new(
+            XmppStreamErrorCondition::BadFormat,
+            "en",
+            "Malformed XEP-0198 control element",
+        )
+        .into();
         self.sm_state.stop();
         events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
             TransportMessage::Element(error),
@@ -254,9 +272,7 @@ impl XmppRuntime {
         events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
             StreamManagementEvent::Failed,
         )));
-        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-            TransportMessage::Close(StreamClose),
-        )));
+        self.begin_local_stream_close(events)
     }
 
     fn resumed_session_binding(&self) -> ClientResult<SessionBinding> {

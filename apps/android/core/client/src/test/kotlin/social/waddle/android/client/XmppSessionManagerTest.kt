@@ -438,7 +438,7 @@ class XmppSessionManagerTest {
 
         val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room")
         assertEquals(WaddleSendMessageOutcome.Sent("stanza-42"), roomSend.outcome)
-        assertEquals("live sends never queue", false, roomSend.queued)
+        assertEquals("live sends are not reported as waiting for replay", false, roomSend.queued)
         assertEquals(
             WaddleSendMessageOutcome.Sent("stanza-42"),
             harness.manager.sendChatMessage("alice@waddle.test", "hello dm").outcome,
@@ -451,6 +451,17 @@ class XmppSessionManagerTest {
             "manager-generated stanza id rides the send options",
             client.sendOptions.all { it?.stanzaId != null },
         )
+        assertTrue(
+            "successful live sends remain durable under native ownership until ack",
+            harness.prefs.outboundQueue.first().all {
+                it.ownership is social.waddle.android.client.prefs.OutboundOwnership.NativeOwned
+            },
+        )
+        client.sendOptions.mapNotNull { it?.stanzaId }.forEach { stanzaId ->
+            harness.factory.emit(WaddleClientEvent.DeliveryAcked(stanzaId))
+        }
+        runCurrent()
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
 
         // The attempt died → the passthrough must stop targeting the client.
         harness.factory.emit(WaddleClientEvent.Disconnected)

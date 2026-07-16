@@ -28,7 +28,7 @@ targets:
       - name: Sync Waddle Brand Assets
         script: |
           set -euo pipefail
-          env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+          /usr/bin/env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
     settings:
       base:
         PRODUCT_NAME: Waddle-iOS
@@ -60,7 +60,7 @@ targets:
       - name: Sync Waddle Brand Assets
         script: |
           set -euo pipefail
-          env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
+          /usr/bin/env -u SDKROOT -u SDK_NAME -u EFFECTIVE_PLATFORM_NAME -u PLATFORM_NAME -u ARCHS -u CURRENT_ARCH xcrun --sdk macosx swift "$SRCROOT/scripts/sync_brand_assets.swift"
     settings:
       base:
         PRODUCT_NAME: Waddle-macOS

@@ -62,6 +62,26 @@ class InMemoryPreferencesDataStore : DataStore<Preferences> {
         mutex.withLock { transform(state.value).also { state.value = it } }
 }
 
+/** In-memory store with one-shot write failure injection for durability tests. */
+class FailingPreferencesDataStore : DataStore<Preferences> {
+    private val mutex = Mutex()
+    private val state = MutableStateFlow<Preferences>(emptyPreferences())
+
+    @Volatile
+    var failNextUpdate: Boolean = false
+
+    override val data: Flow<Preferences> = state
+
+    override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
+        mutex.withLock {
+            if (failNextUpdate) {
+                failNextUpdate = false
+                error("injected preferences write failure")
+            }
+            transform(state.value).also { state.value = it }
+        }
+}
+
 class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {
     val state = MutableStateFlow(initiallyOnline)
     override val online: Flow<Boolean> = state
@@ -74,12 +94,14 @@ class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {
 class FakeClientFactory : ClientFactory {
     val clients = CopyOnWriteArrayList<FakeWaddleClient>()
     val configs = CopyOnWriteArrayList<WaddleConfig>()
+    val listeners = CopyOnWriteArrayList<WaddleEventListener>()
 
     @Volatile
     private var listener: WaddleEventListener? = null
 
     override fun create(config: WaddleConfig, listener: WaddleEventListener): WaddleClientInterface {
         this.listener = listener
+        listeners += listener
         configs += config
         return FakeWaddleClient().also { clients += it }
     }
@@ -92,6 +114,11 @@ class FakeClientFactory : ClientFactory {
      */
     fun emit(event: WaddleClientEvent) {
         checkNotNull(listener) { "no client created yet" }.onEvent(event)
+    }
+
+    /** Fire an event at an immutable historical attempt for stale-generation tests. */
+    fun emitAt(attemptIndex: Int, event: WaddleClientEvent) {
+        listeners[attemptIndex].onEvent(event)
     }
 }
 
@@ -140,6 +167,9 @@ class FakeWaddleClient : WaddleClientInterface {
 
     /** Per-call outcome overrides consumed before [sendOutcome]. */
     val sendOutcomes = ConcurrentLinkedDeque<WaddleSendMessageOutcome>()
+
+    /** Runs after the call is recorded but before its outcome is returned. */
+    var beforeSendReturns: (suspend () -> Unit)? = null
 
     override suspend fun connect() {
         connectCalls += 1
@@ -252,6 +282,7 @@ class FakeWaddleClient : WaddleClientInterface {
     ): WaddleSendMessageOutcome {
         sendCalls += peerJid to body
         sendOptions += options
+        beforeSendReturns?.invoke()
         return sendOutcomes.pollFirst() ?: sendOutcome
     }
 
@@ -262,6 +293,7 @@ class FakeWaddleClient : WaddleClientInterface {
     ): WaddleSendMessageOutcome {
         sendCalls += roomJid to body
         sendOptions += options
+        beforeSendReturns?.invoke()
         return sendOutcomes.pollFirst() ?: sendOutcome
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()

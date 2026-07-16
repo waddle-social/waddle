@@ -49,6 +49,12 @@ export class WaddleClient {
     discover_extension_routes(user_jid?: string | null): Promise<any>;
     discover_upload_service(): Promise<any>;
     /**
+     * Permanently retire this wrapper. Disposal is idempotent and clears the
+     * command sender and every JS callback before any queued driver event can
+     * re-enter application code.
+     */
+    dispose(): void;
+    /**
      * XEP-0357 §5 `<enable/>` IQ. No provider credentials — those
      * flow through `register_push_device` (XEP-0050) against the
      * Push Service component.

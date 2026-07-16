@@ -24,6 +24,8 @@ function createStorageMock() {
     removeItem(key: string) { values.delete(key); },
     clear() { values.clear(); },
     has(key: string) { return values.has(key); },
+    key(index: number) { return [...values.keys()][index] ?? null; },
+    get length() { return values.size; },
   };
 }
 
@@ -100,11 +102,10 @@ describe("outbound queue TTL", () => {
     // Reading triggers prune.
     expect(countQueuedMessages("alice@example.com")).toBe(1);
     // The persisted blob should reflect just the fresh entry now.
-    const raw = storage.getItem("waddle.chat.outbound-queue.alice@example.com");
+    const raw = storage.getItem("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-fresh");
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].id).toBe("dm-fresh");
+    expect(parsed.id).toBe("dm-fresh");
   });
 
   test("when every entry is stale the storage key is removed entirely", () => {
@@ -124,7 +125,8 @@ describe("outbound queue TTL", () => {
     });
 
     expect(countQueuedMessages("alice@example.com")).toBe(0);
-    expect(storage.has("waddle.chat.outbound-queue.alice@example.com")).toBe(false);
+    expect(storage.has("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-stale-1")).toBe(false);
+    expect(storage.has("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-stale-2")).toBe(false);
   });
 
   test("unparseable createdAt is treated as fresh (refuse-to-prune is safer than dropping)", () => {

@@ -76,6 +76,7 @@ struct StreamCloseHandshake {
     sent_confirmed_at_ms: Option<u64>,
     received: bool,
     complete: bool,
+    peer_stream_error_received: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,7 +286,7 @@ impl XmppRuntime {
     /// timestamp. Returned events are transport instructions and content-free
     /// telemetry; drivers must abort uncleanly when the stalled event appears.
     pub fn poll_stream_management_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
-        if self.stream_close.sent_confirmed {
+        if self.stream_close.sent_confirmed || self.stream_close.peer_stream_error_received {
             return Vec::new();
         }
         let poll = self.sm_state.poll_ack_timer_at(now_ms);
@@ -312,7 +313,7 @@ impl XmppRuntime {
     }
 
     pub fn next_stream_management_wakeup_in_ms(&self, now_ms: u64) -> Option<u64> {
-        if self.stream_close.sent_confirmed {
+        if self.stream_close.sent_confirmed || self.stream_close.peer_stream_error_received {
             return None;
         }
         self.sm_state.next_ack_wakeup_in_ms(now_ms)
@@ -321,7 +322,7 @@ impl XmppRuntime {
     /// Best-effort pagehide hook. It shares the normal request-in-flight gate
     /// and therefore never emits a second concurrent `<r/>`.
     pub fn request_stream_management_ack_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
-        if self.stream_close.sent_confirmed {
+        if self.stream_close.sent_confirmed || self.stream_close.peer_stream_error_received {
             return Vec::new();
         }
         let mut events = Vec::new();
@@ -484,13 +485,21 @@ impl XmppRuntime {
     ) -> ClientResult<()> {
         use crate::stream_management::NS_SM;
 
+        // RFC 6120 §4.9.1.1: a peer stream error is terminal for the
+        // current XML stream. The typed RFC 7395 close is the only XML
+        // this side may emit after observing it; later application and SM
+        // elements are ignored while the framing close/timeout completes.
+        if self.stream_close.peer_stream_error_received {
+            return Ok(());
+        }
+
         if element.ns() == NS_SM {
             self.handle_sm_element(&element, now_ms, events)?;
             return Ok(());
         }
 
         if element.name() == "error" && element.ns() == crate::bootstrap::NS_STREAMS {
-            self.handle_stream_error_element(&element, events);
+            self.handle_stream_error_element(&element, events)?;
             return Ok(());
         }
 

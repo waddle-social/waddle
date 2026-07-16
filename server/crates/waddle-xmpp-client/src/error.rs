@@ -7,6 +7,7 @@ use crate::bootstrap::{RequiredStreamFeature, SaslFailureCondition};
 use crate::push::PushRegistrationError;
 use crate::request::{RequestId, StanzaId};
 use crate::state::{ClientState, SessionPhase};
+use crate::stream_management::ResumeStanzaError;
 
 pub type ClientResult<T> = Result<T, ClientError>;
 
@@ -90,6 +91,8 @@ pub enum ClientError {
     RequestCancelled,
     #[error("the XMPP session is disconnected")]
     Disconnected,
+    #[error(transparent)]
+    InvalidResumeStanza(#[from] ResumeStanzaError),
     #[error(transparent)]
     PushRegistration(#[from] PushRegistrationError),
     #[error("server returned a stanza error: {0}")]

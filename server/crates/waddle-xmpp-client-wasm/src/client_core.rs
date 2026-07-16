@@ -9,6 +9,7 @@ impl WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
                 command_owner: Rc::downgrade(&command_owner),
+                disposed: false,
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
@@ -45,53 +46,86 @@ impl WaddleClient {
     }
 
     pub fn set_on_message(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_message = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_message = Some(cb);
+        }
     }
 
     pub fn set_on_presence(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_presence = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_presence = Some(cb);
+        }
     }
 
     pub fn set_on_connected(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_connected = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_connected = Some(cb);
+        }
     }
 
     pub fn set_on_session_lifecycle(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_session_lifecycle = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_session_lifecycle = Some(cb);
+        }
     }
 
     pub fn set_on_stream_management(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_stream_management = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_stream_management = Some(cb);
+        }
     }
 
     pub fn set_on_disconnected(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_disconnected = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_disconnected = Some(cb);
+        }
     }
 
     pub fn set_on_error(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_error = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_error = Some(cb);
+        }
     }
 
     pub fn set_on_message_delivery_acked(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_message_delivery_acked = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_message_delivery_acked = Some(cb);
+        }
     }
 
     pub fn set_on_message_delivery_failed(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_message_delivery_failed = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_message_delivery_failed = Some(cb);
+        }
     }
 
     /// XEP-0490 §3.2 PEP event handler. Invoked once per displayed
     /// item carried in an inbound `urn:xmpp:mds:displayed:0` PEP
     /// event, with a `WaddleMdsDisplayedEntry`-shaped JS value.
     pub fn set_on_mds_displayed(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_mds_displayed = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_mds_displayed = Some(cb);
+        }
     }
 
     /// Generic XEP-0060 pubsub event handler. Invoked once per
     /// inbound `<items/>` event with a `WaddlePubsubEvent`-shaped JS
     /// value.
     pub fn set_on_pubsub_event(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_pubsub_event = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_pubsub_event = Some(cb);
+        }
     }
 
     /// Register a callback for inbound XMPP-native call events
@@ -102,12 +136,25 @@ impl WaddleClient {
     /// `reason` fields. See `messaging::call::parse_call_event` on
     /// the Rust side for the typed input.
     pub fn set_on_call(&mut self, cb: Function) {
-        self.inner.borrow_mut().on_call = Some(cb);
+        let mut inner = self.inner.borrow_mut();
+        if !inner.disposed {
+            inner.on_call = Some(cb);
+        }
+    }
+
+    /// Permanently retire this wrapper. Disposal is idempotent and clears the
+    /// command sender and every JS callback before any queued driver event can
+    /// re-enter application code.
+    pub fn dispose(&self) {
+        self.inner.borrow_mut().retire();
     }
 
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
+            if inner.borrow().disposed {
+                return Err(js_error("client is disposed"));
+            }
             let command_owner = command_owner(&inner)?;
             if command_owner.borrow().is_some() {
                 return Err(js_error("client is already connected"));
@@ -146,5 +193,55 @@ impl WaddleClient {
             request_stream_management_ack(inner).await?;
             Ok(JsValue::UNDEFINED)
         })
+    }
+}
+
+impl Drop for WaddleClient {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.inner.try_borrow_mut() {
+            inner.retire();
+        } else {
+            self._command_owner.borrow_mut().take();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_client() -> WaddleClient {
+        WaddleClient::new(WaddleConfig::new(
+            "wss://xmpp.example.test/ws".to_owned(),
+            "alice@example.test".to_owned(),
+            "token".to_owned(),
+            "web".to_owned(),
+        ))
+    }
+
+    #[test]
+    fn dispose_is_idempotent_and_permanently_retires_command_input() {
+        let client = test_client();
+        let (sender, _receiver) = mpsc::channel(1);
+        *client._command_owner.borrow_mut() = Some(sender);
+
+        client.dispose();
+        client.dispose();
+
+        let inner = client.inner.borrow();
+        assert!(inner.disposed);
+        assert!(client._command_owner.borrow().is_none());
+        assert!(inner.on_message.is_none());
+        assert!(inner.on_presence.is_none());
+        assert!(inner.on_connected.is_none());
+        assert!(inner.on_session_lifecycle.is_none());
+        assert!(inner.on_stream_management.is_none());
+        assert!(inner.on_disconnected.is_none());
+        assert!(inner.on_error.is_none());
+        assert!(inner.on_message_delivery_acked.is_none());
+        assert!(inner.on_message_delivery_failed.is_none());
+        assert!(inner.on_mds_displayed.is_none());
+        assert!(inner.on_pubsub_event.is_none());
+        assert!(inner.on_call.is_none());
     }
 }

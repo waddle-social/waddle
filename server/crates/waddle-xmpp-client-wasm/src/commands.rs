@@ -267,6 +267,9 @@ pub(crate) fn command_sender(
 pub(crate) fn command_owner(
     inner: &Rc<RefCell<WaddleClientInner>>,
 ) -> Result<Rc<RefCell<Option<mpsc::Sender<WasmCommand>>>>, JsValue> {
+    if inner.borrow().disposed {
+        return Err(js_error("client is disposed"));
+    }
     inner
         .borrow()
         .command_owner
@@ -296,6 +299,7 @@ mod tests {
                     resume_state: Some(resume_state.clone()),
                 },
                 command_owner: Rc::downgrade(&command_owner),
+                disposed: false,
                 on_message: None,
                 on_presence: None,
                 on_connected: None,
