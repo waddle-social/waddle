@@ -3,6 +3,8 @@ package social.waddle.android.client
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.client.ffi.WaddleFallbackRange
+import social.waddle.client.ffi.WaddleMarkupSpan
+import social.waddle.client.ffi.WaddleMarkupSpanType
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleReplyTarget
@@ -29,6 +31,8 @@ data class MessageSendExtras(
     val sharedFiles: List<SharedFileRef> = emptyList(),
     /** XEP-0372 mentions, offsets over the pre-fallback send body. */
     val mentions: List<MentionRef> = emptyList(),
+    /** XEP-0394 markup, offsets over the pre-fallback send body. */
+    val markup: List<MarkupRef> = emptyList(),
 ) {
     val hasReply: Boolean get() = replyToId != null && replyToAuthorJid != null
 }
@@ -43,6 +47,7 @@ internal fun QueuedOutboundMessage.sendExtras(): MessageSendExtras? {
         threadParent = threadParent,
         sharedFiles = sharedFiles,
         mentions = mentions,
+        markup = markup,
     )
     // A plain queued body carries no annotations at all.
     return extras.takeIf { it != MessageSendExtras() }
@@ -110,7 +115,34 @@ internal fun preparedSend(
         thread = thread,
         sharedFiles = files,
         references = mentionReferences(extras.mentions, shiftBy = fallback?.end ?: 0u),
+        markupSpans = markupWireSpans(extras.markup, shiftBy = fallback?.end ?: 0u),
     )
+}
+
+/**
+ * XEP-0394 wire spans for the composed markup, rebased onto the FINAL
+ * wire body exactly like [mentionReferences]: a prepended reply
+ * fallback quote shifts every offset right by its code-point length.
+ * Empty or inverted spans are dropped.
+ */
+private fun markupWireSpans(markup: List<MarkupRef>, shiftBy: UInt): List<WaddleMarkupSpan> =
+    markup.mapNotNull { span ->
+        if (span.end <= span.begin) return@mapNotNull null
+        WaddleMarkupSpan(
+            spanType = span.type.wireType(),
+            start = span.begin + shiftBy,
+            end = span.end + shiftBy,
+            uri = null,
+        )
+    }
+
+private fun MarkupRefType.wireType(): WaddleMarkupSpanType = when (this) {
+    MarkupRefType.BOLD -> WaddleMarkupSpanType.BOLD
+    MarkupRefType.ITALIC -> WaddleMarkupSpanType.ITALIC
+    MarkupRefType.STRIKETHROUGH -> WaddleMarkupSpanType.STRIKETHROUGH
+    MarkupRefType.CODE -> WaddleMarkupSpanType.CODE
+    MarkupRefType.CODE_BLOCK -> WaddleMarkupSpanType.CODE_BLOCK
+    MarkupRefType.BLOCKQUOTE -> WaddleMarkupSpanType.BLOCKQUOTE
 }
 
 /**

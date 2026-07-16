@@ -23,6 +23,7 @@ import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
+import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleUploadSlot
@@ -216,6 +217,10 @@ class XmppSessionManager(
 
     /** Seed [pinStore] with the room's current pin list (room open). */
     suspend fun refreshRoomPins(roomJid: String) = verbs.refreshRoomPins(roomJid)
+
+    /** Composer `urn:waddle:link-preview:0` lookup; `null` when offline. */
+    suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup? =
+        verbs.lookupLinkPreview(url, scopeJid)
 
     /**
      * Mark the newest displayable message of a conversation as read:

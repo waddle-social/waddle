@@ -66,6 +66,7 @@ internal class OutboundMessenger(
                     threadParent = extras?.threadParent,
                     sharedFiles = extras?.sharedFiles.orEmpty(),
                     mentions = extras?.mentions.orEmpty(),
+                    markup = extras?.markup.orEmpty(),
                 ),
             )
         } catch (cancellation: CancellationException) {

@@ -1,8 +1,11 @@
 package social.waddle.android.client.store
 
 import social.waddle.client.ffi.WaddleArchivedMessage
+import social.waddle.client.ffi.WaddleLinkPreview
+import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleStanzaId
 
 /** One emoji's aggregated reaction state on a timeline row. */
@@ -92,6 +95,18 @@ data class TimelineItem(
     /** XEP-0461 reply target author (string JID). */
     val replyToSender: String? get() = source.replyToSender
 
+    /** XEP-0394 markup spans; offsets are code points over the WIRE body. */
+    val markupSpans: List<WaddleMarkupSpan> get() = source.markupSpans
+
+    /** Server-attached `urn:waddle:link-preview:0` cards. */
+    val linkPreviews: List<WaddleLinkPreview> get() = source.linkPreviews
+
+    /** XEP-0449: [body] is sticker alt-text; media rides [sharedFiles]. */
+    val isSticker: Boolean get() = source.isSticker
+
+    /** XEP-0446/0447 shared files attached to this message. */
+    val sharedFiles: List<WaddleSharedFile> get() = source.sharedFiles
+
     /** `urn:waddle:call-thread:0` anchor riding this message. */
     val hasCallThread: Boolean get() = source.hasCallThread
 
@@ -171,6 +186,18 @@ sealed interface TimelineSource {
     /** `@everyone`/`@here` broadcast mention URI, when present. */
     val broadcastMention: String?
 
+    /** XEP-0394 markup spans; offsets are code points over the WIRE body. */
+    val markupSpans: List<WaddleMarkupSpan>
+
+    /** Server-attached `urn:waddle:link-preview:0` cards. */
+    val linkPreviews: List<WaddleLinkPreview>
+
+    /** XEP-0449: the body is sticker alt-text for an attached image. */
+    val isSticker: Boolean
+
+    /** XEP-0446/0447 shared files attached to this message. */
+    val sharedFiles: List<WaddleSharedFile>
+
     data class Live(val message: WaddleMessage) : TimelineSource {
         override val from: String? get() = message.from
         override val body: String? get() = message.body
@@ -195,6 +222,10 @@ sealed interface TimelineSource {
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
+        override val markupSpans: List<WaddleMarkupSpan> get() = message.markupSpans
+        override val linkPreviews: List<WaddleLinkPreview> get() = message.linkPreviews
+        override val isSticker: Boolean get() = message.isSticker
+        override val sharedFiles: List<WaddleSharedFile> get() = message.sharedFiles
     }
 
     data class Archived(val message: WaddleArchivedMessage) : TimelineSource {
@@ -221,5 +252,9 @@ sealed interface TimelineSource {
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
+        override val markupSpans: List<WaddleMarkupSpan> get() = message.markupSpans
+        override val linkPreviews: List<WaddleLinkPreview> get() = message.linkPreviews
+        override val isSticker: Boolean get() = message.isSticker
+        override val sharedFiles: List<WaddleSharedFile> get() = message.sharedFiles
     }
 }
