@@ -1,7 +1,6 @@
 package social.waddle.android.client.prefs
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
 
 /** Plain-JVM DataStore over a temp dir — no Robolectric needed. */
 class SessionPrefsTest {

@@ -5,10 +5,10 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
-import kotlin.random.Random
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
+import kotlin.random.Random
 
 /**
  * Session-scoped persistence (`session.preferences_pb`), mirroring the
@@ -69,8 +69,11 @@ class SessionPrefs(
     /** `null` clears the snapshot (explicit disconnect / resume rejected). */
     suspend fun setSmResume(snapshot: SmResumeSnapshot?) {
         dataStore.edit { prefs ->
-            if (snapshot == null) prefs.remove(KEY_SM_RESUME)
-            else prefs[KEY_SM_RESUME] = json.encodeToString(snapshot)
+            if (snapshot == null) {
+                prefs.remove(KEY_SM_RESUME)
+            } else {
+                prefs[KEY_SM_RESUME] = json.encodeToString(snapshot)
+            }
         }
     }
 
@@ -97,15 +100,21 @@ class SessionPrefs(
     ) {
         dataStore.edit { prefs ->
             val next = transform(prefs[KEY_OUTBOUND_QUEUE]?.let(::decodeOutboundQueue) ?: emptyList())
-            if (next.isEmpty()) prefs.remove(KEY_OUTBOUND_QUEUE)
-            else prefs[KEY_OUTBOUND_QUEUE] = json.encodeToString(next)
+            if (next.isEmpty()) {
+                prefs.remove(KEY_OUTBOUND_QUEUE)
+            } else {
+                prefs[KEY_OUTBOUND_QUEUE] = json.encodeToString(next)
+            }
         }
     }
 
     suspend fun setResumeCursors(cursors: Map<String, ResumeCursor>) {
         dataStore.edit { prefs ->
-            if (cursors.isEmpty()) prefs.remove(KEY_RESUME_CURSORS)
-            else prefs[KEY_RESUME_CURSORS] = json.encodeToString(cursors)
+            if (cursors.isEmpty()) {
+                prefs.remove(KEY_RESUME_CURSORS)
+            } else {
+                prefs[KEY_RESUME_CURSORS] = json.encodeToString(cursors)
+            }
         }
     }
 

@@ -1,11 +1,11 @@
 package social.waddle.android.client.auth
 
-import java.io.IOException
-import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Response
+import java.io.IOException
+import kotlin.coroutines.resumeWithException
 
 /** Suspend until the call completes; cancelling the coroutine cancels the call. */
 internal suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->

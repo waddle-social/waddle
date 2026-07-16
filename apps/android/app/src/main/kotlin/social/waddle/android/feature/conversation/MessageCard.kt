@@ -49,18 +49,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
-import social.waddle.android.client.store.ReactionGroup
-import java.time.Instant
-import java.time.OffsetDateTime
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 import social.waddle.android.R
+import social.waddle.android.client.store.ReactionGroup
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
 import social.waddle.client.ffi.WaddleSharedFile
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 
 /** One timeline row: author, time, body, attachment placeholders. */
 @Composable

@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.io.ByteArrayInputStream
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -13,6 +12,7 @@ import org.junit.Before
 import org.junit.Test
 import social.waddle.client.ffi.WaddleUploadHeader
 import social.waddle.client.ffi.WaddleUploadSlot
+import java.io.ByteArrayInputStream
 
 class SlotUploaderTest {
     private lateinit var server: MockWebServer

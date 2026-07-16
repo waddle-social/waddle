@@ -1,7 +1,5 @@
 package social.waddle.android.client
 
-import java.io.IOException
-import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType
@@ -12,6 +10,8 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import okio.source
 import social.waddle.client.ffi.WaddleUploadSlot
+import java.io.IOException
+import java.io.InputStream
 
 /**
  * XEP-0363 §5: PUT the file bytes to the slot's URL with exactly the

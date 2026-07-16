@@ -116,16 +116,52 @@ class FakeWaddleClient : WaddleClientInterface {
         WaddleTopology(spaces = emptyList(), channels = emptyList())
 
     override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean = unused()
-    override suspend fun sendCallFinishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean = unused()
+
+    override suspend fun sendCallFinishMigrated(
+        peerFullJid: String,
+        oldSid: String,
+        newSid: String,
+    ): Boolean = unused()
+
     override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean = unused()
-    override suspend fun sendCallPropose(peerBareJid: String, sid: String, audio: Boolean, video: Boolean): Boolean = unused()
+
+    override suspend fun sendCallPropose(
+        peerBareJid: String,
+        sid: String,
+        audio: Boolean,
+        video: Boolean,
+    ): Boolean = unused()
+
     override suspend fun sendCallReject(peerFullJid: String, sid: String): Boolean = unused()
+
     override suspend fun sendCallRejectTieBreak(peerFullJid: String, sid: String): Boolean = unused()
+
     override suspend fun sendCallRetract(peerBareJid: String, sid: String): Boolean = unused()
+
     override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean = unused()
-    override suspend fun sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Boolean, video: Boolean): Boolean = unused()
-    override suspend fun sendCallSessionInitiate(peerFullJid: String, initiatorFullJid: String, sid: String, audio: Boolean, video: Boolean): Boolean = unused()
-    override suspend fun sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean = unused()
+
+    override suspend fun sendCallSessionAccept(
+        peerFullJid: String,
+        responderFullJid: String,
+        sid: String,
+        audio: Boolean,
+        video: Boolean,
+    ): Boolean = unused()
+
+    override suspend fun sendCallSessionInitiate(
+        peerFullJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        audio: Boolean,
+        video: Boolean,
+    ): Boolean = unused()
+
+    override suspend fun sendCallSessionTerminate(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason?,
+    ): Boolean = unused()
+
     override suspend fun discoverUploadService(): String? = unused()
 
     override suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage {
@@ -145,25 +181,44 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun leaveRoom(roomJid: String, nick: String) = unused()
     override suspend fun requestAvatar(jid: String): WaddleAvatar? = unused()
-    override suspend fun requestUploadSlot(serviceJid: String, filename: String, size: ULong, contentType: String): WaddleUploadSlot? = unused()
+    override suspend fun requestUploadSlot(
+        serviceJid: String,
+        filename: String,
+        size: ULong,
+        contentType: String,
+    ): WaddleUploadSlot? = unused()
 
-    override suspend fun sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+    override suspend fun sendChatMessage(
+        peerJid: String,
+        body: String,
+        options: WaddleSendOptions?,
+    ): WaddleSendMessageOutcome {
         sendCalls += peerJid to body
         sendOptions += options
         return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
 
-    override suspend fun sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+    override suspend fun sendGroupchatMessage(
+        roomJid: String,
+        body: String,
+        options: WaddleSendOptions?,
+    ): WaddleSendMessageOutcome {
         sendCalls += roomJid to body
         sendOptions += options
         return sendOutcomes.removeFirstOrNull() ?: sendOutcome
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
+
     /** Recorded (conversation, targetId, emojis) reaction sends. */
     val reactionCalls = mutableListOf<Triple<String, String, List<String>>>()
     var reactionResult = true
 
-    override suspend fun sendReaction(targetJid: String, targetStanzaId: String, emojis: List<String>, isMuc: Boolean): Boolean {
+    override suspend fun sendReaction(
+        targetJid: String,
+        targetStanzaId: String,
+        emojis: List<String>,
+        isMuc: Boolean,
+    ): Boolean {
         reactionCalls += Triple(targetJid, targetStanzaId, emojis)
         return reactionResult
     }
@@ -172,7 +227,13 @@ class FakeWaddleClient : WaddleClientInterface {
     val correctionCalls = mutableListOf<Triple<String, String, String>>()
     var correctionOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("corr-1")
 
-    override suspend fun sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Boolean, options: WaddleSendOptions?): WaddleSendMessageOutcome {
+    override suspend fun sendCorrection(
+        peerJid: String,
+        targetId: String,
+        newBody: String,
+        isMuc: Boolean,
+        options: WaddleSendOptions?,
+    ): WaddleSendMessageOutcome {
         correctionCalls += Triple(peerJid, targetId, newBody)
         return correctionOutcome
     }
@@ -187,6 +248,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
+
     /** Recorded (conversation, state, isMuc) typing notifications. */
     val chatStateCalls = mutableListOf<Triple<String, WaddleChatState, Boolean>>()
 
@@ -224,6 +286,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
+
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
     var roomPins: List<WaddlePinEntry> = emptyList()
     val pinCalls = mutableListOf<Triple<String, String, Boolean>>()
@@ -244,7 +307,12 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()
     override suspend fun disablePushNotifications(pushServiceJid: String, node: String?): Boolean = unused()
     override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean = unused()
-    override suspend fun registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials): WaddleRegisterDeviceResult? = unused()
+    override suspend fun registerPushDevice(
+        pushServiceJid: String,
+        appId: String,
+        environment: WaddlePushEnvironment,
+        credentials: WaddlePushDeviceCredentials,
+    ): WaddleRegisterDeviceResult? = unused()
 
     private fun unused(): Nothing = throw UnsupportedOperationException("not exercised by the session manager")
 }

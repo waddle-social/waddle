@@ -68,7 +68,13 @@ internal class DmIo(
         sessionManager.toggleReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emoji = emoji)
 
     override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): Boolean =
-        sessionManager.sendCorrection(peerJid, isGroupchat = false, targetId = targetId, newBody = newBody, threadId = threadId)
+        sessionManager.sendCorrection(
+            peerJid,
+            isGroupchat = false,
+            targetId = targetId,
+            newBody = newBody,
+            threadId = threadId,
+        )
 
     override suspend fun sendRetraction(targetId: String): Boolean =
         sessionManager.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)

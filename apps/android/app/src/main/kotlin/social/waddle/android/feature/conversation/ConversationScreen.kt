@@ -4,13 +4,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
@@ -129,7 +129,10 @@ fun ConversationScreen(
                 onLongPress = { item -> sheetTarget = item },
                 onToggleReaction = viewModel::toggleReaction,
                 onOpenThread = onOpenThread?.let { open ->
-                    { item -> open(viewModel.threadIdFor(item)) }
+                    {
+                        item ->
+                            open(viewModel.threadIdFor(item))
+                        }
                 },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
             )
@@ -158,7 +161,9 @@ fun ConversationScreen(
             onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
             onReply = { viewModel.startReply(item) },
             onReplyInThread = onOpenThread?.let { open ->
-                { open(viewModel.threadIdFor(item)) }
+                {
+                    open(viewModel.threadIdFor(item))
+                }
             },
             onEdit = { viewModel.startEdit(item) },
             onRetract = { viewModel.retract(item) },

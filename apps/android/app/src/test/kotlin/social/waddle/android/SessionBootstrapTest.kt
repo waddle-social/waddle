@@ -2,9 +2,6 @@ package social.waddle.android
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
-import java.io.IOException
-import java.util.concurrent.AbstractExecutorService
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -33,6 +30,9 @@ import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.testSessionInfo
+import java.io.IOException
+import java.util.concurrent.AbstractExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * Drives [SessionBootstrap] against a real [WaddleAuthApi] whose OkHttp

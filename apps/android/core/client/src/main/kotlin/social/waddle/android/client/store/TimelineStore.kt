@@ -1,7 +1,5 @@
 package social.waddle.android.client.store
 
-import java.time.Instant
-import java.time.OffsetDateTime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,6 +8,8 @@ import social.waddle.android.client.conversationKeyOf
 import social.waddle.android.client.stripReplyFallback
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
+import java.time.Instant
+import java.time.OffsetDateTime
 
 /**
  * Per-conversation ordered message lists: live messages insert as they

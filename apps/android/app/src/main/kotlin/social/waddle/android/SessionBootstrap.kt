@@ -1,21 +1,21 @@
 package social.waddle.android
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Cold-start session restore (the `AppModel.bootstrap()` analog): a

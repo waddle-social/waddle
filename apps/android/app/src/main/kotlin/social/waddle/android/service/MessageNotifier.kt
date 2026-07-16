@@ -12,8 +12,6 @@ import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
-import java.time.Instant
-import java.time.OffsetDateTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +27,8 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.jid.localpartOf
 import social.waddle.client.ffi.WaddleMessage
+import java.time.Instant
+import java.time.OffsetDateTime
 
 /**
  * MessagingStyle notifications for messages arriving while the app is

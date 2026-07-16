@@ -14,8 +14,11 @@ complexity:
     ignoreAnnotated: ['Composable']
     excludes: &decompositionTargets
       # Decomposed in the follow-up refactor PR; excludes removed there.
+      # MessageMutation's mutationOf collapses onto the TimelineSource
+      # projection introduced by the same refactor.
       - '**/social/waddle/android/client/XmppSessionManager.kt'
       - '**/social/waddle/android/client/store/TimelineStore.kt'
+      - '**/social/waddle/android/client/store/MessageMutation.kt'
       - '**/social/waddle/android/feature/conversation/ConversationViewModel.kt'
       - '**/social/waddle/android/service/MessageNotifier.kt'
   LargeClass:

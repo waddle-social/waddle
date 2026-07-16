@@ -16,8 +16,8 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
-import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -108,7 +108,10 @@ class XmppSessionManagerTest {
             harness.factory.emit(WaddleClientEvent.Disconnected)
             runCurrent()
             val state = harness.manager.connectionState.value
-            assertTrue("expected Reconnecting after failure $attempt, got $state", state is ConnectionState.Reconnecting)
+            assertTrue(
+                "expected Reconnecting after failure $attempt, got $state",
+                state is ConnectionState.Reconnecting,
+            )
             assertEquals(attempt + 1, (state as ConnectionState.Reconnecting).attempt)
             advanceTimeBy(state.nextDelayMs)
             runCurrent()

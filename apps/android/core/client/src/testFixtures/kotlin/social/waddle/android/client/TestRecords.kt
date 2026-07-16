@@ -7,8 +7,8 @@ import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
-import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSmResumeState
 
