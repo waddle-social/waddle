@@ -1,21 +1,76 @@
 use super::*;
 
 /// Bind the subject mutation emitted from one frozen room snapshot to
-/// that actor incarnation's immutable ownership proof. The pure protocol
-/// chain cannot carry actor state in `RoomContext`, so the async boundary
-/// attaches it before any effect is interpreted.
+/// that actor incarnation's immutable ownership proof. This is mandatory
+/// post-processing before interpretation: the pure protocol chain cannot carry
+/// actor state in `RoomContext`, so it emits an unbound event. Bypassing this
+/// boundary leaves a durable actor without its exact snapshot fence (or with a
+/// different one), which it rejects before applying the mutation.
 pub(super) fn bind_room_claim_fence(
     events: &mut [OutboundEvent],
     claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
 ) {
     for event in events {
         if let OutboundEvent::PersistRoomSubject {
-            claim_fence: event_fence,
+            claim_fence: event_fence @ None,
             ..
         } = event
         {
             *event_fence = claim_fence.cloned();
         }
+    }
+}
+
+#[cfg(test)]
+mod room_claim_fence_tests {
+    use super::*;
+    use chrono::Utc;
+    use waddle_xmpp::muc::{RoomClaimFenceContext, RoomSubjectTexts};
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    fn fence(owner: &str) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, "room@muc.example.com"),
+            NodeIdentity::new(owner, "epoch-a"),
+            ClaimEpoch(7),
+        )
+    }
+
+    fn persist_subject_event(claim_fence: Option<RoomClaimFenceContext>) -> OutboundEvent {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room bare jid");
+        OutboundEvent::PersistRoomSubject {
+            room: room.clone(),
+            claim_fence,
+            texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_string())]),
+            setter: "alice@example.com".parse().expect("setter bare jid"),
+            sender: "alice@example.com/web".parse().expect("sender full jid"),
+            message: Box::new(Message::new(Some(jid::Jid::from(room)))),
+            setter_nick: "alice".to_string(),
+            set_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn bind_room_claim_fence_binds_missing_fence_without_overwriting_or_touching_other_events() {
+        let snapshot_fence = fence("snapshot-owner");
+        let other_actor_fence = fence("other-owner");
+        let mut events = vec![
+            persist_subject_event(None),
+            OutboundEvent::CloseTransport,
+            persist_subject_event(Some(other_actor_fence.clone())),
+        ];
+
+        bind_room_claim_fence(&mut events, Some(&snapshot_fence));
+
+        let OutboundEvent::PersistRoomSubject { claim_fence, .. } = &events[0] else {
+            panic!("first event must be PersistRoomSubject");
+        };
+        assert_eq!(claim_fence.as_ref(), Some(&snapshot_fence));
+        assert!(matches!(events[1], OutboundEvent::CloseTransport));
+        let OutboundEvent::PersistRoomSubject { claim_fence, .. } = &events[2] else {
+            panic!("third event must be PersistRoomSubject");
+        };
+        assert_eq!(claim_fence.as_ref(), Some(&other_actor_fence));
     }
 }
 

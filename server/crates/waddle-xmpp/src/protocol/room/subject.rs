@@ -134,6 +134,11 @@ impl RoomHandler for MucSubjectHandler {
 
         let event = OutboundEvent::PersistRoomSubject {
             room: ctx.room.clone(),
+            // `room_dispatch::bind_room_claim_fence` must bind the frozen
+            // `RoomChainSnapshot` fence before interpretation. This pure
+            // protocol handler deliberately has no actor state; bypassing the
+            // dispatch post-processing therefore fails closed when a durable
+            // actor rejects the missing exact ownership proof.
             claim_fence: None,
             texts,
             setter: sender.bare_jid(),
