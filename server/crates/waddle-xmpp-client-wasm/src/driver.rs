@@ -15,7 +15,7 @@ impl WasmDriverWire for WasmWebSocket {
         self.send(frame).map_err(|_| ClientError::TransportClosed)
     }
 
-    fn close(&mut self) -> DriverResult<()> {
+    fn close_websocket(&mut self) -> DriverResult<()> {
         WasmWebSocket::close(self).map_err(|_| ClientError::TransportClosed)
     }
 }
@@ -198,6 +198,7 @@ impl WasmDriverTask {
             pending_inbox_queries: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
+            websocket_close_started: false,
         })
     }
 
@@ -395,18 +396,14 @@ impl WasmDriverTask {
                 keep_running
             }
             Some(WasmCommand::Disconnect { responder }) => {
-                self.explicit_disconnect = true;
-                self.publish_resume_state_snapshot();
                 let result = self
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
-                let keep_running = result.is_ok();
                 let result = result.map_err(WasmPumpFailure::into_source);
                 if result.is_err() {
-                    self.explicit_disconnect = false;
-                    self.publish_resume_state_snapshot();
                     self.terminate_uncleanly().await;
                 }
+                let keep_running = result.is_ok();
                 let _ = responder.send(result);
                 keep_running
             }
@@ -651,6 +648,11 @@ impl WasmDriverTask {
             }
         }
 
+        if self.runtime.stream_close_complete() && self.begin_websocket_close().is_err() {
+            self.terminate_uncleanly().await;
+            return false;
+        }
+
         if !self.flush_deferred_commands().await {
             return false;
         }
@@ -820,23 +822,23 @@ impl WasmDriverTask {
                     if !initiating_message_confirmed {
                         initiating_message_confirmed = true;
                     }
-                    if matches!(message, TransportMessage::Close(_)) {
-                        self.ws.close().map_err(|source| WasmPumpFailure {
-                            failed_message: message.clone(),
-                            initiating_message_confirmed,
-                            source,
-                        })?;
-                    }
-
                     let events = self
                         .runtime
                         .apply_transport_event(TransportEvent::MessageSent(message.clone()))
                         .map_err(|source| WasmPumpFailure {
-                            failed_message: message,
+                            failed_message: message.clone(),
                             initiating_message_confirmed,
                             source,
                         })?;
                     self.publish_resume_state_snapshot();
+                    if self.runtime.stream_close_complete() {
+                        self.begin_websocket_close()
+                            .map_err(|source| WasmPumpFailure {
+                                failed_message: message.clone(),
+                                initiating_message_confirmed,
+                                source,
+                            })?;
+                    }
                     for event in events.into_iter().rev() {
                         pending.push_front(PumpItem::Event(event));
                     }
@@ -855,11 +857,21 @@ impl WasmDriverTask {
     async fn terminate_uncleanly(&mut self) {
         self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Failed))
             .await;
-        let _ = self.ws.close();
+        let _ = self.ws.close_websocket();
         self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Closed))
             .await;
         self.apply_terminal_transport_event(TransportEvent::Closed)
             .await;
+    }
+
+    fn begin_websocket_close(&mut self) -> DriverResult<()> {
+        if self.websocket_close_started {
+            return Ok(());
+        }
+        self.websocket_close_started = true;
+        self.explicit_disconnect = true;
+        self.publish_resume_state_snapshot();
+        self.ws.close_websocket()
     }
 
     async fn apply_terminal_transport_event(&mut self, event: TransportEvent) {
@@ -1080,7 +1092,7 @@ mod tests {
             Ok(())
         }
 
-        fn close(&mut self) -> DriverResult<()> {
+        fn close_websocket(&mut self) -> DriverResult<()> {
             self.state.close_count.set(self.state.close_count.get() + 1);
             Ok(())
         }
@@ -1640,6 +1652,136 @@ mod tests {
         publish_resume_state_snapshot(&inner, &runtime, true);
 
         assert!(inner.borrow().resume_state.is_none());
+    }
+
+    #[test]
+    fn wasm_peer_initiated_close_writes_reciprocal_before_websocket_close() {
+        block_on(async {
+            let (mut task, wire, _events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let (responder, response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza: Element::builder("message", NS_CLIENT)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "wasm-peer-close",
+                        )
+                        .build(),
+                    responder,
+                }))
+                .await
+            );
+            assert!(response.await.expect("send response").is_ok());
+            wire.take_messages();
+            assert!(inner.borrow().resume_state.is_some());
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+
+            assert!(matches!(
+                wire.take_messages().as_slice(),
+                [TransportMessage::Close(_)]
+            ));
+            assert_eq!(wire.close_count.get(), 1);
+            assert!(task.websocket_close_started);
+            assert!(task.runtime.stream_close_complete());
+            assert!(inner.borrow().resume_state.is_none());
+        });
+    }
+
+    #[test]
+    fn wasm_local_close_waits_for_peer_before_websocket_close_and_sm_destruction() {
+        block_on(async {
+            let (mut task, wire, _events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let (send_responder, send_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza: Element::builder("message", NS_CLIENT)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "wasm-local-close",
+                        )
+                        .build(),
+                    responder: send_responder,
+                }))
+                .await
+            );
+            assert!(send_response.await.expect("send response").is_ok());
+            wire.take_messages();
+
+            let (responder, response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::Disconnect { responder }))
+                    .await
+            );
+            assert!(response.await.expect("disconnect response").is_ok());
+            assert!(matches!(
+                wire.take_messages().as_slice(),
+                [TransportMessage::Close(_)]
+            ));
+            assert_eq!(wire.close_count.get(), 0);
+            assert!(!task.runtime.stream_close_complete());
+            assert!(inner.borrow().resume_state.is_some());
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+            assert_eq!(wire.close_count.get(), 1);
+            assert!(task.websocket_close_started);
+            assert!(task.runtime.stream_close_complete());
+            assert!(inner.borrow().resume_state.is_none());
+        });
+    }
+
+    #[test]
+    fn wasm_failed_peer_close_reciprocal_preserves_resume_state() {
+        block_on(async {
+            let (mut task, wire, _events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let (responder, response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza: Element::builder("message", NS_CLIENT)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "wasm-close-failure",
+                        )
+                        .build(),
+                    responder,
+                }))
+                .await
+            );
+            assert!(response.await.expect("send response").is_ok());
+            wire.take_messages();
+            let resume_before = inner.borrow().resume_state.clone();
+            wire.fail_after_successful_sends(0);
+
+            assert!(
+                !task
+                    .apply_transport_event(TransportEvent::MessageReceived(
+                        TransportMessage::Close(StreamClose),
+                    ))
+                    .await
+            );
+
+            assert_eq!(inner.borrow().resume_state, resume_before);
+            assert!(!task.runtime.stream_close_complete());
+            assert!(!task.websocket_close_started);
+            assert_eq!(wire.close_count.get(), 1, "unclean transport abort only");
+            assert!(wire.take_messages().is_empty());
+        });
     }
 
     #[test]

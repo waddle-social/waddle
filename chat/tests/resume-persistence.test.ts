@@ -37,6 +37,7 @@ import {
 // path; a leaked shim would activate localStorage in those tests
 // and corrupt state across runs.
 const WINDOW_SENTINEL = Symbol("test-installed-window");
+const RESUME_SENT_AT = "2026-07-16T08:09:10.123Z";
 type ShimmedGlobal = typeof globalThis & {
   window?: { localStorage: Storage; sessionStorage: Storage } & { [WINDOW_SENTINEL]?: true };
 };
@@ -289,10 +290,10 @@ describe("applyResumeStateToWasmConfig", () => {
     return { config, calls };
   }
 
-  test("uses max-aware stanza resume when both unhandled stanzas and max are available", () => {
+  test("uses max-aware timestamped resume entries when unhandled work and max are available", () => {
     const { config, calls } = configWith([
-      "with_resume_state_stanzas_with_max",
-      "with_resume_state_stanzas",
+      "with_resume_state_entries_with_max",
+      "with_resume_state_entries",
       "with_resume_state_with_max",
       "with_resume_state",
     ]);
@@ -302,13 +303,13 @@ describe("applyResumeStateToWasmConfig", () => {
       inboundH: 7,
       outboundH: 11,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message/>"],
+      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas_with_max",
-        args: ["prev-1", 7, 11, ["<message/>"], 300],
+        method: "with_resume_state_entries_with_max",
+        args: ["prev-1", 7, 11, [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }], 300],
       },
     ]);
   });
@@ -331,23 +332,33 @@ describe("applyResumeStateToWasmConfig", () => {
     ]);
   });
 
-  test("falls back to old stanza resume when generated WASM lacks max-aware stanza support", () => {
-    const { config, calls } = configWith(["with_resume_state_stanzas", "with_resume_state"]);
+  test("uses timestamped resume entries without a max-aware entry method", () => {
+    const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-3",
       inboundH: 1,
       outboundH: 2,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<presence/>"],
+      unhandledOutboundEntries: [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_stanzas",
-        args: ["prev-3", 1, 2, ["<presence/>"]],
+        method: "with_resume_state_entries",
+        args: ["prev-3", 1, 2, [{ stanza: "<presence/>", sentAt: RESUME_SENT_AT }]],
       },
     ]);
+  });
+
+  test("fails closed instead of dropping timestamped unhandled entries", () => {
+    const { config } = configWith(["with_resume_state"]);
+    expect(() => applyResumeStateToWasmConfig(config, {
+      previd: "prev-missing-entry-api",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [{ stanza: "<message/>", sentAt: RESUME_SENT_AT }],
+    })).toThrow("cannot restore timestamped XEP-0198 resume entries");
   });
 
   test("falls back to old plain resume when generated WASM has only the legacy method", () => {
@@ -386,7 +397,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='m1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='m1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     };
     persistence.saveSm(state);
     // Round-trip strips the internal `savedAt` so the caller gets
@@ -588,7 +602,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           outboundH: number;
           maxResumeSeconds: number;
           hasUnackedOutbound: boolean;
-          unhandledOutboundStanzas: string[];
+          unhandledOutboundEntries: Array<{ stanza: string; sentAt: string }>;
         };
       };
     }).xmpp = {
@@ -598,7 +612,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 9,
         maxResumeSeconds: 300,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+        unhandledOutboundEntries: [{
+          stanza: "<message xmlns='jabber:client' id='unacked'/>",
+          sentAt: RESUME_SENT_AT,
+        }],
       }),
     };
 
@@ -609,7 +626,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       inboundH: 4,
       outboundH: 9,
       maxResumeSeconds: 300,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='unacked'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='unacked'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
   });
 
@@ -619,7 +639,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",
@@ -645,7 +668,10 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "live-sm-id",
       inboundH: 4,
       outboundH: 9,
-      unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+      unhandledOutboundEntries: [{
+        stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+        sentAt: RESUME_SENT_AT,
+      }],
     });
     enqueueQueuedMessage("alice@example.com", {
       kind: "dm",

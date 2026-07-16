@@ -574,6 +574,44 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterTimestamp: FfiConverterRustBuffer {
+    typealias SwiftType = Date
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Date {
+        let seconds: Int64 = try readInt(&buf)
+        let nanoseconds: UInt32 = try readInt(&buf)
+        if seconds >= 0 {
+            let delta = Double(seconds) + (Double(nanoseconds) / 1.0e9)
+            return Date.init(timeIntervalSince1970: delta)
+        } else {
+            let delta = Double(seconds) - (Double(nanoseconds) / 1.0e9)
+            return Date.init(timeIntervalSince1970: delta)
+        }
+    }
+
+    public static func write(_ value: Date, into buf: inout [UInt8]) {
+        var delta = value.timeIntervalSince1970
+        var sign: Int64 = 1
+        if delta < 0 {
+            // The nanoseconds portion of the epoch offset must always be
+            // positive, to simplify the calculation we will use the absolute
+            // value of the offset.
+            sign = -1
+            delta = -delta
+        }
+        if delta.rounded(.down) > Double(Int64.max) {
+            fatalError("Timestamp overflow, exceeds max bounds supported by Uniffi")
+        }
+        let seconds = Int64(delta)
+        let nanoseconds = UInt32((delta - Double(seconds)) * 1.0e9)
+        writeInt(&buf, sign * seconds)
+        writeInt(&buf, nanoseconds)
+    }
+}
+
 
 
 
@@ -5466,14 +5504,69 @@ public func FfiConverterTypeWaddleSharedFile_lower(_ value: WaddleSharedFile) ->
 
 
 /**
+ * UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
+ * parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
+ * native timestamp type before Rust converts it to `DateTime<Utc>`.
+ */
+public struct WaddleSmResumeEntry: Equatable, Hashable {
+    public var stanzaXml: String
+    public var sentAt: Date
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(stanzaXml: String, sentAt: Date) {
+        self.stanzaXml = stanzaXml
+        self.sentAt = sentAt
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSmResumeEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSmResumeEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSmResumeEntry {
+        return
+            try WaddleSmResumeEntry(
+                stanzaXml: FfiConverterString.read(from: &buf),
+                sentAt: FfiConverterTimestamp.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleSmResumeEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.stanzaXml, into: &buf)
+        FfiConverterTimestamp.write(value.sentAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSmResumeEntry_lift(_ buf: RustBuffer) throws -> WaddleSmResumeEntry {
+    return try FfiConverterTypeWaddleSmResumeEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSmResumeEntry_lower(_ value: WaddleSmResumeEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleSmResumeEntry.lower(value)
+}
+
+
+/**
  * XEP-0198 client resume snapshot crossing the FFI as an opaque
  * persistence round-trip: the Swift app stores it on disconnect and
  * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
+ * outbound entries carry serialized XML plus their original send instant.
  */
 public struct WaddleSmResumeState: Equatable, Hashable {
     /**
@@ -5493,10 +5586,9 @@ public struct WaddleSmResumeState: Equatable, Hashable {
      */
     public var maxResumeSeconds: UInt32?
     /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
+     * Outbound entries the server had not acked, in send order.
      */
-    public var queuedStanzasXml: [String]
+    public var queuedEntries: [WaddleSmResumeEntry]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5514,14 +5606,13 @@ public struct WaddleSmResumeState: Equatable, Hashable {
          * Server-advertised resumption window in seconds, when supplied.
          */maxResumeSeconds: UInt32?,
         /**
-         * Outbound stanzas the server had not acked at snapshot time,
-         * serialized to XML in send order for lossless replay.
-         */queuedStanzasXml: [String]) {
+         * Outbound entries the server had not acked, in send order.
+         */queuedEntries: [WaddleSmResumeEntry]) {
         self.previd = previd
         self.inboundH = inboundH
         self.outboundH = outboundH
         self.maxResumeSeconds = maxResumeSeconds
-        self.queuedStanzasXml = queuedStanzasXml
+        self.queuedEntries = queuedEntries
     }
 
 
@@ -5544,7 +5635,7 @@ public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
                 inboundH: FfiConverterUInt32.read(from: &buf),
                 outboundH: FfiConverterUInt32.read(from: &buf),
                 maxResumeSeconds: FfiConverterOptionUInt32.read(from: &buf),
-                queuedStanzasXml: FfiConverterSequenceString.read(from: &buf)
+                queuedEntries: FfiConverterSequenceTypeWaddleSmResumeEntry.read(from: &buf)
         )
     }
 
@@ -5553,7 +5644,7 @@ public struct FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.inboundH, into: &buf)
         FfiConverterUInt32.write(value.outboundH, into: &buf)
         FfiConverterOptionUInt32.write(value.maxResumeSeconds, into: &buf)
-        FfiConverterSequenceString.write(value.queuedStanzasXml, into: &buf)
+        FfiConverterSequenceTypeWaddleSmResumeEntry.write(value.queuedEntries, into: &buf)
     }
 }
 
@@ -9316,6 +9407,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuf
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleSharedFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleSmResumeEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleSmResumeEntry]
+
+    public static func write(_ value: [WaddleSmResumeEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleSmResumeEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleSmResumeEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleSmResumeEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleSmResumeEntry.read(from: &buf))
         }
         return seq
     }

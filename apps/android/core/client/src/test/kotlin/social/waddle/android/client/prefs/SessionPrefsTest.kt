@@ -57,7 +57,9 @@ class SessionPrefsTest {
             inboundH = 5u,
             outboundH = 7u,
             maxResumeSeconds = 300u,
-            queuedStanzasXml = listOf("<message/>"),
+            queuedEntries = listOf(
+                SmResumeEntrySnapshot("<message/>", 1_752_573_540L, 123_000_000),
+            ),
         )
 
         prefs.setSmResume(snapshot)

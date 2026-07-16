@@ -457,7 +457,10 @@ describe("OfflineSendQueue drain ordering", () => {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundStanzas: ['<message id="dm-native" to="bob@example.com"><body>native replay</body></message>'],
+      unhandledOutboundEntries: [{
+        stanza: '<message id="dm-native" to="bob@example.com"><body>native replay</body></message>',
+        sentAt: "2026-07-16T08:09:10.123Z",
+      }],
     });
 
     queue.handleAck("dm-native");

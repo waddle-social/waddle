@@ -1402,7 +1402,10 @@ describe("client send readiness", () => {
         inboundH: 4,
         outboundH: 9,
         hasUnackedOutbound: true,
-        unhandledOutboundStanzas: ["<message xmlns='jabber:client' id='dm-live-1'/>"],
+        unhandledOutboundEntries: [{
+          stanza: "<message xmlns='jabber:client' id='dm-live-1'/>",
+          sentAt: "2026-07-16T08:09:10.123Z",
+        }],
       }),
     };
     const client = new BrowserXmppClient(session());

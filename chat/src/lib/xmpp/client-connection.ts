@@ -35,8 +35,13 @@ export type XmppResumeState = {
   outboundH: number;
   maxResumeSeconds?: number;
   hasUnackedOutbound?: boolean;
-  unhandledOutboundStanzas?: string[];
+  unhandledOutboundEntries?: XmppResumeEntry[];
   resource?: string;
+};
+
+type XmppResumeEntry = {
+  stanza: string;
+  sentAt: string;
 };
 
 export type XmppResumeStateHandle = import("@waddle/xmpp-client-wasm").WaddleResumeState;
@@ -101,18 +106,18 @@ function validResumeMaxSeconds(value: number | undefined): number | undefined {
 
 export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppResumeState): void {
   const wasmConfig = config as {
-    with_resume_state_stanzas_with_max?: (
+    with_resume_state_entries_with_max?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: XmppResumeEntry[],
       maxResumeSeconds: number,
     ) => void;
-    with_resume_state_stanzas?: (
+    with_resume_state_entries?: (
       previd: string,
       inboundH: number,
       outboundH: number,
-      stanzas: string[],
+      entries: XmppResumeEntry[],
     ) => void;
     with_resume_state_with_max?: (
       previd: string,
@@ -124,30 +129,33 @@ export function applyResumeStateToWasmConfig(config: unknown, resumeState: XmppR
   };
   const maxResumeSeconds = validResumeMaxSeconds(resumeState.maxResumeSeconds);
   if (
-    resumeState.unhandledOutboundStanzas?.length
+    resumeState.unhandledOutboundEntries?.length
     && maxResumeSeconds !== undefined
-    && typeof wasmConfig.with_resume_state_stanzas_with_max === "function"
+    && typeof wasmConfig.with_resume_state_entries_with_max === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas_with_max(
+    wasmConfig.with_resume_state_entries_with_max(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
       maxResumeSeconds,
     );
     return;
   }
   if (
-    resumeState.unhandledOutboundStanzas?.length
-    && typeof wasmConfig.with_resume_state_stanzas === "function"
+    resumeState.unhandledOutboundEntries?.length
+    && typeof wasmConfig.with_resume_state_entries === "function"
   ) {
-    wasmConfig.with_resume_state_stanzas(
+    wasmConfig.with_resume_state_entries(
       resumeState.previd,
       resumeState.inboundH,
       resumeState.outboundH,
-      resumeState.unhandledOutboundStanzas,
+      resumeState.unhandledOutboundEntries,
     );
     return;
+  }
+  if (resumeState.unhandledOutboundEntries?.length) {
+    throw new Error("WASM client cannot restore timestamped XEP-0198 resume entries");
   }
   if (maxResumeSeconds !== undefined && typeof wasmConfig.with_resume_state_with_max === "function") {
     wasmConfig.with_resume_state_with_max(
@@ -336,7 +344,7 @@ export class ResumeStateStore {
     const state = liveState ?? this.stateValue;
     this.persistence.preparePagehideHandoff();
     if (state) {
-      if (state.hasUnackedOutbound && !state.unhandledOutboundStanzas?.length) {
+      if (state.hasUnackedOutbound && !state.unhandledOutboundEntries?.length) {
         this.stateValue = null;
         this.persistence.clearSm();
         persistJoinedRooms();
@@ -428,8 +436,8 @@ export class OfflineSendQueue {
    * on resume are tracked so their acks clear the persisted queue copy.
    */
   seedFromResumeState(state: XmppResumeState | null | undefined): void {
-    for (const xml of state?.unhandledOutboundStanzas ?? []) {
-      const id = messageStanzaIdFromSerializedXml(xml);
+    for (const entry of state?.unhandledOutboundEntries ?? []) {
+      const id = messageStanzaIdFromSerializedXml(entry.stanza);
       if (id) {
         this.inflightQueuedIds.add(id);
         this.resumeReplayQueuedIds.add(id);

@@ -18,7 +18,7 @@
  *     "handle" form from the WASM client is a live JS object that cannot
  *     be serialized; the POD `{previd, inboundH, outboundH}` triple can be.
  *     When the native XEP-0198 queue still has unhandled outbound stanzas,
- *     their XML is serialized too so `doConnect` can restore sender
+ *     their XML and original send instant are serialized too so `doConnect` can restore sender
  *     responsibility after a full reload instead of creating a false
  *     resume state with an empty replay queue.
  *
@@ -61,7 +61,7 @@ export type PersistedSmResumeState = {
   inboundH: number;
   outboundH: number;
   maxResumeSeconds?: number;
-  unhandledOutboundStanzas?: string[];
+  unhandledOutboundEntries?: Array<{ stanza: string; sentAt: string }>;
   resource?: string;
 };
 
@@ -163,13 +163,15 @@ export function createLocalStorageResumePersistence(accountKey: string, ownerId?
       }
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
-      const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundStanzas } = envelope;
+      const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = envelope;
       return {
         previd,
         inboundH,
         outboundH,
         ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
-        ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
+        ...(unhandledOutboundEntries?.length
+          ? { unhandledOutboundEntries: unhandledOutboundEntries.map(entry => ({ ...entry })) }
+          : {}),
         ...(resource ? { resource } : {}),
       };
     },
@@ -241,13 +243,15 @@ function consumeSmEnvelope(key: string, ownerId: string): PersistedSmResumeState
 
     s.setItem(consumedKey, consumedMarker);
     s.removeItem(key);
-    const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundStanzas } = claimed;
+    const { previd, inboundH, outboundH, maxResumeSeconds, resource, unhandledOutboundEntries } = claimed;
     return {
       previd,
       inboundH,
       outboundH,
       ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
-      ...(unhandledOutboundStanzas?.length ? { unhandledOutboundStanzas: [...unhandledOutboundStanzas] } : {}),
+      ...(unhandledOutboundEntries?.length
+        ? { unhandledOutboundEntries: unhandledOutboundEntries.map(entry => ({ ...entry })) }
+        : {}),
       ...(resource ? { resource } : {}),
     };
   } catch (err) {
@@ -542,6 +546,17 @@ function normalizeRoomJid(roomJid: string): string {
   return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
 }
 
+function isResumeEntryArray(value: unknown): value is Array<{ stanza: string; sentAt: string }> {
+  return Array.isArray(value) && value.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const candidate = entry as Record<string, unknown>;
+    return typeof candidate.stanza === "string"
+      && candidate.stanza.length > 0
+      && typeof candidate.sentAt === "string"
+      && Number.isFinite(Date.parse(candidate.sentAt));
+  });
+}
+
 function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
@@ -550,7 +565,7 @@ function isPersistedSmEnvelope(value: unknown): value is PersistedSmEnvelope {
     && isU32(candidate.inboundH)
     && isU32(candidate.outboundH)
     && (candidate.maxResumeSeconds === undefined || isPositiveU32(candidate.maxResumeSeconds))
-    && (candidate.unhandledOutboundStanzas === undefined || isStringArray(candidate.unhandledOutboundStanzas))
+    && (candidate.unhandledOutboundEntries === undefined || isResumeEntryArray(candidate.unhandledOutboundEntries))
     && (candidate.resource === undefined || typeof candidate.resource === "string")
     && (candidate.ownerId === undefined || typeof candidate.ownerId === "string")
     && (candidate.claimId === undefined || typeof candidate.claimId === "string")

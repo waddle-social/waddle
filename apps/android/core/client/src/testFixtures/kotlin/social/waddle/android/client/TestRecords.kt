@@ -213,5 +213,10 @@ fun testResumeState(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = 300u,
-    queuedStanzasXml = listOf("<message/>"),
+    queuedEntries = listOf(
+        social.waddle.client.ffi.WaddleSmResumeEntry(
+            stanzaXml = "<message/>",
+            sentAt = java.time.Instant.parse("2026-07-15T09:59:00.123Z"),
+        ),
+    ),
 )

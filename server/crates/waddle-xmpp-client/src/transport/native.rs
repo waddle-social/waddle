@@ -16,8 +16,8 @@ use crate::config::ClientConfig;
 use crate::error::{ClientError, ClientResult};
 
 use super::{
-    decode_message, encode_message, StreamClose, TransportCapabilities, TransportEvent,
-    TransportKind, TransportMessage, TransportState,
+    decode_message, encode_message, TransportCapabilities, TransportEvent, TransportKind,
+    TransportMessage, TransportState,
 };
 
 /// Whether a failed native transport write can still have transferred the
@@ -98,7 +98,9 @@ pub trait WebSocketTransport: Send + Sync {
 
     fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>>;
+    /// Begin the RFC 6455 closing handshake after the typed RFC 7395
+    /// `<close/>` exchange has completed. This method never writes XML.
+    fn close_websocket<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>>;
 
     /// Terminate the WebSocket without sending RFC 7395 `<close/>`.
     /// XEP-0198 treats this as an unclean XML-stream loss, so the runtime's
@@ -254,22 +256,13 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
+    fn close_websocket<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
             if self.state == TransportState::Closed {
                 return Ok(());
             }
 
-            if self.state != TransportState::Closing {
-                self.queue_state_change(TransportState::Closing);
-                let frame = encode_message(&TransportMessage::Close(StreamClose))
-                    .map_err(TransportWriteFailure::definitely_not_written)?;
-                self.sink
-                    .send(Message::Text(frame.into()))
-                    .await
-                    .map_err(|error| TransportWriteFailure::possibly_written(error.into()))?;
-            }
-
+            self.queue_state_change(TransportState::Closing);
             self.sink
                 .close()
                 .await

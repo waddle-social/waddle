@@ -192,6 +192,7 @@ where
             pending_iqs: HashMap::new(),
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
+            websocket_close_started: false,
             last_resume_state: None,
         };
 
@@ -215,6 +216,9 @@ struct DriverTask {
     /// broadcast state to `None` from that point on — mirroring the
     /// wasm driver's `explicit_disconnect` flag.
     explicit_disconnect: bool,
+    /// Ensures the RFC 6455 closing handshake starts exactly once, and only
+    /// after both typed RFC 7395 `<close/>` frames are confirmed.
+    websocket_close_started: bool,
     /// Last broadcast XEP-0198 resume snapshot; publishing is deduped
     /// against it so subscribers only see actual state transitions.
     last_resume_state: Option<SmResumeState>,
@@ -408,14 +412,10 @@ impl DriverTask {
                     self.terminate_uncleanly().await;
                     return false;
                 }
-                // Only a transport-confirmed explicit close ends resumability.
-                self.explicit_disconnect = true;
-                self.publish_resume_state_snapshot();
-                // Drain close events so state reaches Disconnected before we exit.
-                for event in self.transport.drain_events() {
-                    self.apply_transport_event(event).await;
-                }
-                false
+                // RFC 7395 considers the stream closed only after the peer's
+                // corresponding `<close/>` arrives. Keep driving the socket;
+                // SM state remains resumable until both directions confirm.
+                true
             }
         }
     }
@@ -512,6 +512,11 @@ impl DriverTask {
                     return false;
                 }
             }
+        }
+
+        if self.runtime.stream_close_complete() && !self.begin_websocket_close().await {
+            self.terminate_uncleanly().await;
+            return false;
         }
 
         if self.flush_deferred_commands().await.is_err() {
@@ -692,6 +697,15 @@ impl DriverTask {
                     };
                     self.publish_resume_state_snapshot();
                     *self.state.write().unwrap() = self.runtime.snapshot().clone();
+                    if self.runtime.stream_close_complete() && !self.begin_websocket_close().await {
+                        return Err(TransportPumpFailure::Write {
+                            failed_message: message,
+                            initiating_message_confirmed,
+                            failure: TransportWriteFailure::possibly_written(
+                                ClientError::TransportClosed,
+                            ),
+                        });
+                    }
                     for event in events.into_iter().rev() {
                         pending.push_front(PumpItem::Event(event));
                     }
@@ -711,12 +725,7 @@ impl DriverTask {
         &mut self,
         message: &TransportMessage,
     ) -> Result<(), TransportWriteFailure> {
-        let write = async {
-            match message {
-                TransportMessage::Close(_) => self.transport.close().await,
-                _ => self.transport.send(message.clone()).await,
-            }
-        };
+        let write = self.transport.send(message.clone());
         tokio::time::timeout(NATIVE_TRANSPORT_WRITE_DEADLINE, write)
             .await
             .unwrap_or_else(|_| {
@@ -726,6 +735,23 @@ impl DriverTask {
                     },
                 ))
             })
+    }
+
+    async fn begin_websocket_close(&mut self) -> bool {
+        if self.websocket_close_started {
+            return true;
+        }
+        self.websocket_close_started = true;
+        self.explicit_disconnect = true;
+        self.publish_resume_state_snapshot();
+        matches!(
+            tokio::time::timeout(
+                NATIVE_TRANSPORT_WRITE_DEADLINE,
+                self.transport.close_websocket(),
+            )
+            .await,
+            Ok(Ok(()))
+        )
     }
 
     /// Assume responsibility for an uncertain native write exactly once.

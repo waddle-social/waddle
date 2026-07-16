@@ -16,7 +16,7 @@ use waddle_xmpp_client::{
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
-    MessagingEvent, SmResumeState,
+    MessagingEvent, SmResumeEntry, SmResumeState,
 };
 
 use crate::{
@@ -28,8 +28,8 @@ use crate::{
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
     WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
-    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState,
-    WaddleStanzaErrorType, WaddleStanzaId,
+    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeEntry,
+    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -472,9 +472,12 @@ pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
         inbound_h: state.inbound_h(),
         outbound_h: state.outbound_h(),
         max_resume_seconds: state.max_resume_seconds(),
-        queued_stanzas_xml: state
-            .unhandled_outbound_stanzas()
-            .map(String::from)
+        queued_entries: state
+            .unhandled_outbound_entries()
+            .map(|entry| WaddleSmResumeEntry {
+                stanza_xml: String::from(entry.element()),
+                sent_at: entry.sent_at().into(),
+            })
             .collect(),
     }
 }
@@ -484,19 +487,23 @@ pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
 /// malformed persisted state is surfaced as a human-readable error
 /// (via the listener) rather than silently dropped.
 pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResumeState, String> {
-    let stanzas = state
-        .queued_stanzas_xml
+    let entries = state
+        .queued_entries
         .into_iter()
-        .map(|xml| {
-            xml.parse::<Element>()
-                .map_err(|err| format!("invalid resume stanza XML: {err}"))
+        .map(|entry| {
+            let element = entry
+                .stanza_xml
+                .parse::<Element>()
+                .map_err(|err| format!("invalid resume stanza XML: {err}"))?;
+            let sent_at = entry.sent_at.into();
+            Ok(SmResumeEntry::new(element, sent_at))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    SmResumeState::from_unhandled_outbound_stanzas(
+    SmResumeState::from_unhandled_outbound_entries(
         state.previd,
         state.inbound_h,
         state.outbound_h,
-        stanzas,
+        entries,
     )
     .map(|resume| resume.with_max_resume_seconds(state.max_resume_seconds))
     .map_err(|err| err.to_string())
@@ -1916,7 +1923,11 @@ mod tests {
             inbound_h: 5,
             outbound_h: 9,
             max_resume_seconds: Some(300),
-            queued_stanzas_xml: vec![String::from(&queued)],
+            queued_entries: vec![WaddleSmResumeEntry {
+                stanza_xml: String::from(&queued),
+                sent_at: std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::new(1_748_779_140, 123_000_000),
+            }],
         };
 
         // FFI record → typed SmResumeState (as threaded into
@@ -1930,6 +1941,17 @@ mod tests {
             typed.unhandled_message_stanza_ids(),
             vec![StanzaId::new("queued-1").expect("stanza id")],
             "message stanza-id must be re-derived from the persisted XML"
+        );
+        assert_eq!(
+            std::time::SystemTime::from(
+                typed
+                    .unhandled_outbound_entries()
+                    .next()
+                    .expect("typed resume entry")
+                    .sent_at(),
+            ),
+            original.queued_entries[0].sent_at,
+            "the original send instant must cross UniFFI exactly",
         );
 
         // Seed a runtime SM state from it and snapshot back — the
@@ -1950,7 +1972,10 @@ mod tests {
             inbound_h: 0,
             outbound_h: 1,
             max_resume_seconds: None,
-            queued_stanzas_xml: vec!["<not-xml".to_string()],
+            queued_entries: vec![WaddleSmResumeEntry {
+                stanza_xml: "<not-xml".to_string(),
+                sent_at: std::time::SystemTime::UNIX_EPOCH,
+            }],
         })
         .expect_err("malformed XML must be rejected");
         assert!(err.contains("invalid resume stanza XML"), "err: {err}");

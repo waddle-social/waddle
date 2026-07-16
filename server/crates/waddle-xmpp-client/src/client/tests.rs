@@ -75,6 +75,7 @@ fn make_driver_task_with_config(
         pending_iqs: HashMap::new(),
         deferred_commands: VecDeque::new(),
         explicit_disconnect: false,
+        websocket_close_started: false,
         last_resume_state: None,
     };
     (task, cmd_tx, evt_rx)
@@ -405,7 +406,22 @@ async fn driver_broadcasts_resume_state_transitions() {
         .expect("resumable snapshot after <enabled/>");
     assert_eq!(state.previd(), "new-stream");
 
-    task.handle_command(XmppCommand::Disconnect).await;
+    assert!(task.handle_command(XmppCommand::Disconnect).await);
+
+    let before_peer_close = drain_client_events(&mut rx);
+    assert!(
+        !before_peer_close
+            .iter()
+            .any(|event| matches!(event, ClientEvent::ResumeStateChanged(None))),
+        "local stream close must preserve the resume snapshot until the peer replies"
+    );
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose,
+        )))
+        .await
+    );
 
     let mut saw_cleared = false;
     while let Ok(event) = rx.try_recv() {
@@ -638,7 +654,7 @@ async fn permanently_pending_generated_ack_is_bounded_without_rolling_back_messa
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn permanently_pending_close_is_unfinished_bounded_and_terminal() {
+async fn permanently_pending_stream_close_write_is_unfinished_bounded_and_terminal() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, mut events) =
         make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
@@ -649,7 +665,7 @@ async fn permanently_pending_close_is_unfinished_bounded_and_terminal() {
         )))
         .await
     );
-    shared.set_close_pending(true);
+    shared.pend_stream_close_write();
     let resumable_before = task.runtime.resume_state();
     let started = tokio::time::Instant::now();
 
@@ -661,7 +677,7 @@ async fn permanently_pending_close_is_unfinished_bounded_and_terminal() {
     );
     assert_eq!(task.runtime.resume_state(), resumable_before);
     assert!(!task.explicit_disconnect);
-    assert_eq!(shared.close_count(), 1);
+    assert_eq!(shared.close_count(), 0);
     assert_eq!(shared.abort_count(), 1);
     assert!(!shared
         .sent_messages()
@@ -672,6 +688,111 @@ async fn permanently_pending_close_is_unfinished_bounded_and_terminal() {
         .iter()
         .any(|event| matches!(event, ClientEvent::ResumeStateChanged(None))));
     assert_terminal_transport_event_slice(&observed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn peer_initiated_close_writes_reciprocal_before_websocket_close() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    assert!(
+        task.handle_command(XmppCommand::SendStanza(message_stanza(
+            "peer-close-unacked"
+        )))
+        .await
+    );
+    assert!(task.runtime.resume_state().is_some());
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose
+        ),))
+            .await
+    );
+
+    let attempted = shared.attempted_messages();
+    assert!(matches!(attempted.last(), Some(TransportMessage::Close(_))));
+    assert!(matches!(
+        shared.sent_messages().last(),
+        Some(TransportMessage::Close(_))
+    ));
+    assert_eq!(shared.close_count(), 1);
+    assert!(task.websocket_close_started);
+    assert!(task.runtime.stream_close_complete());
+    assert!(task.runtime.resume_state().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_close_waits_for_peer_before_websocket_close_and_sm_destruction() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, _events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    assert!(
+        task.handle_command(XmppCommand::SendStanza(message_stanza(
+            "local-close-unacked"
+        )))
+        .await
+    );
+
+    assert!(task.handle_command(XmppCommand::Disconnect).await);
+    assert!(matches!(
+        shared.sent_messages().last(),
+        Some(TransportMessage::Close(_))
+    ));
+    assert_eq!(shared.close_count(), 0);
+    assert!(!task.runtime.stream_close_complete());
+    assert!(task.runtime.resume_state().is_some());
+
+    assert!(
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+            StreamClose
+        ),))
+            .await
+    );
+    assert_eq!(shared.close_count(), 1);
+    assert!(task.websocket_close_started);
+    assert!(task.runtime.stream_close_complete());
+    assert!(task.runtime.resume_state().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_peer_close_reciprocal_preserves_resume_state_and_aborts_uncleanly() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    assert!(
+        task.handle_command(XmppCommand::SendStanza(message_stanza(
+            "peer-close-failure"
+        )))
+        .await
+    );
+    let resume_before = task.runtime.resume_state();
+    shared.fail_stream_close_write(TransportWriteResponsibility::DefinitelyNotWritten);
+
+    assert!(
+        !task
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Close(
+                StreamClose
+            ),))
+            .await
+    );
+
+    assert_eq!(task.runtime.resume_state(), resume_before);
+    assert!(!task.runtime.stream_close_complete());
+    assert_eq!(shared.close_count(), 0);
+    assert_eq!(shared.abort_count(), 1);
+    assert!(matches!(
+        shared.attempted_messages().last(),
+        Some(TransportMessage::Close(_))
+    ));
+    assert!(!shared
+        .sent_messages()
+        .iter()
+        .any(|message| matches!(message, TransportMessage::Close(_))));
+    assert_terminal_transport_event_slice(&drain_client_events(&mut events));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1015,7 +1136,8 @@ async fn driver_disconnects_cleanly() {
                 // Driver blocks here until a command arrives.
             ],
             shared.clone(),
-        ),
+        )
+        .with_peer_close_after_local_close(),
         false,
     );
 
@@ -1091,6 +1213,7 @@ struct MockTransportShared {
 enum MockWriteTarget {
     Any,
     AckRequest,
+    StreamClose,
     Stanza(StanzaId),
 }
 
@@ -1147,6 +1270,16 @@ impl MockTransportShared {
             });
     }
 
+    fn fail_stream_close_write(&self, responsibility: TransportWriteResponsibility) {
+        self.write_failures
+            .lock()
+            .unwrap()
+            .push_back(MockWriteFailure {
+                target: MockWriteTarget::StreamClose,
+                responsibility,
+            });
+    }
+
     fn pend_stanza_write(&self, stanza_id: StanzaId) {
         self.pending_writes
             .lock()
@@ -1161,8 +1294,11 @@ impl MockTransportShared {
             .push_back(MockWriteTarget::AckRequest);
     }
 
-    fn set_close_pending(&self, pending: bool) {
-        *self.close_pending.lock().unwrap() = pending;
+    fn pend_stream_close_write(&self) {
+        self.pending_writes
+            .lock()
+            .unwrap()
+            .push_back(MockWriteTarget::StreamClose);
     }
 
     fn set_abort_failure(&self, fail: bool) {
@@ -1207,6 +1343,8 @@ struct MockTransport {
     pending_events: VecDeque<TransportEvent>,
     next_events: VecDeque<ClientResult<Option<TransportEvent>>>,
     shared: MockTransportShared,
+    peer_close_after_local_close: bool,
+    peer_close_delivered: bool,
 }
 
 impl MockTransport {
@@ -1219,7 +1357,14 @@ impl MockTransport {
             pending_events: pending_events.into(),
             next_events: next_events.into(),
             shared,
+            peer_close_after_local_close: false,
+            peer_close_delivered: false,
         }
+    }
+
+    fn with_peer_close_after_local_close(mut self) -> Self {
+        self.peer_close_after_local_close = true;
+        self
     }
 }
 
@@ -1282,27 +1427,33 @@ impl WebSocketTransport for MockTransport {
             if let Some(event) = self.next_events.pop_front() {
                 return event;
             }
+            if self.peer_close_after_local_close && !self.peer_close_delivered {
+                loop {
+                    if self
+                        .shared
+                        .sent_messages()
+                        .iter()
+                        .any(|message| matches!(message, TransportMessage::Close(_)))
+                    {
+                        self.peer_close_delivered = true;
+                        return Ok(Some(TransportEvent::MessageReceived(
+                            TransportMessage::Close(StreamClose),
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
             // No more scripted events — park the task until cancelled.
             std::future::pending::<ClientResult<Option<TransportEvent>>>().await
         })
     }
 
-    fn close<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
+    fn close_websocket<'a>(&'a mut self) -> BoxFuture<'a, TransportWriteResult<()>> {
         Box::pin(async move {
             *self.shared.close_count.lock().unwrap() += 1;
-            self.shared
-                .attempted_messages
-                .lock()
-                .unwrap()
-                .push(TransportMessage::Close(StreamClose));
             if *self.shared.close_pending.lock().unwrap() {
                 return std::future::pending::<TransportWriteResult<()>>().await;
             }
-            self.shared
-                .sent_messages
-                .lock()
-                .unwrap()
-                .push(TransportMessage::Close(StreamClose));
             self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closing),
                 TransportEvent::StateChanged(TransportState::Closed),
@@ -1339,6 +1490,7 @@ fn mock_write_target_matches(target: &MockWriteTarget, message: &TransportMessag
             TransportMessage::Element(element)
                 if element.name() == "r" && element.ns() == NS_SM
         ),
+        MockWriteTarget::StreamClose => matches!(message, TransportMessage::Close(_)),
         MockWriteTarget::Stanza(stanza_id) => matches!(
             message,
             TransportMessage::Element(element)

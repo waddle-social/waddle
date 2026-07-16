@@ -1597,6 +1597,49 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 }
 
 
+/**
+ * @suppress
+ */
+public object FfiConverterTimestamp: FfiConverterRustBuffer<java.time.Instant> {
+    override fun read(buf: ByteBuffer): java.time.Instant {
+        val seconds = buf.getLong()
+        // Type mismatch (should be u32) but we check for overflow/underflow below
+        val nanoseconds = buf.getInt().toLong()
+        if (nanoseconds < 0) {
+            throw java.time.DateTimeException("Instant nanoseconds exceed minimum or maximum supported by uniffi")
+        }
+        if (seconds >= 0) {
+            return java.time.Instant.EPOCH.plus(java.time.Duration.ofSeconds(seconds, nanoseconds))
+        } else {
+            return java.time.Instant.EPOCH.minus(java.time.Duration.ofSeconds(-seconds, nanoseconds))
+        }
+    }
+
+    // 8 bytes for seconds, 4 bytes for nanoseconds
+    override fun allocationSize(value: java.time.Instant) = 12UL
+
+    override fun write(value: java.time.Instant, buf: ByteBuffer) {
+        var epochOffset = java.time.Duration.between(java.time.Instant.EPOCH, value)
+
+        var sign = 1
+        if (epochOffset.isNegative()) {
+            sign = -1
+            epochOffset = epochOffset.negated()
+        }
+
+        if (epochOffset.nano < 0) {
+            // Java docs provide guarantee that nano will always be positive, so this should be impossible
+            // See: https://docs.oracle.com/javase/8/docs/api/java/time/Instant.html
+            throw IllegalArgumentException("Invalid timestamp, nano value must be non-negative")
+        }
+
+        buf.putLong(sign * epochOffset.seconds)
+        // Type mismatch (should be u32) but since values will always be between 0 and 999,999,999 it should be OK
+        buf.putInt(epochOffset.nano)
+    }
+}
+
+
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
 //
@@ -5973,14 +6016,53 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
 
 
 /**
+ * UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
+ * parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
+ * native timestamp type before Rust converts it to `DateTime<Utc>`.
+ */
+data class WaddleSmResumeEntry (
+    var `stanzaXml`: kotlin.String
+    ,
+    var `sentAt`: java.time.Instant
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSmResumeEntry: FfiConverterRustBuffer<WaddleSmResumeEntry> {
+    override fun read(buf: ByteBuffer): WaddleSmResumeEntry {
+        return WaddleSmResumeEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTimestamp.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleSmResumeEntry) = (
+            FfiConverterString.allocationSize(value.`stanzaXml`) +
+            FfiConverterTimestamp.allocationSize(value.`sentAt`)
+    )
+
+    override fun write(value: WaddleSmResumeEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`stanzaXml`, buf)
+            FfiConverterTimestamp.write(value.`sentAt`, buf)
+    }
+}
+
+
+
+/**
  * XEP-0198 client resume snapshot crossing the FFI as an opaque
  * persistence round-trip: the Swift app stores it on disconnect and
  * feeds it back through [`WaddleConfig`] on the next connect. Queued
- * outbound stanzas travel as serialized XML strings — the message
- * stanza-id is re-derived from the element's `id` attribute on
- * restore, and the original enqueue instant survives only when the
- * element already carries a `<delay/>` stamp (identical semantics to
- * the wasm client's localStorage persistence of the same snapshot).
+ * outbound entries carry serialized XML plus their original send instant.
  */
 data class WaddleSmResumeState (
     /**
@@ -6004,10 +6086,9 @@ data class WaddleSmResumeState (
     var `maxResumeSeconds`: kotlin.UInt?
     ,
     /**
-     * Outbound stanzas the server had not acked at snapshot time,
-     * serialized to XML in send order for lossless replay.
+     * Outbound entries the server had not acked, in send order.
      */
-    var `queuedStanzasXml`: List<kotlin.String>
+    var `queuedEntries`: List<WaddleSmResumeEntry>
 
 ){
 
@@ -6028,7 +6109,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterOptionalUInt.read(buf),
-            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceTypeWaddleSmResumeEntry.read(buf),
         )
     }
 
@@ -6037,7 +6118,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.allocationSize(value.`inboundH`) +
             FfiConverterUInt.allocationSize(value.`outboundH`) +
             FfiConverterOptionalUInt.allocationSize(value.`maxResumeSeconds`) +
-            FfiConverterSequenceString.allocationSize(value.`queuedStanzasXml`)
+            FfiConverterSequenceTypeWaddleSmResumeEntry.allocationSize(value.`queuedEntries`)
     )
 
     override fun write(value: WaddleSmResumeState, buf: ByteBuffer) {
@@ -6045,7 +6126,7 @@ public object FfiConverterTypeWaddleSmResumeState: FfiConverterRustBuffer<Waddle
             FfiConverterUInt.write(value.`inboundH`, buf)
             FfiConverterUInt.write(value.`outboundH`, buf)
             FfiConverterOptionalUInt.write(value.`maxResumeSeconds`, buf)
-            FfiConverterSequenceString.write(value.`queuedStanzasXml`, buf)
+            FfiConverterSequenceTypeWaddleSmResumeEntry.write(value.`queuedEntries`, buf)
     }
 }
 
@@ -9629,6 +9710,34 @@ public object FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleSharedFile.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleSmResumeEntry: FfiConverterRustBuffer<List<WaddleSmResumeEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleSmResumeEntry> {
+        val len = buf.getInt()
+        return List<WaddleSmResumeEntry>(len) {
+            FfiConverterTypeWaddleSmResumeEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleSmResumeEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleSmResumeEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleSmResumeEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleSmResumeEntry.write(it, buf)
         }
     }
 }

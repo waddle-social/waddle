@@ -1,6 +1,8 @@
 package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
+import java.time.Instant
+import social.waddle.client.ffi.WaddleSmResumeEntry
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
@@ -14,7 +16,14 @@ data class SmResumeSnapshot(
     val inboundH: UInt,
     val outboundH: UInt,
     val maxResumeSeconds: UInt? = null,
-    val queuedStanzasXml: List<String> = emptyList(),
+    val queuedEntries: List<SmResumeEntrySnapshot> = emptyList(),
+)
+
+@Serializable
+data class SmResumeEntrySnapshot(
+    val stanzaXml: String,
+    val sentAtEpochSeconds: Long,
+    val sentAtNanoseconds: Int,
 )
 
 fun WaddleSmResumeState.toSnapshot(): SmResumeSnapshot = SmResumeSnapshot(
@@ -22,7 +31,9 @@ fun WaddleSmResumeState.toSnapshot(): SmResumeSnapshot = SmResumeSnapshot(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = maxResumeSeconds,
-    queuedStanzasXml = queuedStanzasXml,
+    queuedEntries = queuedEntries.map {
+        SmResumeEntrySnapshot(it.stanzaXml, it.sentAt.epochSecond, it.sentAt.nano)
+    },
 )
 
 fun SmResumeSnapshot.toFfi(): WaddleSmResumeState = WaddleSmResumeState(
@@ -30,5 +41,10 @@ fun SmResumeSnapshot.toFfi(): WaddleSmResumeState = WaddleSmResumeState(
     inboundH = inboundH,
     outboundH = outboundH,
     maxResumeSeconds = maxResumeSeconds,
-    queuedStanzasXml = queuedStanzasXml,
+    queuedEntries = queuedEntries.map {
+        WaddleSmResumeEntry(
+            it.stanzaXml,
+            Instant.ofEpochSecond(it.sentAtEpochSeconds, it.sentAtNanoseconds.toLong()),
+        )
+    },
 )

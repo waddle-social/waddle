@@ -616,9 +616,9 @@ export class WaddleConfig {
     [Symbol.dispose](): void;
     constructor(server_url: string, jid: string, access_token: string, resource: string);
     with_resume_state(previd: string, inbound_h: number, outbound_h: number): void;
+    with_resume_state_entries(previd: string, inbound_h: number, outbound_h: number, entries: any): void;
+    with_resume_state_entries_with_max(previd: string, inbound_h: number, outbound_h: number, entries: any, max_resume_seconds: number): void;
     with_resume_state_handle(state: WaddleResumeState): void;
-    with_resume_state_stanzas(previd: string, inbound_h: number, outbound_h: number, stanzas: string[]): void;
-    with_resume_state_stanzas_with_max(previd: string, inbound_h: number, outbound_h: number, stanzas: string[], max_resume_seconds: number): void;
     with_resume_state_with_max(previd: string, inbound_h: number, outbound_h: number, max_resume_seconds: number): void;
 }
 

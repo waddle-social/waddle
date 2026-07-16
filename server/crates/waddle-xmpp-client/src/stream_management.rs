@@ -64,9 +64,33 @@ struct AckCadence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedOutboundStanza {
-    element: Element,
+    entry: SmResumeEntry,
     message_stanza_id: Option<StanzaId>,
+}
+
+/// One typed outbound stanza retained for XEP-0198 resume/fallback retry.
+///
+/// `sent_at` is the original transport-confirmed send instant. It survives
+/// persistence independently of the XML so XEP-0203 fallback delivery can add
+/// the original timestamp after a page reload without mutating normal replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmResumeEntry {
+    element: Element,
     sent_at: DateTime<Utc>,
+}
+
+impl SmResumeEntry {
+    pub fn new(element: Element, sent_at: DateTime<Utc>) -> Self {
+        Self { element, sent_at }
+    }
+
+    pub fn element(&self) -> &Element {
+        &self.element
+    }
+
+    pub fn sent_at(&self) -> DateTime<Utc> {
+        self.sent_at
+    }
 }
 
 /// In-memory XEP-0198 resume snapshot carried across a reconnect attempt.
@@ -119,11 +143,24 @@ impl SmResumeState {
     ) -> ClientResult<Self> {
         let outbound_queue = stanzas
             .into_iter()
-            .map(|element| QueuedOutboundStanza {
-                message_stanza_id: message_delivery_stanza_id(&element),
-                sent_at: existing_delay_stamp(&element).unwrap_or_else(Utc::now),
-                element,
+            .map(|element| {
+                let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
+                SmResumeEntry::new(element, sent_at)
             })
+            .map(QueuedOutboundStanza::from_entry)
+            .collect();
+        Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
+    }
+
+    pub fn from_unhandled_outbound_entries(
+        previd: impl Into<String>,
+        inbound_h: u32,
+        outbound_h: u32,
+        entries: impl IntoIterator<Item = SmResumeEntry>,
+    ) -> ClientResult<Self> {
+        let outbound_queue = entries
+            .into_iter()
+            .map(QueuedOutboundStanza::from_entry)
             .collect();
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
@@ -149,7 +186,13 @@ impl SmResumeState {
     }
 
     pub fn unhandled_outbound_stanzas(&self) -> impl Iterator<Item = &Element> {
-        self.outbound_queue.iter().map(|queued| &queued.element)
+        self.outbound_queue
+            .iter()
+            .map(|queued| queued.entry.element())
+    }
+
+    pub fn unhandled_outbound_entries(&self) -> impl Iterator<Item = &SmResumeEntry> {
+        self.outbound_queue.iter().map(|queued| &queued.entry)
     }
 
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
@@ -252,11 +295,12 @@ impl SmState {
             SentStanzaKind::Replay
         } else {
             self.record_sent(1);
-            self.outbound_queue.push_back(QueuedOutboundStanza {
-                message_stanza_id: message_delivery_stanza_id(element),
-                element: element.clone(),
-                sent_at: existing_delay_stamp(element).unwrap_or_else(Utc::now),
-            });
+            let sent_at = existing_delay_stamp(element).unwrap_or_else(Utc::now);
+            self.outbound_queue
+                .push_back(QueuedOutboundStanza::from_entry(SmResumeEntry::new(
+                    element.clone(),
+                    sent_at,
+                )));
             SentStanzaKind::New
         };
 
@@ -509,7 +553,7 @@ impl SmState {
         let replay: Vec<Element> = self
             .outbound_queue
             .iter()
-            .map(|queued| queued.element.clone())
+            .map(|queued| queued.entry.element().clone())
             .collect();
         self.replay_in_flight.extend(replay.iter().cloned());
         replay
@@ -645,16 +689,26 @@ impl SmState {
 }
 
 impl QueuedOutboundStanza {
-    fn element_for_fallback_retry(&self) -> Element {
-        if self.element.name() != "message" {
-            return self.element.clone();
+    fn from_entry(entry: SmResumeEntry) -> Self {
+        Self {
+            message_stanza_id: message_delivery_stanza_id(entry.element()),
+            entry,
         }
-        if self.element.get_child("delay", NS_DELAY).is_some() {
-            return self.element.clone();
+    }
+
+    fn element_for_fallback_retry(&self) -> Element {
+        if self.entry.element().name() != "message" {
+            return self.entry.element().clone();
+        }
+        if self.entry.element().get_child("delay", NS_DELAY).is_some() {
+            return self.entry.element().clone();
         }
 
-        let stamp = self.sent_at.to_rfc3339_opts(SecondsFormat::Millis, true);
-        let mut element = self.element.clone();
+        let stamp = self
+            .entry
+            .sent_at()
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        let mut element = self.entry.element().clone();
         element.append_child(
             Element::builder("delay", NS_DELAY)
                 .attr(minidom::rxml::xml_ncname!("stamp").to_owned(), stamp)
@@ -1004,6 +1058,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![&stanza],
         );
+    }
+
+    #[test]
+    fn persisted_resume_entry_keeps_original_send_time_for_failed_resume_fallback() {
+        let sent_at = DateTime::parse_from_rfc3339("2026-07-16T08:09:10.123Z")
+            .expect("T0")
+            .with_timezone(&Utc);
+        let stanza = Element::builder("message", "jabber:client")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "persisted-t0")
+            .build();
+        let persisted = SmResumeState::from_unhandled_outbound_entries(
+            "previous-stream",
+            4,
+            9,
+            [SmResumeEntry::new(stanza, sent_at)],
+        )
+        .expect("persisted resume state");
+
+        let reloaded = SmState::from_resume_state(&persisted);
+        let fallback = reloaded
+            .unhandled_stanzas_for_fallback_retry()
+            .into_iter()
+            .next()
+            .expect("fallback after failed resume");
+        let delay = fallback
+            .get_child("delay", NS_DELAY)
+            .expect("XEP-0203 delay");
+
+        assert_eq!(delay.attr("stamp"), Some("2026-07-16T08:09:10.123Z"));
     }
 
     #[test]

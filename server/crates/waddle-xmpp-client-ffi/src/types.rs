@@ -15,11 +15,7 @@ pub struct WaddleConfig {
 /// XEP-0198 client resume snapshot crossing the FFI as an opaque
 /// persistence round-trip: the Swift app stores it on disconnect and
 /// feeds it back through [`WaddleConfig`] on the next connect. Queued
-/// outbound stanzas travel as serialized XML strings — the message
-/// stanza-id is re-derived from the element's `id` attribute on
-/// restore, and the original enqueue instant survives only when the
-/// element already carries a `<delay/>` stamp (identical semantics to
-/// the wasm client's localStorage persistence of the same snapshot).
+/// outbound entries carry serialized XML plus their original send instant.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleSmResumeState {
     /// SM resumption token from `<enabled id='…'/>`.
@@ -30,9 +26,17 @@ pub struct WaddleSmResumeState {
     pub outbound_h: u32,
     /// Server-advertised resumption window in seconds, when supplied.
     pub max_resume_seconds: Option<u32>,
-    /// Outbound stanzas the server had not acked at snapshot time,
-    /// serialized to XML in send order for lossless replay.
-    pub queued_stanzas_xml: Vec<String>,
+    /// Outbound entries the server had not acked, in send order.
+    pub queued_entries: Vec<WaddleSmResumeEntry>,
+}
+
+/// UniFFI boundary representation of one typed XEP-0198 resume entry. XML is
+/// parsed exactly once into `Element`; UniFFI carries `SystemTime` as its
+/// native timestamp type before Rust converts it to `DateTime<Utc>`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleSmResumeEntry {
+    pub stanza_xml: String,
+    pub sent_at: std::time::SystemTime,
 }
 
 #[derive(uniffi::Record, Clone)]

@@ -60,6 +60,14 @@ pub struct XmppRuntime {
     /// generated `<r/>`. Keeping this inside the typed runtime prevents a
     /// driver from publishing `AckRequestSent` before the write succeeds.
     pending_ack_request: Option<AckRequest>,
+    stream_close: StreamCloseHandshake,
+}
+
+#[derive(Debug, Default)]
+struct StreamCloseHandshake {
+    sent_confirmed: bool,
+    received: bool,
+    complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +105,7 @@ impl XmppRuntime {
             fallback_resume_state: None,
             fallback_retry_writes_in_flight: VecDeque::new(),
             pending_ack_request: None,
+            stream_close: StreamCloseHandshake::default(),
         })
     }
 
@@ -117,6 +126,12 @@ impl XmppRuntime {
         }
 
         self.sm_state.resume_state()
+    }
+
+    /// True only after both directions of the typed RFC 7395 `<close/>`
+    /// exchange are confirmed. Drivers use this edge to begin RFC 6455 close.
+    pub fn stream_close_complete(&self) -> bool {
+        self.stream_close.complete
     }
 
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
@@ -289,9 +304,22 @@ impl XmppRuntime {
             TransportEvent::MessageSent(TransportMessage::Element(element)) => {
                 self.handle_sent_element(&element, now_ms, events);
             }
-            TransportEvent::MessageReceived(TransportMessage::Close(_))
-            | TransportEvent::StateChanged(TransportState::Closed)
-            | TransportEvent::Closed => {
+            TransportEvent::MessageReceived(TransportMessage::Close(_)) => {
+                self.stream_close.received = true;
+                self.set_phase(SessionPhase::Disconnecting)?;
+                if !self.stream_close.sent_confirmed {
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Close(StreamClose),
+                    )));
+                }
+                self.finish_stream_close_if_complete()?;
+            }
+            TransportEvent::MessageSent(TransportMessage::Close(_)) => {
+                self.stream_close.sent_confirmed = true;
+                self.set_phase(SessionPhase::Disconnecting)?;
+                self.finish_stream_close_if_complete()?;
+            }
+            TransportEvent::StateChanged(TransportState::Closed) | TransportEvent::Closed => {
                 self.pending_ack_request = None;
                 self.snapshot.binding = None;
                 self.bootstrap = BootstrapState::Idle;
@@ -309,6 +337,25 @@ impl XmppRuntime {
         }
 
         Ok(())
+    }
+
+    fn finish_stream_close_if_complete(&mut self) -> ClientResult<()> {
+        if self.stream_close.complete
+            || !self.stream_close.sent_confirmed
+            || !self.stream_close.received
+        {
+            return Ok(());
+        }
+
+        self.stream_close.complete = true;
+        self.pending_ack_request = None;
+        self.pending_fallback_retries.clear();
+        self.fallback_resume_state = None;
+        self.fallback_retry_writes_in_flight.clear();
+        self.sm_state = SmState::new();
+        self.snapshot.binding = None;
+        self.bootstrap = BootstrapState::Idle;
+        self.set_phase(SessionPhase::Disconnecting)
     }
 
     fn handle_sent_element(
@@ -679,6 +726,7 @@ impl XmppRuntime {
                 | (SessionPhase::Binding, SessionPhase::Established)
                 | (SessionPhase::Established, SessionPhase::Resuming)
                 | (SessionPhase::Resuming, SessionPhase::Established)
+                | (SessionPhase::Resuming, SessionPhase::Disconnecting)
                 | (SessionPhase::Established, SessionPhase::Disconnecting)
                 | (SessionPhase::Connecting, SessionPhase::Disconnecting)
                 | (SessionPhase::OpeningStream, SessionPhase::Disconnecting)
