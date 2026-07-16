@@ -44,14 +44,24 @@ Debug builds are signed with the **checked-in** `debug.keystore`
 (deliberately not a secret; never used for release), so every APK —
 local or CI — carries the same signature and `adb install -r` upgrades
 in place without uninstalling (app data survives). Every merge to main
-refreshes the `android-latest` GitHub prerelease with
-`waddle-android-debug.apk` (versionCode = commit-timestamp minutes, so
-upgrades are always monotonic):
+builds `waddle-android-debug.apk` (versionCode = commit-timestamp
+minutes, so upgrades are always monotonic) and publishes it as the
+repo's **latest** release under a unique `android-b<versionCode>-<sha>`
+tag. The stable, tag-agnostic download URL always resolves to the
+newest build:
 
 ```sh
-gh release download android-latest --pattern waddle-android-debug.apk
+gh release download --pattern waddle-android-debug.apk   # latest release
 adb install -r waddle-android-debug.apk
+# or straight from the browser/curl on the phone:
+#   https://github.com/waddle-social/waddle/releases/latest/download/waddle-android-debug.apk
 ```
+
+(A single reused tag like `android-latest` is deliberately avoided:
+GitHub's immutable releases permanently reserve a tag name once it has
+backed a release, so a reused tag cannot be recreated. Unique tags per
+build sidestep that; older rolling releases are pruned to the newest
+10.)
 
 ## Testing in CI
 

@@ -194,19 +194,25 @@ schema.#Project & {
 			inputs: _gradleInputs
 		}
 
-		// Rolling install-in-place artifact: every merge to main rebuilds
-		// the debug APK (shared checked-in debug keystore -> signature is
+		// Install-in-place artifact: every merge to main rebuilds the
+		// debug APK (shared checked-in debug keystore -> signature is
 		// stable across builders, so `adb install -r` upgrades without an
-		// uninstall) with a monotonic timestamp-derived versionCode.
-		// GitHub releases are immutable once published (asset uploads to
-		// an existing release 422), so each publish deletes the release
-		// and recreates it on the stable `android-latest` tag. The tag is
-		// re-pointed to HEAD SYNCHRONOUSLY via git — `gh release delete
-		// --cleanup-tag` deletes the tag asynchronously and the recreate
-		// races the still-present tag (422 Validation Failed), so tag
-		// lifecycle is managed here instead. The stable download URL
-		// releases/download/android-latest/waddle-android-debug.apk is
-		// keyed by tag name and survives the recreate.
+		// uninstall) with a monotonic timestamp-derived versionCode, and
+		// publishes it as the repo's "latest" release.
+		//
+		// Each build uses a UNIQUE tag `android-b<versionCode>-<sha>` and
+		// `gh release create --latest`; the stable download URL is
+		// GitHub's tag-agnostic
+		//   releases/latest/download/waddle-android-debug.apk
+		// which always resolves to whichever release is marked latest.
+		// A fixed reused tag is deliberately NOT used: GitHub's immutable
+		// releases permanently reserve a tag name once it has backed a
+		// release (creating `refs/tags/<name>` afterwards 422s "Reference
+		// update failed", and asset re-uploads to an existing release
+		// 422 too), so delete-and-recreate on a stable tag is impossible.
+		// Unique-tag-per-build sidesteps both: no tag is ever reused and
+		// no published release is ever mutated. Older rolling releases
+		// are pruned to a bounded window.
 		publishDebugApk: schema.#Task & {
 			command: "bash"
 			env: {
@@ -223,29 +229,25 @@ schema.#Project & {
 				  -PversionName="$(git rev-parse --short HEAD)"
 				apk="app/build/outputs/apk/debug/app-debug.apk"
 				sha="$(git rev-parse --short HEAD)"
-				full_sha="$(git rev-parse HEAD)"
-				# Delete only the release object (not the tag — `gh release
-				# delete --cleanup-tag`'s tag removal is async and races the
-				# recreate); best-effort on the first run.
-				gh release delete android-latest --yes || true
-				# Re-point the stable tag to this commit via the git-refs
-				# API (same GH_TOKEN as the release commands, no reliance on
-				# checkout push credentials), so the create below always
-				# finds an up-to-date existing tag and never races one.
-				# Existence-check first so exactly ONE of PATCH/POST runs
-				# and its real error surfaces (a `PATCH || POST` chain would
-				# mask a permission/5xx PATCH failure behind the POST).
-				if gh api "repos/{owner}/{repo}/git/refs/tags/android-latest" >/dev/null 2>&1; then
-				  gh api -X PATCH "repos/{owner}/{repo}/git/refs/tags/android-latest" \
-				    -f sha="${full_sha}" -F force=true
-				else
-				  gh api -X POST "repos/{owner}/{repo}/git/refs" \
-				    -f ref="refs/tags/android-latest" -f sha="${full_sha}"
-				fi
-				gh release create android-latest --prerelease \
-				  --title "Android (rolling debug)" \
-				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)" \
+				# Unique per build (never reused -> never hits the immutable
+				# tag-name lock); versionCode prefix keeps tags sortable.
+				tag="android-b${version_code}-${sha}"
+				gh release create "${tag}" --latest \
+				  --title "Android debug ${sha}" \
+				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (stable URL: releases/latest/download/waddle-android-debug.apk; shared debug signature, no uninstall needed)" \
 				  "${apk}#waddle-android-debug.apk"
+				# Prune older rolling releases beyond the newest 10 (their
+				# tags stay reserved by immutable releases, which is fine —
+				# we never reuse a tag). Wrapped so a transient list/delete
+				# error can never fail the build after a successful publish.
+				{
+				  gh release list --limit 100 --json tagName,createdAt \
+				    --jq '[.[] | select(.tagName | startswith("android-b"))]
+				          | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' \
+				  | while read -r old; do
+				      [ -n "${old}" ] && gh release delete "${old}" --yes || true
+				    done
+				} || true
 				"""#]
 			dependsOn: [setupSdk, buildRustJni]
 			// env.cue is in the input set so a change to THIS publish
