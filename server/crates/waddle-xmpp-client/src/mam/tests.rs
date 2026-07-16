@@ -494,6 +494,66 @@ fn build_mam_iq_preserves_existing_before_behavior() {
     assert!(fields.contains(&("with".to_string(), "bob@example.com".to_string())));
 }
 
+// ── XEP-0313 full-text search builder tests ──────────────────────────────
+
+fn mam_form_value(iq: &Element, field_var: &str) -> Option<String> {
+    iq.get_child("query", MAM_NS)
+        .and_then(|query| query.get_child("x", DATA_FORMS_NS))
+        .and_then(|form| {
+            form.children()
+                .find(|field| field.name() == "field" && field.attr("var") == Some(field_var))
+        })
+        .and_then(|field| field.get_child("value", DATA_FORMS_NS))
+        .map(|element| element.text())
+}
+
+fn rsm_before(iq: &Element) -> Option<String> {
+    iq.get_child("query", MAM_NS)
+        .and_then(|query| query.get_child("set", RSM_NS))
+        .and_then(|set| set.get_child("before", RSM_NS))
+        .map(|element| element.text())
+}
+
+#[test]
+fn room_search_history_targets_room_archive_with_fulltext() {
+    let iq = build_room_search_history_iq("iq-1", "query-1", 10, "room@muc.example.com", "needle");
+
+    assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
+    assert_eq!(
+        mam_form_value(&iq, FULLTEXT_MAM_FIELD).as_deref(),
+        Some("needle")
+    );
+    // Empty `<before/>` = newest matching page first (XEP-0059 §2.5).
+    assert_eq!(rsm_before(&iq).as_deref(), Some(""));
+    assert!(
+        mam_form_value(&iq, "with").is_none(),
+        "room search must not carry a with filter"
+    );
+}
+
+#[test]
+fn dm_search_history_targets_account_archive_and_filters_peer() {
+    let iq = build_dm_search_history_iq(
+        "iq-1",
+        "query-1",
+        10,
+        "alice@example.com",
+        "bob@example.com",
+        "quarterly report",
+    );
+
+    assert_eq!(iq.attr("to"), Some("alice@example.com"));
+    assert_eq!(
+        mam_form_value(&iq, "with").as_deref(),
+        Some("bob@example.com")
+    );
+    assert_eq!(
+        mam_form_value(&iq, FULLTEXT_MAM_FIELD).as_deref(),
+        Some("quarterly report")
+    );
+    assert_eq!(rsm_before(&iq).as_deref(), Some(""));
+}
+
 // ── XEP-0359 stanza-id filter tests ─────────────────────────────────────
 
 #[cfg(test)]
@@ -647,15 +707,15 @@ mod query {
     use std::time::Duration;
 
     use minidom::Element;
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, oneshot};
     use tokio::time::timeout;
 
     use super::super::{ArchivedMessage, ArchivedPayload, MamExt, CLIENT_NS};
     use crate::client::ClientHandle;
     use crate::command::XmppCommand;
     use crate::event::ClientEvent;
-    use crate::state::SessionSnapshot;
-    use waddle_xmpp_core::mam::{MAM_NS, RSM_NS};
+    use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
+    use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, MAM_NS, RSM_NS};
 
     fn make_handle() -> (
         ClientHandle,
@@ -665,6 +725,28 @@ mod query {
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(4);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(64);
         let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+        let handle = ClientHandle::from_parts(cmd_tx, evt_tx.clone(), state);
+        (handle, cmd_rx, evt_tx)
+    }
+
+    /// Handle with an established session bound to `alice@example.com/res`,
+    /// as `search_dm_history` derives the personal-archive address from the
+    /// bound JID.
+    fn make_bound_handle() -> (
+        ClientHandle,
+        mpsc::Receiver<XmppCommand>,
+        broadcast::Sender<ClientEvent>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(4);
+        let (evt_tx, _) = broadcast::channel::<ClientEvent>(64);
+        let mut snapshot = SessionSnapshot::new();
+        snapshot.phase = SessionPhase::Established;
+        snapshot.binding = Some(SessionBinding {
+            jid: "alice@example.com/res".parse().expect("valid bound jid"),
+            stream_id: None,
+            resumable: false,
+        });
+        let state = Arc::new(RwLock::new(snapshot));
         let handle = ClientHandle::from_parts(cmd_tx, evt_tx.clone(), state);
         (handle, cmd_rx, evt_tx)
     }
@@ -897,5 +979,118 @@ mod query {
         .expect("must not hang the full 30s timeout");
 
         assert!(result.is_err(), "dropped responder must surface as error");
+    }
+
+    /// Mock driver for the search verbs: answers the first `SendIq` with a
+    /// complete empty `<fin/>` and hands the sent stanza back for
+    /// wire-shape assertions in the test body.
+    fn spawn_fin_responder(mut cmd_rx: mpsc::Receiver<XmppCommand>) -> oneshot::Receiver<Element> {
+        let (stanza_tx, stanza_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let cmd = cmd_rx.recv().await.expect("driver received cmd");
+            let (stanza, responder) = match cmd {
+                XmppCommand::SendIq { stanza, responder } => (stanza, responder),
+                other => panic!("unexpected command: {other:?}"),
+            };
+            let iq_id = stanza.attr("id").expect("id attribute on <iq>").to_string();
+            responder
+                .send(Ok(build_fin_iq(&iq_id, "", "", 0)))
+                .expect("responder not dropped");
+            stanza_tx.send(stanza).expect("test still listening");
+        });
+        stanza_rx
+    }
+
+    fn form_field_value(iq: &Element, field_var: &str) -> Option<String> {
+        iq.get_child("query", MAM_NS)
+            .and_then(|query| query.get_child("x", "jabber:x:data"))
+            .and_then(|form| {
+                form.children()
+                    .find(|field| field.name() == "field" && field.attr("var") == Some(field_var))
+            })
+            .and_then(|field| field.get_child("value", "jabber:x:data"))
+            .map(|element| element.text())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_room_history_sends_fulltext_query_to_room_archive() {
+        let (handle, cmd_rx, _evt_tx) = make_handle();
+        let stanza_rx = spawn_fin_responder(cmd_rx);
+
+        let page = timeout(
+            Duration::from_secs(2),
+            handle.search_room_history("room@muc.example.com", "needle", 25),
+        )
+        .await
+        .expect("search must resolve once <fin/> arrives")
+        .expect("search_room_history succeeds");
+
+        assert!(page.is_complete);
+        assert!(page.messages.is_empty());
+
+        let stanza = stanza_rx.await.expect("driver captured the IQ");
+        assert_eq!(stanza.attr("to"), Some("room@muc.example.com"));
+        assert_eq!(
+            form_field_value(&stanza, FULLTEXT_MAM_FIELD).as_deref(),
+            Some("needle")
+        );
+        let before = stanza
+            .get_child("query", MAM_NS)
+            .and_then(|query| query.get_child("set", RSM_NS))
+            .and_then(|set| set.get_child("before", RSM_NS))
+            .map(|element| element.text());
+        assert_eq!(
+            before.as_deref(),
+            Some(""),
+            "search must request the newest page via an empty <before/>"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_dm_history_targets_account_archive_and_filters_peer() {
+        let (handle, cmd_rx, _evt_tx) = make_bound_handle();
+        let stanza_rx = spawn_fin_responder(cmd_rx);
+
+        let page = timeout(
+            Duration::from_secs(2),
+            handle.search_dm_history("bob@example.com", "quarterly report", 25),
+        )
+        .await
+        .expect("search must resolve once <fin/> arrives")
+        .expect("search_dm_history succeeds");
+
+        assert!(page.is_complete);
+
+        let stanza = stanza_rx.await.expect("driver captured the IQ");
+        // Personal archive = the session's bound bare JID.
+        assert_eq!(stanza.attr("to"), Some("alice@example.com"));
+        assert_eq!(
+            form_field_value(&stanza, "with").as_deref(),
+            Some("bob@example.com")
+        );
+        assert_eq!(
+            form_field_value(&stanza, FULLTEXT_MAM_FIELD).as_deref(),
+            Some("quarterly report")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_dm_history_without_bound_session_errors() {
+        // No binding in the snapshot: the personal-archive address is
+        // unknown, so the verb must fail without sending anything.
+        let (handle, mut cmd_rx, _evt_tx) = make_handle();
+
+        let result = timeout(
+            Duration::from_secs(2),
+            handle.search_dm_history("bob@example.com", "needle", 25),
+        )
+        .await
+        .expect("must fail fast, not wait for the query timeout");
+
+        assert!(result.is_err(), "unbound session must surface as error");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no IQ may be sent without a bound JID"
+        );
     }
 }

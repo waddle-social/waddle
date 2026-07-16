@@ -81,7 +81,7 @@ class TestAppGraph {
         sessionStore = InMemoryPreferencesDataStore(),
         userStore = InMemoryPreferencesDataStore(),
         networkSignal = networkSignal,
-        loginGateway = { loginGateway },
+        loginGatewayFactory = { loginGateway },
     )
 
     /** Flip the shell to SignedOut without touching the network. */

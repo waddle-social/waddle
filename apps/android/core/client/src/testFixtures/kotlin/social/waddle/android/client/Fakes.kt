@@ -78,7 +78,12 @@ class FakeClientFactory : ClientFactory {
         return FakeWaddleClient().also { clients += it }
     }
 
-    /** Fire an FFI event at the most recent attempt's listener. */
+    /**
+     * Fire an FFI event at the MOST RECENT attempt's listener. Only the
+     * latest attempt is addressable: a test that drives a reconnection
+     * while asserting on the previous attempt's event flow would deliver
+     * here to the wrong listener without any failure.
+     */
     fun emit(event: WaddleClientEvent) {
         checkNotNull(listener) { "no client created yet" }.onEvent(event)
     }
@@ -189,6 +194,19 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage {
         fetchHistoryCalls += Triple(roomJid, maxMessages, beforeId)
+        return mamPage
+    }
+
+    /** Recorded (conversationJid, query, max) full-text search queries. */
+    val searchCalls = CopyOnWriteArrayList<Triple<String, String, UInt>>()
+
+    override suspend fun searchDmHistory(peerJid: String, query: String, maxMessages: UInt): WaddleMamPage {
+        searchCalls += Triple(peerJid, query, maxMessages)
+        return mamPage
+    }
+
+    override suspend fun searchRoomHistory(roomJid: String, query: String, maxMessages: UInt): WaddleMamPage {
+        searchCalls += Triple(roomJid, query, maxMessages)
         return mamPage
     }
 
