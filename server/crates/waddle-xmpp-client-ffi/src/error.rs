@@ -27,6 +27,11 @@ pub enum WaddleError {
     /// The request timed out before the server replied.
     #[error("request timed out")]
     Timeout,
+    /// The reply's stamped `from` does not match the queried entity
+    /// (RFC 6120 §8.1.2.1 defense-in-depth); the payload was
+    /// discarded rather than trusted.
+    #[error("reply from an unexpected sender")]
+    UntrustedReply,
 }
 
 /// Collapse the shared client error into the typed FFI error. Stanza

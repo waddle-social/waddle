@@ -584,6 +584,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func disconnect() async
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+    func fetchExternalServices() async throws  -> [WaddleExternalService]
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -637,6 +647,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallRetractTieBreak(peerFullJid: String, sid: String) async  -> Bool
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+    func sendCallRinging(peerBareJid: String, sid: String) async  -> Bool
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
     func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool) async  -> Bool
@@ -651,6 +670,18 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * Send a XEP-0166 §7.4 `session-terminate` IQ.
      */
     func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> Bool
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+    func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> WaddleCallSessionTerminateOutcome
 
     func discoverTopology() async  -> WaddleTopology
 
@@ -985,6 +1016,31 @@ open func disconnect()async   {
 }
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+open func fetchExternalServices()async throws  -> [WaddleExternalService]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleExternalService.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -1166,6 +1222,31 @@ open func sendCallRetractTieBreak(peerFullJid: String, sid: String)async  -> Boo
 }
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+open func sendCallRinging(peerBareJid: String, sid: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerBareJid),FfiConverterString.lower(sid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
 open func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool)async  -> Bool  {
@@ -1224,6 +1305,34 @@ open func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: Wad
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+open func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?)async  -> WaddleCallSessionTerminateOutcome  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate_with_outcome(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid),FfiConverterOptionTypeWaddleJingleReason.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleCallSessionTerminateOutcome_lift,
             errorHandler: nil
 
         )
@@ -3289,6 +3398,116 @@ public func FfiConverterTypeWaddleEncryptedFileHash_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeWaddleEncryptedFileHash_lower(_ value: WaddleEncryptedFileHash) -> RustBuffer {
     return FfiConverterTypeWaddleEncryptedFileHash.lower(value)
+}
+
+
+/**
+ * One external service (TURN/STUN) advertised by the user's server
+ * over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
+ * The app maps a list of these to WebRTC ICE servers for LiveKit's
+ * RTC configuration (RFC 7064/7065 URI mapping happens app-side, web
+ * `ice-servers.ts` parity). Credentials are present only on
+ * TURN/TURNS entries.
+ */
+public struct WaddleExternalService: Equatable, Hashable {
+    public var serviceType: WaddleExternalServiceType
+    public var host: String
+    /**
+     * RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+     * carries no explicit port and the scheme default applies.
+     */
+    public var port: UInt16?
+    public var transport: WaddleExternalServiceTransport?
+    public var username: String?
+    public var password: String?
+    /**
+     * RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+     * serialized for the FFI boundary exactly like the wasm client's
+     * JSON transit shape.
+     */
+    public var expires: String?
+    /**
+     * Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+     */
+    public var restricted: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(serviceType: WaddleExternalServiceType, host: String,
+        /**
+         * RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+         * carries no explicit port and the scheme default applies.
+         */port: UInt16?, transport: WaddleExternalServiceTransport?, username: String?, password: String?,
+        /**
+         * RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+         * serialized for the FFI boundary exactly like the wasm client's
+         * JSON transit shape.
+         */expires: String?,
+        /**
+         * Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+         */restricted: Bool) {
+        self.serviceType = serviceType
+        self.host = host
+        self.port = port
+        self.transport = transport
+        self.username = username
+        self.password = password
+        self.expires = expires
+        self.restricted = restricted
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalService: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalService: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalService {
+        return
+            try WaddleExternalService(
+                serviceType: FfiConverterTypeWaddleExternalServiceType.read(from: &buf),
+                host: FfiConverterString.read(from: &buf),
+                port: FfiConverterOptionUInt16.read(from: &buf),
+                transport: FfiConverterOptionTypeWaddleExternalServiceTransport.read(from: &buf),
+                username: FfiConverterOptionString.read(from: &buf),
+                password: FfiConverterOptionString.read(from: &buf),
+                expires: FfiConverterOptionString.read(from: &buf),
+                restricted: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExternalService, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleExternalServiceType.write(value.serviceType, into: &buf)
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterOptionUInt16.write(value.port, into: &buf)
+        FfiConverterOptionTypeWaddleExternalServiceTransport.write(value.transport, into: &buf)
+        FfiConverterOptionString.write(value.username, into: &buf)
+        FfiConverterOptionString.write(value.password, into: &buf)
+        FfiConverterOptionString.write(value.expires, into: &buf)
+        FfiConverterBool.write(value.restricted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalService_lift(_ buf: RustBuffer) throws -> WaddleExternalService {
+    return try FfiConverterTypeWaddleExternalService.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalService_lower(_ value: WaddleExternalService) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalService.lower(value)
 }
 
 
@@ -6113,6 +6332,99 @@ public func FfiConverterTypeWaddleCallEventKind_lower(_ value: WaddleCallEventKi
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Typed outcome of `send_call_session_terminate_with_outcome`.
+ * Mirrors the wasm client's three-way classification so the app can
+ * still send the XEP-0353 `<finish/>` bookend after a terminate the
+ * server refused only because it already lost the call registry.
+ */
+
+public enum WaddleCallSessionTerminateOutcome: Equatable, Hashable {
+
+    /**
+     * The server acked the terminate with an `<iq type='result'/>`.
+     */
+    case ok
+    /**
+     * The server answered `forbidden` with the Waddle Jingle handler's
+     * "terminator is not a participant" text: the call registry entry
+     * is already gone (crashed peer, recovered session). Callers treat
+     * this like success for the message-level `<finish/>` bookend.
+     */
+    case orphaned
+    /**
+     * Invalid input, no live session, transport failure, or any other
+     * stanza error.
+     */
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallSessionTerminateOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallSessionTerminateOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallSessionTerminateOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallSessionTerminateOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ok
+
+        case 2: return .orphaned
+
+        case 3: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallSessionTerminateOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .ok:
+            writeInt(&buf, Int32(1))
+
+
+        case .orphaned:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lift(_ buf: RustBuffer) throws -> WaddleCallSessionTerminateOutcome {
+    return try FfiConverterTypeWaddleCallSessionTerminateOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lower(_ value: WaddleCallSessionTerminateOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleCallSessionTerminateOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0280 carbon direction of an unwrapped forwarded copy. Always
  * §11-verified by the runtime before it reaches this boundary.
  */
@@ -6519,6 +6831,12 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
      * The request timed out before the server replied.
      */
     case Timeout
+    /**
+     * The reply's stamped `from` does not match the queried entity
+     * (RFC 6120 §8.1.2.1 defense-in-depth); the payload was
+     * discarded rather than trusted.
+     */
+    case UntrustedReply
 
 
 
@@ -6556,6 +6874,7 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
             )
         case 4: return .Transport
         case 5: return .Timeout
+        case 6: return .UntrustedReply
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6589,6 +6908,10 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
         case .Timeout:
             writeInt(&buf, Int32(5))
 
+
+        case .UntrustedReply:
+            writeInt(&buf, Int32(6))
+
         }
     }
 }
@@ -6607,6 +6930,155 @@ public func FfiConverterTypeWaddleError_lift(_ buf: RustBuffer) throws -> Waddle
 public func FfiConverterTypeWaddleError_lower(_ value: WaddleError) -> RustBuffer {
     return FfiConverterTypeWaddleError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Transport of a XEP-0215 `<service transport='…'/>` entry.
+ */
+
+public enum WaddleExternalServiceTransport: Equatable, Hashable {
+
+    case udp
+    case tcp
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalServiceTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalServiceTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalServiceTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .udp
+
+        case 2: return .tcp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExternalServiceTransport, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .udp:
+            writeInt(&buf, Int32(1))
+
+
+        case .tcp:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceTransport_lift(_ buf: RustBuffer) throws -> WaddleExternalServiceTransport {
+    return try FfiConverterTypeWaddleExternalServiceTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceTransport_lower(_ value: WaddleExternalServiceTransport) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalServiceTransport.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Service type of a XEP-0215 `<service type='…'/>` entry. `Turns` is
+ * TLS-protected TURN (XEP-0215 §3.6.5) — the shape Waddle's own server
+ * advertises.
+ */
+
+public enum WaddleExternalServiceType: Equatable, Hashable {
+
+    case stun
+    case turn
+    case turns
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalServiceType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalServiceType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalServiceType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .stun
+
+        case 2: return .turn
+
+        case 3: return .turns
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExternalServiceType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .stun:
+            writeInt(&buf, Int32(1))
+
+
+        case .turn:
+            writeInt(&buf, Int32(2))
+
+
+        case .turns:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceType_lift(_ buf: RustBuffer) throws -> WaddleExternalServiceType {
+    return try FfiConverterTypeWaddleExternalServiceType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceType_lower(_ value: WaddleExternalServiceType) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalServiceType.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -8230,6 +8702,30 @@ public func FfiConverterCallbackInterfaceWaddleEventListener_lower(_ v: WaddleEv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
     typealias SwiftType = UInt32?
 
@@ -8806,6 +9302,30 @@ fileprivate struct FfiConverterOptionTypeWaddleChatState: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleExternalServiceTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceTransport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleExternalServiceTransport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleExternalServiceTransport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
     typealias SwiftType = WaddleForumPostKind?
 
@@ -9149,6 +9669,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExternalService]
+
+    public static func write(_ value: [WaddleExternalService], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExternalService.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExternalService] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExternalService]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExternalService.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleLinkPreview: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleLinkPreview]
 
@@ -9478,6 +10023,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9502,6 +10050,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 34869) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9509,6 +10060,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 27703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome() != 22694) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
