@@ -232,10 +232,16 @@ schema.#Project & {
 				# API (same GH_TOKEN as the release commands, no reliance on
 				# checkout push credentials), so the create below always
 				# finds an up-to-date existing tag and never races one.
-				gh api -X PATCH "repos/{owner}/{repo}/git/refs/tags/android-latest" \
-				  -f sha="${full_sha}" -F force=true \
-				  || gh api -X POST "repos/{owner}/{repo}/git/refs" \
-				  -f ref="refs/tags/android-latest" -f sha="${full_sha}"
+				# Existence-check first so exactly ONE of PATCH/POST runs
+				# and its real error surfaces (a `PATCH || POST` chain would
+				# mask a permission/5xx PATCH failure behind the POST).
+				if gh api "repos/{owner}/{repo}/git/refs/tags/android-latest" >/dev/null 2>&1; then
+				  gh api -X PATCH "repos/{owner}/{repo}/git/refs/tags/android-latest" \
+				    -f sha="${full_sha}" -F force=true
+				else
+				  gh api -X POST "repos/{owner}/{repo}/git/refs" \
+				    -f ref="refs/tags/android-latest" -f sha="${full_sha}"
+				fi
 				gh release create android-latest --prerelease \
 				  --title "Android (rolling debug)" \
 				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (no uninstall needed; shared debug signature)" \
