@@ -248,7 +248,9 @@ function localPackageInputs(repoRoot, pkg) {
 			`Cargo target for ${manifestPath}`,
 		);
 		if (isBuildScript) {
-			requiredFiles.push(targetPath);
+			throw new Error(
+				`local Cargo custom-build targets are unsupported until their complete filesystem input boundary is declared: ${targetPath}`,
+			);
 		} else {
 			sourceEntries.push(targetPath);
 		}

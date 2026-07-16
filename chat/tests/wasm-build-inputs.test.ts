@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -27,6 +29,7 @@ import {
 import {
 	WASM_BUILD_INPUT_MANIFEST,
 	assertHermeticWasmBuildEnvironment,
+	assertNoAmbientCargoAncestorConfig,
 	assertPinnedNixToolchain,
 	assertPinnedToolVersions,
 	canonicalWasmBuildIdentity,
@@ -45,11 +48,15 @@ import {
 	createIsolatedWasmBuildPaths,
 	pinnedFlakeBuildArgs,
 } from "../scripts/wasm-build-executor.mjs";
-import { renderWasmWrapper } from "../scripts/wasm-package-bindings.mjs";
+import {
+	finalizeWasmPackage,
+	renderWasmWrapper,
+} from "../scripts/wasm-package-bindings.mjs";
 
 const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
 const BUILD_SCRIPT_PATH = "chat/scripts/build-xmpp-wasm.mjs";
 const FORMAT = "waddle:xmpp-client-wasm:canonical-inputs:v3";
+const REAL_REPO_ROOT = resolve(import.meta.dir, "../..");
 const roots: string[] = [];
 const cargoMetadataByRoot = new Map<
 	string,
@@ -307,11 +314,21 @@ describe("canonical WASM build identity", () => {
 		write(contentRoot, "flake.lock", "different locked toolchain\n");
 		expect(buildId(contentRoot)).not.toBe(beforeContent);
 
-		const configRoot = fixtureRoot();
-		const tomlRoot = fixtureRoot();
-		write(configRoot, "server/.cargo/config", "[build]\n");
-		write(tomlRoot, "server/.cargo/config.toml", "[build]\n");
-		expect(buildId(configRoot)).not.toBe(buildId(tomlRoot));
+		for (const configPath of [
+			".cargo/config",
+			".cargo/config.toml",
+			"server/.cargo/config",
+			"server/.cargo/config.toml",
+			"server/crates/.cargo/config",
+			"server/crates/.cargo/config.toml",
+			"server/crates/waddle-xmpp-client-wasm/.cargo/config",
+			"server/crates/waddle-xmpp-client-wasm/.cargo/config.toml",
+		]) {
+			const configRoot = fixtureRoot();
+			const beforeConfig = buildId(configRoot);
+			write(configRoot, configPath, `[build]\ntarget-dir = "${configPath}"\n`);
+			expect(buildId(configRoot)).not.toBe(beforeConfig);
+		}
 	});
 
 	test("discovers every resolved local path dependency from Cargo metadata", () => {
@@ -324,13 +341,12 @@ describe("canonical WASM build identity", () => {
 		expect(buildId(root)).not.toBe(before);
 	});
 
-	test("hashes custom library targets and build scripts", () => {
+	test("hashes custom library targets", () => {
 		const root = fixtureRoot();
 		addResolvedLocalPackage(root, {
 			name: "waddle-custom-target",
 			path: "server/crates/waddle-custom-target",
 			source: "server/crates/waddle-custom-target/code/entry.rs",
-			buildScript: "server/crates/waddle-custom-target/tools/build.rs",
 		});
 		const beforeSource = buildId(root);
 		write(
@@ -338,14 +354,19 @@ describe("canonical WASM build identity", () => {
 			"server/crates/waddle-custom-target/code/entry.rs",
 			"pub fn changed_target() {}\n",
 		);
-		const afterSource = buildId(root);
-		expect(afterSource).not.toBe(beforeSource);
-		write(
-			root,
-			"server/crates/waddle-custom-target/tools/build.rs",
-			'fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n',
+		expect(buildId(root)).not.toBe(beforeSource);
+	});
+
+	test("rejects every reachable local custom-build target", () => {
+		const root = fixtureRoot();
+		addResolvedLocalPackage(root, {
+			name: "waddle-custom-build",
+			path: "server/crates/waddle-custom-build",
+			buildScript: "server/crates/waddle-custom-build/build.rs",
+		});
+		expect(() => buildId(root)).toThrow(
+			"custom-build targets are unsupported until their complete filesystem input boundary is declared",
 		);
-		expect(buildId(root)).not.toBe(afterSource);
 	});
 
 	test("rejects local package, target, build-script, and source-identity escapes", () => {
@@ -751,6 +772,17 @@ describe("canonical WASM build execution policy", () => {
 		expect(() =>
 			assertHermeticWasmBuildEnvironment({ CARGO_HOME: cargoHome }),
 		).toThrow("ambient CARGO_HOME configuration");
+
+		const ancestorRoot = mkdtempSync(
+			resolve(tmpdir(), "waddle-wasm-cargo-ancestor-"),
+		);
+		roots.push(ancestorRoot);
+		const repoRoot = resolve(ancestorRoot, "checkout");
+		mkdirSync(repoRoot);
+		write(ancestorRoot, ".cargo/config.toml", "[build]\nrustflags = []\n");
+		expect(() => assertNoAmbientCargoAncestorConfig(repoRoot)).toThrow(
+			"ambient Cargo ancestor configuration",
+		);
 	});
 
 	test("requires exact flake tool paths and versions, not arbitrary Nix tools", () => {
@@ -933,13 +965,110 @@ describe("canonical WASM build execution policy", () => {
 			writeFileSync(resolve(left, artifact), `same:${artifact}`);
 			writeFileSync(resolve(right, artifact), `same:${artifact}`);
 		}
-		expect(() => assertWasmArtifactSetsEqual(left, right)).not.toThrow();
+		expect(() =>
+			assertWasmArtifactSetsEqual(left, right, contract.executor.artifactCount),
+		).not.toThrow();
 		writeFileSync(
 			resolve(right, "waddle_xmpp_client_wasm_bg.wasm"),
 			"different compiled bytes",
 		);
-		expect(() => assertWasmArtifactSetsEqual(left, right)).toThrow(
-			"waddle_xmpp_client_wasm_bg.wasm",
+		expect(() =>
+			assertWasmArtifactSetsEqual(left, right, contract.executor.artifactCount),
+		).toThrow("waddle_xmpp_client_wasm_bg.wasm");
+	});
+
+	test("rejects noncanonical build-output trees before byte comparison", () => {
+		function artifactPair() {
+			const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-artifact-tree-"));
+			roots.push(root);
+			const left = resolve(root, "left");
+			const right = resolve(root, "right");
+			mkdirSync(left);
+			mkdirSync(right);
+			for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+				writeFileSync(resolve(left, artifact), `same:${artifact}`);
+				writeFileSync(resolve(right, artifact), `same:${artifact}`);
+			}
+			return { left, right };
+		}
+
+		const extra = artifactPair();
+		writeFileSync(resolve(extra.left, "snippet.js"), "unexpected");
+		expect(() =>
+			assertWasmArtifactSetsEqual(
+				extra.left,
+				extra.right,
+				contract.executor.artifactCount,
+			),
+		).toThrow("path set does not match");
+
+		const directory = artifactPair();
+		mkdirSync(resolve(directory.right, "nested"));
+		expect(() =>
+			assertWasmArtifactSetsEqual(
+				directory.left,
+				directory.right,
+				contract.executor.artifactCount,
+			),
+		).toThrow("unexpected directory");
+
+		const link = artifactPair();
+		symlinkSync("package.json", resolve(link.left, "linked-package"));
+		expect(() =>
+			assertWasmArtifactSetsEqual(
+				link.left,
+				link.right,
+				contract.executor.artifactCount,
+			),
+		).toThrow("symbolic link");
+
+		const special = artifactPair();
+		execFileSync("mkfifo", [resolve(special.right, "artifact.pipe")]);
+		expect(() =>
+			assertWasmArtifactSetsEqual(
+				special.left,
+				special.right,
+				contract.executor.artifactCount,
+			),
+		).toThrow("special path");
+
+		const mismatch = artifactPair();
+		renameSync(
+			resolve(mismatch.right, "package.json"),
+			resolve(mismatch.right, "renamed-package.json"),
+		);
+		expect(() =>
+			assertWasmArtifactSetsEqual(
+				mismatch.left,
+				mismatch.right,
+				contract.executor.artifactCount,
+			),
+		).toThrow("path set does not match");
+
+		const wrongCount = artifactPair();
+		expect(() =>
+			assertWasmArtifactSetsEqual(wrongCount.left, wrongCount.right, 5),
+		).toThrow("artifact contract count");
+	});
+
+	test("shared finalizer removes wasm-pack gitignore before exact-six attestation", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-finalize-"));
+		roots.push(root);
+		writeFileSync(resolve(root, ".gitignore"), "*\n");
+		for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+			const contents =
+				artifact === "package.json"
+					? `${JSON.stringify({ name: "unfinalized" })}\n`
+					: artifact === "waddle_xmpp_client_wasm.d.ts"
+						? "export class Fixture {}\n"
+						: `fixture:${artifact}`;
+			writeFileSync(resolve(root, artifact), contents);
+		}
+
+		finalizeWasmPackage(root, "a".repeat(64));
+		expect(existsSync(resolve(root, ".gitignore"))).toBe(false);
+		expect(readdirSync(root).sort()).toEqual(
+			[...WASM_PACKAGE_ARTIFACTS].sort(),
 		);
 	});
 
@@ -954,11 +1083,26 @@ describe("canonical WASM build execution policy", () => {
 		expect(wrapper.match(new RegExp(id, "gu"))).toHaveLength(4);
 	});
 
+	test("publisher authentication matches the generated workflow and npmrc", () => {
+		const workflow = readFileSync(
+			resolve(REAL_REPO_ROOT, ".github/workflows/waddle-chat-publishwasm.yml"),
+			"utf8",
+		);
+		const npmrc = readFileSync(resolve(REAL_REPO_ROOT, ".npmrc"), "utf8");
+		expect(workflow).toContain("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}");
+		expect(npmrc).toContain("_authToken=${GITHUB_TOKEN}");
+		expect(() =>
+			buildAndPublishWasm({
+				environment: { NODE_AUTH_TOKEN: "legacy-token" },
+			}),
+		).toThrow("GITHUB_TOKEN is required");
+	});
+
 	test("publishes only after two isolated artifact sets match", () => {
 		const built: string[] = [];
 		const published: string[] = [];
 		buildAndPublishWasm({
-			environment: { NODE_AUTH_TOKEN: "test-token" },
+			environment: { GITHUB_TOKEN: "test-token" },
 			loadIdentity: () => ({ buildId: "e".repeat(64), contract }),
 			runBuild: ({ outDir }: { outDir: string }) => {
 				built.push(outDir);
@@ -988,7 +1132,7 @@ describe("canonical WASM build execution policy", () => {
 		let publishCount = 0;
 		expect(() =>
 			buildAndPublishWasm({
-				environment: { NODE_AUTH_TOKEN: "test-token" },
+				environment: { GITHUB_TOKEN: "test-token" },
 				loadIdentity: () => ({ buildId: "f".repeat(64), contract }),
 				runBuild: ({ outDir }: { outDir: string }) => {
 					const currentBuild = buildIndex++;

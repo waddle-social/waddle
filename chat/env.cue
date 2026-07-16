@@ -43,6 +43,7 @@ let _NamespaceNix = schema.#Contributor & {
 // the WASM builder. env.cue and package.json are triggers because they own the
 // task/package invocation; only the relevant contract descriptor is hashed.
 let _WasmBuildInputs = [
+	"../.cargo/**",
 	"../flake.lock",
 	"../flake.nix",
 	"../server/.cargo/**",

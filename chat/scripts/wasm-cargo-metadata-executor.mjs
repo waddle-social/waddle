@@ -11,6 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	assertHermeticWasmBuildEnvironment,
+	assertNoAmbientCargoAncestorConfig,
 	resolvePinnedNixToolchain,
 } from "./wasm-build-environment.mjs";
 import {
@@ -116,6 +117,7 @@ export function loadPinnedWasmCargoMetadata(
 		),
 	} = {},
 ) {
+	assertNoAmbientCargoAncestorConfig(repoRoot);
 	const cargoHome = resolve(
 		environment.CARGO_HOME ?? resolve(environment.HOME ?? homedir(), ".cargo"),
 	);

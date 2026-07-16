@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { X_OK } from "node:constants";
 import { accessSync, existsSync, realpathSync } from "node:fs";
-import { delimiter, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { bytewiseCompare } from "./wasm-build-input-digest.mjs";
 
 const FORBIDDEN_ENVIRONMENT_NAMES = new Set([
@@ -28,6 +28,7 @@ const PINNED_TOOL_NAMES = Object.freeze([
 	"wasmPack",
 	"wasmBindgen",
 ]);
+const CARGO_CONFIG_NAMES = Object.freeze(["config", "config.toml"]);
 
 function isForbiddenEnvironmentName(name) {
 	if (
@@ -50,13 +51,34 @@ export function assertHermeticWasmBuildEnvironment(environment) {
 	}
 
 	if (environment.CARGO_HOME) {
-		for (const name of ["config", "config.toml"]) {
+		for (const name of CARGO_CONFIG_NAMES) {
 			if (existsSync(resolve(environment.CARGO_HOME, name))) {
 				throw new Error(
 					`ambient CARGO_HOME configuration is not allowed for the canonical WASM build: ${name}`,
 				);
 			}
 		}
+	}
+}
+
+/// Cargo walks `.cargo/config{,.toml}` from the crate working directory to
+/// the filesystem root. Repository locations are canonical hashed inputs;
+/// any matching ancestor above the repository would be ambient and must make
+/// the build fail closed even when CARGO_HOME itself is clean.
+export function assertNoAmbientCargoAncestorConfig(repoRoot) {
+	let directory = dirname(resolve(repoRoot));
+	while (true) {
+		for (const name of CARGO_CONFIG_NAMES) {
+			const path = resolve(directory, ".cargo", name);
+			if (existsSync(path)) {
+				throw new Error(
+					`ambient Cargo ancestor configuration is not allowed for the canonical WASM build: ${path}`,
+				);
+			}
+		}
+		const parent = dirname(directory);
+		if (parent === directory) return;
+		directory = parent;
 	}
 }
 

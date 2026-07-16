@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -10,6 +11,7 @@ import {
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	assertHermeticWasmBuildEnvironment,
+	assertNoAmbientCargoAncestorConfig,
 	resolvePinnedNixToolchain,
 } from "./wasm-build-environment.mjs";
 
@@ -166,6 +168,7 @@ export function assertPinnedWasmBuildProcess(
 		);
 	}
 	assertPinnedWasmBuildFilesystem(environment, outDir);
+	assertNoAmbientCargoAncestorConfig(repoRoot);
 
 	const expected = expectedToolchain(environment);
 	resolvePinnedNixToolchain(expected.executables, expected.versions);
@@ -252,19 +255,84 @@ export function runPinnedWasmBuild({
 	});
 }
 
-export function assertWasmArtifactSetsEqual(leftDir, rightDir) {
-	const different = [];
-	for (const name of WASM_PACKAGE_ARTIFACTS) {
-		const left = resolve(leftDir, name);
-		const right = resolve(rightDir, name);
-		if (
-			!existsSync(left) ||
-			!existsSync(right) ||
-			!readFileSync(left).equals(readFileSync(right))
-		) {
-			different.push(name);
+function canonicalArtifactFiles(directory, description) {
+	const root = lstatSync(directory);
+	if (root.isSymbolicLink() || !root.isDirectory()) {
+		throw new Error(`${description} must be a real directory: ${directory}`);
+	}
+	const files = [];
+	const directories = [];
+	function visit(current, prefix) {
+		for (const name of readdirSync(current).sort()) {
+			const relativePath = prefix ? `${prefix}/${name}` : name;
+			const path = resolve(current, name);
+			const stat = lstatSync(path);
+			if (stat.isSymbolicLink()) {
+				throw new Error(
+					`${description} contains a symbolic link: ${relativePath}`,
+				);
+			}
+			if (stat.isDirectory()) {
+				directories.push(relativePath);
+				visit(path, relativePath);
+				continue;
+			}
+			if (!stat.isFile()) {
+				throw new Error(
+					`${description} contains a special path: ${relativePath}`,
+				);
+			}
+			files.push(relativePath);
 		}
 	}
+	visit(directory, "");
+	if (directories.length > 0) {
+		throw new Error(
+			`${description} contains an unexpected directory: ${directories.join(", ")}`,
+		);
+	}
+	return files;
+}
+
+export function assertWasmArtifactSetsEqual(
+	leftDir,
+	rightDir,
+	expectedArtifactCount,
+) {
+	if (
+		!Number.isSafeInteger(expectedArtifactCount) ||
+		expectedArtifactCount !== WASM_PACKAGE_ARTIFACTS.length
+	) {
+		throw new Error(
+			`WASM artifact contract count must equal the ${WASM_PACKAGE_ARTIFACTS.length} canonical files`,
+		);
+	}
+	const expected = [...WASM_PACKAGE_ARTIFACTS].sort();
+	const leftFiles = canonicalArtifactFiles(leftDir, "first WASM build output");
+	const rightFiles = canonicalArtifactFiles(
+		rightDir,
+		"second WASM build output",
+	);
+	for (const [description, files] of [
+		["first WASM build output", leftFiles],
+		["second WASM build output", rightFiles],
+	]) {
+		if (
+			files.length !== expectedArtifactCount ||
+			files.some((name, index) => name !== expected[index])
+		) {
+			throw new Error(
+				`${description} path set does not match the canonical artifacts: ${files.join(", ")}`,
+			);
+		}
+	}
+
+	const different = expected.filter(
+		(name) =>
+			!readFileSync(resolve(leftDir, name)).equals(
+				readFileSync(resolve(rightDir, name)),
+			),
+	);
 	if (different.length > 0) {
 		throw new Error(
 			`isolated canonical WASM builds diverged: ${different.join(", ")}`,

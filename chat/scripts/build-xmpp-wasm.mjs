@@ -155,7 +155,11 @@ try {
 			contract,
 			buildId,
 		});
-		assertWasmArtifactSetsEqual(firstBuild.outDir, secondBuild.outDir);
+		assertWasmArtifactSetsEqual(
+			firstBuild.outDir,
+			secondBuild.outDir,
+			contract.executor.artifactCount,
+		);
 		const drifted = TRACKED_WASM_ARTIFACTS.filter((file) => {
 			const committed = resolve(committedOutDir, file);
 			const rebuilt = resolve(firstBuild.outDir, file);

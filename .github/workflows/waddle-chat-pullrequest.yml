@@ -5,6 +5,7 @@ name: waddle-chat-pullRequest
 on:
   pull_request:
     paths:
+    - .cargo/**
     - .github/workflows/waddle-chat-pullrequest.yml
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json
     - apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json/**

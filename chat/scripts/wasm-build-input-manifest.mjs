@@ -35,8 +35,14 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		"server/rust-toolchain.toml",
 	]),
 	optionalFiles: Object.freeze([
+		".cargo/config",
+		".cargo/config.toml",
 		"server/.cargo/config",
 		"server/.cargo/config.toml",
+		"server/crates/.cargo/config",
+		"server/crates/.cargo/config.toml",
+		"server/crates/waddle-xmpp-client-wasm/.cargo/config",
+		"server/crates/waddle-xmpp-client-wasm/.cargo/config.toml",
 	]),
 });
 

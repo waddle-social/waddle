@@ -2,7 +2,7 @@
  * CI build-and-publish script for @waddle/xmpp-client-wasm.
  *
  * Runs in the CI `publishWasm` pipeline on every merge to main.
- * Requires: wasm-pack, wasm32-unknown-unknown Rust target, NODE_AUTH_TOKEN env var.
+ * Requires: wasm-pack, wasm32-unknown-unknown Rust target, GITHUB_TOKEN env var.
  *
  * Usage: bun run scripts/build-and-publish-wasm.mjs
  */
@@ -44,10 +44,8 @@ export function buildAndPublishWasm({
 	removeRunRoot = (path) => rmSync(path, { recursive: true, force: true }),
 	log = console.log,
 } = {}) {
-	if (!environment.NODE_AUTH_TOKEN) {
-		throw new Error(
-			"NODE_AUTH_TOKEN is required to publish to GitHub Packages.",
-		);
+	if (!environment.GITHUB_TOKEN) {
+		throw new Error("GITHUB_TOKEN is required to publish to GitHub Packages.");
 	}
 	const { buildId, contract } = loadIdentity(repoRoot);
 	const runRoot = createRunRoot();
@@ -69,7 +67,11 @@ export function buildAndPublishWasm({
 			});
 		}
 
-		compareArtifacts(firstBuild.outDir, secondBuild.outDir);
+		compareArtifacts(
+			firstBuild.outDir,
+			secondBuild.outDir,
+			contract.executor.artifactCount,
+		);
 		log(
 			"[wasm] Two isolated six-artifact builds match; publishing the attested first package...",
 		);

@@ -7,6 +7,7 @@ on:
     branches:
     - main
     paths:
+    - .cargo/**
     - .github/workflows/waddle-chat-publishwasm.yml
     - chat/env.cue
     - chat/env.cue/**

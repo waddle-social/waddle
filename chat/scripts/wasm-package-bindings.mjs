@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 export function renderWasmWrapper(buildId) {
@@ -42,6 +42,11 @@ export * from "./waddle_xmpp_client_wasm_bg.js?b=${buildId}";
 }
 
 export function finalizeWasmPackage(outDir, buildId) {
+	// wasm-pack emits this repository convenience file beside the package.
+	// It is not a publish artifact and would violate the exact-six attestation
+	// contract, so the shared local/publish finalizer removes it explicitly.
+	rmSync(resolve(outDir, ".gitignore"), { force: true });
+
 	const pkgJsonPath = resolve(outDir, "package.json");
 	const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
 	pkg.name = "@waddle/xmpp-client-wasm";
