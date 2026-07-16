@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- UniFFI-generated bindings (committed, drift-guarded) are not
+         hand-maintained; lint findings there track the generator. -->
+    <issue id="all">
+        <ignore path="src/main/kotlin/social/waddle/client/ffi" />
+    </issue>
+</lint>

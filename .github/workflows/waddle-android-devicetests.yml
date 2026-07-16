@@ -3,6 +3,47 @@
 
 name: waddle-android-deviceTests
 on:
+  pull_request:
+    paths:
+    - .github/workflows/waddle-android-devicetests.yml
+    - apps/android/app/**
+    - apps/android/build.gradle.kts
+    - apps/android/build.gradle.kts/**
+    - apps/android/core/client/build.gradle.kts
+    - apps/android/core/client/build.gradle.kts/**
+    - apps/android/core/client/consumer-rules.pro
+    - apps/android/core/client/consumer-rules.pro/**
+    - apps/android/core/client/lint.xml
+    - apps/android/core/client/lint.xml/**
+    - apps/android/core/client/src/**
+    - apps/android/debug.keystore
+    - apps/android/debug.keystore/**
+    - apps/android/detekt.yml
+    - apps/android/detekt.yml/**
+    - apps/android/env.cue
+    - apps/android/gradle.properties
+    - apps/android/gradle.properties/**
+    - apps/android/gradle/**
+    - apps/android/gradlew
+    - apps/android/gradlew/**
+    - apps/android/schema/**
+    - apps/android/settings.gradle.kts
+    - apps/android/settings.gradle.kts/**
+    - cue.mod/**
+    - scripts/build-android-rust.sh
+    - scripts/build-android-rust.sh/**
+    - scripts/check-android-ffi-bindings.sh
+    - scripts/check-android-ffi-bindings.sh/**
+    - scripts/setup-android-sdk.sh
+    - scripts/setup-android-sdk.sh/**
+    - server/Cargo.lock
+    - server/Cargo.lock/**
+    - server/Cargo.toml
+    - server/Cargo.toml/**
+    - server/crates/waddle-xmpp-client-ffi/**
+    - server/crates/waddle-xmpp-client/**
+    - server/rust-toolchain.toml
+    - server/rust-toolchain.toml/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -45,7 +86,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.53.2"
+        cuenv_version="0.54.0"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

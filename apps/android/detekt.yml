@@ -1,0 +1,66 @@
+# Deviations from the detekt default rule set. Every entry needs a
+# justification; suppressing findings in code (`@Suppress`) is not
+# allowed. Per-file excludes marked "decomposition PR" are removed by the
+# follow-up refactor that splits XmppSessionManager/ConversationViewModel.
+
+naming:
+  FunctionNaming:
+    # Composables are PascalCase by convention.
+    ignoreAnnotated: ['Composable']
+
+complexity:
+  LongMethod:
+    # Declarative UI: a screen's content is one long slot-filling call.
+    ignoreAnnotated: ['Composable']
+    excludes: &decompositionTargets
+      # Decomposed in the follow-up refactor PR; excludes removed there.
+      - '**/social/waddle/android/client/XmppSessionManager.kt'
+      - '**/social/waddle/android/client/store/TimelineStore.kt'
+      - '**/social/waddle/android/feature/conversation/ConversationViewModel.kt'
+      - '**/social/waddle/android/service/MessageNotifier.kt'
+  LargeClass:
+    excludes: *decompositionTargets
+  CyclomaticComplexMethod:
+    ignoreAnnotated: ['Composable']
+    excludes: *decompositionTargets
+  NestedBlockDepth:
+    excludes: *decompositionTargets
+  LongParameterList:
+    # Compose slots and named-arg fixture builders enumerate params by
+    # design; manual-DI constructors enumerate their collaborators.
+    ignoreAnnotated: ['Composable']
+    ignoreDefaultParameters: true
+    constructorThreshold: 8
+    excludes: *decompositionTargets
+  TooManyFunctions:
+    # House style prefers many small single-purpose functions; class
+    # bloat is caught by LargeClass instead. FakeWaddleClient implements
+    # the full generated FFI interface and cannot shrink.
+    active: false
+
+exceptions:
+  TooGenericExceptionCaught:
+    # The FFI/process boundaries deliberately catch Throwable and rethrow
+    # CancellationException; each site documents why. The heuristic fights
+    # a load-bearing pattern here.
+    active: false
+
+style:
+  # Timeouts, paddings, and backoff constants are self-describing at the
+  # call site; forcing a named constant for every literal hurts locality.
+  MagicNumber:
+    active: false
+
+formatting:
+  # The repo's Kotlin predates ktlint; indentation/wrapping style is
+  # consistent but not ktlint's. Content rules stay on; pure layout rules
+  # that would rewrite every file wholesale are off.
+  Indentation:
+    active: false
+  ArgumentListWrapping:
+    active: false
+  ParameterListWrapping:
+    active: false
+  # style.MaxLineLength covers line length; the ktlint twin double-reports.
+  MaximumLineLength:
+    active: false

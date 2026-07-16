@@ -79,8 +79,10 @@ let _gradleInputs = [
 	"app/**",
 	"core/client/build.gradle.kts",
 	"core/client/consumer-rules.pro",
-	"core/client/src/main/kotlin/**",
+	"core/client/lint.xml",
+	"core/client/src/**",
 	"debug.keystore",
+	"detekt.yml",
 ]
 
 schema.#Project & {
@@ -115,20 +117,24 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: contents: "write"
-			"tasks": [tasks.checkBindingsDrift, tasks.test, tasks.publishDebugApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.publishDebugApk]
 		}
 		pullRequest: {
 			when: {
 				pullRequest: true
 			}
 			provider: github: permissions: contents: "read"
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.build]
 		}
-		// Manual probe: verifies /dev/kvm on the Namespace runner and runs
-		// the Gradle-managed-device instrumented smoke suite on a headless
-		// ATD emulator. Promoted into pullRequest once proven stable.
+		// Instrumented suite on a headless GMD ATD emulator. Runs as its
+		// own parallel PR job so a flaky emulator never delays unit-test
+		// feedback and can be re-run independently (/dev/kvm on the
+		// Namespace runner was proven by manual dispatch).
 		deviceTests: {
-			when: manual: true
+			when: {
+				pullRequest: true
+				manual:      true
+			}
 			provider: github: permissions: contents: "read"
 			"tasks": [tasks.gmdCheck]
 		}
@@ -184,12 +190,25 @@ schema.#Project & {
 			inputs: _gradleInputs
 		}
 
-		// KVM probe + headless ATD emulator smoke suite (deviceTests
-		// pipeline). API 34: the aosp-atd image line trails the newest
-		// platform; 34 matches minSdk and has stable ATD images.
+		// Static analysis: detekt (default rules + formatting, no
+		// baselines — see detekt.yml for the justified deviations) and
+		// Android lint with warnings-as-errors, mirroring the server's
+		// clippy -D warnings posture.
+		lint: schema.#Task & {
+			command: "bash"
+			args: ["-c", "./gradlew --no-daemon detekt :app:lintDebug"]
+			dependsOn: [setupSdk]
+			inputs: _gradleInputs
+		}
+
+		// KVM probe + headless ATD emulator suite (deviceTests pipeline).
+		// API 34: the aosp-atd image line trails the newest platform; 34
+		// matches minSdk and has stable ATD images. Configuration cache is
+		// off for GMD runs: the emulator lifecycle interacts badly with
+		// cached configuration.
 		gmdCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon :app:atdApi34DebugAndroidTest"]
+			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache :app:atdApi34DebugAndroidTest"]
 			dependsOn: [setupSdk, buildRustJni]
 			inputs: _gradleInputs
 		}
