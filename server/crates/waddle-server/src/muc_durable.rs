@@ -221,7 +221,7 @@ impl PostgresMucRoomStore {
         self.node_identity
             .guard_if_current(&fence.owner)
             .await
-            .ok_or_else(|| XmppError::OwnershipLost {
+            .ok_or_else(|| XmppError::OwnershipUnavailable {
                 entity: fence.entity.clone(),
             })
     }
@@ -244,7 +244,7 @@ impl PostgresMucRoomStore {
         }
         if self.node_identity.current() != fence.owner {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
-            return Err(XmppError::OwnershipLost {
+            return Err(XmppError::OwnershipUnavailable {
                 entity: expected_entity,
             });
         }
@@ -266,14 +266,14 @@ impl PostgresMucRoomStore {
             .await
             .map_err(|error| fence_db_unavailable(error, fence))?
             .is_some();
-        if held && self.node_identity.current() == fence.owner {
-            Ok(())
-        } else {
+        if !held {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
-            Err(XmppError::OwnershipLost {
+            return Err(XmppError::OwnershipLost {
                 entity: expected_entity,
-            })
+            });
         }
+        debug_assert_eq!(self.node_identity.current(), fence.owner);
+        Ok(())
     }
 
     async fn exact_claim_is_held(
@@ -285,10 +285,7 @@ impl PostgresMucRoomStore {
         if fence.entity != expected_entity {
             return Ok(false);
         }
-        if self.node_identity.current() != fence.owner {
-            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
-            return Ok(false);
-        }
+        let _identity_guard = self.guard_fence_identity(fence).await?;
         let conn = self
             .db
             .guard()
@@ -313,12 +310,12 @@ impl PostgresMucRoomStore {
             .map_err(|error| fence_db_unavailable(error, fence))?
             .is_some();
         drop(rows);
-        if held && self.node_identity.current() == fence.owner {
-            Ok(true)
-        } else {
+        if !held {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
-            Ok(false)
+            return Ok(false);
         }
+        debug_assert_eq!(self.node_identity.current(), fence.owner);
+        Ok(true)
     }
 
     async fn load_room_state_in_tx(
@@ -485,9 +482,9 @@ impl MucDurableStore for PostgresMucRoomStore {
             self.assert_fenced(&mut tx, room_jid, fence).await?;
             // Keep this UPDATE-only: an upsert here could create an incomplete
             // row without its required `waddle_id` and `channel_id` fields.
-            // Until #1352 atomically initializes the complete room plus
-            // initial Owner, an exact-fenced missing row is non-fatal. #1350
-            // will enforce missing-parent writes after that lifecycle exists.
+            // Until #1352 atomically initializes the complete room plus its
+            // initial Owner, fail before acknowledging a subject whose
+            // durable parent is absent.
             let affected = tx
                 .execute(
                     "UPDATE clustering_muc_rooms SET subject_json = ?, updated_at = now() WHERE room_jid = ?",
@@ -496,11 +493,9 @@ impl MucDurableStore for PostgresMucRoomStore {
                 .await
                 .map_err(db_err)?;
             if affected == 0 {
-                tracing::warn!(
-                    room = %room_jid,
-                    entity = %fence.entity,
-                    "subject update found no durable room parent before creator lifecycle initialization"
-                );
+                return Err(XmppError::DurableRoomStateMissing {
+                    entity: fence.entity.clone(),
+                });
             }
             tx.commit().await.map_err(db_err)?;
             Ok(())
@@ -669,10 +664,10 @@ mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
-    use kameo::actor::Spawn;
+    use kameo::{actor::Spawn, error::SendError};
     use std::sync::Arc;
     use waddle_xmpp::muc::room_actor::{
-        GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject,
+        GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
     };
     use waddle_xmpp::muc::RoomSubjectTexts;
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
@@ -743,21 +738,25 @@ mod tests {
         };
         let jid = room_jid("identity-rotation");
         let entity = Entity::new(EntityType::RoomActor, jid.to_string());
-        store.record_claim_fence(
-            &jid,
-            RoomClaimFenceContext::new(entity, original, ClaimEpoch(7)),
-        );
+        let fence = RoomClaimFenceContext::new(entity.clone(), original, ClaimEpoch(7));
+        store.record_claim_fence(&jid, fence.clone());
         assert!(store.current_claim_fence(&jid).is_some());
 
         live_identity.rotate(node_identity()).await;
 
-        assert!(
-            !store
-                .check_fenced_fanout(&jid)
-                .await
-                .expect("identity rotation is definitive ownership loss"),
-            "a rotated cached fence must return false, never a transient error that callers fail open"
-        );
+        assert!(matches!(
+            store.guard_fence_identity(&fence).await,
+            Err(XmppError::OwnershipUnavailable {
+                entity: unavailable_entity
+            }) if unavailable_entity == entity
+        ));
+
+        assert!(matches!(
+            store.check_fenced_fanout(&jid).await,
+            Err(XmppError::OwnershipUnavailable {
+                entity: unavailable_entity
+            }) if unavailable_entity == entity
+        ));
         assert!(store.current_claim_fence(&jid).is_none());
         assert!(store.claim_fences.get(&jid).is_none());
     }
@@ -923,8 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_subject_fenced_keeps_a_missing_durable_room_nonfatal_without_creating_partial_state(
-    ) {
+    async fn save_subject_fenced_rejects_a_claimed_room_without_durable_state() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, _db, me)) = clean_store().await else {
             return;
@@ -944,22 +942,29 @@ mod tests {
             set_at: chrono::Utc::now(),
         };
 
-        store
+        let result = store
             .save_subject_fenced(&jid, Some(&subject), &fence)
-            .await
-            .expect("an exact-fenced subject update without a parent is non-fatal until #1352");
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(XmppError::DurableRoomStateMissing { entity })
+                    if entity == &fence.entity
+            ),
+            "a subject write must fail typed rather than acknowledge non-durable state: {result:?}"
+        );
         assert!(
             store
                 .load_room_state_fenced(&jid, &fence)
                 .await
-                .expect("load after non-fatal subject write")
+                .expect("load after rejected subject write")
                 .is_none(),
-            "the non-fatal subject update must not create a partial durable room state"
+            "the rejected subject write must not create a partial durable room state"
         );
     }
 
     #[tokio::test]
-    async fn fresh_clustered_room_accepts_its_first_subject_without_creating_a_partial_parent() {
+    async fn fresh_clustered_room_rejects_its_first_subject_before_applying_memory() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, _db, me)) = clean_store().await else {
             return;
@@ -990,34 +995,37 @@ mod tests {
             })
             .await
             .expect("restore handler");
-        actor
+        let result = actor
             .ask(SetSubject {
                 texts: RoomSubjectTexts::from_iter([(String::new(), "first subject".to_string())]),
                 setter: "alice@example.com".parse().expect("valid jid"),
                 setter_nick: "alice".to_string(),
                 set_at: chrono::Utc::now(),
             })
-            .await
-            .expect("the first subject must be accepted rather than bounced");
-        assert_eq!(
+            .await;
+        assert!(matches!(
+            result,
+            Err(SendError::HandlerError(
+                SetSubjectError::PersistFailedBeforeApply
+            ))
+        ));
+        assert!(
             actor
                 .ask(GetSnapshot)
                 .await
                 .expect("room snapshot")
                 .room
                 .subject
-                .expect("accepted subject is installed in memory")
-                .texts
-                .get(""),
-            Some("first subject")
+                .is_none(),
+            "the failed first subject must not be installed in actor memory"
         );
         assert!(
             store
                 .load_room_state_fenced(&room_jid, &fence)
                 .await
-                .expect("load after accepted first subject")
+                .expect("load after rejected first subject")
                 .is_none(),
-            "the first subject must not manufacture a partial durable parent"
+            "the failed first subject must not manufacture a partial durable parent"
         );
     }
 

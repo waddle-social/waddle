@@ -151,8 +151,9 @@ pub trait MucDurableStore: Send + Sync {
 
     /// Update (or, when `subject` is `None`, clear) an existing room's current
     /// subject. This must not create a parent row: #1352 owns atomically
-    /// creating the complete room plus initial Owner, and #1350 will enforce
-    /// missing-parent writes once that lifecycle boundary exists.
+    /// creating the complete room plus initial Owner. Until then, a missing
+    /// parent returns [`crate::XmppError::DurableRoomStateMissing`] so callers
+    /// fail before acknowledging or applying a non-durable subject.
     fn save_subject_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,

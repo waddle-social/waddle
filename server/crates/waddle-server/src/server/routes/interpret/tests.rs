@@ -3228,13 +3228,18 @@ impl SubjectMutationStore {
         Self {
             mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
             claim_store,
-            durable_parent_rows: std::sync::atomic::AtomicUsize::new(0),
+            durable_parent_rows: std::sync::atomic::AtomicUsize::new(1),
         }
     }
 
     fn durable_parent_row_count(&self) -> usize {
         self.durable_parent_rows
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn remove_durable_parent(&self) {
+        self.durable_parent_rows
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn set_mode(&self, mode: SubjectMutationStoreMode) {
@@ -3329,6 +3334,11 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
         Box::pin(async move {
             if !self.exact_fence_matches(room_jid, fence).await? {
                 return Err(waddle_xmpp::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                });
+            }
+            if self.durable_parent_row_count() == 0 {
+                return Err(waddle_xmpp::XmppError::DurableRoomStateMissing {
                     entity: fence.entity.clone(),
                 });
             }
@@ -3711,15 +3721,15 @@ async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
 }
 
 #[tokio::test]
-async fn xep_0045_new_clustered_room_subject_is_not_bounced_before_creator_lifecycle_initializes() {
+async fn xep_0045_new_clustered_room_subject_fails_closed_without_a_durable_parent() {
     use waddle_xmpp::muc::room_actor::GetSnapshot;
 
-    // The clustered store deliberately restores no parent and treats the
-    // UPDATE-only subject write as non-fatal. #1352 owns atomic complete
-    // room-plus-Owner initialization; this #1355 boundary must neither bounce
-    // the first valid subject nor manufacture a partial parent row.
-    let (room_registry, room_actor, room_jid, _claim_store, claim_fence, _store) =
+    // #1352 owns atomic complete room-plus-Owner initialization. Until that
+    // prerequisite lands, the UPDATE-only subject path must fail before
+    // acknowledging or applying state that cannot survive actor replacement.
+    let (room_registry, room_actor, room_jid, _claim_store, claim_fence, store) =
         spawn_subject_mutation_test_room().await;
+    store.remove_durable_parent();
     let connection_registry = ConnectionRegistry::new();
     let mut deps = Deps::registry_only(&connection_registry);
     deps.room_registry = Some(&room_registry);
@@ -3734,28 +3744,18 @@ async fn xep_0045_new_clustered_room_subject_is_not_bounced_before_creator_lifec
     )
     .await;
 
-    assert!(
-        outcome.frames.is_empty(),
-        "the first subject must not bounce"
-    );
-    assert!(
-        outcome.close,
-        "later effects must continue after the subject"
-    );
+    assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+    assert!(outcome.frames[0].contains("resource-constraint"));
+    assert!(!outcome.close, "later effects must be suppressed");
     assert_eq!(
-        _store.durable_parent_row_count(),
+        store.durable_parent_row_count(),
         0,
-        "generic restore and the subject write must not create a partial durable parent"
+        "the rejected subject must not create a partial durable parent"
     );
     let snapshot = room_actor.ask(GetSnapshot).await.expect("room snapshot");
-    assert_eq!(
-        snapshot
-            .room
-            .subject
-            .expect("first subject is applied in memory")
-            .texts
-            .get(""),
-        Some("first subject")
+    assert!(
+        snapshot.room.subject.is_none(),
+        "the rejected subject must not be applied in actor memory"
     );
 }
 

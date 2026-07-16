@@ -1353,10 +1353,12 @@ password/members-only hold after steal — this phase builds the mechanism, GA g
 correctness.
 
 At the #1355 stack boundary, generic restore returning `None` does not create a
-durable parent. The exact-fenced subject UPDATE remains non-creating and non-fatal
-there; #1352 must atomically initialize the complete room plus initial Owner to
-preserve creator/status-201 semantics, after which #1350 enforces missing-parent
-writes.
+durable parent. The exact-fenced subject UPDATE remains non-creating and returns a
+typed pre-apply failure when that parent is absent, so an acknowledged subject can
+never disappear on actor replacement. #1352 must atomically initialize the complete
+room plus initial Owner to remove that temporary unavailability while preserving
+creator/status-201 semantics; #1350 then hardens the broader parent/child integrity
+contract.
 
 **Code research finding, corrected (minor fix 16)**: the previous draft attributed the
 "no room/affiliation table exists in any schema" reasoning to
@@ -3349,15 +3351,19 @@ record the retained work.
     instead sets terminal `OwnershipLost`, seals the actor, and returns
     `RoomSealed`: it never retries the stale fence. The registry does not
     publish that actor, enqueue retry work, or release the already-lost
-    stale claim tuple. New disco/join-error mapping in
+    stale claim tuple. A local node-identity rotation is not proof that the
+    database row moved: it remains typed as `OwnershipUnavailable`, so demand
+    cleanup releases the old exact tuple and reclaimed cleanup retains that
+    release responsibility across retries. New disco/join-error mapping in
     `handlers/presence/muc.rs`: `RestorePending` bounces `<error
     type='wait'><resource-constraint/></error>`, matching FIX 6's shape.
 
     `SetSubject` uses the phase-specific pre-mutation ownership gate before
     constructing, persisting, or applying the subject: definitive loss maps
     to `NotOwner`, uncertainty maps to `OwnershipUnavailable`, and a normal
-    durable write failure maps to `PersistFailedBeforeApply`. This keeps its
-    public failure contract pre-apply. Shared `DurablePersistError::PersistFailed`
+    durable write failure — including a missing complete room parent before
+    #1352 — maps to `PersistFailedBeforeApply`. This keeps its public failure
+    contract pre-apply. Shared `DurablePersistError::PersistFailed`
     is deliberately phase-neutral because it is also wrapped by mediated
     invite grant and rollback errors whose public variants encode that their
     affiliation writes failed before applying memory.

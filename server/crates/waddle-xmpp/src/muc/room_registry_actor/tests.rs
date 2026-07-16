@@ -2081,6 +2081,7 @@ mod ownership_claims_tests {
         fail_load: bool,
         lose_restore_ownership_on_call: Option<usize>,
         restore_loss_successor: Option<(Arc<DeadOwnerClaimStore>, NodeIdentity)>,
+        rotate_identity_during_load: Option<(SharedNodeIdentity, NodeIdentity)>,
         fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
         block_load_for: Option<BareJid>,
@@ -2188,6 +2189,12 @@ mod ownership_claims_tests {
                 if let Some((claim_store, successor)) = &store.restore_loss_successor {
                     claim_store.replace_with_successor(successor.clone());
                     return Err(crate::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    });
+                }
+                if let Some((identity, successor)) = &store.rotate_identity_during_load {
+                    identity.rotate(successor.clone()).await;
+                    return Err(crate::XmppError::OwnershipUnavailable {
                         entity: fence.entity.clone(),
                     });
                 }
@@ -4096,6 +4103,58 @@ mod ownership_claims_tests {
     }
 
     #[tokio::test]
+    async fn identity_rotation_during_demand_restore_releases_the_old_exact_fence() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let identity = SharedNodeIdentity::new(old_owner);
+        let claim_store = Arc::new(DeadOwnerClaimStore::empty());
+        let durable_store = Arc::new(RecordingDurableStore {
+            rotate_identity_during_load: Some((identity.clone(), foreign_identity())),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            identity,
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let jid = test_room_jid("rotate-during-demand-restore");
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "caller-waddle".to_string(),
+                    channel_id: "caller-channel".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(room)))
+                if room == jid
+        ));
+        assert_eq!(
+            durable_store.load_calls.load(Ordering::SeqCst),
+            2,
+            "identity uncertainty receives only the bounded restore retry"
+        );
+        assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert!(durable_store.current_claim_fence(&jid).is_none());
+    }
+
+    #[tokio::test]
     async fn transient_initial_demand_restore_recovers_before_publication() {
         let registry = spawn_registry().await;
         let claim_store = Arc::new(InProcessClaimStore::new());
@@ -4615,6 +4674,73 @@ mod ownership_claims_tests {
             .expect("retry after rotation");
 
         assert_eq!(retried, ReclaimedRoomOutcome::Released);
+        assert!(claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("claim lookup")
+            .is_none());
+        assert!(registry
+            .ask(ListPendingReclaimedRooms { limit: 8 })
+            .await
+            .expect("pending retries")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_rotation_during_reclaimed_restore_retains_then_releases_old_fence() {
+        let registry = spawn_registry().await;
+        let old_owner = this_identity();
+        let new_identity = foreign_identity();
+        let identity = SharedNodeIdentity::new(old_owner.clone());
+        let epoch = ClaimEpoch(12);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(old_owner.clone(), epoch));
+        let durable_store = Arc::new(RecordingDurableStore {
+            rotate_identity_during_load: Some((identity.clone(), new_identity)),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            identity,
+            durable_store,
+        )
+        .await;
+        let jid = test_room_jid("rotate-during-reclaimed-restore");
+        let fence = RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, jid.to_string()),
+            old_owner,
+            epoch,
+        );
+
+        let first = registry
+            .ask(ReconcileReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: fence.clone(),
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("restore interrupted by identity rotation");
+        assert_eq!(first, ReclaimedRoomOutcome::PendingRetry);
+        assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registry
+                .ask(ListPendingReclaimedRooms { limit: 8 })
+                .await
+                .expect("retained old-fence responsibility")
+                .len(),
+            1
+        );
+
+        let retried = registry
+            .ask(ReconcileReclaimedRoom {
+                room_jid: jid.clone(),
+                claim_fence: fence,
+                previous_owner: foreign_identity(),
+            })
+            .await
+            .expect("retry releases the old identity's exact fence");
+        assert_eq!(retried, ReclaimedRoomOutcome::Released);
+        assert_eq!(claim_store.exact_release_calls.load(Ordering::SeqCst), 1);
         assert!(claim_store
             .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
             .await
