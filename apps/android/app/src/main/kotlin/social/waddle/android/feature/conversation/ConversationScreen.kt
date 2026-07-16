@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.NotificationsOff
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,9 +45,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.store.TimelineItem
+import social.waddle.android.feature.search.MessageSearchSheet
+import social.waddle.android.feature.search.MessageSearchTarget
+import social.waddle.android.feature.search.MessageSearchViewModel
 import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
@@ -54,6 +60,8 @@ import social.waddle.client.ffi.WaddleNotifyMode
  * timeline, composer. Marks the conversation active (unread clearing)
  * while resumed. [onOpenThread] is null on thread screens — threads do
  * not nest, so reply-count chips and the overview affordance hide.
+ * [searchTarget] names the archive the top-bar search action queries;
+ * null (thread screens) hides the affordance.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +70,7 @@ fun ConversationScreen(
     viewModel: ConversationViewModel,
     onBack: () -> Unit,
     onOpenThread: ((threadId: String) -> Unit)? = null,
+    searchTarget: MessageSearchTarget? = null,
     /** Own bare JID for the self-mention row highlight (XEP-0372). */
     selfBareJid: String? = null,
 ) {
@@ -78,6 +87,7 @@ fun ConversationScreen(
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
+    var searchOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val actionFailedText = stringResource(R.string.action_failed)
     val actionFailedOfflineText = stringResource(R.string.action_failed_offline)
@@ -128,6 +138,14 @@ fun ConversationScreen(
                             Icon(
                                 Icons.AutoMirrored.Outlined.Chat,
                                 contentDescription = stringResource(R.string.threads_overview_title),
+                            )
+                        }
+                    }
+                    if (searchTarget != null) {
+                        IconButton(onClick = { searchOpen = true }) {
+                            Icon(
+                                Icons.Outlined.Search,
+                                contentDescription = stringResource(R.string.search_messages),
                             )
                         }
                     }
@@ -217,6 +235,25 @@ fun ConversationScreen(
             currentMode = notifyMode,
             onDismiss = { notifySheetOpen = false },
             onSelect = viewModel::setNotificationMode,
+        )
+    }
+
+    searchTarget?.takeIf { searchOpen }?.let { target ->
+        // Graph read stays inside the open branch: hosts without a
+        // provided graph (plain scaffold tests) never search.
+        val graph = LocalAppGraph.current
+        val searchViewModel: MessageSearchViewModel = viewModel(
+            key = "search:${target.conversationJid}",
+            factory = MessageSearchViewModel.factory(graph, target),
+        )
+        MessageSearchSheet(
+            viewModel = searchViewModel,
+            onDismiss = {
+                searchOpen = false
+                // Reopen starts fresh (web parity: closing resets), and
+                // the ticket bump drops any in-flight response.
+                searchViewModel.clear()
+            },
         )
     }
 

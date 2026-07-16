@@ -32,12 +32,10 @@
 //! [`super::archive::MucArchiveHandler`] so an unauthorized subject
 //! change cannot leak into the room archive.
 //!
-//! Note: subject persistence is eventually-consistent with the live
-//! broadcast (both are emitted in the same dispatch but persistence is
-//! an actor ask while the broadcast is direct routing). Joiners between
-//! the broadcast and the persistence may briefly see the previous
-//! stored subject — acceptable per §7.2.15 since the live broadcast and
-//! historical replay are independent stanzas.
+//! The interpreter awaits the actor's fenced persistence before draining
+//! later archive and reflector effects from the same dispatch batch. If
+//! persistence cannot prove exact authority or fails before apply, it returns
+//! a retryable error to the sender and suppresses those later effects.
 
 use super::super::event::OutboundEvent;
 use super::super::handlers::errors::send_message_error;
@@ -136,8 +134,16 @@ impl RoomHandler for MucSubjectHandler {
 
         let event = OutboundEvent::PersistRoomSubject {
             room: ctx.room.clone(),
+            // `room_dispatch::bind_room_claim_fence` must bind the frozen
+            // `RoomChainSnapshot` fence before interpretation. This pure
+            // protocol handler deliberately has no actor state; bypassing the
+            // dispatch post-processing therefore fails closed when a durable
+            // actor rejects the missing exact ownership proof.
+            claim_fence: None,
             texts,
             setter: sender.bare_jid(),
+            sender: sender.full_jid.clone(),
+            message: Box::new(message.clone()),
             setter_nick: sender.nick.clone(),
             set_at,
         };

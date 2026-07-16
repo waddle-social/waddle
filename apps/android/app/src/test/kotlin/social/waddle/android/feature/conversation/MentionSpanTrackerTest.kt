@@ -97,4 +97,18 @@ class MentionSpanTrackerTest {
 
         assertNull(tracker.insertMention("hi", MentionToken(1, 9, "x"), bob))
     }
+
+    @Test
+    fun `a double-tap replaying the same token cannot re-insert`() {
+        // After the first insert, the stale token's region in the NEW
+        // text still reads `@bo` — the substring guard alone passes, so
+        // the overlap-with-recorded-span guard must reject the replay.
+        val tracker = tracker("hi @bo")
+        val token = MentionToken(3, 6, "bo")
+        val first = tracker.insertMention("hi @bo", token, bob)
+
+        assertEquals("hi @bob ", first?.text)
+        assertNull(tracker.insertMention(first!!.text, token, bob))
+        assertEquals(1, tracker.mentionRefs().size)
+    }
 }

@@ -155,6 +155,10 @@ fun MessageComposer(
                             // text; going through updateDraft would
                             // re-diff the same change.
                             draft = TextFieldValue(insertion.text, TextRange(insertion.cursor))
+                            // Accepting a candidate mutates the draft like
+                            // a keystroke — the XEP-0085 composing state
+                            // must refresh with it.
+                            onDraftChanged()
                         }
                     },
                 )

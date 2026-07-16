@@ -2276,7 +2276,9 @@ async fn run_group_dm_rename(
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(error) => return Err(group_dm_rename_update_error(state, &args.room_jid, error).await),
+        Err(error) => {
+            return Err(group_dm_rename_update_error(state, &args.room_jid, &actor, error).await)
+        }
     };
     let expected_revision = updated_snapshot.config_revision;
     if find_occupant_for_full_jid(&updated_snapshot, caller_full_jid).is_none() {
@@ -2681,6 +2683,7 @@ fn group_dm_shared_name(name: &str) -> Option<&str> {
 async fn group_dm_rename_update_error(
     state: &AppState,
     room_jid: &BareJid,
+    actor: &ActorRef<RoomActor>,
     error: kameo::error::SendError<
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
         waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
@@ -2702,19 +2705,30 @@ async fn group_dm_rename_update_error(
                 ))))
             }
             // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
-            // fenced pre-mutation gate observed this node has been
-            // deposed — the rename was NEVER APPLIED. Hard-kill the
-            // stale local actor (mirrors the Demote relay ask's own
-            // receiving-side call) and bounce with a recoverable,
-            // retry-able error, same flavor `dispatch_to_room`'s own
-            // ownership-gap bounce uses.
-            UpdateGroupDmConfigByMemberError::NotOwner => {
-                state.clustering_claims.demote_room_actor(room_jid).await;
-                unavailable("This room's ownership recently moved to another node; please retry.")
+            // `NotOwner` means the pre-mutation gate rejected the rename.
+            // `OwnershipLostAfterApply` means the rename may already exist in
+            // this stale actor, but its awaited durable write lost ownership.
+            // Either outcome exact-demotes this actor and returns a
+            // recoverable retry response.
+            UpdateGroupDmConfigByMemberError::NotOwner
+            | UpdateGroupDmConfigByMemberError::OwnershipLostAfterApply => {
+                let _ = state
+                    .room_registry
+                    .ask(
+                        waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                            room_jid: room_jid.clone(),
+                            actor_ref: actor.clone(),
+                        },
+                    )
+                    .await;
+                unavailable("This room is temporarily unavailable; please retry.")
             }
-            UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
-                "group-DM rename applied but durable persist failed: {detail}"
-            )),
+            UpdateGroupDmConfigByMemberError::OwnershipUnavailable => {
+                unavailable("This room's ownership cannot be verified right now; please retry.")
+            }
+            UpdateGroupDmConfigByMemberError::PersistFailed => {
+                internal_err("group-DM rename applied but durable persist failed")
+            }
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
     }

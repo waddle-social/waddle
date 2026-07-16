@@ -187,17 +187,18 @@ pub enum OutboundEvent {
     /// changes are rare, so the simpler ordering is preferred over
     /// fire-and-forget concurrency.
     ///
-    /// **Failure mode.** If the actor ask fails (mailbox closed, room
-    /// destroyed mid-dispatch) the interpreter logs and continues
-    /// draining — the live broadcast still goes out, just without a
-    /// matching state update. Future joiners see the previous stored
-    /// subject; the broadcast they missed is gone. This is an
-    /// irreducible window for any out-of-band persistence path; the
-    /// failure rate is bounded by `RoomActor` mailbox availability,
-    /// which is shared with every other room operation.
+    /// **Failure mode.** If exact room authority is unavailable, lost, or the
+    /// actor transport cannot confirm handling, the interpreter uses the
+    /// captured sender/message to emit a retryable error and suppresses every
+    /// later archive, inbox, and fan-out event in the same dispatch batch.
     PersistRoomSubject {
         /// Room whose state is being mutated.
         room: BareJid,
+        /// Exact room-actor incarnation fence bound by the interpreter
+        /// after it obtains the actor snapshot. `None` is valid only for
+        /// an actor without durable ownership; a durable actor rejects a
+        /// missing or different fence before applying the subject change.
+        claim_fence: Option<crate::muc::RoomClaimFenceContext>,
         /// New subject texts keyed by `xml:lang` (`""` is the default
         /// language). Mirrors the originating §8.1 message's
         /// `<subject xml:lang='...'>` set so localized variants
@@ -209,6 +210,10 @@ pub enum OutboundEvent {
         /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
         /// at next-join emission.
         setter: BareJid,
+        /// Exact sending session used for a retryable failure reply.
+        sender: FullJid,
+        /// Canonical subject-change message preserved for error correlation.
+        message: Box<Message>,
         /// Setter's nickname at the moment of the change. Frozen here
         /// rather than re-resolved at emission so historical join-time
         /// emissions stay stable across nick changes and after the

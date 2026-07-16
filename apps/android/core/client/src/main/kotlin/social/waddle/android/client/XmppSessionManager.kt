@@ -150,6 +150,14 @@ class XmppSessionManager(
     suspend fun fetchDmHistory(peerJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         verbs.fetchDmHistory(peerJid, maxMessages, beforeId)
 
+    /** MAM full-text room search; ephemeral results, no store fan-out. */
+    suspend fun searchRoomHistory(roomJid: String, query: String, maxResults: UInt): WaddleMamPage? =
+        verbs.searchRoomHistory(roomJid, query, maxResults)
+
+    /** DM twin of [searchRoomHistory]. */
+    suspend fun searchDmHistory(peerJid: String, query: String, maxResults: UInt): WaddleMamPage? =
+        verbs.searchDmHistory(peerJid, query, maxResults)
+
     /**
      * Send a groupchat message on the live connection; a session-shaped
      * failure persists the message to the outbound queue for replay (see

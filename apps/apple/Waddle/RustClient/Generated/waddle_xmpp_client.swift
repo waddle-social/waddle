@@ -674,6 +674,22 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
+    /**
+     * Full-text search of the account's personal archive, filtered to a
+     * 1:1 peer via the standard `with` field. Returns the newest matching
+     * page first; an empty page plus an `Error` event on failure,
+     * mirroring `fetch_dm_history`.
+     */
+    func searchDmHistory(peerJid: String, query: String, maxMessages: UInt32) async  -> WaddleMamPage
+
+    /**
+     * Full-text search of a room archive (XEP-0313 extended form field
+     * `{urn:xmpp:fulltext:0}fulltext`). Returns the newest matching page
+     * first; an empty page plus an `Error` event on failure, mirroring
+     * `fetch_room_history`.
+     */
+    func searchRoomHistory(roomJid: String, query: String, maxMessages: UInt32) async  -> WaddleMamPage
+
     func sendChatMessage(peerJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
     func sendGroupchatMessage(roomJid: String, body: String, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
@@ -1358,6 +1374,54 @@ open func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, 
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeWaddleUploadSlot.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Full-text search of the account's personal archive, filtered to a
+     * 1:1 peer via the standard `with` field. Returns the newest matching
+     * page first; an empty page plus an `Error` event on failure,
+     * mirroring `fetch_dm_history`.
+     */
+open func searchDmHistory(peerJid: String, query: String, maxMessages: UInt32)async  -> WaddleMamPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_dm_history(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(query),FfiConverterUInt32.lower(maxMessages)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleMamPage_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Full-text search of a room archive (XEP-0313 extended form field
+     * `{urn:xmpp:fulltext:0}fulltext`). Returns the newest matching page
+     * first; an empty page plus an `Error` event on failure, mirroring
+     * `fetch_room_history`.
+     */
+open func searchRoomHistory(roomJid: String, query: String, maxMessages: UInt32)async  -> WaddleMamPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_room_history(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(query),FfiConverterUInt32.lower(maxMessages)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleMamPage_lift,
             errorHandler: nil
 
         )
@@ -9469,6 +9533,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history() != 34217) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history() != 4562) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message() != 16287) {

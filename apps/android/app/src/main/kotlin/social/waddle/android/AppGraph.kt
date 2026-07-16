@@ -51,7 +51,7 @@ class AppGraph(
     sessionStore: DataStore<Preferences>? = null,
     userStore: DataStore<Preferences>? = null,
     networkSignal: NetworkSignal? = null,
-    loginGateway: (() -> LoginAuthGateway)? = null,
+    loginGatewayFactory: (() -> LoginAuthGateway)? = null,
 ) {
     private val appContext: Context = context.applicationContext
 
@@ -65,7 +65,7 @@ class AppGraph(
     val authApi: WaddleAuthApi = WaddleAuthApi(serverUrl, okHttpClient)
 
     val loginGateway: () -> LoginAuthGateway =
-        loginGateway ?: { WaddleLoginAuthGateway(authApi) }
+        loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
 
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))

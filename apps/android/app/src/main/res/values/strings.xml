@@ -86,6 +86,14 @@
     <string name="message_sticker">Sticker</string>
     <string name="message_attachment">Attachment</string>
 
+    <!-- Message search -->
+    <string name="search_messages">Search messages</string>
+    <string name="search_placeholder">Search messages…</string>
+    <string name="search_hint">Search this conversation\'s history.</string>
+    <string name="search_searching">Searching…</string>
+    <string name="search_no_results">No matching messages.</string>
+    <string name="search_failed">Search failed — check your connection.</string>
+
     <!-- DMs -->
     <string name="dm_list_title">Direct messages</string>
     <string name="dm_list_empty">No direct messages yet.</string>
