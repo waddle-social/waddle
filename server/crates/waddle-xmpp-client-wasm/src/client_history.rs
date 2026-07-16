@@ -68,11 +68,7 @@ impl WaddleClient {
         future_to_promise(async move {
             let query_id = uuid::Uuid::new_v4().to_string();
             let iq_id = uuid::Uuid::new_v4().to_string();
-            let iq = MamIqBuilder::new(&iq_id, &query_id, max)
-                .before("")
-                .to_jid(&room_jid)
-                .fulltext(&query)
-                .build();
+            let iq = build_room_search_history_iq(&iq_id, &query_id, max, &room_jid, &query);
             let page = send_mam_query_command(inner, iq, query_id).await?;
             to_js_value(&mam_page_to_js(page))
         })
@@ -358,22 +354,6 @@ fn build_dm_history_page_iq(
     Ok(apply_page_param(builder, page)?.build())
 }
 
-fn build_dm_search_history_iq(
-    iq_id: &str,
-    query_id: &str,
-    max: u32,
-    account_jid: &str,
-    peer_jid: &str,
-    query: &str,
-) -> Element {
-    MamIqBuilder::new(iq_id, query_id, max)
-        .before("")
-        .to_jid(account_jid)
-        .with_jid(peer_jid)
-        .fulltext(query)
-        .build()
-}
-
 fn build_dm_history_iq(
     iq_id: &str,
     query_id: &str,
@@ -571,24 +551,6 @@ mod client_history_tests {
             mam_form_value(&iq, "{urn:waddle:mam-thread:0}thread").as_deref(),
             Some("thread-42")
         );
-    }
-
-    #[test]
-    fn dm_search_history_targets_account_archive_and_filters_peer() {
-        let iq = build_dm_search_history_iq(
-            "iq-1",
-            "query-1",
-            10,
-            "alice@example.com",
-            "bob@example.com",
-            "quarterly report",
-        );
-
-        assert_eq!(iq.attr("to"), Some("alice@example.com"));
-        let with_value = mam_form_value(&iq, "with");
-        assert_eq!(with_value.as_deref(), Some("bob@example.com"));
-        let fulltext_value = mam_form_value(&iq, "{urn:xmpp:fulltext:0}fulltext");
-        assert_eq!(fulltext_value.as_deref(), Some("quarterly report"));
     }
 
     #[test]
