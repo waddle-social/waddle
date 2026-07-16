@@ -380,6 +380,20 @@ fn bookmark_name_normalizes_empty_and_whitespace_to_none() {
     );
 }
 
+#[test]
+fn iq_timeout_collapses_to_typed_timeout_error() {
+    // `TimeoutCommandDriver` bounds every set-verb IQ with the crate
+    // IQ timeout; the resulting `IqTimeout` must surface as the typed
+    // `Timeout` (via `client_error_to_waddle` on the verbs' Err path),
+    // never fold into the stanza-level `Error` outcome.
+    assert_eq!(
+        crate::error::client_error_to_waddle(&ClientError::IqTimeout {
+            timeout: std::time::Duration::from_secs(30),
+        }),
+        WaddleError::Timeout,
+    );
+}
+
 // ── Exported verbs: typed not-connected / invalid-JID failures ──────────────
 
 #[tokio::test]
