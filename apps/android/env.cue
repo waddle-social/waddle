@@ -227,15 +227,20 @@ schema.#Project & {
 				./gradlew --no-daemon :app:assembleDebug \
 				  -PversionCode="${version_code}" \
 				  -PversionName="$(git rev-parse --short HEAD)"
-				apk="app/build/outputs/apk/debug/app-debug.apk"
 				sha="$(git rev-parse --short HEAD)"
+				# The asset's FILENAME (not the `file#label` display text)
+				# is the path segment in releases/latest/download/<name>,
+				# so upload the file under the advertised name rather than
+				# gradle's app-debug.apk.
+				apk="waddle-android-debug.apk"
+				cp app/build/outputs/apk/debug/app-debug.apk "${apk}"
 				# Unique per build (never reused -> never hits the immutable
 				# tag-name lock); versionCode prefix keeps tags sortable.
 				tag="android-b${version_code}-${sha}"
 				gh release create "${tag}" --latest \
 				  --title "Android debug ${sha}" \
 				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (stable URL: releases/latest/download/waddle-android-debug.apk; shared debug signature, no uninstall needed)" \
-				  "${apk}#waddle-android-debug.apk"
+				  "${apk}"
 				# Prune older rolling releases beyond the newest 10, tag and
 				# all (--cleanup-tag): the tags are never reused, so there
 				# is no downside to deleting them and it keeps the ref list
