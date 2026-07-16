@@ -188,11 +188,17 @@ pub fn build_muc_owner_config_get_iq(room_jid: &BareJid) -> Element {
 
 /// Parse the §10.2 example 164 config-form result into a typed
 /// [`RoomConfigForm`]. Reads only each field's own direct `<value/>`
-/// children (never `<option><value/>`). Returns `None` when the IQ
-/// carries no `muc#owner` query or no data form.
+/// children (never `<option><value/>`). Returns `None` only when the
+/// IQ carries no `muc#owner` query at all. A query WITHOUT a data
+/// form parses as an empty form: per §10.2/§10.1.3 a service with no
+/// configurable options "MUST return an empty query element", and a
+/// subsequent submit of the (FORM_TYPE-only) form doubles as the
+/// §10.1.2 unlock so a freshly created room is never stranded locked.
 pub fn parse_muc_owner_config_form(iq: &Element) -> Option<RoomConfigForm> {
     let query = iq.get_child("query", NS_MUC_OWNER)?;
-    let form = query.get_child("x", NS_DATA_FORMS)?;
+    let Some(form) = query.get_child("x", NS_DATA_FORMS) else {
+        return Some(RoomConfigForm::default());
+    };
     let fields = form
         .children()
         .filter(|child| child.name() == "field" && child.ns() == NS_DATA_FORMS)
@@ -351,10 +357,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_form_returns_none_without_form() {
+    fn parse_config_form_accepts_the_no_options_empty_query() {
+        // §10.2 / §10.1.3: "If there are no configuration options
+        // available, the service MUST return an empty query element"
+        // — a valid, empty form, never a protocol error.
         let raw = r#"<iq xmlns='jabber:client' type='result' id='c2'>
             <query xmlns='http://jabber.org/protocol/muc#owner'/>
           </iq>"#;
+        let iq: Element = raw.parse().expect("parse fixture");
+        let form = parse_muc_owner_config_form(&iq).expect("empty form");
+        assert!(form.fields.is_empty());
+    }
+
+    #[test]
+    fn parse_config_form_returns_none_without_owner_query() {
+        let raw = r#"<iq xmlns='jabber:client' type='result' id='c3'/>"#;
         let iq: Element = raw.parse().expect("parse fixture");
         assert!(parse_muc_owner_config_form(&iq).is_none());
     }
