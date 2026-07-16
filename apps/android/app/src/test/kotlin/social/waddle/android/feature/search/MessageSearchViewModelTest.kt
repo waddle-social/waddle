@@ -156,6 +156,24 @@ class MessageSearchViewModelTest {
     }
 
     @Test
+    fun `an archive error page surfaces failed, not empty`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = MessageSearchViewModel(harness.manager, roomTarget)
+        runCurrent()
+        // The FFI reports query errors as an empty INCOMPLETE page —
+        // distinct from a genuine zero-hit complete fin.
+        harness.client.mamPage = testMamPage(messages = emptyList(), isComplete = false)
+
+        viewModel.onQueryChanged("penguin")
+        advanceTimeBy(MessageSearchViewModel.DEBOUNCE_MILLIS)
+        runCurrent()
+
+        assertEquals(MessageSearchState.Failed, viewModel.state.value)
+        harness.manager.logout()
+    }
+
+    @Test
     fun `search without a live session surfaces the failed state`() = runTest {
         val harness = Harness(this)
         // Login without ever reaching ready: the verbs answer null.

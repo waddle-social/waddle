@@ -38,6 +38,10 @@ sealed interface MessageSearchState {
     /** The archive answered with no displayable matches. */
     data object Empty : MessageSearchState
 
-    /** No live session, or the archive query failed. */
+    /**
+     * No live session (null page), or the archive query itself failed —
+     * the FFI reports the latter as an empty page with isComplete=false,
+     * distinct from a genuine zero-hit complete fin.
+     */
     data object Failed : MessageSearchState
 }

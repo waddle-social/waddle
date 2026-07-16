@@ -98,8 +98,12 @@ class MessageSearchViewModel(
             null
         }
         if (ticket != searchGeneration) return
-        _state.value = when (page) {
-            null -> MessageSearchState.Failed
+        _state.value = when {
+            page == null -> MessageSearchState.Failed
+            // The FFI reports archive errors as an empty page with
+            // isComplete=false; a genuine zero-hit query answers with a
+            // complete fin. Only the latter is truly "no matches".
+            page.messages.isEmpty() && !page.isComplete -> MessageSearchState.Failed
             else -> page.messages.mapNotNull(::hitOf).let { hits ->
                 if (hits.isEmpty()) MessageSearchState.Empty else MessageSearchState.Results(hits)
             }
