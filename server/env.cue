@@ -45,6 +45,15 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
 ]
 let _deploymentInputs = ["deployment.cue"]
+let _ciDriftInputs = [
+	"../env.cue",
+	"../**/env.cue",
+	"../cue.mod/**",
+	"../cuenv.lock",
+	"../.github/workflows/**",
+	"scripts/check-ci-drift.mjs",
+	"scripts/check-ci-drift.test.ts",
+]
 
 let _NamespaceNix = schema.#Contributor & {
 	id: "namespaceNix"
@@ -222,14 +231,17 @@ schema.#Project & {
 	}
 
 	tasks: {
+		testCiDrift: schema.#Task & {
+			command: "bun"
+			args: ["test", "scripts/check-ci-drift.test.ts"]
+			inputs: _ciDriftInputs
+		}
+
 		checkCiDrift: schema.#Task & {
-			command: "cuenv"
-			args: ["sync", "ci", "--check", "-A"]
-			inputs: [
-				"**/env.cue",
-				"deployment.cue",
-				"../.github/workflows/waddle-server-*.yml",
-			]
+			command: "bun"
+			args: ["scripts/check-ci-drift.mjs"]
+			dependsOn: [tasks.testCiDrift]
+			inputs: _ciDriftInputs
 		}
 
 		checkRootSyncDrift: schema.#Task & {
