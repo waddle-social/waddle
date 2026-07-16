@@ -1495,6 +1495,7 @@ mod ownership_claims_tests {
         fence_fail_on_call: AtomicUsize,
         fence_lose_claim_on_call: AtomicUsize,
         release_failures: AtomicUsize,
+        exact_release_calls: AtomicUsize,
         release_delay_ms: AtomicU64,
         fence_delay_ms: AtomicU64,
         ensure_delay_ms: AtomicU64,
@@ -1514,6 +1515,7 @@ mod ownership_claims_tests {
                 fence_fail_on_call: AtomicUsize::new(usize::MAX),
                 fence_lose_claim_on_call: AtomicUsize::new(usize::MAX),
                 release_failures: AtomicUsize::new(0),
+                exact_release_calls: AtomicUsize::new(0),
                 release_delay_ms: AtomicU64::new(0),
                 fence_delay_ms: AtomicU64::new(0),
                 ensure_delay_ms: AtomicU64::new(0),
@@ -1760,6 +1762,7 @@ mod ownership_claims_tests {
             me: &NodeIdentity,
             mine: ClaimEpoch,
         ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
+            self.exact_release_calls.fetch_add(1, Ordering::SeqCst);
             let delay_ms = self.release_delay_ms.load(Ordering::SeqCst);
             if delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -2065,6 +2068,8 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
+        lose_restore_ownership: bool,
+        lose_restore_ownership_on_call: Option<usize>,
         fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
         block_load_for: Option<BareJid>,
@@ -2136,9 +2141,9 @@ mod ownership_claims_tests {
             if self.authoritative_claim_matches(room_jid, fence).await? {
                 Ok(())
             } else {
-                Err(crate::XmppError::internal(
-                    "durable operation received a stale or unowned claim fence",
-                ))
+                Err(crate::XmppError::OwnershipLost {
+                    entity: fence.entity.clone(),
+                })
             }
         }
     }
@@ -2149,35 +2154,42 @@ mod ownership_claims_tests {
             room_jid: &'a BareJid,
             fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            let load_call = self.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
             let store = self;
-            let fail_fenced_load = self
-                .fail_fenced_loads_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok();
-            let fence_lost = self.fence_lost.load(Ordering::SeqCst);
-            let should_block = self.block_all_loads
-                || self.block_load_for.as_ref() == Some(room_jid)
-                || self
-                    .block_load_from_call
-                    .is_some_and(|first_blocked_call| load_call >= first_blocked_call);
             let load_started = self.load_started.clone();
             let allow_load = self.allow_load.clone();
             let fail_load = self.fail_load;
             let result = self.load_result.clone();
             Box::pin(async move {
                 store.validate_claim_fence(room_jid, fence).await?;
+                let load_call = store.load_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let should_block = store.block_all_loads
+                    || store.block_load_for.as_ref() == Some(room_jid)
+                    || store
+                        .block_load_from_call
+                        .is_some_and(|first_blocked_call| load_call >= first_blocked_call);
+                let fail_fenced_load = store
+                    .fail_fenced_loads_remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok();
+                let fence_lost = store.fence_lost.load(Ordering::SeqCst);
+                if store.lose_restore_ownership
+                    || store.lose_restore_ownership_on_call == Some(load_call)
+                {
+                    return Err(crate::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    });
+                }
                 if fail_fenced_load {
                     return Err(crate::XmppError::internal(
                         "transient fenced load failure from test store",
                     ));
                 }
                 if fence_lost {
-                    return Err(crate::XmppError::internal(
-                        "fenced load rejected after ownership loss",
-                    ));
+                    return Err(crate::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    });
                 }
                 if should_block {
                     if let Some(started) = load_started {
@@ -2247,7 +2259,13 @@ mod ownership_claims_tests {
             let store = self;
             Box::pin(async move {
                 let exact = store.authoritative_claim_matches(room_jid, fence).await?;
-                Ok(exact && !store.fence_lost.load(Ordering::SeqCst))
+                if !exact {
+                    return Ok(false);
+                }
+                if store.fence_lost.load(Ordering::SeqCst) {
+                    return Ok(false);
+                }
+                Ok(true)
             })
         }
 
@@ -2350,10 +2368,12 @@ mod ownership_claims_tests {
             NodeIdentity::new("room-node", "stale-incarnation"),
             epoch,
         );
-        assert!(store
-            .load_room_state_fenced(&room_jid, &wrong_incarnation)
-            .await
-            .is_err());
+        assert!(matches!(
+            store
+                .load_room_state_fenced(&room_jid, &wrong_incarnation)
+                .await,
+            Err(crate::XmppError::OwnershipLost { .. })
+        ));
         assert!(!store
             .check_exact_claim_fence(&room_jid, &wrong_incarnation)
             .await
@@ -2364,6 +2384,32 @@ mod ownership_claims_tests {
             .load_room_state_fenced(&room_jid, &wrong_epoch)
             .await
             .is_err());
+
+        store.fence_lost.store(true, Ordering::SeqCst);
+        assert!(!store
+            .check_exact_claim_fence(&room_jid, &wrong_incarnation)
+            .await
+            .expect("a stale tuple remains a definitive ownership miss"));
+        assert!(!store
+            .check_exact_claim_fence(&room_jid, &exact_fence)
+            .await
+            .expect("a lost fence is a definitive ownership miss"));
+        store.fence_lost.store(false, Ordering::SeqCst);
+
+        store.fail_fenced_loads_remaining.store(1, Ordering::SeqCst);
+        assert!(store
+            .load_room_state_fenced(&room_jid, &wrong_incarnation)
+            .await
+            .is_err());
+        assert!(store
+            .load_room_state_fenced(&room_jid, &exact_fence)
+            .await
+            .is_err());
+        assert_eq!(
+            store.fail_fenced_loads_remaining.load(Ordering::SeqCst),
+            0,
+            "a failed exact-fence validation must not consume a later fault injection"
+        );
 
         let missing_authority = RecordingDurableStore::default();
         assert!(missing_authority
@@ -2385,6 +2431,54 @@ mod ownership_claims_tests {
             .check_exact_claim_fence(&room_jid, &exact_fence)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn recording_durable_store_validates_before_call_indexed_faults() {
+        let room_jid = test_room_jid("recording-store-fault-order");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let owner = NodeIdentity::new("room-node", "current-incarnation");
+        let epoch = ClaimEpoch(42);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(owner.clone(), epoch));
+        let exact_fence = RoomClaimFenceContext::new(entity.clone(), owner.clone(), epoch);
+        let stale_fence = RoomClaimFenceContext::new(
+            entity,
+            NodeIdentity::new("room-node", "stale-incarnation"),
+            epoch,
+        );
+
+        let ownership_loss_store = RecordingDurableStore {
+            lose_restore_ownership_on_call: Some(1),
+            ..RecordingDurableStore::default()
+        };
+        ownership_loss_store.bind_claim_store(Arc::clone(&claim_store) as Arc<dyn ClaimStore>);
+        assert!(ownership_loss_store
+            .load_room_state_fenced(&room_jid, &stale_fence)
+            .await
+            .is_err());
+        assert!(matches!(
+            ownership_loss_store
+                .load_room_state_fenced(&room_jid, &exact_fence)
+                .await,
+            Err(crate::XmppError::OwnershipLost { .. })
+        ));
+
+        let blocking_store = RecordingDurableStore {
+            block_load_from_call: Some(2),
+            ..RecordingDurableStore::default()
+        };
+        blocking_store.bind_claim_store(claim_store as Arc<dyn ClaimStore>);
+        assert!(blocking_store
+            .load_room_state_fenced(&room_jid, &stale_fence)
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            blocking_store.load_room_state_fenced(&room_jid, &exact_fence),
+        )
+        .await
+        .expect("a stale fence must not advance the blocking fault's call index")
+        .is_ok());
     }
 
     fn blocking_restore_store(
@@ -3885,7 +3979,7 @@ mod ownership_claims_tests {
         let registry = spawn_registry().await;
         let claim_store = Arc::new(InProcessClaimStore::new());
         let durable_store = Arc::new(RecordingDurableStore {
-            fence_lost: AtomicBool::new(true),
+            fail_load: true,
             ..RecordingDurableStore::default()
         });
         wire_recording_store_with_claims(
@@ -3931,6 +4025,53 @@ mod ownership_claims_tests {
             durable_store.load_calls.load(Ordering::SeqCst),
             2,
             "a demand restore gets one bounded retry before the claim is released",
+        );
+    }
+
+    #[tokio::test]
+    async fn demand_restore_ownership_loss_is_terminal_without_release_or_retry() {
+        let registry = spawn_registry().await;
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let durable_store = Arc::new(RecordingDurableStore {
+            lose_restore_ownership: true,
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(this_identity()),
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let jid = test_room_jid("terminal-demand-restore");
+        assert!(matches!(
+            registry
+                .ask(GetOrCreateRoom {
+                    room_jid: jid.clone(),
+                    waddle_id: "caller-waddle".to_string(),
+                    channel_id: "caller-channel".to_string(),
+                    config: RoomConfig::default(),
+                })
+                .await,
+            Err(SendError::HandlerError(RoomRegistryError::OwnershipUnavailable(room))) if room == jid
+        ));
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 1);
+        assert!(durable_store.current_claim_fence(&jid).is_none());
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_some(),
+            "a terminally lost fence must not be released again"
         );
     }
 
@@ -4135,7 +4276,7 @@ mod ownership_claims_tests {
         let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), epoch));
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(reclaimed_snapshot("must remain hidden")),
-            fence_lost: AtomicBool::new(true),
+            fail_load: true,
             ..RecordingDurableStore::default()
         });
         wire_recording_store_with_claims(
@@ -4176,6 +4317,72 @@ mod ownership_claims_tests {
             durable_store.current_claim_fence(&jid),
             None,
             "an unpublished failed preparation must not expose its fence through the fan-out cache",
+        );
+    }
+
+    #[tokio::test]
+    async fn reclaimed_restore_ownership_loss_is_terminal_without_release_or_retry() {
+        let registry = spawn_registry().await;
+        let epoch = ClaimEpoch(51);
+        let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), epoch));
+        let durable_store = Arc::new(RecordingDurableStore {
+            load_result: Some(reclaimed_snapshot("must-not-publish")),
+            lose_restore_ownership_on_call: Some(2),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(this_identity()),
+            Arc::clone(&durable_store),
+        )
+        .await;
+
+        let jid = test_room_jid("terminal-reclaimed-restore");
+        assert_eq!(
+            registry
+                .ask(ReconcileReclaimedRoom {
+                    room_jid: jid.clone(),
+                    claim_fence: room_claim_fence(&jid, epoch),
+                    previous_owner: this_identity(),
+                })
+                .await
+                .expect("reconcile"),
+            ReclaimedRoomOutcome::LostRace
+        );
+        assert!(registry
+            .ask(GetRoom {
+                room_jid: jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none());
+        assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            claim_store.exact_release_calls.load(Ordering::SeqCst),
+            0,
+            "the terminal stale fence must not be redundantly released"
+        );
+        assert_eq!(
+            registry
+                .ask(GetPendingReclaimedRoomBacklog)
+                .await
+                .expect("pending reclaimed backlog")
+                .depth,
+            0,
+            "terminal ownership loss must not retain reclaimed retry work"
+        );
+        assert!(
+            durable_store.current_claim_fence(&jid).is_none(),
+            "a terminally lost reclaimed fence must not remain published"
+        );
+        assert!(
+            claim_store
+                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+                .await
+                .expect("claim lookup")
+                .is_some(),
+            "the already-lost fence must not be released again"
         );
     }
 
@@ -6930,19 +7137,13 @@ mod ownership_claims_tests {
             allow_config_save: Some(Arc::clone(&allow_config_save)),
             ..RecordingDurableStore::default()
         });
-        *durable_store
-            .authoritative_claim_store
-            .lock()
-            .expect("lock") = Some(Arc::clone(&claim_store) as Arc<dyn ClaimStore>);
-        registry
-            .ask(WireClusteringClaims {
-                claim_store: Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
-                node_identity: node_identity.clone(),
-                durable_store: Some(Arc::clone(&durable_store) as Arc<dyn MucDurableStore>),
-                rollout_backoff: None,
-            })
-            .await
-            .expect("wire");
+        wire_recording_store_with_claims(
+            &registry,
+            Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
+            node_identity.clone(),
+            Arc::clone(&durable_store),
+        )
+        .await;
         let jid = test_room_jid("local-old-epoch");
         let original = registry
             .ask(GetOrCreateRoom {

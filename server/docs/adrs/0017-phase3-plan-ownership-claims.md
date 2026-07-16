@@ -3334,20 +3334,33 @@ record the retained work.
 68. **FIX 4 (high) — `RestoreDurableRoomState`'s genuine load failure now
     fails closed: joins are refused until a retry succeeds, never served
     against caller-supplied defaults.** New `RoomActor` field
-    `restore_state: DurableRestoreState` (`Ready` | `Pending`, private,
-    default `Ready`). `RestoreDurableRoomState`'s `Err` arm (a real
-    backend error, distinct from `Ok(None)`'s legitimate "brand new room"
-    case, which still proceeds as before) sets `Pending` instead of
-    logging-and-continuing with the caller-supplied initial config.
-    `JoinWithAffiliation` calls a new `ensure_restored_before_join()`
-    first: `Ready` is a no-op; `Pending` runs ONE bounded inline retry
-    against the same store — success applies the restored state and
-    flips back to `Ready`, letting THIS join proceed immediately; a
-    repeated failure returns a new `RoomActorError::RestorePending` and
-    leaves `Pending` for the next join attempt to retry again. New
-    disco/join-error mapping in `handlers/presence/muc.rs`: `RestorePending`
-    bounces `<error type='wait'><resource-constraint/></error>`,
-    matching FIX 6's shape.
+    `restore_state: DurableRestoreState` (`Ready` | `Pending` |
+    `OwnershipLost`, private, default `Ready`). A non-ownership backend
+    failure from `RestoreDurableRoomState` (distinct from `Ok(None)`'s
+    legitimate "brand new room" case) sets `Pending` instead of
+    logging-and-continuing with caller-supplied initial config.
+    `JoinWithAffiliation` calls `ensure_restored_before_join()` first:
+    `Ready` is a no-op; `Pending` runs ONE bounded inline retry against the
+    same store — success applies the restored state and flips back to
+    `Ready`, letting THIS join proceed immediately; a repeated uncertain
+    failure returns `RoomActorError::RestorePending` and leaves `Pending`
+    for the next join attempt to retry again. A definitive
+    `XmppError::OwnershipLost` from either the initial load or that retry
+    instead sets terminal `OwnershipLost`, seals the actor, and returns
+    `RoomSealed`: it never retries the stale fence. The registry does not
+    publish that actor, enqueue retry work, or release the already-lost
+    stale claim tuple. New disco/join-error mapping in
+    `handlers/presence/muc.rs`: `RestorePending` bounces `<error
+    type='wait'><resource-constraint/></error>`, matching FIX 6's shape.
+
+    `SetSubject` uses the phase-specific pre-mutation ownership gate before
+    constructing, persisting, or applying the subject: definitive loss maps
+    to `NotOwner`, uncertainty maps to `OwnershipUnavailable`, and a normal
+    durable write failure maps to `PersistFailedBeforeApply`. This keeps its
+    public failure contract pre-apply. Shared `DurablePersistError::PersistFailed`
+    is deliberately phase-neutral because it is also wrapped by mediated
+    invite grant and rollback errors whose public variants encode that their
+    affiliation writes failed before applying memory.
 
     Test: `room_actor::tests::
     join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_with_no_ban_lost`

@@ -150,7 +150,7 @@ async fn invite_grant_persist_failure_leaves_memory_unchanged_and_creates_no_tok
             })
             .await,
         Err(SendError::HandlerError(
-            MediatedInviteGrantError::GrantPersistFailed(_)
+            MediatedInviteGrantError::GrantPersistFailed(DurablePersistError::PersistFailed)
         ))
     ));
     assert_eq!(
@@ -298,7 +298,9 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
             })
             .await,
         Err(SendError::HandlerError(
-            MediatedInviteRollbackError::PersistFailedBeforeApply(_)
+            MediatedInviteRollbackError::PersistFailedBeforeApply(
+                DurablePersistError::PersistFailed
+            )
         ))
     ));
     assert_eq!(

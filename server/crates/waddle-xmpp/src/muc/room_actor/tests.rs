@@ -40,9 +40,12 @@ fn validate_test_claim_fence(
     if fence == &test_claim_fence(room_jid) {
         Ok(())
     } else {
-        Err(crate::XmppError::internal(
-            "test store received an unexpected room claim fence",
-        ))
+        Err(crate::XmppError::OwnershipLost {
+            entity: crate::ownership::Entity::new(
+                crate::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            ),
+        })
     }
 }
 
@@ -3472,6 +3475,8 @@ struct FakeDurableStore {
     fenced: std::sync::Mutex<Option<bool>>,
     fail_persist: bool,
     lose_config_persist_ownership: bool,
+    lose_restore_ownership: bool,
+    load_calls: std::sync::atomic::AtomicUsize,
     save_calls: std::sync::atomic::AtomicUsize,
     saved_affiliations: std::sync::Mutex<Vec<(BareJid, BareJid, Affiliation)>>,
 }
@@ -3505,6 +3510,7 @@ impl FakeDurableStore {
             lose_config_persist_ownership: false,
             save_calls: std::sync::atomic::AtomicUsize::new(0),
             saved_affiliations: std::sync::Mutex::new(Vec::new()),
+            ..Default::default()
         })
     }
 
@@ -3512,6 +3518,14 @@ impl FakeDurableStore {
         std::sync::Arc::new(Self {
             fenced: std::sync::Mutex::new(Some(true)),
             lose_config_persist_ownership: true,
+            ..Default::default()
+        })
+    }
+
+    fn ownership_lost_during_restore() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            fenced: std::sync::Mutex::new(Some(true)),
+            lose_restore_ownership: true,
             ..Default::default()
         })
     }
@@ -3537,9 +3551,17 @@ impl crate::muc::durable::MucDurableStore for FakeDurableStore {
     ) -> crate::muc::durable::MucDurableFuture<'a, Option<crate::muc::durable::DurableRoomState>>
     {
         let validation = validate_test_claim_fence(room_jid, fence);
+        self.load_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let lose_ownership = self.lose_restore_ownership;
+        let entity = fence.entity.clone();
         Box::pin(async move {
             validation?;
-            Ok(None)
+            if lose_ownership {
+                Err(crate::XmppError::OwnershipLost { entity })
+            } else {
+                Ok(None)
+            }
         })
     }
 
@@ -3763,6 +3785,36 @@ async fn spawn_room_actor_with_store(
         .await
         .expect("restore");
     actor
+}
+
+#[tokio::test]
+async fn ownership_lost_during_restore_is_terminal_and_never_retries() {
+    let store = FakeDurableStore::ownership_lost_during_restore();
+    let actor = spawn_room_actor().await;
+    actor
+        .ask(RestoreDurableRoomState {
+            store: store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
+        })
+        .await
+        .expect("restore message");
+
+    assert_eq!(
+        actor
+            .ask(GetDurableRestoreReadiness)
+            .await
+            .expect("restore readiness"),
+        DurableRestoreReadiness::OwnershipLost
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("seal state"),
+        RoomSealState::OwnershipLost
+    );
+    assert_eq!(
+        store.load_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the terminal restore state must not perform the Pending retry"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4130,7 +4182,7 @@ async fn update_config_surfaces_a_typed_persist_failure_after_mutating() {
     assert!(
         matches!(
             result,
-            Err(SendError::HandlerError(RoomMutationError::PersistFailed(_)))
+            Err(SendError::HandlerError(RoomMutationError::PersistFailed))
         ),
         "expected PersistFailed, got: {result:?}"
     );
@@ -4238,6 +4290,37 @@ async fn set_subject_gate_blocks_the_mutation_when_deposed() {
             Err(SendError::HandlerError(SetSubjectError::NotOwner))
         ),
         "expected NotOwner, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_subject_gate_surfaces_ownership_uncertainty_without_mutating() {
+    let actor = spawn_room_actor_with_store(FakeDurableStore::transient_failure()).await;
+    let setter: BareJid = "alice@example.com".parse().expect("valid jid");
+
+    let result = actor
+        .ask(SetSubject {
+            texts: RoomSubjectTexts::from_iter([(String::new(), "new subject".to_string())]),
+            setter,
+            setter_nick: "alice".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SendError::HandlerError(
+            SetSubjectError::OwnershipUnavailable
+        ))
+    ));
+    assert!(
+        actor
+            .ask(GetSnapshot)
+            .await
+            .expect("subject query")
+            .room
+            .subject
+            .is_none(),
+        "an uncertain ownership gate must not apply the subject"
     );
 }
 

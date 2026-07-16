@@ -201,8 +201,8 @@ pub enum AdminApplyError {
     /// swallowed; FIX 2 revises that contract for affiliation-mutating
     /// operations — the caller is told the durable side did not
     /// converge rather than reporting bare success.
-    #[error("durable persist failed after the in-memory mutation committed: {0}")]
-    PersistFailed(String),
+    #[error("durable persist failed after the in-memory mutation committed")]
+    PersistFailed,
 }
 
 impl From<RoomMutationError> for AdminApplyError {
@@ -211,7 +211,7 @@ impl From<RoomMutationError> for AdminApplyError {
             RoomMutationError::NotOwner => AdminApplyError::NotOwner,
             RoomMutationError::OwnershipLostAfterApply => AdminApplyError::OwnershipLostAfterApply,
             RoomMutationError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
-            RoomMutationError::PersistFailed(detail) => AdminApplyError::PersistFailed(detail),
+            RoomMutationError::PersistFailed => AdminApplyError::PersistFailed,
         }
     }
 }
@@ -224,7 +224,7 @@ impl From<DurablePersistError> for AdminApplyError {
                 AdminApplyError::OwnershipLostAfterApply
             }
             DurablePersistError::OwnershipUnavailable => AdminApplyError::OwnershipUnavailable,
-            DurablePersistError::Failed(detail) => AdminApplyError::PersistFailed(detail),
+            DurablePersistError::PersistFailed => AdminApplyError::PersistFailed,
         }
     }
 }
@@ -262,8 +262,27 @@ pub enum RoomMutationError {
     OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    #[error("durable persist failed after the in-memory mutation committed: {0}")]
-    PersistFailed(String),
+    #[error("durable persist failed after the in-memory mutation committed")]
+    PersistFailed,
+}
+
+/// The ownership result of the pre-mutation gate. This phase cannot report
+/// persistence or post-apply ownership outcomes because no mutation has run.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+enum PreMutationOwnershipError {
+    #[error("this room's ownership has moved to another node")]
+    NotOwner,
+    #[error("this room's ownership is temporarily unavailable")]
+    OwnershipUnavailable,
+}
+
+impl From<PreMutationOwnershipError> for RoomMutationError {
+    fn from(error: PreMutationOwnershipError) -> Self {
+        match error {
+            PreMutationOwnershipError::NotOwner => Self::NotOwner,
+            PreMutationOwnershipError::OwnershipUnavailable => Self::OwnershipUnavailable,
+        }
+    }
 }
 
 /// Failure from an affiliation mutation that can collide with an
@@ -276,8 +295,8 @@ pub enum AffiliationMutationError {
     OwnershipLostAfterApply,
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
-    #[error("durable persist failed after the in-memory mutation committed: {0}")]
-    PersistFailed(String),
+    #[error("durable persist failed after the in-memory mutation committed")]
+    PersistFailed,
     #[error("invitee affiliation is fenced pending invite rollback acknowledgement")]
     InviteRollbackPending,
 }
@@ -288,7 +307,7 @@ impl From<RoomMutationError> for AffiliationMutationError {
             RoomMutationError::NotOwner => Self::NotOwner,
             RoomMutationError::OwnershipLostAfterApply => Self::OwnershipLostAfterApply,
             RoomMutationError::OwnershipUnavailable => Self::OwnershipUnavailable,
-            RoomMutationError::PersistFailed(detail) => Self::PersistFailed(detail),
+            RoomMutationError::PersistFailed => Self::PersistFailed,
         }
     }
 }
@@ -299,7 +318,7 @@ impl From<DurablePersistError> for AffiliationMutationError {
             DurablePersistError::NotOwner => Self::NotOwner,
             DurablePersistError::OwnershipLostAfterApply => Self::OwnershipLostAfterApply,
             DurablePersistError::OwnershipUnavailable => Self::OwnershipUnavailable,
-            DurablePersistError::Failed(detail) => Self::PersistFailed(detail),
+            DurablePersistError::PersistFailed => Self::PersistFailed,
         }
     }
 }
@@ -308,11 +327,11 @@ impl From<DurablePersistError> for AffiliationMutationError {
 /// [`RoomActor::persist_config`] and [`RoomActor::persist_affiliation`]. The
 /// ownership variants distinguish a failure before an in-memory mutation from
 /// ownership loss after one. Subject persistence has its own pre-apply-only
-/// [`SetSubjectError`] contract. This type wraps the underlying
-/// [`crate::XmppError`]'s rendered detail — the backend/fencing failure
-/// text is opaque past this boundary, mirroring every other typed error
-/// in this codebase that carries an opaque backend detail string inside a
-/// named variant (`PendingStorageError::Other`, `MamStorageError::Database`).
+/// [`SetSubjectError`] contract. Definitive ownership variants preserve
+/// whether the mutation was applied; `PersistFailed` is phase-neutral so
+/// each operation's public error can state its own apply boundary. Backend
+/// diagnostics stay in structured logs rather than becoming a stringly-typed
+/// protocol payload.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum DurablePersistError {
     #[error("this room's ownership moved before the in-memory mutation was applied")]
@@ -321,8 +340,8 @@ pub enum DurablePersistError {
     OwnershipLostAfterApply,
     #[error("this room's exact ownership fence is unavailable")]
     OwnershipUnavailable,
-    #[error("durable persist failed: {0}")]
-    Failed(String),
+    #[error("durable persist failed")]
+    PersistFailed,
 }
 
 impl From<DurablePersistError> for RoomMutationError {
@@ -333,7 +352,7 @@ impl From<DurablePersistError> for RoomMutationError {
                 RoomMutationError::OwnershipLostAfterApply
             }
             DurablePersistError::OwnershipUnavailable => RoomMutationError::OwnershipUnavailable,
-            DurablePersistError::Failed(detail) => RoomMutationError::PersistFailed(detail),
+            DurablePersistError::PersistFailed => RoomMutationError::PersistFailed,
         }
     }
 }
@@ -450,6 +469,9 @@ struct AdmissionPolicySnapshot {
 enum DurableRestoreState {
     Ready(DurableRoomOrigin),
     Pending,
+    /// A fenced durable load definitively proved this actor incarnation was
+    /// deposed. This terminal state must never retry with the stale fence.
+    OwnershipLost,
 }
 
 impl Default for DurableRestoreState {
@@ -654,19 +676,19 @@ impl RoomActor {
     /// Backend failures fail closed without marking the actor deposed: the
     /// exact fence could not be proven, so applying an in-memory mutation
     /// would let state diverge from its durable authority.
-    async fn gate_mutation(&mut self) -> Result<(), RoomMutationError> {
+    async fn gate_pre_mutation_ownership(&mut self) -> Result<(), PreMutationOwnershipError> {
         // A definitive ownership-loss observation is monotonic for this
         // actor incarnation. Do not let a later transient store failure
         // override that proof through a later uncertain probe while the
         // registry is still converging the deposed actor's removal.
         if self.seal_state == RoomSealState::OwnershipLost {
-            return Err(RoomMutationError::NotOwner);
+            return Err(PreMutationOwnershipError::NotOwner);
         }
         let Some(store) = self.durable_store.clone() else {
             return Ok(());
         };
         let Some(fence) = self.durable_claim_fence.as_ref() else {
-            return Err(RoomMutationError::OwnershipUnavailable);
+            return Err(PreMutationOwnershipError::OwnershipUnavailable);
         };
         match store
             .check_exact_claim_fence(&self.room.room_jid, fence)
@@ -679,7 +701,7 @@ impl RoomActor {
                     room = %self.room.room_jid,
                     "mutation gate observed ownership loss; refusing to mutate"
                 );
-                Err(RoomMutationError::NotOwner)
+                Err(PreMutationOwnershipError::NotOwner)
             }
             Err(error) => {
                 tracing::warn!(
@@ -687,9 +709,13 @@ impl RoomActor {
                     %error,
                     "mutation gate could not prove the actor's exact ownership; refusing mutation"
                 );
-                Err(RoomMutationError::OwnershipUnavailable)
+                Err(PreMutationOwnershipError::OwnershipUnavailable)
             }
         }
+    }
+
+    async fn gate_mutation(&mut self) -> Result<(), RoomMutationError> {
+        self.gate_pre_mutation_ownership().await.map_err(Into::into)
     }
 
     /// ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated): the
@@ -706,8 +732,10 @@ impl RoomActor {
     /// join against defaulted config/affiliations/subject while a
     /// genuine restore failure is unresolved.
     async fn ensure_restored_before_join(&mut self) -> Result<(), RoomActorError> {
-        if matches!(self.restore_state, DurableRestoreState::Ready(_)) {
-            return Ok(());
+        match self.restore_state {
+            DurableRestoreState::Ready(_) => return Ok(()),
+            DurableRestoreState::OwnershipLost => return Err(RoomActorError::RoomSealed),
+            DurableRestoreState::Pending => {}
         }
         let Some(store) = self.durable_store.clone() else {
             // Defensive: `Pending` is only ever set from inside the
@@ -733,6 +761,16 @@ impl RoomActor {
             Ok(None) => {
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
                 Ok(())
+            }
+            Err(crate::XmppError::OwnershipLost { entity }) => {
+                self.restore_state = DurableRestoreState::OwnershipLost;
+                self.seal_state = RoomSealState::OwnershipLost;
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %entity,
+                    "durable room-state restore retry lost this actor's exact ownership"
+                );
+                Err(RoomActorError::RoomSealed)
             }
             Err(error) => {
                 tracing::warn!(
@@ -841,9 +879,7 @@ impl RoomActor {
                     "durable write could not prove exact ownership"
                 );
                 if mutation_applied {
-                    DurablePersistError::Failed(
-                        "exact ownership became unavailable after apply".to_string(),
-                    )
+                    DurablePersistError::PersistFailed
                 } else {
                     DurablePersistError::OwnershipUnavailable
                 }
@@ -855,7 +891,7 @@ impl RoomActor {
                     %error,
                     "durable write failed for a non-ownership reason"
                 );
-                DurablePersistError::Failed(error.to_string())
+                DurablePersistError::PersistFailed
             }
         }
     }
@@ -1160,6 +1196,7 @@ pub enum DurableRoomOrigin {
 pub enum DurableRestoreReadiness {
     Ready(DurableRoomOrigin),
     Pending,
+    OwnershipLost,
 }
 
 /// FIFO publication barrier for a freshly prepared room actor.
@@ -1176,6 +1213,7 @@ impl kameo::message::Message<GetDurableRestoreReadiness> for RoomActor {
         match self.restore_state {
             DurableRestoreState::Ready(origin) => DurableRestoreReadiness::Ready(origin),
             DurableRestoreState::Pending => DurableRestoreReadiness::Pending,
+            DurableRestoreState::OwnershipLost => DurableRestoreReadiness::OwnershipLost,
         }
     }
 }
@@ -1188,6 +1226,9 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
         msg: RestoreDurableRoomState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.restore_state == DurableRestoreState::OwnershipLost {
+            return;
+        }
         if let Some(retained) = self.durable_claim_fence.as_ref() {
             if retained != &msg.claim_fence {
                 tracing::warn!(
@@ -1199,11 +1240,16 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
                 // The first exact fence permanently identifies this actor
                 // incarnation. A delayed restore carrying a successor's
                 // tuple must not read, install, or retain successor state.
-                self.restore_state = DurableRestoreState::Pending;
+                self.restore_state = DurableRestoreState::OwnershipLost;
                 self.seal_state = RoomSealState::OwnershipLost;
                 return;
             }
         }
+        // Retain this incarnation's exact authority before awaiting the
+        // fenced load. A terminal result must leave a coherent sealed actor,
+        // rather than one whose deposed state lacks its identifying fence.
+        self.durable_store = Some(std::sync::Arc::clone(&msg.store));
+        self.durable_claim_fence = Some(msg.claim_fence.clone());
         match msg
             .store
             .load_room_state_fenced(&self.room.room_jid, &msg.claim_fence)
@@ -1216,6 +1262,15 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
             Ok(None) => {
                 // No durable row yet — brand new room, nothing to restore.
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
+            }
+            Err(crate::XmppError::OwnershipLost { entity }) => {
+                self.restore_state = DurableRestoreState::OwnershipLost;
+                self.seal_state = RoomSealState::OwnershipLost;
+                tracing::warn!(
+                    room = %self.room.room_jid,
+                    %entity,
+                    "durable room-state restore lost this actor's exact ownership"
+                );
             }
             Err(error) => {
                 // ADR-0017 Phase 3 Slice 7 FIX 4 (council-adjudicated):
@@ -1235,8 +1290,6 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
                 self.restore_state = DurableRestoreState::Pending;
             }
         }
-        self.durable_store = Some(msg.store);
-        self.durable_claim_fence = Some(msg.claim_fence);
     }
 }
 
@@ -1452,8 +1505,8 @@ pub enum UpdateGroupDmConfigByMemberError {
     #[error("this room's ownership is temporarily unavailable")]
     OwnershipUnavailable,
     /// FIX 2: see [`AdminApplyError::PersistFailed`]'s doc comment.
-    #[error("durable persist failed after the in-memory mutation committed: {0}")]
-    PersistFailed(String),
+    #[error("durable persist failed after the in-memory mutation committed")]
+    PersistFailed,
 }
 
 impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
@@ -1466,9 +1519,7 @@ impl From<RoomMutationError> for UpdateGroupDmConfigByMemberError {
             RoomMutationError::OwnershipUnavailable => {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
-            RoomMutationError::PersistFailed(detail) => {
-                UpdateGroupDmConfigByMemberError::PersistFailed(detail)
-            }
+            RoomMutationError::PersistFailed => UpdateGroupDmConfigByMemberError::PersistFailed,
         }
     }
 }
@@ -1483,9 +1534,7 @@ impl From<DurablePersistError> for UpdateGroupDmConfigByMemberError {
             DurablePersistError::OwnershipUnavailable => {
                 UpdateGroupDmConfigByMemberError::OwnershipUnavailable
             }
-            DurablePersistError::Failed(detail) => {
-                UpdateGroupDmConfigByMemberError::PersistFailed(detail)
-            }
+            DurablePersistError::PersistFailed => UpdateGroupDmConfigByMemberError::PersistFailed,
         }
     }
 }
@@ -1554,6 +1603,15 @@ pub enum SetSubjectError {
     PersistFailedBeforeApply,
 }
 
+impl From<PreMutationOwnershipError> for SetSubjectError {
+    fn from(error: PreMutationOwnershipError) -> Self {
+        match error {
+            PreMutationOwnershipError::NotOwner => Self::NotOwner,
+            PreMutationOwnershipError::OwnershipUnavailable => Self::OwnershipUnavailable,
+        }
+    }
+}
+
 impl kameo::message::Message<SetSubject> for RoomActor {
     type Reply = Result<(), SetSubjectError>;
 
@@ -1562,18 +1620,7 @@ impl kameo::message::Message<SetSubject> for RoomActor {
         msg: SetSubject,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match self.gate_mutation().await {
-            Ok(()) => {}
-            Err(RoomMutationError::NotOwner) => return Err(SetSubjectError::NotOwner),
-            Err(RoomMutationError::OwnershipUnavailable) => {
-                return Err(SetSubjectError::OwnershipUnavailable)
-            }
-            Err(
-                RoomMutationError::OwnershipLostAfterApply | RoomMutationError::PersistFailed(_),
-            ) => {
-                unreachable!("the pre-mutation ownership gate never applies or persists state")
-            }
-        }
+        self.gate_pre_mutation_ownership().await?;
         let subject = SubjectState {
             texts: msg.texts,
             setter: msg.setter,

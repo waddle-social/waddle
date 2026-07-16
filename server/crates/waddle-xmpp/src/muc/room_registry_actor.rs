@@ -144,6 +144,7 @@ enum RoomPreparationReadiness {
         publication_fence: Result<(), RoomPublicationError>,
     },
     Pending,
+    ClaimLost,
     Unavailable,
 }
 
@@ -932,6 +933,11 @@ impl RoomRegistryActor {
         previous_owner: NodeIdentity,
     ) {
         if claim_fence.entity != Entity::new(EntityType::RoomActor, room_jid.to_string()) {
+            warn!(
+                room = %room_jid,
+                fence_entity = %claim_fence.entity,
+                "rejecting pending reclaimed room with a cross-entity claim fence"
+            );
             return;
         }
         self.pending_reclaimed_reservations.remove(&room_jid);
@@ -1544,6 +1550,9 @@ impl RoomRegistryActor {
                         publication_fence,
                     }
                 }
+                Some(Ok(DurableRestoreReadiness::OwnershipLost)) => {
+                    RoomPreparationReadiness::ClaimLost
+                }
                 Some(Ok(DurableRestoreReadiness::Pending)) => RoomPreparationReadiness::Pending,
                 Some(Err(_)) | None => RoomPreparationReadiness::Unavailable,
             };
@@ -1979,18 +1988,33 @@ impl RoomRegistryActor {
             }
             Err(error) => {
                 let reclaimed_outcome = match origin {
-                    RoomPreparationOrigin::Demand { .. } => {
-                        self.transfer_exact_responsibility_to_pending_release(
-                            room_jid.clone(),
-                            claim_fence.clone(),
-                        );
-                        self.start_detached_room_release(
-                            room_jid.clone(),
-                            claim_fence.clone(),
-                            registry_ref,
-                        );
-                        ReclaimedRoomOutcome::PendingRetry
-                    }
+                    RoomPreparationOrigin::Demand { .. } => match error {
+                        // The actor's fenced load proved this exact claim is
+                        // already gone. Forget the cache and the acquisition
+                        // reservation; releasing this stale tuple would add a
+                        // redundant, potentially misleading retry.
+                        RoomPublicationError::ClaimLost => {
+                            if let Some(store) = &self.durable_store {
+                                store.forget_claim_fence(&room_jid, &claim_fence);
+                            }
+                            self.clear_pending_room_acquisition(&room_jid, &claim_fence.owner());
+                            ReclaimedRoomOutcome::LostRace
+                        }
+                        RoomPublicationError::LocalIdentityChanged
+                        | RoomPublicationError::OwnershipUnavailable
+                        | RoomPublicationError::ReconciliationPending => {
+                            self.transfer_exact_responsibility_to_pending_release(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                            );
+                            self.start_detached_room_release(
+                                room_jid.clone(),
+                                claim_fence.clone(),
+                                registry_ref,
+                            );
+                            ReclaimedRoomOutcome::PendingRetry
+                        }
+                    },
                     RoomPreparationOrigin::Reclaimed { previous_owner } => match error {
                         RoomPublicationError::ClaimLost => {
                             if let Some(store) = &self.durable_store {
@@ -2071,6 +2095,7 @@ impl kameo::message::Message<CompleteRoomPreparation> for RoomRegistryActor {
                 publication_fence: Err(error),
                 ..
             } => error,
+            RoomPreparationReadiness::ClaimLost => RoomPublicationError::ClaimLost,
             RoomPreparationReadiness::Pending | RoomPreparationReadiness::Unavailable => {
                 RoomPublicationError::OwnershipUnavailable
             }
@@ -3095,6 +3120,16 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     )
                     .await,
                 );
+            }
+            Ok(Err(crate::XmppError::OwnershipLost { entity })) => {
+                warn!(
+                    room = %msg.room_jid,
+                    %entity,
+                    "proactively reclaimed room-state load lost the exact claim"
+                );
+                store.forget_claim_fence(&msg.room_jid, &claim_fence);
+                self.clear_pending_reclaimed_room(&msg.room_jid, &claim_fence);
+                return ctx.reply(ReclaimedRoomOutcome::LostRace);
             }
             Ok(Err(error)) => {
                 debug!(

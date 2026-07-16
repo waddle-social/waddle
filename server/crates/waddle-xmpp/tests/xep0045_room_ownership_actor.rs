@@ -16,9 +16,9 @@ use waddle_xmpp::muc::durable::{
 };
 use waddle_xmpp::muc::room_actor::{
     DurableRestoreReadiness, GetAffiliation, GetConfig, GetDurableRestoreReadiness,
-    GetRoomSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation, OccupantCount,
-    ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor, RoomActorError,
-    RoomMutationError, SyncResolverAffiliation, UpdateConfig,
+    GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
+    OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor,
+    RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation, UpdateConfig,
 };
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
@@ -85,10 +85,9 @@ impl OwnershipStore {
             || fence.owner != self.expected_owner
             || fence.epoch != self.expected_epoch
         {
-            return Err(XmppError::internal(format!(
-                "unexpected exact room fence: entity={}, owner={:?}, epoch={:?}",
-                fence.entity, fence.owner, fence.epoch
-            )));
+            return Err(XmppError::OwnershipLost {
+                entity: expected_entity,
+            });
         }
         Ok(())
     }
@@ -103,9 +102,16 @@ impl MucDurableStore for OwnershipStore {
         self.observed_loads.fetch_add(1, Ordering::SeqCst);
         let validation = self.validate_fence(room_jid, fence);
         let restore = self.restore.clone();
+        let state = self.state.load(Ordering::SeqCst);
+        let entity = fence.entity.clone();
         Box::pin(async move {
             validation?;
-            Ok(restore)
+            match state {
+                OWNED => Ok(restore),
+                DEPOSED => Err(XmppError::OwnershipLost { entity }),
+                UNCERTAIN => Err(XmppError::internal("ownership proof unavailable")),
+                _ => unreachable!("test ownership state"),
+            }
         })
     }
 
@@ -171,7 +177,11 @@ impl MucDurableStore for OwnershipStore {
     }
 }
 
-async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
+async fn spawn_unrestored_fenced_room() -> (
+    ActorRef<RoomActor>,
+    Arc<OwnershipStore>,
+    RoomClaimFenceContext,
+) {
     let room_jid: BareJid = "ownership@muc.example.com".parse().expect("valid room JID");
     let room = MucRoom::new(
         room_jid.clone(),
@@ -185,14 +195,20 @@ async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
     let owner = NodeIdentity::new("test-node", "test-node-epoch");
     let epoch = ClaimEpoch(1);
     let store = Arc::new(OwnershipStore::expecting(owner.clone(), epoch, None));
+    let claim_fence = RoomClaimFenceContext::new(
+        Entity::new(EntityType::RoomActor, room_jid.to_string()),
+        owner,
+        epoch,
+    );
+    (actor, store, claim_fence)
+}
+
+async fn spawn_fenced_room() -> (ActorRef<RoomActor>, Arc<OwnershipStore>) {
+    let (actor, store, claim_fence) = spawn_unrestored_fenced_room().await;
     actor
         .ask(RestoreDurableRoomState {
             store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
-            claim_fence: RoomClaimFenceContext::new(
-                Entity::new(EntityType::RoomActor, room_jid.to_string()),
-                owner,
-                epoch,
-            ),
+            claim_fence,
         })
         .await
         .expect("install durable ownership store");
@@ -246,6 +262,79 @@ async fn deposed_room_refuses_xep0045_resolver_join() {
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
     assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+}
+
+#[tokio::test]
+async fn restore_ownership_loss_is_terminal_and_never_retries_xep0045_join() {
+    let (actor, store, claim_fence) = spawn_unrestored_fenced_room().await;
+    store.set(UNCERTAIN);
+
+    actor
+        .ask(RestoreDurableRoomState {
+            store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+            claim_fence,
+        })
+        .await
+        .expect("transient restore failure is retained as pending");
+    assert_eq!(store.take_observed_load_count(), 1);
+    assert_eq!(
+        actor
+            .ask(GetDurableRestoreReadiness)
+            .await
+            .expect("restore readiness"),
+        DurableRestoreReadiness::Pending
+    );
+
+    store.set(DEPOSED);
+    assert!(matches!(
+        actor.ask(resolver_join()).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        actor
+            .ask(GetDurableRestoreReadiness)
+            .await
+            .expect("terminal restore readiness"),
+        DurableRestoreReadiness::OwnershipLost
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("room seal state"),
+        RoomSealState::OwnershipLost
+    );
+    assert_eq!(store.take_observed_load_count(), 1);
+
+    assert!(matches!(
+        actor.ask(resolver_join()).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        store.take_observed_load_count(),
+        0,
+        "the terminal restore state must not retry the stale fence"
+    );
+    actor
+        .ask(RestoreDurableRoomState {
+            store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+            claim_fence: RoomClaimFenceContext::new(
+                Entity::new(EntityType::RoomActor, "ownership@muc.example.com"),
+                NodeIdentity::new("test-node", "test-node-epoch"),
+                ClaimEpoch(1),
+            ),
+        })
+        .await
+        .expect("terminal restore ignores the same stale fence");
+    assert_eq!(
+        actor
+            .ask(GetDurableRestoreReadiness)
+            .await
+            .expect("terminal restore readiness"),
+        DurableRestoreReadiness::OwnershipLost
+    );
+    assert_eq!(
+        store.take_observed_load_count(),
+        0,
+        "a terminal restore state must ignore duplicate same-fence restores"
+    );
 }
 
 #[tokio::test]
@@ -397,7 +486,11 @@ async fn assert_invalid_restore_fence_fails_closed(invalid_fence: RoomClaimFence
             .ask(GetDurableRestoreReadiness)
             .await
             .expect("restore readiness"),
-        DurableRestoreReadiness::Pending,
+        DurableRestoreReadiness::OwnershipLost,
+    );
+    assert_eq!(
+        actor.ask(GetRoomSealState).await.expect("room seal state"),
+        RoomSealState::OwnershipLost,
     );
     let original_config = actor.ask(GetConfig).await.expect("original config");
     let mut attempted = original_config.clone();
