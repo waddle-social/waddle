@@ -20,6 +20,13 @@ data class SendResult(
 }
 
 /**
+ * Fresh client stanza id: the message id AND XEP-0359 origin-id of an
+ * outbound send, generated manager-side so a queued replay can resend
+ * under the same origin-id.
+ */
+internal fun newClientStanzaId(): String = java.util.UUID.randomUUID().toString()
+
+/**
  * Default send options carrying only the caller-chosen stanza id (the
  * Rust builder uses it as the message id AND the XEP-0359 origin-id,
  * and echoes it back as `Sent.stanzaId`). Every send requests an
