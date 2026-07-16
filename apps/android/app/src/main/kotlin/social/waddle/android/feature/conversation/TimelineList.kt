@@ -37,6 +37,7 @@ fun TimelineList(
     onToggleReaction: (item: TimelineItem, emoji: String) -> Unit = { _, _ -> },
     onOpenThread: ((item: TimelineItem) -> Unit)? = null,
     onAtNewestEdgeChanged: (Boolean) -> Unit = {},
+    selfBareJid: String? = null,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -82,6 +83,7 @@ fun TimelineList(
                         .firstNotNullOfOrNull { threadReplyCounts[it] }
                 } ?: 0,
                 onOpenThread = onOpenThread,
+                selfBareJid = selfBareJid,
             )
         }
         if (isLoadingOlder) {

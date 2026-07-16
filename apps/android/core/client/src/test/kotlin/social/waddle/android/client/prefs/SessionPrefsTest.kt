@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import social.waddle.android.client.MentionRef
 import java.io.File
 
 /** Plain-JVM DataStore over a temp dir — no Robolectric needed. */
@@ -82,6 +83,23 @@ class SessionPrefsTest {
 
         prefs.updateOutboundQueue { current -> current.filterNot { it.clientStanzaId == "q-1" } }
         assertTrue(prefs.outboundQueue.first().isEmpty())
+    }
+
+    @Test
+    fun `queued mention refs survive the json round trip`() = runBlocking {
+        val prefs = newPrefs()
+        val message = QueuedOutboundMessage(
+            conversationJid = "general@muc.waddle.test",
+            isGroupchat = true,
+            body = "hi @bob",
+            clientStanzaId = "q-2",
+            enqueuedAtMillis = 1_000L,
+            mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 3u, end = 7u)),
+        )
+
+        prefs.updateOutboundQueue { current -> current + message }
+
+        assertEquals(listOf(message), prefs.outboundQueue.first())
     }
 
     @Test

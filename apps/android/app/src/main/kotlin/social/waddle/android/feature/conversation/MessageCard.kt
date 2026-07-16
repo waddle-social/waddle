@@ -43,7 +43,11 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -51,6 +55,8 @@ import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import social.waddle.android.R
 import social.waddle.android.client.FileDisposition
+import social.waddle.android.client.mentionSpansIn
+import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.store.ReactionGroup
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
@@ -76,6 +82,7 @@ fun MessageCard(
     onQuoteClick: (String) -> Unit = {},
     threadReplyCount: Int = 0,
     onOpenThread: ((TimelineItem) -> Unit)? = null,
+    selfBareJid: String? = null,
 ) {
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
@@ -87,6 +94,7 @@ fun MessageCard(
             onQuoteClick = onQuoteClick,
             threadReplyCount = threadReplyCount,
             onOpenThread = onOpenThread,
+            selfBareJid = selfBareJid,
             modifier = modifier,
         )
         is ConversationRow.Unconfirmed -> PendingMessageCard(
@@ -107,6 +115,7 @@ private fun StoredMessageCard(
     onQuoteClick: (String) -> Unit,
     threadReplyCount: Int,
     onOpenThread: ((TimelineItem) -> Unit)?,
+    selfBareJid: String?,
     modifier: Modifier = Modifier,
 ) {
     if (item.tombstone != null) {
@@ -137,10 +146,15 @@ private fun StoredMessageCard(
     MessageBubble(
         author = authorOf(item),
         time = formatTimestamp(item.timestamp),
-        body = item.body,
+        body = mentionStyledBody(item),
         isMine = item.isMine,
         edited = item.edited,
         pinned = isPinned,
+        mentionsSelf = messageMentionsBareJid(
+            broadcastMention = item.source.broadcastMention,
+            mentionUris = item.source.mentionUris,
+            selfBareJid = selfBareJid,
+        ),
         onLongPress = { onLongPress(item) },
         modifier = modifier,
         header = {
@@ -236,7 +250,7 @@ private fun PendingMessageCard(
             message.queued -> stringResource(R.string.message_queued)
             else -> stringResource(R.string.message_sending)
         },
-        body = message.body,
+        body = AnnotatedString(message.body),
         isMine = true,
         modifier = modifier,
     ) {
@@ -266,11 +280,12 @@ private fun PendingMessageCard(
 private fun MessageBubble(
     author: String,
     time: String?,
-    body: String?,
+    body: AnnotatedString?,
     isMine: Boolean,
     modifier: Modifier = Modifier,
     edited: Boolean = false,
     pinned: Boolean = false,
+    mentionsSelf: Boolean = false,
     onLongPress: (() -> Unit)? = null,
     header: @Composable () -> Unit = {},
     extras: @Composable () -> Unit,
@@ -283,10 +298,13 @@ private fun MessageBubble(
     ) {
         Surface(
             shape = RoundedCornerShape(12.dp),
-            color = if (isMine) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceContainerHigh
+            // Web parity: a message mentioning the signed-in account gets
+            // a subtly tinted bubble. Own messages keep the "mine" color —
+            // it already dominates, and losing it would blur authorship.
+            color = when {
+                isMine -> MaterialTheme.colorScheme.primaryContainer
+                mentionsSelf -> MaterialTheme.colorScheme.secondaryContainer
+                else -> MaterialTheme.colorScheme.surfaceContainerHigh
             },
             modifier = Modifier
                 .widthIn(max = 340.dp)
@@ -476,6 +494,30 @@ private fun AttachmentRow(icon: @Composable () -> Unit, label: String) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = 4.dp),
         )
+    }
+}
+
+/**
+ * The row body with XEP-0372 mention spans styled (primary, medium
+ * weight). Offsets come from a remote sender: `mentionSpansIn` clamps
+ * and drops anything out of range, so hostile references never crash.
+ */
+@Composable
+private fun mentionStyledBody(item: TimelineItem): AnnotatedString {
+    val spans = mentionSpansIn(
+        body = item.body,
+        references = item.source.references,
+        fallbackStart = item.source.replyFallbackStart,
+        fallbackEnd = item.source.replyFallbackEnd,
+    )
+    if (spans.isEmpty()) return AnnotatedString(item.body)
+    val mentionStyle = SpanStyle(
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.Medium,
+    )
+    return buildAnnotatedString {
+        append(item.body)
+        spans.forEach { span -> addStyle(mentionStyle, span.startIndex, span.endIndex) }
     }
 }
 

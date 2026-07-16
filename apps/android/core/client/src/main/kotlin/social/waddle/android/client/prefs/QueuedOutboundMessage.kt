@@ -2,6 +2,7 @@ package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
 import social.waddle.android.client.FileDisposition
+import social.waddle.android.client.MentionRef
 
 /**
  * A completed XEP-0363 upload attached to an outbound send (XEP-0447
@@ -52,4 +53,6 @@ data class QueuedOutboundMessage(
     val threadParent: String? = null,
     /** XEP-0363/0447 attachments (already uploaded; URLs are durable). */
     val sharedFiles: List<SharedFileRef> = emptyList(),
+    /** XEP-0372 mentions (see `MessageSendExtras.mentions`). */
+    val mentions: List<MentionRef> = emptyList(),
 )

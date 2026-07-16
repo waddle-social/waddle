@@ -59,9 +59,12 @@ fun ConversationScreen(
     viewModel: ConversationViewModel,
     onBack: () -> Unit,
     onOpenThread: ((threadId: String) -> Unit)? = null,
+    /** Own bare JID for the self-mention row highlight (XEP-0372). */
+    selfBareJid: String? = null,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
+    val mentionCandidates by viewModel.mentionCandidates.collectAsStateWithLifecycle()
     val composerMode by viewModel.composerMode.collectAsStateWithLifecycle()
     val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -139,10 +142,12 @@ fun ConversationScreen(
                         }
                 },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
+                selfBareJid = selfBareJid,
             )
             TypingIndicator(names = typing)
             MessageComposer(
                 onSend = viewModel::send,
+                mentionCandidates = mentionCandidates,
                 onDraftChanged = viewModel::onDraftChanged,
                 editing = composerMode as? ComposerMode.Editing,
                 onCancelEdit = viewModel::cancelEdit,

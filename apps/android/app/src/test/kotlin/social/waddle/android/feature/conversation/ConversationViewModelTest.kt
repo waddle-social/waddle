@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -15,6 +16,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import social.waddle.android.client.MentionCandidate
+import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
@@ -431,6 +434,39 @@ class ConversationViewModelTest {
         assertEquals(listOf("s1"), io.retractionCalls)
         // Both refusals reach the screen (they used to fail silently).
         assertEquals(listOf(VerbResult.Rejected, VerbResult.NotConnected), failures)
+    }
+
+    @Test
+    fun `send threads mention refs into the wire extras`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        val mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 3u, end = 7u))
+
+        viewModel.send("hi @bob", mentions)
+        runCurrent()
+
+        assertEquals(listOf("hi @bob"), io.sent)
+        assertEquals(mentions, io.sentExtras.single()?.mentions)
+    }
+
+    @Test
+    fun `mention candidates flow through to the composer state`() = runTest {
+        val candidates = listOf(
+            MentionCandidate(display = "bob", uri = "xmpp:bob@waddle.test", isBroadcast = false),
+        )
+        val viewModel = ConversationViewModel(
+            conversationJid = ROOM_JID,
+            isGroupchat = true,
+            timeline = store.timeline(ROOM_JID),
+            events = events,
+            unreadStore = unreadStore,
+            io = io,
+            mentionCandidates = flowOf(candidates),
+            clock = { 1_000L },
+        )
+        runCurrent()
+
+        assertEquals(candidates, viewModel.mentionCandidates.value)
     }
 
     private fun archived(

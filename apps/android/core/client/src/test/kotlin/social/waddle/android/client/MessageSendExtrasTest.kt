@@ -3,6 +3,7 @@ package social.waddle.android.client
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import social.waddle.client.ffi.WaddleReferenceType
 
 class MessageSendExtrasTest {
     @Test
@@ -77,5 +78,84 @@ class MessageSendExtrasTest {
         assertEquals("abc", stripReplyFallback("abc", 2u, 1u))
         assertEquals("abc", stripReplyFallback("abc", 0u, 99u))
         assertEquals("abc", stripReplyFallback("abc", null, 2u))
+    }
+
+    @Test
+    fun `mentions become typed mention references on the send options`() {
+        val (body, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "hi @bob",
+            extras = MessageSendExtras(
+                mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 3u, end = 7u)),
+            ),
+        )
+
+        assertEquals("hi @bob", body)
+        assertEquals(1, options.references.size)
+        val reference = options.references.single()
+        assertEquals(WaddleReferenceType.Mention, reference.refType)
+        assertEquals("xmpp:bob@waddle.test", reference.uri)
+        assertEquals(3u, reference.begin)
+        assertEquals(7u, reference.end)
+        assertNull(reference.anchor)
+    }
+
+    @Test
+    fun `mention offsets are codepoints and round-trip past an emoji`() {
+        // "😀 @bob": the emoji is ONE code point (two UTF-16 units), so
+        // the mention starts at code point 2 — slicing the final body by
+        // code points must recover the label exactly.
+        val body = "😀 @bob"
+        val begin = body.codePointCount(0, body.indexOf("@bob")).toUInt()
+        val end = begin + "@bob".codePointCount(0, "@bob".length).toUInt()
+
+        val (wireBody, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = body,
+            extras = MessageSendExtras(
+                mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = begin, end = end)),
+            ),
+        )
+
+        val reference = options.references.single()
+        assertEquals(2u, reference.begin)
+        assertEquals(6u, reference.end)
+        val start = wireBody.offsetByCodePoints(0, reference.begin.toInt())
+        val stop = wireBody.offsetByCodePoints(0, reference.end.toInt())
+        assertEquals("@bob", wireBody.substring(start, stop))
+    }
+
+    @Test
+    fun `mention offsets shift right past the reply fallback prefix`() {
+        val (wireBody, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "hi @bob",
+            extras = MessageSendExtras(
+                replyToId = "s1",
+                replyToAuthorJid = "room@muc.waddle.test/alice",
+                replyParentBody = "parent 🎉",
+                mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 3u, end = 7u)),
+            ),
+        )
+
+        val reference = options.references.single()
+        assertEquals(checkNotNull(options.fallback).end + 3u, reference.begin)
+        assertEquals(checkNotNull(options.fallback).end + 7u, reference.end)
+        val start = wireBody.offsetByCodePoints(0, reference.begin.toInt())
+        val stop = wireBody.offsetByCodePoints(0, reference.end.toInt())
+        assertEquals("@bob", wireBody.substring(start, stop))
+    }
+
+    @Test
+    fun `empty mention spans are dropped instead of emitting the sentinel`() {
+        val (_, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "hi",
+            extras = MessageSendExtras(
+                mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 0u, end = 0u)),
+            ),
+        )
+
+        assertEquals(emptyList<Any>(), options.references)
     }
 }

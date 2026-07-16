@@ -193,4 +193,47 @@ class NotificationPolicyTest {
         assertEquals("room-1", target?.stanzaId)
         assertTrue(target?.stanzaIdBy.equals("general@muc.waddle.test", ignoreCase = true))
     }
+
+    @Test
+    fun `a self mention marks the decision as a mention`() = runTest {
+        val decision = policy.decide(
+            testMessage(
+                from = "general@muc.waddle.test/alice",
+                messageType = "groupchat",
+                isMuc = true,
+                mentionUris = listOf("xmpp:icepuma@waddle.test"),
+            ),
+        )
+
+        assertEquals(true, decision?.isMention)
+    }
+
+    @Test
+    fun `a broadcast mention marks the decision as a mention`() = runTest {
+        val decision = policy.decide(
+            testMessage(
+                from = "general@muc.waddle.test/alice",
+                messageType = "groupchat",
+                isMuc = true,
+                broadcastMention = "xmpp:@everyone",
+                mentionUris = listOf("xmpp:@everyone"),
+            ),
+        )
+
+        assertEquals(true, decision?.isMention)
+    }
+
+    @Test
+    fun `mentions of other users stay ordinary notifications`() = runTest {
+        val decision = policy.decide(
+            testMessage(
+                from = "general@muc.waddle.test/alice",
+                messageType = "groupchat",
+                isMuc = true,
+                mentionUris = listOf("xmpp:carol@waddle.test"),
+            ),
+        )
+
+        assertEquals(false, decision?.isMention)
+    }
 }

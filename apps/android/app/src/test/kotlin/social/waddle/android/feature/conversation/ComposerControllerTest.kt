@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.MessageTombstone
@@ -228,6 +229,33 @@ class ComposerControllerTest {
             channelController(screenThreadId = "t-1").extrasFor(ComposerMode.Normal),
         )
         assertNull(channelController().extrasFor(ComposerMode.Normal))
+    }
+
+    @Test
+    fun `mentions ride every extras shape including plain sends`() {
+        val mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 0u, end = 4u))
+        val reply = ComposerMode.Replying(
+            targetId = "origin-1",
+            authorJid = PEER_JID,
+            authorName = "alice",
+            previewBody = "parent",
+            threadId = null,
+        )
+
+        assertEquals(
+            mentions,
+            dmController().extrasFor(reply, mentions = mentions)?.mentions,
+        )
+        assertEquals(
+            mentions,
+            channelController(screenThreadId = "t-1")
+                .extrasFor(ComposerMode.Normal, mentions = mentions)?.mentions,
+        )
+        // A mention on a plain send is itself enough to need extras.
+        assertEquals(
+            MessageSendExtras(mentions = mentions),
+            channelController().extrasFor(ComposerMode.Normal, mentions = mentions),
+        )
     }
 
     private companion object {
