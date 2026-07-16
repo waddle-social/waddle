@@ -229,13 +229,12 @@
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
             # Cap parallel cargo compile units so the test build doesn't
-            # OOM the runner during release-mode linking of the full
-            # workspace + every extension. The waddle-server-test step
-            # was hitting SIGKILL (exit 137) under default parallelism;
-            # 4 codegen-units in flight keeps peak memory bounded on
-            # the namespace-profile-linux-x86 runner without meaningfully
-            # slowing the build (deps are already cached upstream).
-            CARGO_BUILD_JOBS = "4";
+            # OOM the runner. The waddle-server-test step used to hit
+            # SIGKILL (exit 137) under default parallelism with fat-LTO
+            # release linking; with the `ci` profile (thin LTO) peak
+            # memory is far lower, so the cap is looser but kept as a
+            # guard on the namespace-profile-linux-x86 runner.
+            CARGO_BUILD_JOBS = "8";
           };
           testArgs = baseArgs // testRuntimeEnv;
           serverTestArgs = testArgs // {
@@ -266,18 +265,14 @@
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
             '';
           };
-          workspaceArtifacts = craneLib.buildDepsOnly (
-            baseArgs
-            // {
-              cargoExtraArgs = "--locked --workspace";
-              cargoCheckExtraArgs = "--all-targets";
-              cargoBuildExtraArgs = "--all-targets";
-              cargoTestExtraArgs = "--all-targets --no-run";
-            }
-          );
+          # Lint/test derivations build with the `ci` cargo profile (thin LTO,
+          # codegen-units = 4) instead of the production `release` profile
+          # (fat LTO, codegen-units = 1): tests don't need production codegen,
+          # and fat LTO dominated check wall-clock.
           workspaceAllFeaturesArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci";
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -287,6 +282,7 @@
           xmppArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci";
               cargoExtraArgs = "--locked --package waddle-xmpp";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -296,6 +292,7 @@
           serverTestArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci";
               cargoExtraArgs = "--locked --package waddle-server";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -334,6 +331,7 @@
           waddle-server-clippy = craneLib.cargoClippy (
             baseArgs
             // {
+              CARGO_PROFILE = "ci";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
@@ -342,6 +340,7 @@
           waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
+              CARGO_PROFILE = "ci";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
@@ -351,6 +350,7 @@
             testArgs
             // {
               pname = "waddle-server-doctest";
+              CARGO_PROFILE = "ci";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoTestExtraArgs = "--doc";
@@ -378,6 +378,7 @@
             testArgs
             // {
               pname = "waddle-server-xmpp-unit-tests";
+              CARGO_PROFILE = "ci";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
               cargoNextestExtraArgs = "--profile ci --lib";
@@ -387,6 +388,7 @@
             serverPostgresTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
+              CARGO_PROFILE = "ci";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
@@ -396,6 +398,7 @@
             serverTestArgs
             // {
               pname = "waddle-server-xmpp-cue-e2e";
+              CARGO_PROFILE = "ci";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
               cargoNextestExtraArgs = "--profile ci --test xmpp_e2e_cue";
@@ -405,6 +408,7 @@
             testArgs
             // {
               pname = "waddle-server-xmpp-xep-integration";
+              CARGO_PROFILE = "ci";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
               cargoNextestExtraArgs = "--profile ci --tests";
