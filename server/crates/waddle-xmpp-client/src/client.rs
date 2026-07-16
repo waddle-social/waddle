@@ -13,7 +13,7 @@ use crate::runtime::XmppRuntime;
 use crate::state::{ClientState, SessionSnapshot};
 use crate::stream_management::SmResumeState;
 use crate::transport::{
-    DefaultTransportFactory, StreamClose, TransportEvent, TransportMessage, TransportState,
+    DefaultTransportFactory, TransportEvent, TransportMessage, TransportState,
     TransportWriteFailure, TransportWriteResponsibility, WebSocketTransport,
     WebSocketTransportFactory,
 };
@@ -193,6 +193,7 @@ where
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
             websocket_close_started: false,
+            commands_closed: false,
             last_resume_state: None,
         };
 
@@ -219,6 +220,11 @@ struct DriverTask {
     /// Ensures the RFC 6455 closing handshake starts exactly once, and only
     /// after both typed RFC 7395 `<close/>` frames are confirmed.
     websocket_close_started: bool,
+    /// Receiver closure is terminal before a close starts, but once the local
+    /// RFC 7395 half is confirmed the driver—not the handle lifetime—owns the
+    /// peer wait and five-second deadline. The disabled select branch avoids
+    /// polling a permanently-ready closed channel.
+    commands_closed: bool,
     /// Last broadcast XEP-0198 resume snapshot; publishing is deduped
     /// against it so subscribers only see actual state transitions.
     last_resume_state: Option<SmResumeState>,
@@ -300,6 +306,10 @@ impl DriverTask {
         loop {
             let now_ms = crate::runtime::monotonic_now_ms();
             let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
+            let close_wakeup_ms = self.runtime.next_stream_close_wakeup_in_ms(now_ms);
+            let driver_wakeup_ms = minimum_wakeup(sm_wakeup_ms, close_wakeup_ms);
+            let close_deadline_scheduled =
+                close_wakeup_ms.is_some_and(|close| sm_wakeup_ms.is_none_or(|sm| close <= sm));
             tokio::select! {
                 result = self.transport.next_event() => {
                     match result {
@@ -322,18 +332,22 @@ impl DriverTask {
                         }
                     }
                 }
-                cmd = self.commands.recv() => {
+                cmd = self.commands.recv(), if !self.commands_closed => {
                     match cmd {
                         Some(command) => {
                             if !self.handle_command(command).await {
                                 return;
                             }
                         }
-                        None => return,
+                        None => {
+                            if !self.handle_command_channel_closed().await {
+                                return;
+                            }
+                        }
                     }
                 }
-                _ = wait_for_stream_management_wakeup(sm_wakeup_ms) => {
-                    if !self.handle_stream_management_timer().await {
+                _ = wait_for_driver_wakeup(driver_wakeup_ms) => {
+                    if !self.handle_driver_timer(close_deadline_scheduled).await {
                         return;
                     }
                 }
@@ -341,9 +355,22 @@ impl DriverTask {
         }
     }
 
-    async fn handle_stream_management_timer(&mut self) -> bool {
+    async fn handle_driver_timer(&mut self, close_deadline_scheduled: bool) -> bool {
+        if close_deadline_scheduled {
+            self.terminate_uncleanly().await;
+            return false;
+        }
         self.handle_stream_management_timer_at(crate::runtime::monotonic_now_ms())
             .await
+    }
+
+    async fn handle_command_channel_closed(&mut self) -> bool {
+        self.commands_closed = true;
+        if self.runtime.stream_close_sent_confirmed() {
+            return true;
+        }
+        self.terminate_uncleanly().await;
+        false
     }
 
     async fn handle_stream_management_timer_at(&mut self, now_ms: u64) -> bool {
@@ -402,15 +429,22 @@ impl DriverTask {
                 true
             }
             XmppCommand::Disconnect => {
-                if self
-                    .send_transport_message(TransportMessage::Close(StreamClose))
-                    .await
-                    .is_err()
-                {
-                    // The close was not confirmed. Treat the stream as
-                    // unfinished and keep its resume snapshot eligible.
-                    self.terminate_uncleanly().await;
-                    return false;
+                let events = match self.runtime.request_stream_close() {
+                    Ok(events) => events,
+                    Err(_) => {
+                        self.terminate_uncleanly().await;
+                        return false;
+                    }
+                };
+                for event in events {
+                    if let Some(message) = self.dispatch_client_event(event) {
+                        if self.send_transport_message(message).await.is_err() {
+                            // The close was not confirmed. Treat the stream as
+                            // unfinished and keep its resume snapshot eligible.
+                            self.terminate_uncleanly().await;
+                            return false;
+                        }
+                    }
                 }
                 // RFC 7395 considers the stream closed only after the peer's
                 // corresponding `<close/>` arrives. Keep driving the socket;
@@ -803,7 +837,15 @@ impl DriverTask {
     }
 }
 
-async fn wait_for_stream_management_wakeup(delay_ms: Option<u64>) {
+fn minimum_wakeup(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
+async fn wait_for_driver_wakeup(delay_ms: Option<u64>) {
     match delay_ms {
         Some(delay_ms) => tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await,
         None => std::future::pending::<()>().await,

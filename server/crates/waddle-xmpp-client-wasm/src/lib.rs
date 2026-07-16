@@ -42,9 +42,7 @@ use waddle_xmpp_client::pep::{
 use waddle_xmpp_client::pin::{
     build_pin_list_iq, parse_pin_list_response, PinEntry, PinEvent, PinEventAction, PinPreview,
 };
-use waddle_xmpp_client::transport::{
-    StreamClose, TransportEvent, TransportMessage, TransportState,
-};
+use waddle_xmpp_client::transport::{TransportEvent, TransportMessage, TransportState};
 use waddle_xmpp_client::xep::{
     reply::{FallbackRange, ReplyMarker},
     thread::ThreadRef,

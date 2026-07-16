@@ -34,6 +34,135 @@ fn runtime_updates_state_when_connecting() {
 }
 
 #[test]
+fn local_stream_close_request_is_idempotent_across_runtime_entrypoints() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+
+    let first = runtime.request_stream_close().unwrap();
+    let second = runtime.request_stream_close().unwrap();
+    let queued = runtime.queue_request(ClientRequest::Disconnect).unwrap();
+
+    let close_count = first
+        .iter()
+        .chain(second.iter())
+        .chain(queued.iter())
+        .filter(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(
+                    _
+                )))
+            )
+        })
+        .count();
+    assert_eq!(close_count, 1);
+    assert!(runtime.stream_close_requested());
+    assert!(!runtime.stream_close_sent_confirmed());
+}
+
+#[test]
+fn confirmed_local_close_fences_sm_xml_but_accepts_final_ack_progress() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.sm_state.enabled = true;
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.previd = Some("resume-after-half-close".to_string());
+
+    let message = Element::builder("message", crate::NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "half-close-1")
+        .build();
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Element(message)),
+            100,
+        )
+        .unwrap();
+    runtime.request_stream_close().unwrap();
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+            200,
+        )
+        .unwrap();
+
+    assert!(runtime.stream_close_sent_confirmed());
+    assert!(runtime.poll_stream_management_at(450).is_empty());
+    assert!(runtime.poll_stream_management_at(5_200).is_empty());
+    assert!(runtime.next_stream_management_wakeup_in_ms(450).is_none());
+    assert!(runtime.request_stream_management_ack_at(450).is_empty());
+
+    let request_events = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(
+                TransportMessage::Element(SmState::build_request_ack()),
+            ),
+            500,
+        )
+        .unwrap();
+    assert!(!request_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(_))
+            | ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested
+            ))
+    )));
+
+    let ack_events = runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Element(SmState::build_ack(1))),
+            600,
+        )
+        .unwrap();
+    assert!(ack_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(crate::MessageDeliveryEvent::Acked { stanza_id })
+            if stanza_id.as_str() == "half-close-1"
+    )));
+    assert!(ack_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckObserved {
+                progressed: true,
+                unacked: 0,
+                ..
+            }
+        ))
+    )));
+    assert!(!ack_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(_))
+    )));
+    assert_eq!(runtime.sm_state.unacked_count(), 0);
+}
+
+#[test]
+fn confirmed_local_close_has_one_five_second_peer_deadline() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.snapshot.phase = SessionPhase::Established;
+    runtime.request_stream_close().unwrap();
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(runtime.next_stream_close_wakeup_in_ms(1_000), Some(5_000));
+    assert_eq!(runtime.next_stream_close_wakeup_in_ms(5_999), Some(1));
+    assert!(!runtime.stream_close_timed_out_at(5_999));
+    assert!(runtime.stream_close_timed_out_at(6_000));
+
+    runtime
+        .apply_transport_event_at(
+            TransportEvent::MessageReceived(TransportMessage::Close(StreamClose)),
+            6_000,
+        )
+        .unwrap();
+    assert!(runtime.stream_close_complete());
+    assert_eq!(runtime.next_stream_close_wakeup_in_ms(6_000), None);
+}
+
+#[test]
 fn runtime_emits_initial_open_when_transport_opens() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();

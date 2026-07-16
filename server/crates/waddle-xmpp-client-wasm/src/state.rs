@@ -10,7 +10,7 @@ pub(crate) trait WasmDriverWire {
     fn close_websocket(&mut self) -> DriverResult<()>;
 }
 
-pub(crate) trait SmTimerBackend {
+pub(crate) trait DriverTimerBackend {
     fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()>;
 }
 
@@ -345,7 +345,7 @@ pub(crate) struct PendingInboxQuery {
 pub(crate) struct WasmDriverTask {
     pub(crate) runtime: XmppRuntime,
     pub(crate) ws: Box<dyn WasmDriverWire>,
-    pub(crate) sm_timer: Rc<dyn SmTimerBackend>,
+    pub(crate) timer: Rc<dyn DriverTimerBackend>,
     pub(crate) cmd_rx: mpsc::Receiver<WasmCommand>,
     pub(crate) event_tx: mpsc::Sender<DriverEvent>,
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,
@@ -355,4 +355,5 @@ pub(crate) struct WasmDriverTask {
     pub(crate) deferred_commands: VecDeque<DeferredWasmCommand>,
     pub(crate) explicit_disconnect: bool,
     pub(crate) websocket_close_started: bool,
+    pub(crate) commands_closed: bool,
 }

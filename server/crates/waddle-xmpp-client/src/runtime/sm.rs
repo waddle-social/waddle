@@ -75,6 +75,12 @@ impl XmppRuntime {
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         if crate::stream_management::SmState::is_request_ack(element) {
+            // RFC 7395 permits no XML after our confirmed close half. The
+            // final peer `<a/>` remains useful below, but a late `<r/>`
+            // cannot be answered without violating the close fence.
+            if self.stream_close_sent_confirmed() {
+                return Ok(());
+            }
             let h = self.sm_state.inbound_count;
             let ack = crate::stream_management::SmState::build_ack(h);
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(

@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use futures::future::{pending, Either};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
@@ -21,9 +22,9 @@ impl WasmDriverWire for WasmWebSocket {
 }
 
 #[derive(Default)]
-struct WindowSmTimerBackend;
+struct WindowDriverTimerBackend;
 
-impl SmTimerBackend for WindowSmTimerBackend {
+impl DriverTimerBackend for WindowDriverTimerBackend {
     fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()> {
         let Some(delay_ms) = delay_ms else {
             return Box::pin(std::future::pending());
@@ -85,7 +86,7 @@ impl Drop for WindowTimeout {
 enum DriverInput {
     Wire(Option<WasmTransportEvent>),
     Command(Option<WasmCommand>),
-    StreamManagementTimer,
+    DriverTimer,
 }
 
 /// Private attribution for one ordered browser wire-pump failure.
@@ -137,7 +138,7 @@ where
     select! {
         event = wire_future => DriverInput::Wire(event),
         command = command_future => DriverInput::Command(command),
-        _ = timer_future => DriverInput::StreamManagementTimer,
+        _ = timer_future => DriverInput::DriverTimer,
     }
 }
 
@@ -171,7 +172,7 @@ impl WasmDriverTask {
         Self::new_with_dependencies(
             config,
             Box::new(ws),
-            Rc::new(WindowSmTimerBackend),
+            Rc::new(WindowDriverTimerBackend),
             cmd_rx,
             event_tx,
             inner,
@@ -181,7 +182,7 @@ impl WasmDriverTask {
     fn new_with_dependencies(
         config: ClientConfig,
         ws: Box<dyn WasmDriverWire>,
-        sm_timer: Rc<dyn SmTimerBackend>,
+        timer: Rc<dyn DriverTimerBackend>,
         cmd_rx: mpsc::Receiver<WasmCommand>,
         event_tx: mpsc::Sender<DriverEvent>,
         inner: Rc<RefCell<WaddleClientInner>>,
@@ -189,7 +190,7 @@ impl WasmDriverTask {
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
             ws,
-            sm_timer,
+            timer,
             cmd_rx,
             event_tx,
             inner,
@@ -199,6 +200,7 @@ impl WasmDriverTask {
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
             websocket_close_started: false,
+            commands_closed: false,
         })
     }
 
@@ -223,17 +225,28 @@ impl WasmDriverTask {
         loop {
             let now_ms = waddle_xmpp_client::runtime::monotonic_now_ms();
             let sm_wakeup_ms = self.runtime.next_stream_management_wakeup_in_ms(now_ms);
+            let close_wakeup_ms = self.runtime.next_stream_close_wakeup_in_ms(now_ms);
+            let driver_wakeup_ms = minimum_wakeup(sm_wakeup_ms, close_wakeup_ms);
+            let close_deadline_scheduled =
+                close_wakeup_ms.is_some_and(|close| sm_wakeup_ms.is_none_or(|sm| close <= sm));
+            let command_future = if self.commands_closed {
+                Either::Left(pending())
+            } else {
+                Either::Right(self.cmd_rx.next())
+            };
             let input = select_driver_input(
                 self.ws.events().next(),
-                self.cmd_rx.next(),
-                self.sm_timer.wait(sm_wakeup_ms),
+                command_future,
+                self.timer.wait(driver_wakeup_ms),
             )
             .await;
 
             let keep_running = match input {
                 DriverInput::Wire(event) => self.handle_wasm_transport_event(event).await,
                 DriverInput::Command(command) => self.handle_command(command).await,
-                DriverInput::StreamManagementTimer => self.handle_stream_management_timer().await,
+                DriverInput::DriverTimer => {
+                    self.handle_driver_timer(close_deadline_scheduled).await
+                }
             };
 
             if !keep_running {
@@ -244,7 +257,11 @@ impl WasmDriverTask {
         self.finish().await;
     }
 
-    async fn handle_stream_management_timer(&mut self) -> bool {
+    async fn handle_driver_timer(&mut self, close_deadline_scheduled: bool) -> bool {
+        if close_deadline_scheduled {
+            self.terminate_uncleanly().await;
+            return false;
+        }
         self.handle_stream_management_timer_at(waddle_xmpp_client::runtime::monotonic_now_ms())
             .await
     }
@@ -396,10 +413,19 @@ impl WasmDriverTask {
                 keep_running
             }
             Some(WasmCommand::Disconnect { responder }) => {
-                let result = self
-                    .send_transport_message(TransportMessage::Close(StreamClose))
-                    .await;
-                let result = result.map_err(WasmPumpFailure::into_source);
+                let result = match self.runtime.request_stream_close() {
+                    Ok(events) => {
+                        let mut result = Ok(());
+                        for event in events {
+                            if !self.handle_client_event(event).await {
+                                result = Err(ClientError::TransportClosed);
+                                break;
+                            }
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                };
                 if result.is_err() {
                     self.terminate_uncleanly().await;
                 }
@@ -407,7 +433,15 @@ impl WasmDriverTask {
                 let _ = responder.send(result);
                 keep_running
             }
-            None => false,
+            None => {
+                self.commands_closed = true;
+                if self.runtime.stream_close_sent_confirmed() {
+                    true
+                } else {
+                    self.terminate_uncleanly().await;
+                    false
+                }
+            }
         }
     }
 
@@ -944,6 +978,14 @@ impl WasmDriverTask {
     }
 }
 
+fn minimum_wakeup(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
 fn publish_resume_state_snapshot(
     inner: &Rc<RefCell<WaddleClientInner>>,
     runtime: &XmppRuntime,
@@ -1029,6 +1071,7 @@ mod tests {
     use futures::executor::block_on;
     use futures::future;
     use waddle_xmpp_client::discovery::DISCO_INFO_NS;
+    use waddle_xmpp_client::transport::StreamClose;
 
     #[derive(Clone, Default)]
     struct FakeWireState {
@@ -1151,7 +1194,7 @@ mod tests {
         }
     }
 
-    impl SmTimerBackend for ManualTimerBackend {
+    impl DriverTimerBackend for ManualTimerBackend {
         fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()> {
             if delay_ms.is_none() {
                 return Box::pin(future::pending());
@@ -1731,6 +1774,39 @@ mod tests {
             assert!(!task.runtime.stream_close_complete());
             assert!(inner.borrow().resume_state.is_some());
 
+            let (ack_responder, ack_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::RequestStreamManagementAck {
+                    responder: ack_responder,
+                }))
+                .await
+            );
+            assert!(ack_response.await.expect("ack response").is_ok());
+            assert!(wire.take_messages().is_empty());
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Element(
+                        waddle_xmpp_client::stream_management::SmState::build_request_ack(),
+                    ),
+                ))
+                .await
+            );
+            assert!(wire.take_messages().is_empty());
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Element(
+                        waddle_xmpp_client::stream_management::SmState::build_ack(1),
+                    ),
+                ))
+                .await
+            );
+            assert!(wire.take_messages().is_empty());
+            assert!(inner
+                .borrow()
+                .resume_state
+                .as_ref()
+                .is_some_and(|state| !state.has_unhandled_outbound_stanzas()));
+
             assert!(
                 task.apply_transport_event(TransportEvent::MessageReceived(
                     TransportMessage::Close(StreamClose),
@@ -1741,6 +1817,109 @@ mod tests {
             assert!(task.websocket_close_started);
             assert!(task.runtime.stream_close_complete());
             assert!(inner.borrow().resume_state.is_none());
+        });
+    }
+
+    #[test]
+    fn repeated_wasm_disconnects_coalesce_to_one_xml_and_websocket_close() {
+        block_on(async {
+            let (mut task, wire, _events, _inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+
+            for _ in 0..2 {
+                let (responder, response) = oneshot::channel();
+                assert!(
+                    task.handle_command(Some(WasmCommand::Disconnect { responder }))
+                        .await
+                );
+                assert!(response.await.expect("disconnect response").is_ok());
+            }
+            assert!(matches!(
+                wire.take_messages().as_slice(),
+                [TransportMessage::Close(_)]
+            ));
+            assert_eq!(wire.close_count.get(), 0);
+
+            assert!(
+                task.apply_transport_event(TransportEvent::MessageReceived(
+                    TransportMessage::Close(StreamClose),
+                ))
+                .await
+            );
+            assert_eq!(wire.close_count.get(), 1);
+        });
+    }
+
+    #[test]
+    fn wasm_command_channel_loss_before_close_aborts_and_preserves_resume_state() {
+        block_on(async {
+            let (mut task, wire, _events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let (responder, response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza: Element::builder("message", NS_CLIENT)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "wasm-channel-loss",
+                        )
+                        .build(),
+                    responder,
+                }))
+                .await
+            );
+            assert!(response.await.expect("send response").is_ok());
+            let resume_before = inner.borrow().resume_state.clone();
+
+            assert!(!task.handle_command(None).await);
+            assert!(task.commands_closed);
+            assert_eq!(wire.close_count.get(), 1);
+            assert_eq!(inner.borrow().resume_state, resume_before);
+        });
+    }
+
+    #[test]
+    fn wasm_channel_loss_during_half_close_waits_then_times_out_uncleanly() {
+        block_on(async {
+            let (mut task, wire, _events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            let (send_responder, send_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::SendStanza {
+                    stanza: Element::builder("message", NS_CLIENT)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "wasm-half-close-timeout",
+                        )
+                        .build(),
+                    responder: send_responder,
+                }))
+                .await
+            );
+            assert!(send_response.await.expect("send response").is_ok());
+            wire.take_messages();
+            let (disconnect_responder, disconnect_response) = oneshot::channel();
+            assert!(
+                task.handle_command(Some(WasmCommand::Disconnect {
+                    responder: disconnect_responder,
+                }))
+                .await
+            );
+            assert!(disconnect_response
+                .await
+                .expect("disconnect response")
+                .is_ok());
+            let resume_before = inner.borrow().resume_state.clone();
+
+            assert!(task.handle_command(None).await);
+            assert!(task.commands_closed);
+            assert_eq!(wire.close_count.get(), 0);
+            assert!(!task.handle_driver_timer(true).await);
+            assert_eq!(wire.close_count.get(), 1);
+            assert_eq!(inner.borrow().resume_state, resume_before);
         });
     }
 

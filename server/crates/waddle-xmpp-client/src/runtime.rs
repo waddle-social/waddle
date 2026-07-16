@@ -36,6 +36,12 @@ mod sm;
 #[cfg(test)]
 mod tests;
 
+/// RFC 7395 stream close is a two-half exchange. Five seconds bounds a
+/// confirmed local half-close without waiting long enough to consume the
+/// XEP-0198 30-second no-progress budget; expiry is an unfinished stream so
+/// its resumable state remains authoritative.
+pub const RFC7395_PEER_CLOSE_TIMEOUT_MS: u64 = 5_000;
+
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStatus {
@@ -65,7 +71,9 @@ pub struct XmppRuntime {
 
 #[derive(Debug, Default)]
 struct StreamCloseHandshake {
+    requested: bool,
     sent_confirmed: bool,
+    sent_confirmed_at_ms: Option<u64>,
     received: bool,
     complete: bool,
 }
@@ -134,6 +142,32 @@ impl XmppRuntime {
         self.stream_close.complete
     }
 
+    /// True after the local RFC 7395 `<close/>` has reached the transport.
+    /// From this edge no later XMPP XML may be emitted on the stream.
+    pub fn stream_close_sent_confirmed(&self) -> bool {
+        self.stream_close.sent_confirmed
+    }
+
+    /// True once either a public request or a peer close has claimed the one
+    /// local `<close/>` write for this stream.
+    pub fn stream_close_requested(&self) -> bool {
+        self.stream_close.requested
+    }
+
+    /// Remaining delay before a confirmed local half-close becomes an
+    /// unfinished stream. No deadline exists after the peer half arrives.
+    pub fn next_stream_close_wakeup_in_ms(&self, now_ms: u64) -> Option<u64> {
+        let sent_at = self.stream_close.sent_confirmed_at_ms?;
+        if self.stream_close.received || self.stream_close.complete {
+            return None;
+        }
+        Some(RFC7395_PEER_CLOSE_TIMEOUT_MS.saturating_sub(now_ms.saturating_sub(sent_at)))
+    }
+
+    pub fn stream_close_timed_out_at(&self, now_ms: u64) -> bool {
+        self.next_stream_close_wakeup_in_ms(now_ms) == Some(0)
+    }
+
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
         self.requests.snapshot()
     }
@@ -171,17 +205,23 @@ impl XmppRuntime {
                 self.set_phase(SessionPhase::Connecting)?;
             }
             crate::request::RequestKind::Disconnect => {
-                self.bootstrap = BootstrapState::Idle;
-                self.set_phase(SessionPhase::Disconnecting)?;
-                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                    TransportMessage::Close(StreamClose),
-                )));
+                self.begin_local_stream_close(&mut events)?;
             }
             _ => {}
         }
 
         self.push_state_change(previous, &mut events);
 
+        Ok(events)
+    }
+
+    /// Claim and emit the one local RFC 7395 close frame. Repeated native,
+    /// WASM, and standalone-runtime requests coalesce without another write.
+    pub fn request_stream_close(&mut self) -> ClientResult<Vec<ClientEvent>> {
+        let previous = self.snapshot.clone();
+        let mut events = Vec::new();
+        self.begin_local_stream_close(&mut events)?;
+        self.push_state_change(previous, &mut events);
         Ok(events)
     }
 
@@ -229,6 +269,14 @@ impl XmppRuntime {
         let previous = self.snapshot.clone();
         let mut events = vec![ClientEvent::Transport(event.clone())];
         self.apply_transport_side_effects(event, now_ms, &mut events)?;
+        if self.stream_close.sent_confirmed {
+            events.retain(|event| {
+                !matches!(
+                    event,
+                    ClientEvent::Connection(ConnectionEvent::OutboundMessage(_))
+                )
+            });
+        }
         self.push_state_change(previous, &mut events);
         Ok(events)
     }
@@ -237,6 +285,9 @@ impl XmppRuntime {
     /// timestamp. Returned events are transport instructions and content-free
     /// telemetry; drivers must abort uncleanly when the stalled event appears.
     pub fn poll_stream_management_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
+        if self.stream_close.sent_confirmed {
+            return Vec::new();
+        }
         let poll = self.sm_state.poll_ack_timer_at(now_ms);
         let mut events = Vec::new();
         if poll.request_timed_out {
@@ -261,12 +312,18 @@ impl XmppRuntime {
     }
 
     pub fn next_stream_management_wakeup_in_ms(&self, now_ms: u64) -> Option<u64> {
+        if self.stream_close.sent_confirmed {
+            return None;
+        }
         self.sm_state.next_ack_wakeup_in_ms(now_ms)
     }
 
     /// Best-effort pagehide hook. It shares the normal request-in-flight gate
     /// and therefore never emits a second concurrent `<r/>`.
     pub fn request_stream_management_ack_at(&mut self, now_ms: u64) -> Vec<ClientEvent> {
+        if self.stream_close.sent_confirmed {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         if let Some(request) = self.sm_state.request_ack_now_at(now_ms) {
             self.push_ack_request(request, &mut events);
@@ -308,6 +365,7 @@ impl XmppRuntime {
                 self.stream_close.received = true;
                 self.set_phase(SessionPhase::Disconnecting)?;
                 if !self.stream_close.sent_confirmed {
+                    self.stream_close.requested = true;
                     events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                         TransportMessage::Close(StreamClose),
                     )));
@@ -315,7 +373,10 @@ impl XmppRuntime {
                 self.finish_stream_close_if_complete()?;
             }
             TransportEvent::MessageSent(TransportMessage::Close(_)) => {
+                self.stream_close.requested = true;
                 self.stream_close.sent_confirmed = true;
+                self.stream_close.sent_confirmed_at_ms.get_or_insert(now_ms);
+                self.pending_ack_request = None;
                 self.set_phase(SessionPhase::Disconnecting)?;
                 self.finish_stream_close_if_complete()?;
             }
@@ -336,6 +397,19 @@ impl XmppRuntime {
             }
         }
 
+        Ok(())
+    }
+
+    fn begin_local_stream_close(&mut self, events: &mut Vec<ClientEvent>) -> ClientResult<()> {
+        self.bootstrap = BootstrapState::Idle;
+        self.set_phase(SessionPhase::Disconnecting)?;
+        if self.stream_close.requested || self.stream_close.sent_confirmed {
+            return Ok(());
+        }
+        self.stream_close.requested = true;
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Close(StreamClose),
+        )));
         Ok(())
     }
 
