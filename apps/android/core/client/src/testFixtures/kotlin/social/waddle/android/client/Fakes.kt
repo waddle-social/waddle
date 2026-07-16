@@ -78,7 +78,12 @@ class FakeClientFactory : ClientFactory {
         return FakeWaddleClient().also { clients += it }
     }
 
-    /** Fire an FFI event at the most recent attempt's listener. */
+    /**
+     * Fire an FFI event at the MOST RECENT attempt's listener. Only the
+     * latest attempt is addressable: a test that drives a reconnection
+     * while asserting on the previous attempt's event flow would deliver
+     * here to the wrong listener without any failure.
+     */
     fun emit(event: WaddleClientEvent) {
         checkNotNull(listener) { "no client created yet" }.onEvent(event)
     }
