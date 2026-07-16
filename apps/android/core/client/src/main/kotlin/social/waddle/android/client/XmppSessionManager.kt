@@ -633,7 +633,13 @@ class XmppSessionManager(
             pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
             return
         }
-        if (readCursorStore.cursor(conversation) == ids.markerId) return
+        // Snapshot the cursor to CAS against below: applyMdsEntry runs
+        // OUTSIDE displayedMutex and can advance the cursor to a newer
+        // sibling value across our suspend points — an unconditional
+        // advance would then regress it to our (older) marker and wedge
+        // the sibling entry's CAS forever.
+        val cursorBefore = readCursorStore.cursor(conversation)
+        if (cursorBefore == ids.markerId) return
         val markerAllowed = when {
             !readReceiptsEnabled() -> false
             isGroupchat -> ids.stanzaIdBy == conversation && ids.markerId == ids.stanzaId
@@ -659,13 +665,11 @@ class XmppSessionManager(
             failed = failed || !published
         }
         if (!failed) {
-            if (explicitTarget != null) {
-                // CAS for explicit targets: a concurrent local/MDS
-                // advance during our sends must not be clobbered.
-                readCursorStore.compareAndAdvance(conversation, expectedCursor, ids.markerId)
-            } else {
-                readCursorStore.advance(conversation, ids.markerId)
-            }
+            // CAS on both paths: a concurrent applyMdsEntry advance (it
+            // does not hold displayedMutex) during our sends must never
+            // be clobbered by our older marker.
+            val expected = if (explicitTarget != null) expectedCursor else cursorBefore
+            readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
         }
     }
 
@@ -1163,8 +1167,14 @@ class XmppSessionManager(
                         // renders once. Thread REPLIES are hidden from
                         // the feed and never count either (web
                         // feed-only unread parity).
+                        // Must match TimelineItem.isFeedVisible exactly
+                        // (all XEP-0359 ids, not just the first): a root
+                        // whose thread id lands on a secondary stanza-id
+                        // is feed-visible and MUST bump unread.
+                        val rootIds = setOfNotNull(message.stanzaId, message.originId, message.id) +
+                            message.stanzaIds.map { it.id }
                         val isThreadReply = message.thread != null &&
-                            message.thread !in setOfNotNull(message.stanzaId, message.originId, message.id) &&
+                            message.thread !in rootIds &&
                             message.callThread == null
                         if (newlyInserted && !isThreadReply) {
                             unreadStore.onLiveMessage(key.jid, key.isMine)

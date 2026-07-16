@@ -253,7 +253,7 @@ class TimelineStore(
         isGroupchat: Boolean,
         timestamp: String?,
     ) {
-        val ranked = synchronized(lock) {
+        synchronized(lock) {
             val instant = timestamp?.let { parseInstant(it) }
             // Web `appliedAfterWire` anchor parity: a live (unstamped)
             // mutation ranks AT the newest wire instant this conversation
@@ -263,7 +263,7 @@ class TimelineStore(
             // mutations replayed via MAM after a stream drop, freezing
             // stale reactions/bodies forever).
             recordWireInstant(conversation, timestamp)
-            RankedMutation(
+            val ranked = RankedMutation(
                 mutation = mutation,
                 rank = Rank(
                     instant = instant ?: newestWireInstant[conversation],
@@ -271,8 +271,6 @@ class TimelineStore(
                 ),
                 isGroupchat = isGroupchat,
             )
-        }
-        synchronized(lock) {
             val list = entries[conversation]
             val index = list?.let { resolveTargetIndex(it, mutation.targetId, mutation, isGroupchat) } ?: -1
             if (list != null && index >= 0) {
