@@ -1,6 +1,5 @@
 package social.waddle.android.client.calls
 
-import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -15,6 +14,7 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleJingleReason
+import java.util.UUID
 
 /**
  * Single-slot call lifecycle store: the Kotlin port of the web

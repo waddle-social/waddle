@@ -17,6 +17,40 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `bodyless call anchor still inserts as a feed row`() {
+        val inserted = store.onLiveMessage(
+            testMessage(
+                id = "call-anchor-1",
+                stanzaId = "call-anchor-1",
+                body = null,
+                from = "alice@waddle.test",
+                thread = "c-sid-1",
+                callThread = social.waddle.client.ffi.WaddleCallThreadAnchor(
+                    kind = "dm",
+                    sid = "c-sid-1",
+                    media = listOf("audio"),
+                    initiator = "alice@waddle.test/phone",
+                    started = "2026-07-15T10:00:00Z",
+                ),
+            ),
+        )
+
+        assertTrue(inserted)
+        val items = store.timeline("alice@waddle.test").value
+        assertEquals(1, items.size)
+        assertEquals("", items[0].body)
+        assertTrue(items[0].hasCallThread)
+        assertTrue(items[0].isFeedVisible)
+        assertEquals("c-sid-1", items[0].callAnchor?.sid)
+    }
+
+    @Test
+    fun `bodyless message without call payload is still dropped`() {
+        assertFalse(store.onLiveMessage(testMessage(stanzaId = "s-drop", body = null)))
+        assertTrue(store.timeline("alice@waddle.test").value.isEmpty())
+    }
+
+    @Test
     fun `live then mam replay dedupes on stanza id and keeps the live record`() {
         store.onLiveMessage(
             testMessage(id = "orig-1", stanzaId = "stanza-1", body = "hi", from = "alice@waddle.test"),

@@ -139,4 +139,33 @@
     <string name="notify_mismatch_room">This room\'s settings node was created by an older client. Ask a server admin to delete the node so Waddle can re-create it.</string>
     <string name="notify_mismatch_dm">Your direct-message notification settings couldn\'t be saved — their storage was created by an incompatible older client.</string>
     <string name="notify_muted_badge">Muted</string>
+
+    <!-- A/V calls (XEP-0353 Jingle Message Initiation + XEP-0166 Jingle) -->
+    <string name="notification_channel_incoming_calls">Incoming calls</string>
+    <string name="notification_channel_incoming_calls_description">Rings for incoming voice and video calls</string>
+    <string name="notification_channel_ongoing_calls">Ongoing calls</string>
+    <string name="notification_channel_ongoing_calls_description">Keeps the current call running in the background</string>
+    <string name="call_incoming_audio">Incoming voice call</string>
+    <string name="call_incoming_video">Incoming video call</string>
+    <string name="call_status_calling">Calling…</string>
+    <string name="call_status_ringing">Ringing…</string>
+    <string name="call_status_connecting">Connecting…</string>
+    <string name="call_status_in_progress">Ongoing call</string>
+    <string name="call_unknown_peer">Unknown</string>
+    <string name="call_action_accept">Answer</string>
+    <string name="call_action_decline">Decline</string>
+    <string name="call_action_hang_up">Hang up</string>
+    <string name="call_action_toggle_mic">Toggle microphone</string>
+    <string name="call_action_toggle_camera">Toggle camera</string>
+    <string name="call_action_flip_camera">Flip camera</string>
+    <string name="call_action_toggle_speaker">Toggle speaker</string>
+    <string name="call_action_minimize">Minimize call</string>
+    <string name="call_action_dismiss">Dismiss</string>
+    <string name="call_banner_ongoing">In call with %1$s — tap to return</string>
+    <string name="call_ended">Call ended</string>
+    <string name="call_start_audio">Start voice call</string>
+    <string name="call_start_video">Start video call</string>
+    <string name="call_row_started">%1$s started a call</string>
+    <string name="call_row_video_started">%1$s started a video call</string>
+    <string name="call_row_ended">Call ended · %1$s</string>
 </resources>

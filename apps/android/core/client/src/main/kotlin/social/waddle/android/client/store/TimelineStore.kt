@@ -93,7 +93,11 @@ class TimelineStore(
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return false
         }
-        val body = message.body ?: return false
+        // Call anchors (`urn:waddle:call-thread:0`) are rendered as a
+        // dedicated call row even when the server enriches a bodyless
+        // stanza — drop only rows with neither body nor call payload.
+        val body = message.body
+            ?: if (message.callThread != null || message.callThreadEnded != null) "" else return false
         return insert(
             conversation = key.jid,
             item = TimelineItem(
@@ -123,7 +127,9 @@ class TimelineStore(
             applyMutation(key.jid, mutation, isGroupchat, timestamp = message.timestamp)
             return
         }
-        val body = message.body ?: return
+        // Same bodyless-call-anchor exception as the live path.
+        val body = message.body
+            ?: if (message.callThread != null || message.callThreadEnded != null) "" else return
         insert(
             conversation = key.jid,
             item = TimelineItem(

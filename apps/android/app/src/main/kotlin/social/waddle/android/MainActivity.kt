@@ -25,6 +25,9 @@ import social.waddle.android.theme.WaddleTheme
 class MainActivity : ComponentActivity() {
     private val pendingConversationJid = MutableStateFlow<String?>(null)
 
+    /** The incoming-call notification's Answer action was tapped. */
+    private val pendingCallAnswer = MutableStateFlow(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
@@ -47,6 +50,12 @@ class MainActivity : ComponentActivity() {
             savedInstanceState.getString(STATE_PENDING_JID)
         }
         intent.removeExtra(EXTRA_NAVIGATE_JID)
+        // Deliberately NOT restored across recreation: replaying a stale
+        // answer after a config change could accept a later call.
+        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)) {
+            pendingCallAnswer.value = true
+        }
+        intent.removeExtra(EXTRA_ANSWER_CALL)
         setContent {
             val themeMode by graph.userPrefs.theme
                 .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
@@ -70,6 +79,8 @@ class MainActivity : ComponentActivity() {
                     AppShell(
                         pendingConversationJid = pendingConversationJid,
                         onConversationConsumed = { pendingConversationJid.value = null },
+                        pendingCallAnswer = pendingCallAnswer,
+                        onCallAnswerConsumed = { pendingCallAnswer.value = false },
                     )
                 }
             }
@@ -85,12 +96,19 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         intent.getStringExtra(EXTRA_NAVIGATE_JID)?.let { pendingConversationJid.value = it }
         intent.removeExtra(EXTRA_NAVIGATE_JID)
+        if (intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)) {
+            pendingCallAnswer.value = true
+        }
+        intent.removeExtra(EXTRA_ANSWER_CALL)
         setIntent(intent)
     }
 
     companion object {
         /** Notification taps carry the conversation bare JID to open. */
         const val EXTRA_NAVIGATE_JID = "waddle.navigate.jid"
+
+        /** Incoming-call Answer action: accept once the shell is up. */
+        const val EXTRA_ANSWER_CALL = "waddle.call.answer"
         private const val STATE_PENDING_JID = "waddle.state.pending-jid"
     }
 }
