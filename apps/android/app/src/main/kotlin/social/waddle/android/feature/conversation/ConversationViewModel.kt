@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -96,6 +97,12 @@ open class ConversationViewModel(
             }
             val visiblePending = unconfirmed.filter { message ->
                 message.stanzaId == null || message.stanzaId !in storedIds
+            }.filter { message ->
+                // Feed mode hides thread-targeted pending rows (their
+                // stored echo will be feed-hidden); a thread screen shows
+                // only its own thread's sends.
+                val pendingThread = message.extras?.threadId
+                if (threadId == null) pendingThread == null else pendingThread == threadId
             }
             val visibleItems = if (threadId != null) {
                 items.filter { it.threadId == threadId || threadId in it.identityIds }
@@ -108,6 +115,7 @@ open class ConversationViewModel(
                 val byThread = HashMap<String, Int>()
                 items.forEach { item ->
                     val thread = item.threadId ?: return@forEach
+                    if (item.hasCallThread) return@forEach
                     if (thread !in item.identityIds) byThread.merge(thread, 1, Int::plus)
                 }
                 byThread
@@ -130,6 +138,11 @@ open class ConversationViewModel(
 
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = _composerMode
+
+    private val _actionFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+
+    /** Fired when a room-gated action (pin/unpin) is refused. */
+    val actionFailures: SharedFlow<Unit> = _actionFailures
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
 
@@ -438,10 +451,18 @@ open class ConversationViewModel(
         viewModelScope.launch { runCatching { io.sendRetraction(target) } }
     }
 
-    /** `urn:waddle:pin:0` room pin toggle. */
+    /**
+     * `urn:waddle:pin:0` room pin toggle. The server gates on
+     * Owner/Admin affiliation; a refusal surfaces instead of failing
+     * silently (the action is offered to every member because the
+     * client does not track its own affiliation yet).
+     */
     fun setPinned(item: TimelineItem, pinned: Boolean) {
         val target = actionTargetIdOf(item) ?: return
-        viewModelScope.launch { runCatching { io.setPinned(target, pinned) } }
+        viewModelScope.launch {
+            val ok = runCatching { io.setPinned(target, pinned) }.getOrDefault(false)
+            if (!ok) _actionFailures.tryEmit(Unit)
+        }
     }
 
     /**
@@ -454,7 +475,10 @@ open class ConversationViewModel(
      * on the other side.
      */
     fun actionTargetIdOf(item: TimelineItem): String? = if (isGroupchat) {
-        item.stanzaId?.takeIf { item.stanzaIdBy == conversationJid }
+        // Authority scan, never the first stanza-id (sender-controlled):
+        // an occupant-injected foreign id must not disable actions on
+        // the message.
+        item.assignedStanzaId(conversationJid)?.id
     } else {
         item.originId ?: item.messageId
     }
@@ -480,6 +504,9 @@ open class ConversationViewModel(
         val lastActivityIndex = HashMap<String, Int>()
         items.forEachIndexed { index, item ->
             val thread = item.threadId ?: return@forEachIndexed
+            // Call anchors carry a thread id (the call sid) but are feed
+            // rows, not thread members.
+            if (item.hasCallThread) return@forEachIndexed
             byThread.getOrPut(thread) { mutableListOf() }.add(item)
             lastActivityIndex[thread] = index
         }

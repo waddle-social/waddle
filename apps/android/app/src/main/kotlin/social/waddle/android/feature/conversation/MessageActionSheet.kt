@@ -30,8 +30,8 @@ import androidx.compose.foundation.clickable
 import social.waddle.android.R
 import social.waddle.android.client.store.TimelineItem
 
-/** Web parity quick-react row (message action sheet order). */
-private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "😮", "😢")
+/** Web QUICK_REACTION_EMOJIS parity (reaction-mode.ts). */
+private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "👀")
 
 /**
  * Long-press actions for a timeline row: quick reactions, edit/delete

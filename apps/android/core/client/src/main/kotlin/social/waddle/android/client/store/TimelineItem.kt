@@ -2,6 +2,7 @@ package social.waddle.android.client.store
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleStanzaId
 
 /** One emoji's aggregated reaction state on a timeline row. */
 data class ReactionGroup(
@@ -53,13 +54,35 @@ data class TimelineItem(
                 source.message.stanzaId,
                 source.message.originId,
                 source.message.id,
-            )
+            ) + source.message.stanzaIds.map { it.id }
             is TimelineSource.Archived -> setOfNotNull(
                 source.message.stanzaId,
                 source.message.originId,
                 source.message.id,
-            )
+            ) + source.message.stanzaIds.map { it.id }
         }
+
+    /** Every XEP-0359 `<stanza-id/>` on the stanza, document order. */
+    val stanzaIds: List<WaddleStanzaId>
+        get() = when (source) {
+            is TimelineSource.Live -> source.message.stanzaIds
+            is TimelineSource.Archived -> source.message.stanzaIds
+        }
+
+    /**
+     * The stanza id ASSIGNED BY [authority] (case-insensitive bare-JID
+     * match), scanning the full XEP-0359 list — the first element is
+     * whatever the sender put there and may be occupant/peer-injected;
+     * trust comes from the `by` authority, never from position (web
+     * `assignedStanzaIdBy` parity).
+     */
+    fun assignedStanzaId(vararg authorities: String): WaddleStanzaId? {
+        val wanted = authorities.map { it.lowercase() }
+        stanzaIds.firstOrNull { it.by.lowercase() in wanted }?.let { return it }
+        val singleBy = stanzaIdBy?.lowercase() ?: return null
+        val single = stanzaId ?: return null
+        return if (singleBy in wanted) WaddleStanzaId(id = single, by = stanzaIdBy!!) else null
+    }
 
     /** XEP-0359 stanza id (action target in MUCs when [stanzaIdBy] is the room). */
     val stanzaId: String?

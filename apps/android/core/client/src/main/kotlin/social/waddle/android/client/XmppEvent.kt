@@ -42,9 +42,15 @@ sealed interface XmppEvent {
     /**
      * XEP-0490 catch-up entries from the connect bootstrap, injected
      * into the event stream so cursor/badge recomputes serialize with
-     * live-message unread increments.
+     * live-message unread increments. [applied] (when present) is
+     * completed by the consumer after application — the ready pipeline
+     * joins it so later steps (the pending-displayed drain) order after
+     * the fetched cursors.
      */
-    data class MdsEntries(val entries: List<WaddleMdsDisplayedEntry>) : XmppEvent
+    data class MdsEntries(
+        val entries: List<WaddleMdsDisplayedEntry>,
+        val applied: kotlinx.coroutines.CompletableJob? = null,
+    ) : XmppEvent
 
     /**
      * `urn:waddle:pin:0` room snapshot from `fetch_room_pins`, injected

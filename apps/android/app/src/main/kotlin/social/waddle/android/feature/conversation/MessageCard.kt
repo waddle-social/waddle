@@ -79,7 +79,7 @@ fun MessageCard(
     when (row) {
         is ConversationRow.Stored -> StoredMessageCard(
             item = row.item,
-            isPinned = row.item.stanzaId?.let { it in pinnedIds } == true,
+            isPinned = row.item.identityIds.any { it in pinnedIds },
             onLongPress = onLongPress,
             onToggleReaction = onToggleReaction,
             resolveQuoted = resolveQuoted,

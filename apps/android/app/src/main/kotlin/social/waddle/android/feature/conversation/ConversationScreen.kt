@@ -22,9 +22,12 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,6 +68,14 @@ fun ConversationScreen(
     ) { uri -> uri?.let(viewModel::sendAttachment) }
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val actionFailedText = stringResource(R.string.action_failed)
+
+    LaunchedEffect(viewModel) {
+        viewModel.actionFailures.collect {
+            snackbarHostState.showSnackbar(actionFailedText)
+        }
+    }
 
     LifecycleResumeEffect(viewModel) {
         viewModel.onConversationVisible()
@@ -72,6 +83,7 @@ fun ConversationScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -140,7 +152,7 @@ fun ConversationScreen(
             item = item,
             actionable = viewModel.actionTargetIdOf(item) != null,
             canPin = state.canPin,
-            isPinned = item.stanzaId?.let { it in state.pinnedIds } == true,
+            isPinned = item.identityIds.any { it in state.pinnedIds },
             onDismiss = { sheetTarget = null },
             onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
             onReply = { viewModel.startReply(item) },

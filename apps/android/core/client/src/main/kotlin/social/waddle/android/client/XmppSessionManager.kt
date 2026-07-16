@@ -393,6 +393,7 @@ class XmppSessionManager(
         // NOTE (deferred, needs an FFI signature change): the reaction
         // stanza does not yet echo the target's XEP-0201 <thread/> like
         // the web client does — send_reaction takes no options today.
+        val owner = ownBareJid ?: return false
         val sender = ownMutationSender(conversationJid, isGroupchat) ?: return false
         val base = ownReactionSet(conversationJid, targetStanzaId) ?: emptyList()
         val next = if (emoji in base) base - emoji else base + emoji
@@ -406,8 +407,9 @@ class XmppSessionManager(
             // Also runs on cancellation (screen closed mid-send): the
             // optimistic apply must never outlive a send that did not
             // happen — in a DM nothing on the wire would ever correct
-            // the phantom chip.
-            if (!sent) {
+            // the phantom chip. Owner-gated: a rollback racing logout
+            // must not park pre-logout state into the next session.
+            if (!sent && ownBareJid == owner) {
                 applyOwnReaction(conversationJid, isGroupchat, sender, targetStanzaId, base)
             }
         }
@@ -447,8 +449,9 @@ class XmppSessionManager(
         if (outcome !is WaddleSendMessageOutcome.Sent) return false
         // DM only: `Sent` means stream-accepted, and a room can still
         // reject the correction — MUC state waits for the reflection
-        // (web parity). A DM has no reflection to wait for.
-        if (!isGroupchat) {
+        // (web parity). A DM has no reflection to wait for. Owner-gated
+        // so a completion racing logout cannot park stale state.
+        if (!isGroupchat && ownBareJid != null) {
             timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Correction(targetId = targetId, from = sender, newBody = newBody),
@@ -470,8 +473,9 @@ class XmppSessionManager(
         }
         // DM only (see sendCorrection): a room rejection after stream
         // accept would leave an irreversible local tombstone; the MUC
-        // reflection drives room state instead.
-        if (sent && !isGroupchat) {
+        // reflection drives room state instead. Owner-gated like the
+        // reaction rollback.
+        if (sent && !isGroupchat && ownBareJid != null) {
             timelineStore.applyLocalMutation(
                 conversationJid,
                 MessageMutation.Retraction(targetId = targetStanzaId, from = sender),
@@ -597,7 +601,7 @@ class XmppSessionManager(
             val target = items.lastOrNull {
                 !it.isMine && it.tombstone == null && it.isFeedVisible
             } ?: return
-            displayedTargetOf(target, isGroupchat) ?: return
+            displayedTargetOf(target, isGroupchat, conversation) ?: return
         }
         // The on-screen path clears the badge unconditionally (looking
         // IS reading, even offline). Explicit targets (parked replays,
@@ -645,13 +649,10 @@ class XmppSessionManager(
             }.getOrDefault(false)
             failed = failed || !sent
         }
-        // XEP-0490 for group chats requires the MUC-ASSIGNED stanza id;
-        // an occupant-injected foreign-authority stanza-id (which the
-        // room only strips when it claims the room's own by-JID) must
-        // not be published as a room read cursor (web parity: the
-        // channel path skips both marker and publish).
-        val mdsIdTrusted = !isGroupchat || ids.stanzaIdBy == conversation
-        if (ids.stanzaId != null && ids.stanzaIdBy != null && mdsIdTrusted && supportsMdsPublish(client)) {
+        // The MDS pair is authority-verified at construction (room-
+        // assigned for MUCs, own-server-assigned for DMs — XEP-0490 §3);
+        // a row without a trusted pair simply skips the publish.
+        if (ids.stanzaId != null && ids.stanzaIdBy != null && supportsMdsPublish(client)) {
             val published = runCatching {
                 client.publishMdsDisplayed(conversation, ids.stanzaId, ids.stanzaIdBy)
             }.getOrDefault(false)
@@ -707,11 +708,27 @@ class XmppSessionManager(
      * stanza id was stamped by our own server and the peer never saw
      * it. The stanza-id pair rides along strictly for the MDS publish.
      */
-    private fun displayedTargetOf(item: TimelineItem, isGroupchat: Boolean): DisplayedTarget? {
-        val markerId = if (isGroupchat) {
-            item.stanzaId
+    private fun displayedTargetOf(
+        item: TimelineItem,
+        isGroupchat: Boolean,
+        conversation: String,
+    ): DisplayedTarget? {
+        // Authority-scanned XEP-0359 ids (never the first element, which
+        // is sender-controlled): the marker/MDS pair for a MUC is the
+        // ROOM-assigned stanza id; the DM MDS pair is the id assigned by
+        // the user's OWN server (XEP-0490 §3) — a peer's archive stamp
+        // or an injected foreign id must never be republished as the
+        // account's read cursor.
+        val own = ownBareJid
+        val mdsPair = if (isGroupchat) {
+            item.assignedStanzaId(conversation)
         } else {
-            item.originId ?: item.messageId ?: item.stanzaId
+            own?.let { item.assignedStanzaId(it, it.substringAfter('@')) }
+        }
+        val markerId = if (isGroupchat) {
+            mdsPair?.id
+        } else {
+            item.originId ?: item.messageId
         } ?: return null
         val markerRequested = when (val source = item.source) {
             is TimelineSource.Live -> source.message.displayedMarkerRequested
@@ -721,8 +738,8 @@ class XmppSessionManager(
         }
         return DisplayedTarget(
             markerId = markerId,
-            stanzaId = item.stanzaId,
-            stanzaIdBy = item.stanzaIdBy,
+            stanzaId = mdsPair?.id,
+            stanzaIdBy = mdsPair?.by,
             markerRequested = markerRequested,
         )
     }
@@ -748,14 +765,13 @@ class XmppSessionManager(
         if (!readCursorStore.compareAndAdvance(conversation, expected = current, stanzaId = entry.stanzaId)) {
             return
         }
-        // The active (on-screen) conversation's badge is suppressed and
-        // owned by the local read path; don't fight it from here.
-        if (unreadStore.isActiveConversation(conversation)) return
         // Feed-visible rows only: hidden thread replies never count.
         val unread = items.subList(index + 1, items.size).count {
             !it.isMine && it.tombstone == null && it.isFeedVisible
         }
-        unreadStore.set(conversation, unread)
+        // Atomic recompute-unless-active: the on-screen conversation's
+        // badge is owned by the local read path.
+        unreadStore.setUnlessActive(conversation, unread)
         // A sibling device read everything: the stale notification in
         // the shade must retire too (the notifier owns that side).
         if (unread == 0) _events.tryEmit(XmppEvent.ReadSynced(conversation))
@@ -771,7 +787,15 @@ class XmppSessionManager(
      */
     private suspend fun bootstrapMdsDisplayed(client: WaddleClientInterface) {
         runCatching { client.fetchMdsDisplayed() }.getOrNull()?.let { entries ->
-            if (entries.isNotEmpty()) currentBridge?.submit(XmppEvent.MdsEntries(entries))
+            if (entries.isNotEmpty()) {
+                // Handshake: the pipeline continues (pending-displayed
+                // drain!) only after the consumer APPLIED the fetched
+                // cursors — a parked read replayed before them could
+                // publish an older MDS cursor over a sibling's newer one.
+                val applied = kotlinx.coroutines.Job()
+                currentBridge?.submit(XmppEvent.MdsEntries(entries, applied))
+                runCatching { applied.join() }
+            }
         }
         runCatching { client.subscribeMdsDisplayed() }
     }
@@ -1150,7 +1174,10 @@ class XmppSessionManager(
                     }
                 }
             }
-            is XmppEvent.MdsEntries -> event.entries.forEach(::applyMdsEntry)
+            is XmppEvent.MdsEntries -> {
+                event.entries.forEach(::applyMdsEntry)
+                event.applied?.complete()
+            }
             is XmppEvent.RoomPins ->
                 pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
             is XmppEvent.Presence -> presenceStore.onPresence(event.presence)
