@@ -54,6 +54,7 @@ pub struct AckTimerPoll {
 
 #[derive(Debug, Clone, Default)]
 struct AckCadence {
+    request_pending_confirmation: bool,
     request_sent_at_ms: Option<u64>,
     next_request_at_ms: Option<u64>,
     progress_started_at_ms: Option<u64>,
@@ -366,16 +367,32 @@ impl SmState {
     /// Request an acknowledgement immediately when SM has outstanding work
     /// and no request is awaiting a response. Used by the pagehide handoff;
     /// regular sends and timers use the same state transition.
-    pub fn request_ack_now_at(&mut self, now_ms: u64) -> Option<AckRequest> {
+    pub fn request_ack_now_at(&mut self, _now_ms: u64) -> Option<AckRequest> {
         if !self.enabled
             || !self.outbound_enabled
             || self.outbound_queue.is_empty()
+            || self.ack_cadence.request_pending_confirmation
             || self.ack_cadence.request_sent_at_ms.is_some()
         {
             return None;
         }
         self.ack_cadence.next_request_at_ms = None;
-        Some(self.mark_ack_request_sent_at(now_ms))
+        Some(self.mark_ack_request_generated())
+    }
+
+    /// Confirm that the exact generated `<r/>` reached the transport.
+    ///
+    /// Generation and transport confirmation are deliberately separate. A
+    /// slow or permanently pending write must not consume the five-second
+    /// response budget before the peer could possibly have received the
+    /// request.
+    pub fn confirm_ack_request_sent_at(&mut self, now_ms: u64) -> bool {
+        if !self.ack_cadence.request_pending_confirmation {
+            return false;
+        }
+        self.ack_cadence.request_pending_confirmation = false;
+        self.ack_cadence.request_sent_at_ms = Some(now_ms);
+        true
     }
 
     /// Poll response/retry/progress deadlines without performing I/O.
@@ -399,11 +416,15 @@ impl SmState {
             if now_ms.saturating_sub(sent_at) >= ACK_RESPONSE_TIMEOUT_MS {
                 self.ack_cadence.request_sent_at_ms = None;
                 return AckTimerPoll {
-                    request: Some(self.mark_ack_request_sent_at(now_ms)),
+                    request: Some(self.mark_ack_request_generated()),
                     request_timed_out: true,
                     progress_stalled_ms: None,
                 };
             }
+            return AckTimerPoll::default();
+        }
+
+        if self.ack_cadence.request_pending_confirmation {
             return AckTimerPoll::default();
         }
 
@@ -414,7 +435,7 @@ impl SmState {
         {
             self.ack_cadence.next_request_at_ms = None;
             return AckTimerPoll {
-                request: Some(self.mark_ack_request_sent_at(now_ms)),
+                request: Some(self.mark_ack_request_generated()),
                 ..AckTimerPoll::default()
             };
         }
@@ -472,6 +493,7 @@ impl SmState {
 
         let progress_started_at_ms = self.ack_cadence.progress_started_at_ms.unwrap_or(now_ms);
         self.ack_cadence.request_sent_at_ms = None;
+        self.ack_cadence.request_pending_confirmation = false;
         self.ack_cadence.next_request_at_ms = None;
         self.ack_cadence.progress_started_at_ms = Some(progress_started_at_ms);
         // A successful resume starts a new request ladder for the replayed
@@ -527,15 +549,18 @@ impl SmState {
             self.ack_cadence.progress_started_at_ms = Some(now_ms);
         }
         if self.ack_cadence.request_sent_at_ms.is_some()
+            || self.ack_cadence.request_pending_confirmation
             || self.ack_cadence.next_request_at_ms.is_some()
         {
             return None;
         }
-        Some(self.mark_ack_request_sent_at(now_ms))
+        Some(self.mark_ack_request_generated())
     }
 
-    fn mark_ack_request_sent_at(&mut self, now_ms: u64) -> AckRequest {
-        self.ack_cadence.request_sent_at_ms = Some(now_ms);
+    fn mark_ack_request_generated(&mut self) -> AckRequest {
+        debug_assert!(!self.ack_cadence.request_pending_confirmation);
+        debug_assert!(self.ack_cadence.request_sent_at_ms.is_none());
+        self.ack_cadence.request_pending_confirmation = true;
         self.ack_cadence.request_attempt = self.ack_cadence.request_attempt.saturating_add(1);
         AckRequest {
             attempt: self.ack_cadence.request_attempt,
@@ -1028,6 +1053,13 @@ mod tests {
             .build()
     }
 
+    fn confirm_generated_request(state: &mut SmState, now_ms: u64) {
+        assert!(
+            state.confirm_ack_request_sent_at(now_ms),
+            "expected one generated acknowledgement request awaiting confirmation"
+        );
+    }
+
     #[test]
     fn first_countable_stanza_requests_ack_and_burst_coalesces() {
         let mut state = enabled_state();
@@ -1052,6 +1084,7 @@ mod tests {
     fn valid_non_progress_ack_releases_request_and_schedules_retry() {
         let mut state = enabled_state();
         state.record_sent_stanza_at(&message("one"), 100);
+        confirm_generated_request(&mut state, 100);
 
         let processed = state.process_ack_at(0, 120);
 
@@ -1073,9 +1106,11 @@ mod tests {
         let mut state = enabled_state();
         state.record_sent_stanza_at(&message("one"), 0);
         state.record_sent_stanza_at(&message("two"), 1);
+        confirm_generated_request(&mut state, 1);
         state.process_ack_at(0, 10);
         let retry = state.poll_ack_timer_at(260);
         assert_eq!(retry.request.map(|request| request.attempt), Some(2));
+        confirm_generated_request(&mut state, 260);
 
         let progressed = state.process_ack_at(1, 300);
 
@@ -1095,6 +1130,7 @@ mod tests {
     fn non_progress_retry_schedule_reaches_and_repeats_five_second_cap() {
         let mut state = enabled_state();
         state.record_sent_stanza_at(&message("one"), 0);
+        confirm_generated_request(&mut state, 0);
         let mut now_ms = 0;
 
         for (expected_delay_ms, expected_attempt) in [
@@ -1120,6 +1156,7 @@ mod tests {
                     unacked: 1,
                 })
             );
+            confirm_generated_request(&mut state, now_ms);
         }
     }
 
@@ -1127,6 +1164,7 @@ mod tests {
     fn missing_ack_response_times_out_and_reissues_request() {
         let mut state = enabled_state();
         state.record_sent_stanza_at(&message("one"), 1_000);
+        confirm_generated_request(&mut state, 1_000);
 
         assert_eq!(state.next_ack_wakeup_in_ms(1_000), Some(5_000));
         let poll = state.poll_ack_timer_at(6_000);
@@ -1139,6 +1177,29 @@ mod tests {
                 unacked: 1,
             })
         );
+    }
+
+    #[test]
+    fn ack_response_clock_starts_only_after_transport_confirmation() {
+        let mut state = enabled_state();
+        let generated = state.record_sent_stanza_at(&message("one"), 100);
+        assert_eq!(generated.request.map(|request| request.attempt), Some(1));
+
+        assert_eq!(
+            state.next_ack_wakeup_in_ms(100),
+            Some(30_000),
+            "only the original no-progress epoch runs while <r/> is pending"
+        );
+        assert_eq!(state.poll_ack_timer_at(4_099), AckTimerPoll::default());
+        assert!(state.confirm_ack_request_sent_at(4_100));
+        assert!(!state.confirm_ack_request_sent_at(4_101));
+        assert_eq!(state.next_ack_wakeup_in_ms(4_100), Some(5_000));
+        assert_eq!(state.poll_ack_timer_at(9_099), AckTimerPoll::default());
+
+        let observed = state.process_ack_at(0, 4_200);
+        assert_eq!(observed.observation.latency_ms, Some(100));
+        assert!(!observed.observation.progressed);
+        assert_eq!(state.next_ack_wakeup_in_ms(4_200), Some(250));
     }
 
     #[test]
@@ -1222,6 +1283,7 @@ mod tests {
                 unacked: 1,
             })
         );
+        confirm_generated_request(&mut state, 10_250);
         state.process_ack_at(0, 10_260);
         assert_eq!(
             state.poll_ack_timer_at(10_760).request,
@@ -1230,6 +1292,7 @@ mod tests {
                 unacked: 1,
             })
         );
+        confirm_generated_request(&mut state, 10_760);
 
         state.begin_replay_transition_at(11_000);
         assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
@@ -1243,6 +1306,7 @@ mod tests {
             })
         );
         assert_eq!(state.outbound_count, 1, "replay must not be recounted");
+        confirm_generated_request(&mut state, 11_001);
 
         let mut now_ms = 11_010;
         for (delay_ms, attempt) in [
@@ -1264,6 +1328,7 @@ mod tests {
                     unacked: 1,
                 })
             );
+            confirm_generated_request(&mut state, now_ms);
             now_ms += 1;
         }
 

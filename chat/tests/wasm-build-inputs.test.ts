@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+	chmodSync,
 	mkdirSync,
 	mkdtempSync,
+	realpathSync,
+	readdirSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
@@ -19,19 +22,30 @@ import {
 	WASM_BUILD_INPUT_MANIFEST,
 	assertHermeticWasmBuildEnvironment,
 	assertPinnedNixToolchain,
+	assertPinnedToolVersions,
 	canonicalWasmBuildIdentity,
 	collectWasmBuildInputs,
+	resolveExecutableOnPath,
 	wasmPackBuildArgs,
 } from "../scripts/wasm-build-inputs.mjs";
+import {
+	PINNED_WASM_EXECUTOR_PROTOCOL,
+	WASM_PACKAGE_ARTIFACTS,
+	assertPinnedWasmBuildFilesystem,
+	assertWasmArtifactSetsEqual,
+	canonicalEncodedRustFlags,
+	createIsolatedWasmBuildPaths,
+	pinnedFlakeBuildArgs,
+} from "../scripts/wasm-build-executor.mjs";
 import { renderWasmWrapper } from "../scripts/wasm-package-bindings.mjs";
 
 const CONTRACT_PATH = "chat/scripts/wasm-build-contract.json";
 const BUILD_SCRIPT_PATH = "chat/scripts/build-xmpp-wasm.mjs";
-const FORMAT = "waddle:xmpp-client-wasm:canonical-inputs:v1";
+const FORMAT = "waddle:xmpp-client-wasm:canonical-inputs:v2";
 const roots: string[] = [];
 
 const contract = {
-	schemaVersion: 1,
+	schemaVersion: 2,
 	digestFormat: FORMAT,
 	packageScript: "bun run scripts/build-xmpp-wasm.mjs",
 	crate: "server/crates/waddle-xmpp-client-wasm",
@@ -54,6 +68,18 @@ const contract = {
 			"--",
 			"--locked",
 		],
+	},
+	executor: {
+		protocol: PINNED_WASM_EXECUTOR_PROTOCOL,
+		flake: "path:.",
+		ignoreEnvironment: true,
+		cleanCargoHome: true,
+		cleanCargoTarget: true,
+		artifactCount: 6,
+		remapPathPrefixes: {
+			buildRoot: "/waddle-build",
+			repoRoot: "/waddle",
+		},
 	},
 };
 
@@ -454,6 +480,28 @@ describe("canonical WASM build identity", () => {
 				...contract,
 				cargo: { ...contract.cargo, features: ["alternate"] },
 			},
+			{
+				...contract,
+				executor: { ...contract.executor, protocol: "unversioned" },
+			},
+			{
+				...contract,
+				executor: { ...contract.executor, ignoreEnvironment: false },
+			},
+			{
+				...contract,
+				executor: { ...contract.executor, artifactCount: 3 },
+			},
+			{
+				...contract,
+				executor: {
+					...contract.executor,
+					remapPathPrefixes: {
+						...contract.executor.remapPathPrefixes,
+						buildRoot: "/ambient-build",
+					},
+				},
+			},
 		];
 
 		for (const invalidContract of invalidContracts) {
@@ -484,25 +532,140 @@ describe("canonical WASM build execution policy", () => {
 				assertHermeticWasmBuildEnvironment({ [name]: "override" }),
 			).toThrow("output-affecting Rust/Cargo environment");
 		}
+
+		const cargoHome = mkdtempSync(resolve(tmpdir(), "waddle-wasm-cargo-home-"));
+		roots.push(cargoHome);
+		writeFileSync(resolve(cargoHome, "config.toml"), "[build]\nrustflags = ['-Ctarget-cpu=native']\n");
+		expect(() =>
+			assertHermeticWasmBuildEnvironment({ CARGO_HOME: cargoHome }),
+		).toThrow("ambient CARGO_HOME configuration");
 	});
 
-	test("requires Bun, Cargo, rustc, and wasm-pack to resolve from Nix", () => {
+	test("requires exact flake tool paths and versions, not arbitrary Nix tools", () => {
+		const expected = {
+			bun: "/nix/store/flake-bun/bin/bun",
+			cargo: "/nix/store/flake-rust/bin/cargo",
+			rustc: "/nix/store/flake-rust/bin/rustc",
+			wasmPack: "/nix/store/flake-wasm-pack/bin/wasm-pack",
+			wasmBindgen: "/nix/store/flake-wasm-bindgen/bin/wasm-bindgen",
+		};
 		expect(() =>
-			assertPinnedNixToolchain({
-				bun: "/nix/store/bun/bin/bun",
-				cargo: "/nix/store/rust/bin/cargo",
-				rustc: "/nix/store/rust/bin/rustc",
-				wasmPack: "/nix/store/wasm-pack/bin/wasm-pack",
-			}),
+			assertPinnedNixToolchain(expected, expected),
 		).not.toThrow();
 		expect(() =>
-			assertPinnedNixToolchain({
-				bun: "/usr/local/bin/bun",
-				cargo: "/nix/store/rust/bin/cargo",
-				rustc: "/nix/store/rust/bin/rustc",
-				wasmPack: "/nix/store/wasm-pack/bin/wasm-pack",
-			}),
-		).toThrow("flake-pinned /nix/store toolchain");
+			assertPinnedNixToolchain(
+				{ ...expected, bun: "/nix/store/ambient-bun/bin/bun" },
+				expected,
+			),
+		).toThrow("exact repository-flake tool");
+
+		const versions = {
+			bun: "1.3.0",
+			cargo: "1.88.0",
+			rustc: "1.88.0",
+			wasmPack: "0.13.1",
+			wasmBindgen: "0.2.120",
+		};
+		expect(() => assertPinnedToolVersions(versions, versions)).not.toThrow();
+		expect(() =>
+			assertPinnedToolVersions(
+				{ ...versions, wasmPack: "0.13.0" },
+				versions,
+			),
+		).toThrow("version must match the repository flake");
+	});
+
+	test("resolves tools directly from PATH without depending on which", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-path-"));
+		roots.push(root);
+		const bin = resolve(root, "bin");
+		mkdirSync(bin);
+		const cargo = resolve(bin, "cargo");
+		writeFileSync(cargo, "#!/bin/sh\nexit 0\n");
+		chmodSync(cargo, 0o755);
+		expect(resolveExecutableOnPath("cargo", bin)).toBe(realpathSync(cargo));
+		expect(() => resolveExecutableOnPath("which", bin)).toThrow(
+			"could not resolve which",
+		);
+	});
+
+	test("allocates fresh config-free homes and rejects target contamination", () => {
+		const runRoot = mkdtempSync(resolve(tmpdir(), "waddle-wasm-run-test-"));
+		roots.push(runRoot);
+		const first = createIsolatedWasmBuildPaths(runRoot, "first");
+		const second = createIsolatedWasmBuildPaths(runRoot, "second");
+		expect(first.root).not.toBe(second.root);
+		expect(first.cargoHome).not.toBe(second.cargoHome);
+		expect(first.cargoTarget).not.toBe(second.cargoTarget);
+		expect(readdirSync(second.cargoHome)).toEqual([]);
+		expect(readdirSync(second.cargoTarget)).toEqual([]);
+
+		const environment = {
+			WADDLE_WASM_BUILD_ROOT: first.root,
+			CARGO_HOME: first.cargoHome,
+			CARGO_TARGET_DIR: first.cargoTarget,
+			HOME: first.home,
+		};
+		expect(() =>
+			assertPinnedWasmBuildFilesystem(environment, first.outDir),
+		).not.toThrow();
+		writeFileSync(resolve(first.cargoTarget, "ambient-artifact"), "poison");
+		expect(() =>
+			assertPinnedWasmBuildFilesystem(environment, first.outDir),
+		).toThrow("must start empty");
+	});
+
+	test("renders a locked path-flake command without VCS discovery", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-no-vcs-"));
+		roots.push(root);
+		const repoRoot = resolve(root, "checkout-without-dot-git");
+		mkdirSync(repoRoot);
+		const paths = createIsolatedWasmBuildPaths(root, "build");
+		const args = pinnedFlakeBuildArgs({
+			repoRoot,
+			scriptPath: resolve(repoRoot, BUILD_SCRIPT_PATH),
+			outDir: paths.outDir,
+			paths,
+			executor: contract.executor,
+		});
+		expect(args.slice(0, 5)).toEqual([
+			"develop",
+			"--no-update-lock-file",
+			"--no-write-lock-file",
+			"--ignore-environment",
+			`path:${repoRoot}`,
+		]);
+		expect(args).not.toContain("git");
+		expect(args).toContain(`CARGO_HOME=${paths.cargoHome}`);
+		expect(args).toContain(`CARGO_TARGET_DIR=${paths.cargoTarget}`);
+		expect(args).toContain(
+			`CARGO_ENCODED_RUSTFLAGS=${canonicalEncodedRustFlags(
+				repoRoot,
+				paths.root,
+				contract.executor.remapPathPrefixes,
+			)}`,
+		);
+	});
+
+	test("compares all six compiled package artifacts byte-for-byte", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-artifacts-"));
+		roots.push(root);
+		const left = resolve(root, "left");
+		const right = resolve(root, "right");
+		mkdirSync(left);
+		mkdirSync(right);
+		for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+			writeFileSync(resolve(left, artifact), `same:${artifact}`);
+			writeFileSync(resolve(right, artifact), `same:${artifact}`);
+		}
+		expect(() => assertWasmArtifactSetsEqual(left, right)).not.toThrow();
+		writeFileSync(
+			resolve(right, "waddle_xmpp_client_wasm_bg.wasm"),
+			"different compiled bytes",
+		);
+		expect(() => assertWasmArtifactSetsEqual(left, right)).toThrow(
+			"waddle_xmpp_client_wasm_bg.wasm",
+		);
 	});
 
 	test("renders all wrapper cache-bust references from one full digest", () => {

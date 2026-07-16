@@ -1,4 +1,4 @@
-const WASM_PACK_ARGS_V1 = Object.freeze([
+const WASM_PACK_ARGS_V2 = Object.freeze([
 	"build",
 	"--target",
 	"bundler",
@@ -10,7 +10,7 @@ const WASM_PACK_ARGS_V1 = Object.freeze([
 ]);
 
 export function validateWasmBuildContract(contract) {
-	if (contract?.schemaVersion !== 1) {
+	if (contract?.schemaVersion !== 2) {
 		throw new Error(
 			"unsupported WASM build contract schemaVersion; update the validator explicitly",
 		);
@@ -44,13 +44,28 @@ export function validateWasmBuildContract(contract) {
 	if (
 		contract.wasmPack?.command !== "wasm-pack" ||
 		!Array.isArray(contract.wasmPack?.args) ||
-		contract.wasmPack.args.length !== WASM_PACK_ARGS_V1.length ||
+		contract.wasmPack.args.length !== WASM_PACK_ARGS_V2.length ||
 		contract.wasmPack.args.some(
-			(argument, index) => argument !== WASM_PACK_ARGS_V1[index],
+			(argument, index) => argument !== WASM_PACK_ARGS_V2[index],
 		)
 	) {
 		throw new Error(
-			"unsupported v1 wasm-pack invocation contract; update the versioned validator explicitly",
+			"unsupported v2 wasm-pack invocation contract; update the versioned validator explicitly",
+		);
+	}
+	if (
+		contract.executor?.protocol !==
+			"waddle:xmpp-client-wasm:pinned-flake-executor:v1" ||
+		contract.executor?.flake !== "path:." ||
+		contract.executor?.ignoreEnvironment !== true ||
+		contract.executor?.cleanCargoHome !== true ||
+		contract.executor?.cleanCargoTarget !== true ||
+		contract.executor?.artifactCount !== 6 ||
+		contract.executor?.remapPathPrefixes?.buildRoot !== "/waddle-build" ||
+		contract.executor?.remapPathPrefixes?.repoRoot !== "/waddle"
+	) {
+		throw new Error(
+			"unsupported canonical WASM flake-executor contract; update the versioned validator explicitly",
 		);
 	}
 }

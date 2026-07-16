@@ -88,6 +88,37 @@ enum DriverInput {
     StreamManagementTimer,
 }
 
+/// Private attribution for one ordered browser wire-pump failure.
+///
+/// `send_frame` is synchronous: a thrown browser WebSocket send means that
+/// exact frame was not accepted. A later generated control-frame failure must
+/// therefore terminate the stream without reclassifying an already-confirmed
+/// initiating stanza as retryable.
+#[derive(Debug)]
+struct WasmPumpFailure {
+    failed_message: TransportMessage,
+    initiating_message_confirmed: bool,
+    source: ClientError,
+}
+
+impl WasmPumpFailure {
+    fn initiating_message_confirmed(&self) -> bool {
+        self.initiating_message_confirmed
+    }
+
+    fn attributed_message(&self) -> &TransportMessage {
+        &self.failed_message
+    }
+
+    fn source(&self) -> &ClientError {
+        &self.source
+    }
+
+    fn into_source(self) -> ClientError {
+        self.source
+    }
+}
+
 async fn select_driver_input<WireFuture, CommandFuture, TimerFuture>(
     wire_future: WireFuture,
     command_future: CommandFuture,
@@ -235,7 +266,7 @@ impl WasmDriverTask {
         }
 
         if progress_stalled {
-            let _ = self.ws.close();
+            self.terminate_uncleanly().await;
             return false;
         }
         true
@@ -370,6 +401,12 @@ impl WasmDriverTask {
                     .send_transport_message(TransportMessage::Close(StreamClose))
                     .await;
                 let keep_running = result.is_ok();
+                let result = result.map_err(WasmPumpFailure::into_source);
+                if result.is_err() {
+                    self.explicit_disconnect = false;
+                    self.publish_resume_state_snapshot();
+                    self.terminate_uncleanly().await;
+                }
                 let _ = responder.send(result);
                 keep_running
             }
@@ -386,18 +423,34 @@ impl WasmDriverTask {
         stanza: Element,
         responder: oneshot::Sender<DriverResult<()>>,
     ) -> bool {
-        let result = self
-            .send_transport_message(TransportMessage::Element(stanza.clone()))
-            .await;
-        let keep_running = result.is_ok();
-        if let Err(err) = &result {
-            if let Some(stanza_id) = message_delivery_stanza_id(&stanza) {
-                self.emit_message_delivery_failed(stanza_id).await;
+        let initiating_message = TransportMessage::Element(stanza.clone());
+        match self
+            .send_transport_message(initiating_message.clone())
+            .await
+        {
+            Ok(()) => {
+                let _ = responder.send(Ok(()));
+                true
             }
-            self.emit_error(err.to_string()).await;
+            Err(failure) => {
+                self.emit_error(failure.source().to_string()).await;
+                if failure.initiating_message_confirmed() {
+                    // The application stanza is already owned by XEP-0198.
+                    // Resolving success prevents the persisted browser queue
+                    // from rolling it back and sending it again after refresh.
+                    let _ = responder.send(Ok(()));
+                } else {
+                    if failure.attributed_message() == &initiating_message {
+                        if let Some(stanza_id) = message_delivery_stanza_id(&stanza) {
+                            self.emit_message_delivery_failed(stanza_id).await;
+                        }
+                    }
+                    let _ = responder.send(Err(failure.into_source()));
+                }
+                self.terminate_uncleanly().await;
+                false
+            }
         }
-        let _ = responder.send(result);
-        keep_running
     }
 
     async fn send_iq_command(
@@ -420,9 +473,18 @@ impl WasmDriverTask {
                     false
                 }
             },
-            Err(err) => {
-                self.emit_error(err.to_string()).await;
-                let _ = responder.send(Err(err));
+            Err(failure) => {
+                self.emit_error(failure.source().to_string()).await;
+                if failure.initiating_message_confirmed() {
+                    if let Some(id) = id {
+                        self.pending_iqs.insert(id, responder);
+                    } else {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
+                } else {
+                    let _ = responder.send(Err(failure.into_source()));
+                }
+                self.terminate_uncleanly().await;
                 false
             }
         }
@@ -450,9 +512,19 @@ impl WasmDriverTask {
                     false
                 }
             },
-            Err(err) => {
-                self.emit_error(err.to_string()).await;
-                let _ = responder.send(Err(err));
+            Err(failure) => {
+                self.emit_error(failure.source().to_string()).await;
+                if failure.initiating_message_confirmed() {
+                    if let Some(id) = id {
+                        self.pending_mam_queries
+                            .insert(id, PendingMamQuery::new(&query_id, responder));
+                    } else {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
+                } else {
+                    let _ = responder.send(Err(failure.into_source()));
+                }
+                self.terminate_uncleanly().await;
                 false
             }
         }
@@ -486,9 +558,25 @@ impl WasmDriverTask {
                     false
                 }
             },
-            Err(err) => {
-                self.emit_error(err.to_string()).await;
-                let _ = responder.send(Err(err));
+            Err(failure) => {
+                self.emit_error(failure.source().to_string()).await;
+                if failure.initiating_message_confirmed() {
+                    if let Some(id) = id {
+                        self.pending_inbox_queries.insert(
+                            id,
+                            PendingInboxQuery {
+                                query_id,
+                                entries: Vec::new(),
+                                responder,
+                            },
+                        );
+                    } else {
+                        let _ = responder.send(Err(ClientError::Disconnected));
+                    }
+                } else {
+                    let _ = responder.send(Err(failure.into_source()));
+                }
+                self.terminate_uncleanly().await;
                 false
             }
         }
@@ -572,8 +660,9 @@ impl WasmDriverTask {
 
     async fn handle_client_event(&mut self, event: ClientEvent) -> bool {
         if let Some(message) = self.dispatch_client_event(event).await {
-            if let Err(err) = self.send_transport_message(message).await {
-                self.emit_error(err.to_string()).await;
+            if let Err(failure) = self.send_transport_message(message).await {
+                self.emit_error(failure.source().to_string()).await;
+                self.terminate_uncleanly().await;
                 return false;
             }
         }
@@ -700,25 +789,53 @@ impl WasmDriverTask {
         }
     }
 
-    async fn send_transport_message(&mut self, message: TransportMessage) -> DriverResult<()> {
+    async fn send_transport_message(
+        &mut self,
+        message: TransportMessage,
+    ) -> Result<(), WasmPumpFailure> {
         enum PumpItem {
             Message(TransportMessage),
             Event(ClientEvent),
         }
 
         let mut pending = VecDeque::from([PumpItem::Message(message)]);
+        let mut initiating_message_confirmed = false;
         while let Some(item) = pending.pop_front() {
             match item {
                 PumpItem::Message(message) => {
-                    let frame = waddle_xmpp_client::encode_message(&message)?;
-                    self.ws.send_frame(&frame)?;
+                    let frame = waddle_xmpp_client::encode_message(&message).map_err(|source| {
+                        WasmPumpFailure {
+                            failed_message: message.clone(),
+                            initiating_message_confirmed,
+                            source,
+                        }
+                    })?;
+                    self.ws
+                        .send_frame(&frame)
+                        .map_err(|source| WasmPumpFailure {
+                            failed_message: message.clone(),
+                            initiating_message_confirmed,
+                            source,
+                        })?;
+                    if !initiating_message_confirmed {
+                        initiating_message_confirmed = true;
+                    }
                     if matches!(message, TransportMessage::Close(_)) {
-                        self.ws.close()?;
+                        self.ws.close().map_err(|source| WasmPumpFailure {
+                            failed_message: message.clone(),
+                            initiating_message_confirmed,
+                            source,
+                        })?;
                     }
 
                     let events = self
                         .runtime
-                        .apply_transport_event(TransportEvent::MessageSent(message))?;
+                        .apply_transport_event(TransportEvent::MessageSent(message.clone()))
+                        .map_err(|source| WasmPumpFailure {
+                            failed_message: message,
+                            initiating_message_confirmed,
+                            source,
+                        })?;
                     self.publish_resume_state_snapshot();
                     for event in events.into_iter().rev() {
                         pending.push_front(PumpItem::Event(event));
@@ -733,6 +850,26 @@ impl WasmDriverTask {
         }
 
         Ok(())
+    }
+
+    async fn terminate_uncleanly(&mut self) {
+        self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+            .await;
+        let _ = self.ws.close();
+        self.apply_terminal_transport_event(TransportEvent::StateChanged(TransportState::Closed))
+            .await;
+        self.apply_terminal_transport_event(TransportEvent::Closed)
+            .await;
+    }
+
+    async fn apply_terminal_transport_event(&mut self, event: TransportEvent) {
+        let Ok(events) = self.runtime.apply_transport_event(event) else {
+            return;
+        };
+        self.publish_resume_state_snapshot();
+        for event in events {
+            let _ = self.dispatch_client_event(event).await;
+        }
     }
     async fn emit_message_delivery_failed(&mut self, stanza_id: StanzaId) {
         let _ = self
@@ -885,6 +1022,8 @@ mod tests {
     struct FakeWireState {
         frames: Rc<RefCell<Vec<String>>>,
         close_count: Rc<Cell<usize>>,
+        send_attempt_count: Rc<Cell<usize>>,
+        fail_on_send_attempt: Rc<Cell<Option<usize>>>,
     }
 
     impl FakeWireState {
@@ -894,6 +1033,15 @@ mod tests {
                 .drain(..)
                 .map(|frame| waddle_xmpp_client::decode_message(&frame).expect("typed frame"))
                 .collect()
+        }
+
+        fn fail_after_successful_sends(&self, successful_sends: usize) {
+            self.fail_on_send_attempt
+                .set(Some(self.send_attempt_count.get() + successful_sends + 1));
+        }
+
+        fn send_attempt_count(&self) -> usize {
+            self.send_attempt_count.get()
         }
     }
 
@@ -922,6 +1070,12 @@ mod tests {
         }
 
         fn send_frame(&mut self, frame: &str) -> DriverResult<()> {
+            let attempt = self.state.send_attempt_count.get() + 1;
+            self.state.send_attempt_count.set(attempt);
+            if self.state.fail_on_send_attempt.get() == Some(attempt) {
+                self.state.fail_on_send_attempt.set(None);
+                return Err(ClientError::TransportClosed);
+            }
             self.state.frames.borrow_mut().push(frame.to_string());
             Ok(())
         }
@@ -1519,6 +1673,87 @@ mod tests {
                 TransportMessage::Element(element)
                     if waddle_xmpp_client::stream_management::SmState::is_request_ack(element)
             ));
+        });
+    }
+
+    #[test]
+    fn second_frame_failure_keeps_confirmed_message_sent_and_terminates_uncleanly() {
+        block_on(async {
+            let (mut task, wire, mut events, inner) = test_driver(test_config(None));
+            drive_to_fresh_sm_enabled(&mut task).await;
+            wire.take_messages();
+            wire.fail_after_successful_sends(1);
+            let attempts_before = wire.send_attempt_count();
+
+            let stanza = Element::builder("message", NS_CLIENT)
+                .attr(
+                    minidom::rxml::xml_ncname!("id").to_owned(),
+                    "confirmed-wasm",
+                )
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
+                .build();
+            let (responder, response) = oneshot::channel();
+
+            assert!(
+                !task
+                    .handle_command(Some(WasmCommand::SendStanza { stanza, responder }))
+                    .await
+            );
+            assert!(
+                response.await.expect("command response").is_ok(),
+                "a generated control-frame failure must not return a retryable message result"
+            );
+            task.finish().await;
+
+            assert_eq!(wire.send_attempt_count() - attempts_before, 2);
+            let messages = wire.take_messages();
+            assert_eq!(messages.len(), 1, "only the initiating frame was accepted");
+            assert!(matches!(
+                &messages[0],
+                TransportMessage::Element(element)
+                    if element.name() == "message" && element.attr("id") == Some("confirmed-wasm")
+            ));
+            let resume = inner
+                .borrow()
+                .resume_state
+                .clone()
+                .expect("confirmed stanza remains resumable");
+            assert_eq!(
+                resume
+                    .unhandled_message_stanza_ids()
+                    .iter()
+                    .map(StanzaId::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["confirmed-wasm"]
+            );
+            assert_eq!(wire.close_count.get(), 1);
+
+            let mut failed_delivery_count = 0;
+            let mut saw_failed = false;
+            let mut saw_closed = false;
+            let mut saw_disconnected = false;
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    DriverEvent::Client(event) => match *event {
+                        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
+                            ref stanza_id,
+                        }) if stanza_id.as_str() == "confirmed-wasm" => {
+                            failed_delivery_count += 1;
+                        }
+                        ClientEvent::Transport(TransportEvent::StateChanged(
+                            TransportState::Failed,
+                        )) => saw_failed = true,
+                        ClientEvent::Transport(TransportEvent::Closed) => saw_closed = true,
+                        _ => {}
+                    },
+                    DriverEvent::Disconnected => saw_disconnected = true,
+                    _ => {}
+                }
+            }
+            assert_eq!(failed_delivery_count, 0);
+            assert!(saw_failed);
+            assert!(saw_closed);
+            assert!(saw_disconnected);
         });
     }
 

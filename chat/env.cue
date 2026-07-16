@@ -65,6 +65,7 @@ let _WasmBuildInputs = [
 	"scripts/wasm-build-contract.mjs",
 	"scripts/wasm-build-contract.json",
 	"scripts/wasm-build-environment.mjs",
+	"scripts/wasm-build-executor.mjs",
 	"scripts/wasm-build-input-digest.mjs",
 	"scripts/wasm-build-input-manifest.mjs",
 	"scripts/wasm-build-inputs.mjs",

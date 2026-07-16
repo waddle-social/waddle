@@ -324,12 +324,14 @@ impl XmppRuntime {
 
         if SmState::is_request_ack(element) {
             if let Some(request) = self.pending_ack_request.take() {
-                events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
-                    crate::event::StreamManagementEvent::AckRequestSent {
-                        attempt: request.attempt,
-                        unacked: request.unacked,
-                    },
-                )));
+                if self.sm_state.confirm_ack_request_sent_at(now_ms) {
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        crate::event::StreamManagementEvent::AckRequestSent {
+                            attempt: request.attempt,
+                            unacked: request.unacked,
+                        },
+                    )));
+                }
             }
             return;
         }

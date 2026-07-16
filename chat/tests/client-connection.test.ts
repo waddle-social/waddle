@@ -241,6 +241,40 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
 
+  test("a confirmed WASM send stays inflight when its control follow-up disconnects", async () => {
+    let connected = true;
+    let attempts = 0;
+    const { queue, events } = createQueue({
+      canUseConnectedSession: () => connected,
+      sendDirect: async (_peer, _body, opts) => {
+        attempts += 1;
+        const id = compatWasmSendResult({ kind: "sent", stanza_id: opts.id });
+        connected = false;
+        return id;
+      },
+    });
+    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const failures: string[] = [];
+    events.on("queueDepthChange", (depth) => depths.push(depth));
+    events.on("messageDeliveryFailure", (id) => failures.push(id));
+    queue.queueDirectMessage("bob@example.com", "confirmed before control failure", {
+      id: "dm-confirmed-control-failure",
+    });
+
+    await queue.flushDirect();
+    await queue.flushDirect();
+
+    expect(attempts).toBe(1);
+    expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((message) => message.id))
+      .toEqual(["dm-confirmed-control-failure"]);
+    expect(depths.at(-1)).toEqual({
+      persisted: 1,
+      inflight: 1,
+      oldestAgeMs: 0,
+    });
+  });
+
   test("null and mismatched queued DM attempts roll back before a later acked retry", async () => {
     let attempt = 0;
     const { queue, events } = createQueue({

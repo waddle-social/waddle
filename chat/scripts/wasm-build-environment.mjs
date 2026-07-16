@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { X_OK } from "node:constants";
+import { accessSync, existsSync, realpathSync } from "node:fs";
+import { delimiter, resolve } from "node:path";
 import { bytewiseCompare } from "./wasm-build-input-digest.mjs";
 
 const FORBIDDEN_ENVIRONMENT_NAMES = new Set([
@@ -18,6 +20,13 @@ const FORBIDDEN_ENVIRONMENT_NAMES = new Set([
 	"RUSTFLAGS",
 	"RUSTUP_TOOLCHAIN",
 	"WASM_PACK_PROFILE",
+]);
+const PINNED_TOOL_NAMES = Object.freeze([
+	"bun",
+	"cargo",
+	"rustc",
+	"wasmPack",
+	"wasmBindgen",
 ]);
 
 function isForbiddenEnvironmentName(name) {
@@ -39,27 +48,94 @@ export function assertHermeticWasmBuildEnvironment(environment) {
 			`output-affecting Rust/Cargo environment is not allowed for the canonical WASM build: ${forbidden.join(", ")}`,
 		);
 	}
+
+	if (environment.CARGO_HOME) {
+		for (const name of ["config", "config.toml"]) {
+			if (existsSync(resolve(environment.CARGO_HOME, name))) {
+				throw new Error(
+					`ambient CARGO_HOME configuration is not allowed for the canonical WASM build: ${name}`,
+				);
+			}
+		}
+	}
 }
 
-export function assertPinnedNixToolchain(executables) {
-	for (const [name, path] of Object.entries(executables)) {
-		if (typeof path !== "string" || !path.startsWith("/nix/store/")) {
+export function assertPinnedNixToolchain(executables, expectedExecutables) {
+	for (const name of PINNED_TOOL_NAMES) {
+		const path = executables[name];
+		const expected = expectedExecutables[name];
+		if (
+			typeof path !== "string" ||
+			typeof expected !== "string" ||
+			!expected.startsWith("/nix/store/") ||
+			path !== expected
+		) {
 			throw new Error(
-				`${name} must resolve from the flake-pinned /nix/store toolchain`,
+				`${name} must resolve to the exact repository-flake tool: expected ${expected}, got ${path}`,
 			);
 		}
 	}
 }
 
-export function resolvePinnedNixToolchain(bunPath = process.execPath) {
-	const resolveExecutable = (name) =>
-		realpathSync(execFileSync("which", [name], { encoding: "utf8" }).trim());
+export function assertPinnedToolVersions(versions, expectedVersions) {
+	for (const name of PINNED_TOOL_NAMES) {
+		if (versions[name] !== expectedVersions[name]) {
+			throw new Error(
+				`${name} version must match the repository flake: expected ${expectedVersions[name]}, got ${versions[name]}`,
+			);
+		}
+	}
+}
+
+export function resolveExecutableOnPath(name, pathValue = process.env.PATH) {
+	if (!pathValue) throw new Error(`PATH is required to resolve ${name}`);
+	for (const directory of pathValue.split(delimiter)) {
+		if (!directory) continue;
+		const candidate = resolve(directory, name);
+		try {
+			accessSync(candidate, X_OK);
+			return realpathSync(candidate);
+		} catch {
+			// Keep searching the explicitly provided PATH.
+		}
+	}
+	throw new Error(`could not resolve ${name} on the pinned flake PATH`);
+}
+
+export function resolvePinnedNixToolchain(
+	expectedExecutables,
+	expectedVersions,
+	bunPath = process.execPath,
+) {
 	const executables = {
 		bun: realpathSync(bunPath),
-		cargo: resolveExecutable("cargo"),
-		rustc: resolveExecutable("rustc"),
-		wasmPack: resolveExecutable("wasm-pack"),
+		cargo: resolveExecutableOnPath("cargo"),
+		rustc: resolveExecutableOnPath("rustc"),
+		wasmPack: resolveExecutableOnPath("wasm-pack"),
+		wasmBindgen: resolveExecutableOnPath("wasm-bindgen"),
 	};
-	assertPinnedNixToolchain(executables);
-	return executables;
+	const normalizedExpectedExecutables = Object.fromEntries(
+		Object.entries(expectedExecutables).map(([name, path]) => [
+			name,
+			realpathSync(path),
+		]),
+	);
+	assertPinnedNixToolchain(executables, normalizedExpectedExecutables);
+	const version = (executable) => {
+		const output = execFileSync(executable, ["--version"], {
+			encoding: "utf8",
+		}).trim();
+		const match = output.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/u);
+		if (!match) throw new Error(`could not parse tool version from: ${output}`);
+		return match[0];
+	};
+	const versions = {
+		bun: version(executables.bun),
+		cargo: version(executables.cargo),
+		rustc: version(executables.rustc),
+		wasmPack: version(executables.wasmPack),
+		wasmBindgen: version(executables.wasmBindgen),
+	};
+	assertPinnedToolVersions(versions, expectedVersions);
+	return { executables, versions };
 }

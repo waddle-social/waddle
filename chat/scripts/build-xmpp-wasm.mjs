@@ -14,11 +14,16 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	assertHermeticWasmBuildEnvironment,
 	canonicalWasmBuildIdentity,
-	resolvePinnedNixToolchain,
 	wasmPackBuildArgs,
 } from "./wasm-build-inputs.mjs";
+import {
+	TRACKED_WASM_ARTIFACTS,
+	assertPinnedWasmBuildProcess,
+	assertWasmArtifactSetsEqual,
+	createIsolatedWasmBuildPaths,
+	runPinnedWasmBuild,
+} from "./wasm-build-executor.mjs";
 import { finalizeWasmPackage } from "./wasm-package-bindings.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -32,24 +37,38 @@ const nodeModulesDir = resolve(
 	"..",
 	"node_modules/@waddle/xmpp-client-wasm",
 );
-const checkOnly = process.argv.slice(2).includes("--check");
-const outDir = checkOnly
-	? mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-check-"))
-	: committedOutDir;
-if (checkOnly) {
-	process.on("exit", () => rmSync(outDir, { recursive: true, force: true }));
+const args = process.argv.slice(2);
+const checkOnly = args.includes("--check");
+const internalIndex = args.indexOf("--internal-pinned-build");
+const internalOutDir = internalIndex >= 0 ? args[internalIndex + 1] : undefined;
+if (internalIndex >= 0 && (!internalOutDir || checkOnly)) {
+	throw new Error("invalid internal pinned WASM build invocation");
 }
-const trackedGeneratedFiles = [
-	"package.json",
-	"waddle_xmpp_client_wasm.d.ts",
-	"waddle_xmpp_client_wasm.js",
-];
 const {
 	buildId,
 	contract,
 	entries: buildInputs,
 } = canonicalWasmBuildIdentity(repoRoot);
 const crateDir = resolve(repoRoot, ...contract.crate.split("/"));
+const scriptPath = fileURLToPath(import.meta.url);
+
+if (internalOutDir) {
+	assertPinnedWasmBuildProcess(
+		process.env,
+		contract,
+		internalOutDir,
+		repoRoot,
+	);
+	execFileSync(contract.wasmPack.command, wasmPackBuildArgs(contract, internalOutDir), {
+		cwd: crateDir,
+		stdio: "inherit",
+		env: { ...process.env },
+	});
+	// The cache-bust identity remains source-only. Compiled bytes are compared
+	// separately by the outer drift verifier and never enter this wrapper ID.
+	finalizeWasmPackage(internalOutDir, buildId);
+	process.exit(0);
+}
 
 function newestBuildInputMtime() {
 	return Math.max(
@@ -97,83 +116,87 @@ if (!checkOnly && process.env.REBUILD_WASM !== "1") {
 	);
 }
 
-assertHermeticWasmBuildEnvironment(process.env);
-resolvePinnedNixToolchain();
-execFileSync(contract.wasmPack.command, wasmPackBuildArgs(contract, outDir), {
-	cwd: crateDir,
-	stdio: "inherit",
-});
-
-// Replace the wasm-pack bundler entry point with a Vite-compatible one that
-// passes the correct import object so WebAssembly.instantiate() receives the
-// JS glue functions the WASM binary imports from "./waddle_xmpp_client_wasm_bg.js".
-//
-// We import the WASM binary as a URL (?url) and instantiate it manually so that
-// in dev mode we can set cache: "no-store" on the fetch.  This prevents the
-// browser from serving a stale compiled WebAssembly module after a rebuild,
-// which would cause "wasm.__wasm_bindgen_func_elem_N is not a function" errors
-// when the .wasm binary and _bg.js glue are from different builds.
-// In production the ?url resolves to a content-hashed filename so the browser
-// cache is correctly busted without needing no-store.
-//
-// The full cache-bust ID comes only from the versioned canonical input
-// manifest, never from host-sensitive compiled WASM or glue bytes.
-finalizeWasmPackage(outDir, buildId);
-
-if (checkOnly) {
-	const drifted = trackedGeneratedFiles.filter((file) => {
-		const committed = resolve(committedOutDir, file);
-		const rebuilt = resolve(outDir, file);
-		return (
-			!existsSync(committed) ||
-			!existsSync(rebuilt) ||
-			!readFileSync(committed).equals(readFileSync(rebuilt))
-		);
+const runRoot = mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-run-"));
+try {
+	const firstBuild = createIsolatedWasmBuildPaths(runRoot, "first");
+	runPinnedWasmBuild({
+		repoRoot,
+		scriptPath,
+		outDir: firstBuild.outDir,
+		paths: firstBuild,
+		contract,
 	});
-	if (drifted.length > 0) {
-		throw new Error(
-			`committed WASM bindings are stale: ${drifted.join(", ")}; run REBUILD_WASM=1 bun run wasm:build`,
+
+	if (checkOnly) {
+		const secondBuild = createIsolatedWasmBuildPaths(runRoot, "second");
+		runPinnedWasmBuild({
+			repoRoot,
+			scriptPath,
+			outDir: secondBuild.outDir,
+			paths: secondBuild,
+			contract,
+		});
+		assertWasmArtifactSetsEqual(firstBuild.outDir, secondBuild.outDir);
+		const drifted = TRACKED_WASM_ARTIFACTS.filter((file) => {
+			const committed = resolve(committedOutDir, file);
+			const rebuilt = resolve(firstBuild.outDir, file);
+			return (
+				!existsSync(committed) ||
+				!existsSync(rebuilt) ||
+				!readFileSync(committed).equals(readFileSync(rebuilt))
+			);
+		});
+		if (drifted.length > 0) {
+			throw new Error(
+				`committed WASM bindings are stale: ${drifted.join(", ")}; run REBUILD_WASM=1 bun run wasm:build`,
+			);
+		}
+		console.log(
+			"[wasm] Two isolated six-artifact builds match; committed bindings match the canonical rebuild.",
+		);
+	} else {
+		copyDirInPlace(firstBuild.outDir, committedOutDir);
+		// Copy compiled artifacts into node_modules so the local build uses this version.
+		// We write each file individually (writeFileSync, not cpSync) so that bun's
+		// hardlinked package cache is updated in-place: bun hardlinks the same inode
+		// for both the file: path and its internal .bun/ cache directory. cpSync would
+		// create new inodes (breaking hardlinks and leaving the bun cache stale), while
+		// writeFileSync writes through the existing inode so every hardlinked copy sees
+		// the new content immediately.
+		console.log("[wasm] Installing local build into node_modules...");
+		const realNodeModulesDir = existsSync(nodeModulesDir)
+			? realpathSync(nodeModulesDir)
+			: nodeModulesDir;
+		mkdirSync(realNodeModulesDir, { recursive: true });
+		copyDirInPlace(firstBuild.outDir, realNodeModulesDir);
+
+		// Clear Vite's module transform cache so it doesn't serve stale _bg.js from a previous build.
+		// Without this, a mismatch between the cached glue JS and the newly compiled .wasm causes
+		// runtime errors like "wasm.__wasm_bindgen_func_elem_N is not a function".
+		const viteCacheDir = resolve(scriptDir, "..", "node_modules", ".vite");
+		if (existsSync(viteCacheDir)) {
+			rmSync(viteCacheDir, { recursive: true, force: true });
+			console.log("[wasm] Cleared Vite module cache.");
+		}
+
+		console.log("[wasm] Done. Local build installed.");
+		console.log(
+			"[wasm] ⚠️  Next `bun install` will revert to the published registry version.",
 		);
 	}
-	console.log("[wasm] Committed WASM bindings match the forced rebuild.");
-} else {
-	// Copy compiled artifacts into node_modules so the local build uses this version.
-	// We write each file individually (writeFileSync, not cpSync) so that bun's
-	// hardlinked package cache is updated in-place: bun hardlinks the same inode
-	// for both the file: path and its internal .bun/ cache directory. cpSync would
-	// create new inodes (breaking hardlinks and leaving the bun cache stale), while
-	// writeFileSync writes through the existing inode so every hardlinked copy sees
-	// the new content immediately.
-	console.log("[wasm] Installing local build into node_modules...");
-	const realNodeModulesDir = existsSync(nodeModulesDir)
-		? realpathSync(nodeModulesDir)
-		: nodeModulesDir;
-	mkdirSync(realNodeModulesDir, { recursive: true });
-	function copyDirInPlace(src, dest) {
-		mkdirSync(dest, { recursive: true });
-		for (const entry of readdirSync(src)) {
-			const srcPath = resolve(src, entry);
-			const destPath = resolve(dest, entry);
-			if (statSync(srcPath).isDirectory()) {
-				copyDirInPlace(srcPath, destPath);
-			} else {
-				writeFileSync(destPath, readFileSync(srcPath));
-			}
+} finally {
+	rmSync(runRoot, { recursive: true, force: true });
+}
+
+function copyDirInPlace(src, dest) {
+	mkdirSync(dest, { recursive: true });
+	for (const entry of readdirSync(src)) {
+		const srcPath = resolve(src, entry);
+		const destPath = resolve(dest, entry);
+		if (statSync(srcPath).isDirectory()) {
+			copyDirInPlace(srcPath, destPath);
+		} else {
+			writeFileSync(destPath, readFileSync(srcPath));
 		}
 	}
-	copyDirInPlace(outDir, realNodeModulesDir);
-
-	// Clear Vite's module transform cache so it doesn't serve stale _bg.js from a previous build.
-	// Without this, a mismatch between the cached glue JS and the newly compiled .wasm causes
-	// runtime errors like "wasm.__wasm_bindgen_func_elem_N is not a function".
-	const viteCacheDir = resolve(scriptDir, "..", "node_modules", ".vite");
-	if (existsSync(viteCacheDir)) {
-		rmSync(viteCacheDir, { recursive: true, force: true });
-		console.log("[wasm] Cleared Vite module cache.");
-	}
-
-	console.log("[wasm] Done. Local build installed.");
-	console.log(
-		"[wasm] ⚠️  Next `bun install` will revert to the published registry version.",
-	);
 }

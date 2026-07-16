@@ -17,6 +17,7 @@ export const WASM_BUILD_INPUT_MANIFEST = Object.freeze({
 		CONTRACT_PATH,
 		"chat/scripts/wasm-build-contract.mjs",
 		"chat/scripts/wasm-build-environment.mjs",
+		"chat/scripts/wasm-build-executor.mjs",
 		"chat/scripts/wasm-build-input-digest.mjs",
 		"chat/scripts/wasm-build-input-manifest.mjs",
 		"chat/scripts/wasm-build-inputs.mjs",

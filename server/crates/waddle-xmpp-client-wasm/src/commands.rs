@@ -37,6 +37,7 @@ pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutc
         ClientError::InvalidTransportScheme { .. }
         | ClientError::MissingWebSocketHost
         | ClientError::WebSocketConnectTimeout { .. }
+        | ClientError::WebSocketWriteTimeout { .. }
         | ClientError::TransportClosed
         | ClientError::EmptyTransportFrame
         | ClientError::TransportFrameTooLarge { .. }

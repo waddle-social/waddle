@@ -7,19 +7,19 @@
  * Usage: bun run scripts/build-and-publish-wasm.mjs
  */
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalWasmBuildIdentity } from "./wasm-build-inputs.mjs";
 import {
-	assertHermeticWasmBuildEnvironment,
-	canonicalWasmBuildIdentity,
-	resolvePinnedNixToolchain,
-	wasmPackBuildArgs,
-} from "./wasm-build-inputs.mjs";
-import { finalizeWasmPackage } from "./wasm-package-bindings.mjs";
+	createIsolatedWasmBuildPaths,
+	runPinnedWasmBuild,
+} from "./wasm-build-executor.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..", "..");
-const outDir = resolve(repoRoot, "server/wasm-pkg/waddle-xmpp-client-wasm");
+const buildScriptPath = resolve(scriptDir, "build-xmpp-wasm.mjs");
 
 if (!process.env.NODE_AUTH_TOKEN) {
 	console.error(
@@ -27,26 +27,29 @@ if (!process.env.NODE_AUTH_TOKEN) {
 	);
 	process.exit(1);
 }
-assertHermeticWasmBuildEnvironment(process.env);
-resolvePinnedNixToolchain();
-const { buildId, contract } = canonicalWasmBuildIdentity(repoRoot);
-const crateDir = resolve(repoRoot, ...contract.crate.split("/"));
+const { contract } = canonicalWasmBuildIdentity(repoRoot);
+const runRoot = mkdtempSync(resolve(tmpdir(), "waddle-xmpp-wasm-publish-"));
+try {
+	const build = createIsolatedWasmBuildPaths(runRoot, "package");
+	console.log(
+		"[wasm] Building @waddle/xmpp-client-wasm through the pinned repository flake...",
+	);
+	runPinnedWasmBuild({
+		repoRoot,
+		scriptPath: buildScriptPath,
+		outDir: build.outDir,
+		paths: build,
+		contract,
+	});
 
-// Build
-console.log("[wasm] Building @waddle/xmpp-client-wasm from Rust source...");
-execFileSync(contract.wasmPack.command, wasmPackBuildArgs(contract, outDir), {
-	cwd: crateDir,
-	stdio: "inherit",
-});
+	console.log("[wasm] Publishing @waddle/xmpp-client-wasm to GitHub Packages...");
+	execFileSync("bun", ["publish", "--access", "public"], {
+		cwd: build.outDir,
+		stdio: "inherit",
+		env: { ...process.env },
+	});
 
-finalizeWasmPackage(outDir, buildId);
-
-// Publish to GitHub Packages.
-console.log("[wasm] Publishing @waddle/xmpp-client-wasm to GitHub Packages...");
-execFileSync("bun", ["publish", "--access", "public"], {
-	cwd: outDir,
-	stdio: "inherit",
-	env: { ...process.env },
-});
-
-console.log("[wasm] Published successfully.");
+	console.log("[wasm] Published successfully.");
+} finally {
+	rmSync(runRoot, { recursive: true, force: true });
+}

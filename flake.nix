@@ -417,6 +417,41 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
+          wasmBindgenCliVersion = "0.2.120";
+          wasmBindgenRelease =
+            {
+              aarch64-darwin = {
+                target = "aarch64-apple-darwin";
+                hash = "sha256-1zazRVwC9pwpD8qSFooYVFHk6kN2v1mmBS45GdEisLU=";
+              };
+              aarch64-linux = {
+                target = "aarch64-unknown-linux-musl";
+                hash = "sha256-3qNSPUmNjQYMG70WgyvxD0sGyOFoYUJ3Bqs4ZYpW8/8=";
+              };
+              x86_64-darwin = {
+                target = "x86_64-apple-darwin";
+                hash = "sha256-5fx3y5RyC4fCnYEM+2sGEzuBcgR5X/QU4OcLGFWj2eA=";
+              };
+              x86_64-linux = {
+                target = "x86_64-unknown-linux-musl";
+                hash = "sha256-zrbwuf6p0oaPJYIVodf4akwoMwoNZEMsx9U2dGGHctY=";
+              };
+            }
+            .${system};
+          wasmBindgenCli = pkgs.stdenvNoCC.mkDerivation {
+            pname = "wasm-bindgen-cli";
+            version = wasmBindgenCliVersion;
+            src = pkgs.fetchurl {
+              url = "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${wasmBindgenCliVersion}/wasm-bindgen-${wasmBindgenCliVersion}-${wasmBindgenRelease.target}.tar.gz";
+              hash = wasmBindgenRelease.hash;
+            };
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              install -m755 wasm-bindgen wasm-bindgen-test-runner wasm2es6js "$out/bin/"
+              runHook postInstall
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -433,6 +468,7 @@
               pkgs.cargo-chef
               pkgs.cargo-nextest
               pkgs.wasm-pack
+              wasmBindgenCli
               pkgs.teleport
               pkgs.openssl
               pkgs.pkg-config
@@ -454,6 +490,19 @@
             ];
 
             env.JAVA_HOME = "${pkgs.temurin-bin-21}";
+            # Canonical WASM builds re-enter through this exact locked flake
+            # and compare both executable paths and versions before invoking
+            # wasm-pack. Merely finding an arbitrary tool in /nix/store is not
+            # sufficient proof of repository toolchain identity.
+            env.WADDLE_FLAKE_BUN = "${pkgs.bun}/bin/bun";
+            env.WADDLE_FLAKE_CARGO = "${rustToolchain}/bin/cargo";
+            env.WADDLE_FLAKE_RUSTC = "${rustToolchain}/bin/rustc";
+            env.WADDLE_FLAKE_WASM_PACK = "${pkgs.wasm-pack}/bin/wasm-pack";
+            env.WADDLE_FLAKE_WASM_BINDGEN = "${wasmBindgenCli}/bin/wasm-bindgen";
+            env.WADDLE_FLAKE_BUN_VERSION = pkgs.bun.version;
+            env.WADDLE_FLAKE_RUST_VERSION = rustToolchain.version;
+            env.WADDLE_FLAKE_WASM_PACK_VERSION = pkgs.wasm-pack.version;
+            env.WADDLE_FLAKE_WASM_BINDGEN_VERSION = wasmBindgenCliVersion;
 
             shellHook = ''
               echo "waddle dev shell"

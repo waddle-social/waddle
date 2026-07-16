@@ -530,6 +530,151 @@ async fn generated_ack_request_write_failure_forces_terminal_unclean_state() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn generated_ack_request_definitely_not_written_does_not_fail_confirmed_message() {
+    let shared = MockTransportShared::default();
+    shared.fail_ack_request_write(TransportWriteResponsibility::DefinitelyNotWritten);
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza("confirmed-message")))
+            .await
+    );
+
+    assert_eq!(resume_stanza_ids(&task), vec!["confirmed-message"]);
+    assert_eq!(attempted_stanza_count(&shared, "confirmed-message"), 1);
+    assert_eq!(attempted_ack_request_count(&shared), 1);
+    let observed = drain_client_events(&mut events);
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "confirmed-message"
+    )));
+    assert_terminal_transport_event_slice(&observed);
+    assert_eq!(shared.abort_count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn permanently_pending_original_stanza_is_bounded_and_retained_once() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    shared.pend_stanza_write(StanzaId::new("pending-original").unwrap());
+    let started = tokio::time::Instant::now();
+
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza("pending-original")))
+            .await
+    );
+
+    assert_eq!(
+        tokio::time::Instant::now().duration_since(started),
+        NATIVE_TRANSPORT_WRITE_DEADLINE
+    );
+    assert_eq!(resume_stanza_ids(&task), vec!["pending-original"]);
+    assert_eq!(attempted_stanza_count(&shared, "pending-original"), 1);
+    assert_eq!(attempted_ack_request_count(&shared), 0);
+    assert!(!shared
+        .sent_messages()
+        .iter()
+        .any(|message| transport_message_id(message) == Some("pending-original")));
+    let observed = drain_client_events(&mut events);
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "pending-original"
+    )));
+    assert_terminal_transport_event_slice(&observed);
+    assert_eq!(shared.abort_count(), 1);
+    assert_eq!(shared.close_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn permanently_pending_generated_ack_is_bounded_without_rolling_back_message() {
+    let shared = MockTransportShared::default();
+    shared.pend_ack_request_write();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    let started = tokio::time::Instant::now();
+
+    assert!(
+        !task
+            .handle_command(XmppCommand::SendStanza(message_stanza(
+                "confirmed-before-pending-r"
+            )))
+            .await
+    );
+
+    assert_eq!(
+        tokio::time::Instant::now().duration_since(started),
+        NATIVE_TRANSPORT_WRITE_DEADLINE
+    );
+    assert_eq!(resume_stanza_ids(&task), vec!["confirmed-before-pending-r"]);
+    assert_eq!(
+        attempted_stanza_count(&shared, "confirmed-before-pending-r"),
+        1
+    );
+    assert_eq!(attempted_ack_request_count(&shared), 1);
+    let observed = drain_client_events(&mut events);
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+            if stanza_id.as_str() == "confirmed-before-pending-r"
+    )));
+    assert!(!observed.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::StreamManagement(
+            StreamManagementEvent::AckRequestSent { .. }
+        ))
+    )));
+    assert_terminal_transport_event_slice(&observed);
+    assert_eq!(shared.abort_count(), 1);
+    assert_eq!(shared.close_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn permanently_pending_close_is_unfinished_bounded_and_terminal() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    drive_task_to_sm_enabled(&mut task).await;
+    assert!(
+        task.handle_command(XmppCommand::SendStanza(message_stanza(
+            "resume-after-close-timeout"
+        )))
+        .await
+    );
+    shared.set_close_pending(true);
+    let resumable_before = task.runtime.resume_state();
+    let started = tokio::time::Instant::now();
+
+    assert!(!task.handle_command(XmppCommand::Disconnect).await);
+
+    assert_eq!(
+        tokio::time::Instant::now().duration_since(started),
+        NATIVE_TRANSPORT_WRITE_DEADLINE
+    );
+    assert_eq!(task.runtime.resume_state(), resumable_before);
+    assert!(!task.explicit_disconnect);
+    assert_eq!(shared.close_count(), 1);
+    assert_eq!(shared.abort_count(), 1);
+    assert!(!shared
+        .sent_messages()
+        .iter()
+        .any(|message| matches!(message, TransportMessage::Close(_))));
+    let observed = drain_client_events(&mut events);
+    assert!(!observed
+        .iter()
+        .any(|event| matches!(event, ClientEvent::ResumeStateChanged(None))));
+    assert_terminal_transport_event_slice(&observed);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn direct_message_possibly_written_failure_is_retained_once_and_terminal() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, mut events) =
@@ -936,6 +1081,8 @@ struct MockTransportShared {
     close_count: Arc<Mutex<usize>>,
     abort_count: Arc<Mutex<usize>>,
     write_failures: Arc<Mutex<VecDeque<MockWriteFailure>>>,
+    pending_writes: Arc<Mutex<VecDeque<MockWriteTarget>>>,
+    close_pending: Arc<Mutex<bool>>,
     abort_failure: Arc<Mutex<bool>>,
     abort_pending: Arc<Mutex<bool>>,
 }
@@ -998,6 +1145,24 @@ impl MockTransportShared {
                 target: MockWriteTarget::Stanza(stanza_id),
                 responsibility,
             });
+    }
+
+    fn pend_stanza_write(&self, stanza_id: StanzaId) {
+        self.pending_writes
+            .lock()
+            .unwrap()
+            .push_back(MockWriteTarget::Stanza(stanza_id));
+    }
+
+    fn pend_ack_request_write(&self) {
+        self.pending_writes
+            .lock()
+            .unwrap()
+            .push_back(MockWriteTarget::AckRequest);
+    }
+
+    fn set_close_pending(&self, pending: bool) {
+        *self.close_pending.lock().unwrap() = pending;
     }
 
     fn set_abort_failure(&self, fail: bool) {
@@ -1073,6 +1238,16 @@ impl WebSocketTransport for MockTransport {
                 .lock()
                 .unwrap()
                 .push(message.clone());
+            let pending = {
+                let mut pending_writes = self.shared.pending_writes.lock().unwrap();
+                let matches = pending_writes
+                    .front()
+                    .is_some_and(|target| mock_write_target_matches(target, &message));
+                matches.then(|| pending_writes.pop_front())
+            };
+            if pending.is_some() {
+                return std::future::pending::<TransportWriteResult<()>>().await;
+            }
             let failure = {
                 let mut failures = self.shared.write_failures.lock().unwrap();
                 let matches = failures
@@ -1120,6 +1295,9 @@ impl WebSocketTransport for MockTransport {
                 .lock()
                 .unwrap()
                 .push(TransportMessage::Close(StreamClose));
+            if *self.shared.close_pending.lock().unwrap() {
+                return std::future::pending::<TransportWriteResult<()>>().await;
+            }
             self.shared
                 .sent_messages
                 .lock()
@@ -1385,6 +1563,20 @@ fn attempted_stanza_count(shared: &MockTransportShared, stanza_id: &str) -> usiz
         .attempted_messages()
         .iter()
         .filter(|message| transport_message_id(message) == Some(stanza_id))
+        .count()
+}
+
+fn attempted_ack_request_count(shared: &MockTransportShared) -> usize {
+    shared
+        .attempted_messages()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                TransportMessage::Element(element)
+                    if element.name() == "r" && element.ns() == NS_SM
+            )
+        })
         .count()
 }
 

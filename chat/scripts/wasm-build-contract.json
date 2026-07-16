@@ -1,6 +1,6 @@
 {
-	"schemaVersion": 1,
-	"digestFormat": "waddle:xmpp-client-wasm:canonical-inputs:v1",
+	"schemaVersion": 2,
+	"digestFormat": "waddle:xmpp-client-wasm:canonical-inputs:v2",
 	"packageScript": "bun run scripts/build-xmpp-wasm.mjs",
 	"crate": "server/crates/waddle-xmpp-client-wasm",
 	"cargo": {
@@ -22,5 +22,17 @@
 			"--",
 			"--locked"
 		]
+	},
+	"executor": {
+		"protocol": "waddle:xmpp-client-wasm:pinned-flake-executor:v1",
+		"flake": "path:.",
+		"ignoreEnvironment": true,
+		"cleanCargoHome": true,
+		"cleanCargoTarget": true,
+		"artifactCount": 6,
+		"remapPathPrefixes": {
+			"buildRoot": "/waddle-build",
+			"repoRoot": "/waddle"
+		}
 	}
 }
