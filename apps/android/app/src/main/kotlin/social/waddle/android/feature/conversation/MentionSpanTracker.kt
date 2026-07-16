@@ -60,8 +60,13 @@ class MentionSpanTracker {
         if (token.start < 0 || token.end > current.length || token.start >= token.end) return null
         // A stale token (e.g. a second tap racing the recomposition that
         // dismisses the popover) must not re-insert over already-updated
-        // text: the token region must still read `@query`.
+        // text: the token region must still read `@query`...
         if (current.substring(token.start, token.end) != "@${token.query}") return null
+        // ...and the substring check alone is bypassable — after the
+        // first insert of `@bob `, the stale token's region still reads
+        // `@bo`. A token overlapping an already-recorded label is the
+        // double-tap replaying; reject it.
+        if (spans.any { it.start < token.end && token.start < it.endExclusive }) return null
         val label = "@${candidate.display}"
         val newText = current.replaceRange(token.start, token.end, "$label ")
         onTextChanged(newText)
