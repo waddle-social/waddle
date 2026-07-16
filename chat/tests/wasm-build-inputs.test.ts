@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import {
 	GITHUB_PACKAGES_REGISTRY,
 	buildAndPublishWasm,
@@ -133,6 +134,78 @@ afterEach(() => {
 	}
 	cargoMetadataByRoot.clear();
 });
+
+const TAR_BLOCK_BYTES = 512;
+
+function readTarField(
+	archive: Uint8Array,
+	offset: number,
+	length: number,
+): string {
+	const field = archive.subarray(offset, offset + length);
+	const terminator = field.indexOf(0);
+	return Buffer.from(
+		terminator === -1 ? field : field.subarray(0, terminator),
+	).toString("utf8");
+}
+
+function readTarSize(archive: Uint8Array, headerOffset: number): number {
+	const encoded = readTarField(archive, headerOffset + 124, 12).trim();
+	if (!/^[0-7]+$/u.test(encoded)) {
+		throw new Error(`packed archive has an invalid tar size: ${encoded}`);
+	}
+	const size = Number.parseInt(encoded, 8);
+	if (!Number.isSafeInteger(size)) {
+		throw new Error(`packed archive has an unsafe tar size: ${encoded}`);
+	}
+	return size;
+}
+
+function packedArtifactNames(archivePath: string): string[] {
+	const archive = gunzipSync(readFileSync(archivePath));
+	const entries: string[] = [];
+	let offset = 0;
+
+	while (offset + TAR_BLOCK_BYTES <= archive.length) {
+		const header = archive.subarray(offset, offset + TAR_BLOCK_BYTES);
+		if (header.every((byte) => byte === 0)) {
+			break;
+		}
+
+		const name = readTarField(archive, offset, 100);
+		const prefix = readTarField(archive, offset + 345, 155);
+		const entryPath = prefix === "" ? name : `${prefix}/${name}`;
+		const type = header[156];
+		const size = readTarSize(archive, offset);
+		if (type === 0 || type === "0".charCodeAt(0)) {
+			entries.push(entryPath);
+		} else if (type === "5".charCodeAt(0)) {
+			if (size !== 0) {
+				throw new Error(`packed archive directory has a payload: ${entryPath}`);
+			}
+		} else {
+			throw new Error(
+				`packed archive has an unsupported tar entry: ${entryPath} (${String.fromCharCode(type ?? 0)})`,
+			);
+		}
+
+		const paddedSize = Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+		offset += TAR_BLOCK_BYTES + paddedSize;
+		if (offset > archive.length) {
+			throw new Error(
+				`packed archive entry exceeds its tar payload: ${entryPath}`,
+			);
+		}
+	}
+
+	return entries.map((entry) => {
+		const packagePrefix = "package/";
+		if (!entry.startsWith(packagePrefix)) {
+			throw new Error(`packed archive entry is outside package/: ${entry}`);
+		}
+		return entry.slice(packagePrefix.length);
+	});
+}
 
 function write(
 	root: string,
@@ -1118,6 +1191,10 @@ describe("canonical WASM build execution policy", () => {
 	test("real Bun pack includes every canonical artifact and excludes temporary build files", () => {
 		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-pack-"));
 		roots.push(root);
+		const packageDir = resolve(root, "package");
+		const archiveDir = resolve(root, "archives");
+		mkdirSync(packageDir);
+		mkdirSync(archiveDir);
 		for (const artifact of WASM_PACKAGE_ARTIFACTS) {
 			const contents =
 				artifact === "package.json"
@@ -1125,21 +1202,38 @@ describe("canonical WASM build execution policy", () => {
 					: artifact === "waddle_xmpp_client_wasm.d.ts"
 						? "export class Fixture {}\n"
 						: `fixture:${artifact}`;
-			writeFileSync(resolve(root, artifact), contents);
+			writeFileSync(resolve(packageDir, artifact), contents);
 		}
-		writeFileSync(resolve(root, "temporary-build.log"), "not publishable\n");
-
-		finalizeWasmPackage(root, "b".repeat(64));
-		const output = execFileSync(
-			"bun",
-			["pm", "pack", "--dry-run", "--ignore-scripts"],
-			{ cwd: root, encoding: "utf8" },
+		writeFileSync(
+			resolve(packageDir, "temporary-build.log"),
+			"not publishable\n",
 		);
-		const packed = output
-			.split(/\r?\n/u)
-			.map((line) => /^packed\s+\S+\s+(.+)$/u.exec(line)?.[1])
-			.filter((artifact): artifact is string => artifact !== undefined)
-			.sort();
+
+		finalizeWasmPackage(packageDir, "b".repeat(64));
+		execFileSync("bun", ["pm", "pack", "--dry-run", "--ignore-scripts"], {
+			cwd: packageDir,
+			stdio: "ignore",
+		});
+		execFileSync(
+			"bun",
+			[
+				"pm",
+				"pack",
+				"--destination",
+				archiveDir,
+				"--ignore-scripts",
+				"--quiet",
+			],
+			{ cwd: packageDir, stdio: "ignore" },
+		);
+
+		const archives = readdirSync(archiveDir, { withFileTypes: true });
+		expect(archives).toHaveLength(1);
+		expect(archives[0]?.isFile()).toBe(true);
+		expect(archives[0]?.name.endsWith(".tgz")).toBe(true);
+		const packed = packedArtifactNames(
+			resolve(archiveDir, archives[0]?.name ?? "missing-archive.tgz"),
+		).sort();
 
 		expect(packed).toEqual([...WASM_PACKAGE_ARTIFACTS].sort());
 		expect(packed).not.toContain("temporary-build.log");
