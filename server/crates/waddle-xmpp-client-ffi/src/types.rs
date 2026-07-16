@@ -463,7 +463,7 @@ pub struct WaddlePresenceHat {
     pub title: String,
 }
 
-#[derive(uniffi::Enum, Clone)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddleMucAffiliation {
     Owner,
     Admin,
@@ -472,7 +472,7 @@ pub enum WaddleMucAffiliation {
     None,
 }
 
-#[derive(uniffi::Enum, Clone)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddleMucRole {
     Moderator,
     Participant,
