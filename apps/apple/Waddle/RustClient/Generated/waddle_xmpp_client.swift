@@ -810,6 +810,48 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func unpinMessage(roomJid: String, targetStanzaId: String) async  -> Bool
 
     /**
+     * Fetch the user's Waddle DM-bookmark items (issue #720) from
+     * PEP, surfaced with the XEP-0492 fallback mode + rich-payload
+     * opt-in (#719) per direct-chat contact. The node is sparse /
+     * override-only; an absent node (`item-not-found`) resolves to
+     * the empty list.
+     */
+    func fetchDmBookmarks() async throws  -> [WaddleDmBookmarkItem]
+
+    /**
+     * Fetch the user's XEP-0402 bookmark items from PEP, surfaced
+     * with the XEP-0492 fallback notification mode (when present) per
+     * room. Resolves to the empty list when the PEP node is absent
+     * (first publish hasn't happened — `item-not-found`).
+     *
+     * **Deferred** (WASM parity): no XEP-0163 §4.4 `+notify`
+     * self-subscription on `urn:xmpp:bookmarks:1` yet, so callers
+     * re-fetch on every fresh session-ready; a setting changed on
+     * another device reaches this one on the next reconnect.
+     */
+    func fetchUserBookmarks() async throws  -> [WaddleBookmarkItem]
+
+    /**
+     * Set the per-DM XEP-0492 notification mode for one direct-chat
+     * contact via the Waddle DM-bookmark carrier (issue #720). The
+     * node is sparse / override-only: returning the DM to the §3
+     * direct-chat default retracts the item (`Removed` outcome)
+     * instead of publishing.
+     */
+    func setDmNotificationMode(dmJid: String, mode: WaddleNotifyMode, richPayloadOptIn: Bool) async throws  -> WaddleSetDmNotificationModeOutcome
+
+    /**
+     * Set the per-chat XEP-0492 notification mode for one room by
+     * merging into the user's XEP-0402 bookmark for that room
+     * (creating one with `autojoin=false` when absent, so the call
+     * never changes join behavior). Foreign `<advanced/>` children
+     * and identity-scoped siblings written by other clients are
+     * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
+     * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+    func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name: String?, richPayloadOptIn: Bool) async throws  -> WaddleSetRoomNotificationModeOutcome
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -1791,6 +1833,108 @@ open func unpinMessage(roomJid: String, targetStanzaId: String)async  -> Bool  {
 }
 
     /**
+     * Fetch the user's Waddle DM-bookmark items (issue #720) from
+     * PEP, surfaced with the XEP-0492 fallback mode + rich-payload
+     * opt-in (#719) per direct-chat contact. The node is sparse /
+     * override-only; an absent node (`item-not-found`) resolves to
+     * the empty list.
+     */
+open func fetchDmBookmarks()async throws  -> [WaddleDmBookmarkItem]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_bookmarks(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleDmBookmarkItem.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Fetch the user's XEP-0402 bookmark items from PEP, surfaced
+     * with the XEP-0492 fallback notification mode (when present) per
+     * room. Resolves to the empty list when the PEP node is absent
+     * (first publish hasn't happened — `item-not-found`).
+     *
+     * **Deferred** (WASM parity): no XEP-0163 §4.4 `+notify`
+     * self-subscription on `urn:xmpp:bookmarks:1` yet, so callers
+     * re-fetch on every fresh session-ready; a setting changed on
+     * another device reaches this one on the next reconnect.
+     */
+open func fetchUserBookmarks()async throws  -> [WaddleBookmarkItem]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_bookmarks(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleBookmarkItem.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Set the per-DM XEP-0492 notification mode for one direct-chat
+     * contact via the Waddle DM-bookmark carrier (issue #720). The
+     * node is sparse / override-only: returning the DM to the §3
+     * direct-chat default retracts the item (`Removed` outcome)
+     * instead of publishing.
+     */
+open func setDmNotificationMode(dmJid: String, mode: WaddleNotifyMode, richPayloadOptIn: Bool)async throws  -> WaddleSetDmNotificationModeOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(dmJid),FfiConverterTypeWaddleNotifyMode_lower(mode),FfiConverterBool.lower(richPayloadOptIn)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleSetDmNotificationModeOutcome_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Set the per-chat XEP-0492 notification mode for one room by
+     * merging into the user's XEP-0402 bookmark for that room
+     * (creating one with `autojoin=false` when absent, so the call
+     * never changes join behavior). Foreign `<advanced/>` children
+     * and identity-scoped siblings written by other clients are
+     * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
+     * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+open func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name: String?, richPayloadOptIn: Bool)async throws  -> WaddleSetRoomNotificationModeOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterTypeWaddleNotifyMode_lower(mode),FfiConverterOptionString.lower(name),FfiConverterBool.lower(richPayloadOptIn)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleSetRoomNotificationModeOutcome_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -2380,6 +2524,114 @@ public func FfiConverterTypeWaddleAvatar_lower(_ value: WaddleAvatar) -> RustBuf
 
 
 /**
+ * One XEP-0402 bookmark item surfaced with its XEP-0492 fallback
+ * notification mode. `notify_mode == None` means the bookmark has no
+ * fallback `<notify/>` setting — the caller resolves against the
+ * XEP-0492 §3 conversation-kind default.
+ */
+public struct WaddleBookmarkItem: Equatable, Hashable {
+    /**
+     * The bookmarked room's bare JID (XEP-0402 §2 item id).
+     */
+    public var jid: String
+    /**
+     * `<conference name='…'>` attribute, when present.
+     */
+    public var name: String?
+    /**
+     * `<conference autojoin='true|false'>`; defaults to `false`.
+     */
+    public var autojoin: Bool
+    /**
+     * XEP-0492 fallback setting read from the bookmark's
+     * `<extensions/>`, when present.
+     */
+    public var notifyMode: WaddleNotifyMode?
+    /**
+     * Waddle rich XEP-0357 push-summary opt-in carried in the
+     * XEP-0492 §2.3 `<advanced/>` block (#719). `false` is the
+     * default / absence-of-marker case.
+     */
+    public var richPayloadOptIn: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The bookmarked room's bare JID (XEP-0402 §2 item id).
+         */jid: String,
+        /**
+         * `<conference name='…'>` attribute, when present.
+         */name: String?,
+        /**
+         * `<conference autojoin='true|false'>`; defaults to `false`.
+         */autojoin: Bool,
+        /**
+         * XEP-0492 fallback setting read from the bookmark's
+         * `<extensions/>`, when present.
+         */notifyMode: WaddleNotifyMode?,
+        /**
+         * Waddle rich XEP-0357 push-summary opt-in carried in the
+         * XEP-0492 §2.3 `<advanced/>` block (#719). `false` is the
+         * default / absence-of-marker case.
+         */richPayloadOptIn: Bool) {
+        self.jid = jid
+        self.name = name
+        self.autojoin = autojoin
+        self.notifyMode = notifyMode
+        self.richPayloadOptIn = richPayloadOptIn
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleBookmarkItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleBookmarkItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleBookmarkItem {
+        return
+            try WaddleBookmarkItem(
+                jid: FfiConverterString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf),
+                autojoin: FfiConverterBool.read(from: &buf),
+                notifyMode: FfiConverterOptionTypeWaddleNotifyMode.read(from: &buf),
+                richPayloadOptIn: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleBookmarkItem, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.autojoin, into: &buf)
+        FfiConverterOptionTypeWaddleNotifyMode.write(value.notifyMode, into: &buf)
+        FfiConverterBool.write(value.richPayloadOptIn, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBookmarkItem_lift(_ buf: RustBuffer) throws -> WaddleBookmarkItem {
+    return try FfiConverterTypeWaddleBookmarkItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBookmarkItem_lower(_ value: WaddleBookmarkItem) -> RustBuffer {
+    return FfiConverterTypeWaddleBookmarkItem.lower(value)
+}
+
+
+/**
  * Typed A/V call event surfaced to Swift via
  * `WaddleClientEvent::Call`.
  * `from` is the stamped sender JID (a *full* JID for propose /
@@ -2801,6 +3053,91 @@ public func FfiConverterTypeWaddleConfig_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleConfig_lower(_ value: WaddleConfig) -> RustBuffer {
     return FfiConverterTypeWaddleConfig.lower(value)
+}
+
+
+/**
+ * One Waddle DM-bookmark item (issue #720): the `urn:waddle:dm-bookmarks:0`
+ * PEP node's item id is the contact's bare JID and its payload hosts
+ * one official XEP-0492 `<notify/>`. The node is sparse /
+ * override-only — an item exists ONLY when the DM has an override —
+ * so `notify_mode == None` means the hosted `<notify/>` carries only
+ * identity-scoped siblings; resolve against the §3 direct-chat
+ * default (`always`).
+ */
+public struct WaddleDmBookmarkItem: Equatable, Hashable {
+    /**
+     * The contact's bare JID (PEP item id).
+     */
+    public var jid: String
+    /**
+     * XEP-0492 fallback setting read from the hosted `<notify/>`.
+     */
+    public var notifyMode: WaddleNotifyMode?
+    /**
+     * Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+    public var richPayloadOptIn: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The contact's bare JID (PEP item id).
+         */jid: String,
+        /**
+         * XEP-0492 fallback setting read from the hosted `<notify/>`.
+         */notifyMode: WaddleNotifyMode?,
+        /**
+         * Waddle rich XEP-0357 push-summary opt-in (#719).
+         */richPayloadOptIn: Bool) {
+        self.jid = jid
+        self.notifyMode = notifyMode
+        self.richPayloadOptIn = richPayloadOptIn
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleDmBookmarkItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleDmBookmarkItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDmBookmarkItem {
+        return
+            try WaddleDmBookmarkItem(
+                jid: FfiConverterString.read(from: &buf),
+                notifyMode: FfiConverterOptionTypeWaddleNotifyMode.read(from: &buf),
+                richPayloadOptIn: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleDmBookmarkItem, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterOptionTypeWaddleNotifyMode.write(value.notifyMode, into: &buf)
+        FfiConverterBool.write(value.richPayloadOptIn, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDmBookmarkItem_lift(_ buf: RustBuffer) throws -> WaddleDmBookmarkItem {
+    return try FfiConverterTypeWaddleDmBookmarkItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDmBookmarkItem_lower(_ value: WaddleDmBookmarkItem) -> RustBuffer {
+    return FfiConverterTypeWaddleDmBookmarkItem.lower(value)
 }
 
 
@@ -6801,6 +7138,93 @@ public func FfiConverterTypeWaddleMucRole_lower(_ value: WaddleMucRole) -> RustB
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * XEP-0492 §2.1 fallback notification setting (no `identity-*`
+ * attrs). FFI mirror of [`NotifyMode`].
+ */
+
+public enum WaddleNotifyMode: Equatable, Hashable {
+
+    /**
+     * `<always/>` — notify for every message.
+     */
+    case always
+    /**
+     * `<on-mention/>` — only notify on a XEP-0461/0372 mention.
+     */
+    case onMention
+    /**
+     * `<never/>` — never notify (muted).
+     */
+    case never
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleNotifyMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleNotifyMode: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleNotifyMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleNotifyMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .always
+
+        case 2: return .onMention
+
+        case 3: return .never
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleNotifyMode, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .always:
+            writeInt(&buf, Int32(1))
+
+
+        case .onMention:
+            writeInt(&buf, Int32(2))
+
+
+        case .never:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleNotifyMode_lift(_ buf: RustBuffer) throws -> WaddleNotifyMode {
+    return try FfiConverterTypeWaddleNotifyMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleNotifyMode_lower(_ value: WaddleNotifyMode) -> RustBuffer {
+    return FfiConverterTypeWaddleNotifyMode.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * urn:waddle:pin:0 pin/unpin action carried on a room system message.
  */
 
@@ -7362,6 +7786,209 @@ public func FfiConverterTypeWaddleSendMessageOutcome_lift(_ buf: RustBuffer) thr
 #endif
 public func FfiConverterTypeWaddleSendMessageOutcome_lower(_ value: WaddleSendMessageOutcome) -> RustBuffer {
     return FfiConverterTypeWaddleSendMessageOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed outcome of [`WaddleClient::set_dm_notification_mode`] (issue
+ * #720). Mirrors [`WaddleSetRoomNotificationModeOutcome`] with one
+ * extra variant: the DM node is sparse / override-only, so returning
+ * a DM to the XEP-0492 §3 direct-chat default RETRACTS the item.
+ */
+
+public enum WaddleSetDmNotificationModeOutcome: Equatable, Hashable {
+
+    /**
+     * The DM carried an override; the item was published.
+     */
+    case ok(item: WaddleDmBookmarkItem
+    )
+    /**
+     * The merged `<notify/>` collapsed to the §3 direct-chat default,
+     * so the item was retracted. `jid` echoes the contact so the
+     * caller can drop its override entry.
+     */
+    case removed(jid: String
+    )
+    /**
+     * XEP-0060 `precondition-not-met` on the publish.
+     */
+    case nodeConfigMismatch
+    /**
+     * Any other stanza-level error (condition stays on the Rust side).
+     */
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSetDmNotificationModeOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSetDmNotificationModeOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSetDmNotificationModeOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSetDmNotificationModeOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ok(item: try FfiConverterTypeWaddleDmBookmarkItem.read(from: &buf)
+        )
+
+        case 2: return .removed(jid: try FfiConverterString.read(from: &buf)
+        )
+
+        case 3: return .nodeConfigMismatch
+
+        case 4: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSetDmNotificationModeOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .ok(item):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleDmBookmarkItem.write(item, into: &buf)
+
+
+        case let .removed(jid):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(jid, into: &buf)
+
+
+        case .nodeConfigMismatch:
+            writeInt(&buf, Int32(3))
+
+
+        case .error:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetDmNotificationModeOutcome_lift(_ buf: RustBuffer) throws -> WaddleSetDmNotificationModeOutcome {
+    return try FfiConverterTypeWaddleSetDmNotificationModeOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetDmNotificationModeOutcome_lower(_ value: WaddleSetDmNotificationModeOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleSetDmNotificationModeOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed outcome of [`WaddleClient::set_room_notification_mode`].
+ * Mirrors the core `SetRoomNotificationModeOutcome` (and the WASM
+ * boundary's tagged shape) so callers branch without parsing
+ * diagnostics.
+ */
+
+public enum WaddleSetRoomNotificationModeOutcome: Equatable, Hashable {
+
+    /**
+     * The merged bookmark was published. Carries the surfaced item so
+     * the caller reconciles its store without a follow-up fetch.
+     */
+    case ok(item: WaddleBookmarkItem
+    )
+    /**
+     * XEP-0060 `precondition-not-met` on the publish — typically a
+     * pre-existing PEP node with a divergent `access_model`.
+     */
+    case nodeConfigMismatch
+    /**
+     * Any other stanza-level error. The specific RFC 6120 §8.3
+     * condition stays on the Rust side (emitted via `tracing::warn`)
+     * rather than crossing the boundary as a stringly-typed payload.
+     */
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSetRoomNotificationModeOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSetRoomNotificationModeOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSetRoomNotificationModeOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSetRoomNotificationModeOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ok(item: try FfiConverterTypeWaddleBookmarkItem.read(from: &buf)
+        )
+
+        case 2: return .nodeConfigMismatch
+
+        case 3: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSetRoomNotificationModeOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .ok(item):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleBookmarkItem.write(item, into: &buf)
+
+
+        case .nodeConfigMismatch:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetRoomNotificationModeOutcome_lift(_ buf: RustBuffer) throws -> WaddleSetRoomNotificationModeOutcome {
+    return try FfiConverterTypeWaddleSetRoomNotificationModeOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSetRoomNotificationModeOutcome_lower(_ value: WaddleSetRoomNotificationModeOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleSetRoomNotificationModeOutcome.lower(value)
 }
 
 
@@ -8275,6 +8902,30 @@ fileprivate struct FfiConverterOptionTypeWaddleMucRole: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleNotifyMode: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleNotifyMode?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleNotifyMode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleNotifyMode.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
     typealias SwiftType = WaddleStanzaErrorType?
 
@@ -8398,6 +9049,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleArchivedMessage: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleBookmarkItem: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleBookmarkItem]
+
+    public static func write(_ value: [WaddleBookmarkItem], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleBookmarkItem.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleBookmarkItem] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleBookmarkItem]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleBookmarkItem.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleChannel]
 
@@ -8415,6 +9091,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleChannel.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleDmBookmarkItem: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleDmBookmarkItem]
+
+    public static func write(_ value: [WaddleDmBookmarkItem], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleDmBookmarkItem.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleDmBookmarkItem] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleDmBookmarkItem]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleDmBookmarkItem.read(from: &buf))
         }
         return seq
     }
@@ -8892,6 +9593,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks() != 18377) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks() != 4873) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode() != 30190) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {

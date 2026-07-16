@@ -12,14 +12,18 @@ import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.store.NotifySettingsEntry
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleTopology
 
 data class ChannelListItem(
     val roomJid: String,
     val name: String,
     val unreadCount: Int,
+    /** XEP-0492: an explicit `never` override mutes this channel. */
+    val isMuted: Boolean = false,
 )
 
 /** One drawer/list section; `name == null` is the unspaced-channels bucket. */
@@ -50,9 +54,10 @@ class HomeViewModel(
         sessionManager.unreadStore.counts,
         sessionManager.dmStore.peers,
         sessionManager.connectionState,
-    ) { topology, counts, dmPeers, connection ->
+        sessionManager.notifySettingsStore.entries,
+    ) { topology, counts, dmPeers, connection, notifyEntries ->
         HomeUiState(
-            sections = sectionsOf(topology, counts),
+            sections = sectionsOf(topology, counts, notifyEntries),
             dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 },
             connectionState = connection,
         )
@@ -69,7 +74,20 @@ class HomeViewModel(
     private fun sectionsOf(
         topology: WaddleTopology,
         counts: Map<String, Int>,
+        notifyEntries: Map<String, NotifySettingsEntry>,
     ): List<SpaceSection> {
+        fun itemOf(roomJid: String, name: String): ChannelListItem {
+            val bare = bareJidOf(roomJid)
+            return ChannelListItem(
+                roomJid = roomJid,
+                name = name,
+                unreadCount = counts[bare] ?: 0,
+                // A group's §3 default is never `never`, so only an
+                // explicit stored override can mute it.
+                isMuted = notifyEntries[bare]?.notifyMode == WaddleNotifyMode.NEVER,
+            )
+        }
+
         val channelsBySpace = topology.channels.groupBy { it.spaceId }
         val sections = topology.spaces.map { space ->
             SpaceSection(
@@ -77,26 +95,14 @@ class HomeViewModel(
                 name = space.name,
                 channels = channelsBySpace[space.id].orEmpty()
                     .sortedBy { it.position }
-                    .map { channel ->
-                        ChannelListItem(
-                            roomJid = channel.roomJid,
-                            name = channel.name,
-                            unreadCount = counts[bareJidOf(channel.roomJid)] ?: 0,
-                        )
-                    },
+                    .map { channel -> itemOf(channel.roomJid, channel.name) },
             )
         }
         val knownSpaces = topology.spaces.mapTo(HashSet()) { it.id }
         val orphans = topology.channels
             .filter { it.spaceId !in knownSpaces }
             .sortedBy { it.position }
-            .map { channel ->
-                ChannelListItem(
-                    roomJid = channel.roomJid,
-                    name = channel.name,
-                    unreadCount = counts[bareJidOf(channel.roomJid)] ?: 0,
-                )
-            }
+            .map { channel -> itemOf(channel.roomJid, channel.name) }
         return if (orphans.isEmpty()) {
             sections
         } else {

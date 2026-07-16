@@ -16,6 +16,7 @@ mod error;
 mod jid_parts;
 mod messaging;
 mod messaging_verbs;
+mod notify_settings;
 mod push;
 mod send_outcome;
 mod stanza;
@@ -25,8 +26,14 @@ mod types;
 mod client_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
+#[cfg(test)]
+mod notify_settings_tests;
 
 pub use error::WaddleError;
+pub use notify_settings::{
+    WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
+    WaddleSetRoomNotificationModeOutcome,
+};
 pub use types::*;
 
 use convert::{dispatch_event, resume_state_from_ffi};

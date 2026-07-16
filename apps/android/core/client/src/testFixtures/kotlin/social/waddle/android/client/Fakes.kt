@@ -10,20 +10,25 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.client.ffi.WaddleAvatar
+import social.waddle.client.ffi.WaddleBookmarkItem
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
+import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
+import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
 import java.util.concurrent.ConcurrentLinkedDeque
@@ -366,6 +371,76 @@ class FakeWaddleClient : WaddleClientInterface {
         pinCalls += Triple(roomJid, targetStanzaId, false)
         return true
     }
+
+    /** Canned XEP-0492 bookmark lists served by the fetch verbs. */
+    @Volatile
+    var userBookmarks: List<WaddleBookmarkItem> = emptyList()
+
+    @Volatile
+    var dmBookmarks: List<WaddleDmBookmarkItem> = emptyList()
+
+    @Volatile
+    var fetchUserBookmarksCalls = 0
+
+    @Volatile
+    var fetchDmBookmarksCalls = 0
+
+    override suspend fun fetchUserBookmarks(): List<WaddleBookmarkItem> {
+        fetchUserBookmarksCalls += 1
+        return userBookmarks
+    }
+
+    override suspend fun fetchDmBookmarks(): List<WaddleDmBookmarkItem> {
+        fetchDmBookmarksCalls += 1
+        return dmBookmarks
+    }
+
+    /** Recorded (jid, mode, richPayloadOptIn) XEP-0492 set calls. */
+    val roomNotifyCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
+    val dmNotifyCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
+
+    /** Canned outcome overrides; `null` echoes the request as `Ok`. */
+    @Volatile
+    var roomNotifyOutcome: WaddleSetRoomNotificationModeOutcome? = null
+
+    /** `null` mirrors the sparse DM carrier: default mode → `Removed`. */
+    @Volatile
+    var dmNotifyOutcome: WaddleSetDmNotificationModeOutcome? = null
+
+    override suspend fun setRoomNotificationMode(
+        roomJid: String,
+        mode: WaddleNotifyMode,
+        name: String?,
+        richPayloadOptIn: Boolean,
+    ): WaddleSetRoomNotificationModeOutcome {
+        roomNotifyCalls += Triple(roomJid, mode, richPayloadOptIn)
+        return roomNotifyOutcome ?: WaddleSetRoomNotificationModeOutcome.Ok(
+            WaddleBookmarkItem(
+                jid = roomJid,
+                name = name,
+                autojoin = false,
+                notifyMode = mode,
+                richPayloadOptIn = richPayloadOptIn,
+            ),
+        )
+    }
+
+    override suspend fun setDmNotificationMode(
+        dmJid: String,
+        mode: WaddleNotifyMode,
+        richPayloadOptIn: Boolean,
+    ): WaddleSetDmNotificationModeOutcome {
+        dmNotifyCalls += Triple(dmJid, mode, richPayloadOptIn)
+        dmNotifyOutcome?.let { return it }
+        return if (mode == WaddleNotifyMode.ALWAYS && !richPayloadOptIn) {
+            WaddleSetDmNotificationModeOutcome.Removed(dmJid)
+        } else {
+            WaddleSetDmNotificationModeOutcome.Ok(
+                WaddleDmBookmarkItem(jid = dmJid, notifyMode = mode, richPayloadOptIn = richPayloadOptIn),
+            )
+        }
+    }
+
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()

@@ -48,6 +48,56 @@ pub fn read_rich_payload_opt_in(notify: &Element) -> bool {
         .any(|advanced| advanced.has_child("rich-payload", NS_PUSH_RICH_PAYLOAD))
 }
 
+/// Surfaced XEP-0492 view of one conversation's notification state:
+/// the fallback mode (if any) plus the Waddle rich-payload opt-in
+/// (#719). This is the read-side companion to the merge helpers —
+/// binding crates (WASM, UniFFI) map it onto their boundary shapes so
+/// the sibling-scanning rules live in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotifySettingsSurface {
+    /// XEP-0492 fallback setting (no `identity-*` attrs). `None` means
+    /// no fallback child is present; the caller resolves against
+    /// [`ConversationKind::default_notify_mode`] (§3).
+    pub fallback_mode: Option<NotifyMode>,
+    /// Waddle rich XEP-0357 push-summary opt-in carried in the
+    /// XEP-0492 §2.3 `<advanced/>` block (#719). `false` is the
+    /// default / absence-of-marker case.
+    pub rich_payload_opt_in: bool,
+}
+
+/// Surface the XEP-0492 notification state from a XEP-0402 bookmark's
+/// extension children.
+///
+/// A bookmark may (malformed-but-possible, folded by the merge code)
+/// carry more than one `<notify/>` sibling, and a `<notify/>` may hold
+/// only identity-scoped settings with no fallback. Scans ALL notify
+/// children rather than stopping at the first: takes the first
+/// fallback mode found, and treats the opt-in as set if ANY notify
+/// sibling carries the rich-payload marker — matching how both
+/// [`read_fallback_mode`] and the server's `parse_rich_payload_opt_in`
+/// resolve across siblings. Round-2 PR #804 review (Codex P2). Pure.
+pub fn surface_bookmark_notify(extensions: &[Element]) -> NotifySettingsSurface {
+    let notifies = || {
+        extensions
+            .iter()
+            .filter(|ext| ext.is("notify", NS_NOTIFICATION_SETTINGS))
+    };
+    NotifySettingsSurface {
+        fallback_mode: notifies().find_map(read_fallback_mode),
+        rich_payload_opt_in: notifies().any(read_rich_payload_opt_in),
+    }
+}
+
+/// Surface the XEP-0492 notification state from a single hosted
+/// `<notify/>` — the DM-bookmark carrier shape (issue #720), which
+/// hosts exactly one `<notify/>` per contact. Pure.
+pub fn surface_dm_notify(notify: &Element) -> NotifySettingsSurface {
+    NotifySettingsSurface {
+        fallback_mode: read_fallback_mode(notify),
+        rich_payload_opt_in: read_rich_payload_opt_in(notify),
+    }
+}
+
 /// Typed XEP-0492 fallback setting — the single child element under
 /// `<notify/>` carrying no `identity-*` attributes.
 ///

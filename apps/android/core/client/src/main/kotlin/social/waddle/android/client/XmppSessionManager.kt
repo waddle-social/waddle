@@ -24,6 +24,7 @@ import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleUploadSlot
 
 /**
@@ -58,6 +59,7 @@ class XmppSessionManager(
     val chatStateStore = stores.chatStateStore
     val readCursorStore = stores.readCursorStore
     val pinStore = stores.pinStore
+    val notifySettingsStore = stores.notifySettingsStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -232,6 +234,17 @@ class XmppSessionManager(
     /** XEP-0085 typing notification: best-effort and live-session-only. */
     suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): VerbResult =
         verbs.sendChatState(conversationJid, isGroupchat, state)
+
+    /** XEP-0492: set a room's notification mode ([ConversationVerbs.setRoomNotificationMode]). */
+    suspend fun setRoomNotificationMode(
+        roomJid: String,
+        mode: WaddleNotifyMode,
+        name: String? = null,
+    ): NotifySettingsResult = verbs.setRoomNotificationMode(roomJid, mode, name)
+
+    /** XEP-0492 DM twin of [setRoomNotificationMode]. */
+    suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult =
+        verbs.setDmNotificationMode(peerJid, mode)
 
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {

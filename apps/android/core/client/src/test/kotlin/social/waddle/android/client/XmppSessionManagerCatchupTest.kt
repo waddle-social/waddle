@@ -13,7 +13,10 @@ import org.junit.Test
 import social.waddle.android.client.prefs.ResumeCursor
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.ConversationKind
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleDmBookmarkItem
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * Reconnect catch-up + per-conversation resume cursors (web
@@ -197,5 +200,97 @@ class XmppSessionManagerCatchupTest {
         )
 
         harness.manager.logout()
+    }
+
+    // ── XEP-0492 notify-settings hydrate ─────────────────────────────
+
+    @Test
+    fun `a fresh stream hydrates notification settings from both carriers`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        assertEquals(1, client.fetchUserBookmarksCalls)
+        assertEquals(1, client.fetchDmBookmarksCalls)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `hydrated overrides resolve while defaults cover the rest`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.clients.single().dmBookmarks = listOf(
+            WaddleDmBookmarkItem(
+                jid = "bob@waddle.test",
+                notifyMode = WaddleNotifyMode.NEVER,
+                richPayloadOptIn = false,
+            ),
+        )
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val store = harness.manager.notifySettingsStore
+        assertEquals(
+            WaddleNotifyMode.NEVER,
+            store.modeFor("bob@waddle.test", ConversationKind.DIRECT_CHAT),
+        )
+        // Un-hydrated conversations resolve to the §3 defaults.
+        assertEquals(
+            WaddleNotifyMode.ALWAYS,
+            store.modeFor("carol@waddle.test", ConversationKind.DIRECT_CHAT),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a resumed stream skips the notify-settings refetch`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertEquals(1, harness.factory.clients.single().fetchUserBookmarksCalls)
+
+        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        advanceTimeBy(1_000L)
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        assertEquals(2, harness.factory.clients.size)
+        assertEquals(
+            "resumed session must not refetch bookmarks",
+            0,
+            harness.factory.clients.last().fetchUserBookmarksCalls,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `logout clears hydrated notification settings`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.clients.single().dmBookmarks = listOf(
+            WaddleDmBookmarkItem(
+                jid = "bob@waddle.test",
+                notifyMode = WaddleNotifyMode.NEVER,
+                richPayloadOptIn = false,
+            ),
+        )
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertTrue(harness.manager.notifySettingsStore.entries.value.isNotEmpty())
+
+        harness.manager.logout()
+
+        assertTrue(harness.manager.notifySettingsStore.entries.value.isEmpty())
     }
 }

@@ -27,6 +27,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.jid.localpartOf
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleNotifyMode
 import java.time.Instant
 import java.time.OffsetDateTime
 
@@ -45,11 +46,15 @@ class MessageNotifier(
     private val isAppVisible: () -> Boolean = {
         ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
     },
+    /** XEP-0492 effective-mode snapshot (see [NotificationPolicy]). */
+    private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
+        { _, _ -> WaddleNotifyMode.ALWAYS },
 ) {
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
         currentSession = currentSession,
         isAppVisible = isAppVisible,
+        notifyModeFor = notifyModeFor,
     )
 
     private val historyLock = Any()

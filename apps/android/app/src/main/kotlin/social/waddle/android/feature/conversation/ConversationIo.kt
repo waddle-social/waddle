@@ -1,10 +1,12 @@
 package social.waddle.android.feature.conversation
 
 import social.waddle.android.client.MessageSendExtras
+import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleNotifyMode
 
 /** Transport seam of a conversation screen (MUC channel or 1:1 DM). */
 interface ConversationIo {
@@ -59,4 +61,8 @@ interface ConversationIo {
 
     /** `urn:waddle:pin:0` pin/unpin (rooms only). */
     suspend fun setPinned(targetId: String, pinned: Boolean): VerbResult = VerbResult.Rejected
+
+    /** XEP-0492: publish this conversation's notification mode. */
+    suspend fun setNotificationMode(mode: WaddleNotifyMode): NotifySettingsResult =
+        NotifySettingsResult.Rejected
 }
