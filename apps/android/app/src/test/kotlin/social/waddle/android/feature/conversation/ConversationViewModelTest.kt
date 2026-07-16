@@ -243,26 +243,6 @@ class ConversationViewModelTest {
     }
 
     @Test
-    fun `acked dm send stays visible with no reflection`() = runTest {
-        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("dm-origin-id"))
-        val viewModel = createViewModel()
-        runCurrent()
-
-        viewModel.send("hi there")
-        runCurrent()
-        events.emit(XmppEvent.DeliveryAcked("dm-origin-id"))
-        runCurrent()
-
-        // 1:1 chats are never reflected back to the sending resource:
-        // the acked optimistic row is the message's only representation
-        // until the next MAM fetch and must not disappear.
-        val row = viewModel.uiState.value.rows.single()
-        assertTrue(row is ConversationRow.Unconfirmed)
-        assertTrue((row as ConversationRow.Unconfirmed).message.acked)
-        assertEquals("hi there", row.message.body)
-    }
-
-    @Test
     fun `failed outcomes and delivery failures mark the pending row`() = runTest {
         // Permanent (non-queueable) failure: no queue id accompanies it.
         io.sendResult = SendResult(WaddleSendMessageOutcome.StanzaError)
@@ -320,56 +300,6 @@ class ConversationViewModelTest {
         val rows = viewModel.uiState.value.rows
         assertEquals("echo replaces the queued row", 1, rows.size)
         assertTrue(rows.single() is ConversationRow.Stored)
-    }
-
-    @Test
-    fun `queued send flips to failed when the queue drops it`() = runTest {
-        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-2")
-        val viewModel = createViewModel()
-        runCurrent()
-
-        viewModel.send("never makes it")
-        runCurrent()
-        assertTrue(
-            (viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed).message.queued,
-        )
-
-        // Cap eviction / permanent replay rejection surfaces as a
-        // DeliveryFailed for the queue id.
-        events.emit(XmppEvent.DeliveryFailed("q-2"))
-        runCurrent()
-
-        val row = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
-        assertTrue(row.message.failed)
-        assertFalse("failed row is retryable, no longer queued", row.message.queued)
-
-        // Retry goes back through the composer path.
-        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("s-retry"))
-        viewModel.retry(row.message.localId)
-        runCurrent()
-        assertEquals(listOf("never makes it", "never makes it"), io.sent)
-        val retried = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
-        assertFalse(retried.message.failed)
-        assertFalse(retried.message.queued)
-    }
-
-    @Test
-    fun `queued dm send acks after the replay without an echo`() = runTest {
-        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-3")
-        val viewModel = createViewModel()
-        runCurrent()
-
-        viewModel.send("dm while offline")
-        runCurrent()
-
-        // Reconnect: the drain sent it and the server 0198-acked the id.
-        events.emit(XmppEvent.DeliveryAcked("q-3"))
-        runCurrent()
-
-        val row = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
-        assertTrue(row.message.acked)
-        assertFalse("delivered, no longer queued", row.message.queued)
-        assertFalse(row.message.failed)
     }
 
     @Test

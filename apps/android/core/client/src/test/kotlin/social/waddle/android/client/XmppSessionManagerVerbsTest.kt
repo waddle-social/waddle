@@ -251,7 +251,7 @@ class XmppSessionManagerVerbsTest {
                         name = "cat.png",
                         mediaType = "image/png",
                         sizeBytes = 42,
-                        disposition = "inline",
+                        disposition = FileDisposition.INLINE,
                     ),
                 ),
             ),
