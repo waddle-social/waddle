@@ -794,7 +794,10 @@ class XmppSessionManager(
                 // publish an older MDS cursor over a sibling's newer one.
                 val applied = kotlinx.coroutines.Job()
                 currentBridge?.submit(XmppEvent.MdsEntries(entries, applied))
-                runCatching { applied.join() }
+                // Bare join: swallowing a cancellation here (attempt
+                // teardown drops unconsumed events) would resume a
+                // cancelled pipeline into the drain.
+                applied.join()
             }
         }
         runCatching { client.subscribeMdsDisplayed() }

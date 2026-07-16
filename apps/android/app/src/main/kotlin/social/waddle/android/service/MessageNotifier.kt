@@ -223,15 +223,29 @@ class MessageNotifier(
         isGroupchat: Boolean,
         conversationJid: String,
     ): XmppSessionManager.DisplayedTarget? {
+        // Authority-scanned like the session manager's own resolution:
+        // the FIRST stanza-id is sender-controlled and must not become
+        // a marker target or a published MDS pair.
+        val ownBare = currentSession.value?.jid?.let(::bareJidOf)
+        val mdsPair = if (isGroupchat) {
+            message.stanzaIds.firstOrNull { it.by.equals(conversationJid, ignoreCase = true) }
+        } else {
+            ownBare?.let { own ->
+                val domain = own.substringAfter('@')
+                message.stanzaIds.firstOrNull {
+                    it.by.equals(own, ignoreCase = true) || it.by.equals(domain, ignoreCase = true)
+                }
+            }
+        }
         val markerId = if (isGroupchat) {
-            message.stanzaId?.takeIf { message.stanzaIdBy == conversationJid }
+            mdsPair?.id
         } else {
             message.originId ?: message.id
         } ?: return null
         return XmppSessionManager.DisplayedTarget(
             markerId = markerId,
-            stanzaId = message.stanzaId,
-            stanzaIdBy = message.stanzaIdBy,
+            stanzaId = mdsPair?.id,
+            stanzaIdBy = mdsPair?.by,
             markerRequested = message.displayedMarkerRequested,
         )
     }
