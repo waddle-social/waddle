@@ -14,6 +14,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.calls.CallStore
+import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -77,8 +79,18 @@ class XmppSessionManager(
             router.emit(event)
         }
 
+    /**
+     * Single-slot DM call engine (reducer + XEP-0353/0166 side
+     * effects), fed from the router's serialized dispatch path.
+     */
+    val callStore: CallStore = CallStore(
+        signaling = ClientCallSignaling(activeSession),
+        ownBareJid = { activeSession.ownBareJid },
+        ownFullJid = { activeSession.ownFullJid },
+    )
+
     private val router: XmppEventRouter =
-        XmppEventRouter(activeSession, stores, resume, readState) { peer, timestamp ->
+        XmppEventRouter(activeSession, stores, resume, readState, callStore) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
 
@@ -119,6 +131,7 @@ class XmppSessionManager(
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
+        callStore.start(scope)
         scope.launch { router.sweepChatStates() }
         scope.launch { loop.run(session) }
     }
@@ -127,6 +140,7 @@ class XmppSessionManager(
     suspend fun logout() = lifecycleMutex.withLock {
         cancelSessionScope()
         activeSession.ownBareJid = null
+        activeSession.ownFullJid = null
         clearSessionState()
         sessionPrefs.clear()
         loop.resetToIdle()
@@ -303,6 +317,7 @@ class XmppSessionManager(
         stores.clear()
         readState.clearPending()
         resume.clear()
+        callStore.clear()
     }
 
     /**

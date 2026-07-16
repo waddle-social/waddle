@@ -28,6 +28,16 @@ internal class ActiveSession(
     @Volatile
     var ownBareJid: String? = null
 
+    /**
+     * The attempt's FULL JID (account bare JID + bound resource) —
+     * the XEP-0166 initiator/responder identity and the XEP-0353
+     * tie-break comparand. Set when the attempt's config is built and
+     * left in place after the attempt ends (an `Ended` call slot may
+     * still reference it); cleared on logout.
+     */
+    @Volatile
+    var ownFullJid: String? = null
+
     /** The live attempt's bridge, for injecting locally-produced events. */
     @Volatile
     var bridge: XmppEventBridge? = null

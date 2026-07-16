@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.store.SessionStores
@@ -26,6 +27,7 @@ internal class XmppEventRouter(
     private val stores: SessionStores,
     private val resume: ResumePersistence,
     private val readState: ReadStateCoordinator,
+    private val callStore: CallStore,
     private val persistDmSeen: (peer: String, timestamp: String) -> Unit,
 ) {
     private val _events = MutableSharedFlow<XmppEvent>(
@@ -53,6 +55,10 @@ internal class XmppEventRouter(
                 stores.pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
             is XmppEvent.Presence -> stores.presenceStore.onPresence(event.presence)
             is XmppEvent.MamResult -> routeMamResult(event)
+            // The reducer + side-effect scheduling run HERE, on the
+            // single-consumer dispatch path, so accept/reject can never
+            // interleave with tie-break sends (web single-thread parity).
+            is XmppEvent.Call -> callStore.onCallEvent(event.event)
             else -> Unit
         }
         _events.tryEmit(event)
