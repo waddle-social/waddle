@@ -64,13 +64,6 @@ pub enum XmppError {
     #[error("exact ownership fence for {entity} is temporarily unavailable")]
     OwnershipUnavailable { entity: Entity },
 
-    /// A fenced durable room mutation required the room's complete durable
-    /// state row, but no such row exists. Keep this distinct from ownership
-    /// loss and backend uncertainty so callers neither demote a live owner nor
-    /// flatten the invariant failure into a string diagnostic.
-    #[error("durable room state is missing for {entity}")]
-    DurableRoomStateMissing { entity: Entity },
-
     /// Stanza error (for IQ error responses)
     #[error("Stanza error: {condition}")]
     Stanza {

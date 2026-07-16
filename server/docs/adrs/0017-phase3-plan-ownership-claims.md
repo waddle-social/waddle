@@ -1352,6 +1352,12 @@ until #1283 replaces it. Phase 4 GA gates (not this phase) assert outcast denial
 password/members-only hold after steal — this phase builds the mechanism, GA gates its
 correctness.
 
+At the #1355 stack boundary, generic restore returning `None` does not create a
+durable parent. The exact-fenced subject UPDATE remains non-creating and non-fatal
+there; #1352 must atomically initialize the complete room plus initial Owner to
+preserve creator/status-201 semantics, after which #1350 enforces missing-parent
+writes.
+
 **Code research finding, corrected (minor fix 16)**: the previous draft attributed the
 "no room/affiliation table exists in any schema" reasoning to
 `session_janitors.rs`'s `spawn_room_dormancy_janitor` doc comment (lines ~1142–1155).

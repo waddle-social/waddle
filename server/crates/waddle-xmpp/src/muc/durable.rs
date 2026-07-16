@@ -149,8 +149,10 @@ pub trait MucDurableStore: Send + Sync {
         fence: &'a RoomClaimFenceContext,
     ) -> MucDurableFuture<'a, ()>;
 
-    /// Durably upsert (or, when `subject` is `None`, clear) the room's
-    /// current subject.
+    /// Update (or, when `subject` is `None`, clear) an existing room's current
+    /// subject. This must not create a parent row: #1352 owns atomically
+    /// creating the complete room plus initial Owner, and #1350 will enforce
+    /// missing-parent writes once that lifecycle boundary exists.
     fn save_subject_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,

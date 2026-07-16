@@ -289,7 +289,11 @@ impl PostgresMucRoomStore {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
             return Ok(false);
         }
-        let conn = self.db.guard().await.map_err(db_err)?;
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| fence_db_unavailable(error, fence))?;
         let mut rows = conn
             .query(
                 "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? \
@@ -302,8 +306,12 @@ impl PostgresMucRoomStore {
                 ],
             )
             .await
-            .map_err(db_err)?;
-        let held = rows.next().await.map_err(db_err)?.is_some();
+            .map_err(|error| fence_db_unavailable(error, fence))?;
+        let held = rows
+            .next()
+            .await
+            .map_err(|error| fence_db_unavailable(error, fence))?
+            .is_some();
         drop(rows);
         if held && self.node_identity.current() == fence.owner {
             Ok(true)
@@ -475,11 +483,11 @@ impl MucDurableStore for PostgresMucRoomStore {
                 .await
                 .map_err(|error| fence_db_unavailable(error, fence))?;
             self.assert_fenced(&mut tx, room_jid, fence).await?;
-            // The room row must already exist (a subject can only be set on
-            // an already-spawned room, which always durably writes its
-            // config at spawn-adjacent points first). Keep this UPDATE-only:
-            // an upsert here could create an incomplete row without its
-            // required `waddle_id` and `channel_id` fields.
+            // Keep this UPDATE-only: an upsert here could create an incomplete
+            // row without its required `waddle_id` and `channel_id` fields.
+            // Until #1352 atomically initializes the complete room plus
+            // initial Owner, an exact-fenced missing row is non-fatal. #1350
+            // will enforce missing-parent writes after that lifecycle exists.
             let affected = tx
                 .execute(
                     "UPDATE clustering_muc_rooms SET subject_json = ?, updated_at = now() WHERE room_jid = ?",
@@ -488,9 +496,11 @@ impl MucDurableStore for PostgresMucRoomStore {
                 .await
                 .map_err(db_err)?;
             if affected == 0 {
-                return Err(XmppError::DurableRoomStateMissing {
-                    entity: fence.entity.clone(),
-                });
+                tracing::warn!(
+                    room = %room_jid,
+                    entity = %fence.entity,
+                    "subject update found no durable room parent before creator lifecycle initialization"
+                );
             }
             tx.commit().await.map_err(db_err)?;
             Ok(())
@@ -659,9 +669,15 @@ mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use kameo::actor::Spawn;
     use std::sync::Arc;
+    use waddle_xmpp::muc::room_actor::{
+        GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject,
+    };
     use waddle_xmpp::muc::RoomSubjectTexts;
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
     use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, StalePredicate};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
@@ -686,6 +702,27 @@ mod tests {
         format!("{name}@muc.example.com")
             .parse()
             .expect("valid test room JID")
+    }
+
+    #[test]
+    fn fence_database_failures_preserve_the_exact_fence_entity() {
+        let jid = room_jid("fence-db-unavailable");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let fence = RoomClaimFenceContext::new(entity.clone(), node_identity(), ClaimEpoch(7));
+
+        for error in [
+            DatabaseError::ConnectionFailed("main pool unavailable".to_string()),
+            DatabaseError::QueryFailed("claim-row iteration failed".to_string()),
+        ] {
+            assert!(
+                matches!(
+                    fence_db_unavailable(error, &fence),
+                    XmppError::OwnershipUnavailable { entity: unavailable_entity }
+                        if unavailable_entity == entity
+                ),
+                "database uncertainty must remain typed for the exact fence entity"
+            );
+        }
     }
 
     #[tokio::test]
@@ -886,7 +923,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_subject_fenced_rejects_a_claimed_room_without_durable_state() {
+    async fn save_subject_fenced_keeps_a_missing_durable_room_nonfatal_without_creating_partial_state(
+    ) {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some((store, claim_store, _db, me)) = clean_store().await else {
             return;
@@ -906,25 +944,80 @@ mod tests {
             set_at: chrono::Utc::now(),
         };
 
-        let result = store
+        store
             .save_subject_fenced(&jid, Some(&subject), &fence)
-            .await;
-
-        assert!(
-            matches!(
-                &result,
-                Err(XmppError::DurableRoomStateMissing { entity })
-                    if entity == &fence.entity
-            ),
-            "a subject write must return the typed missing-state error unless its fenced room row exists: {result:?}"
-        );
+            .await
+            .expect("an exact-fenced subject update without a parent is non-fatal until #1352");
         assert!(
             store
                 .load_room_state_fenced(&jid, &fence)
                 .await
-                .expect("load after rejected subject write")
+                .expect("load after non-fatal subject write")
                 .is_none(),
-            "the rejected subject write must not create a partial durable room state"
+            "the non-fatal subject update must not create a partial durable room state"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_clustered_room_accepts_its_first_subject_without_creating_a_partial_parent() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let room_jid = room_jid("fresh-first-subject");
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        let store: Arc<dyn MucDurableStore> = Arc::new(store);
+        let actor = RoomActor::spawn(RoomActor::new(
+            MucRoom::new(
+                room_jid.clone(),
+                "waddle-fresh".to_string(),
+                "channel-fresh".to_string(),
+                RoomConfig::default(),
+            ),
+            OccupantIdSecret::new(b"muc-durable-first-subject-test-secret".to_vec())
+                .expect("valid test secret"),
+        ));
+
+        actor
+            .ask(RestoreDurableRoomState {
+                store: store.clone(),
+                claim_fence: fence.clone(),
+            })
+            .await
+            .expect("restore handler");
+        actor
+            .ask(SetSubject {
+                texts: RoomSubjectTexts::from_iter([(String::new(), "first subject".to_string())]),
+                setter: "alice@example.com".parse().expect("valid jid"),
+                setter_nick: "alice".to_string(),
+                set_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("the first subject must be accepted rather than bounced");
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("room snapshot")
+                .room
+                .subject
+                .expect("accepted subject is installed in memory")
+                .texts
+                .get(""),
+            Some("first subject")
+        );
+        assert!(
+            store
+                .load_room_state_fenced(&room_jid, &fence)
+                .await
+                .expect("load after accepted first subject")
+                .is_none(),
+            "the first subject must not manufacture a partial durable parent"
         );
     }
 
@@ -946,23 +1039,15 @@ mod tests {
         let fence = RoomClaimFenceContext::new(entity.clone(), me.clone(), epoch);
         store.record_claim_fence(&jid, fence.clone());
 
-        let sibling_jid = room_jid("same-owner-same-epoch");
+        let sibling_jid = room_jid("different-room");
         let sibling_entity = Entity::new(EntityType::RoomActor, sibling_jid.to_string());
-        let sibling_epoch = claim_store
-            .ensure_claimed(&sibling_entity, &me)
-            .await
-            .expect("claim sibling room");
-        assert_eq!(
-            sibling_epoch, epoch,
-            "independent room claims can legitimately share an epoch"
-        );
-        let sibling_fence = RoomClaimFenceContext::new(sibling_entity, me.clone(), sibling_epoch);
+        let sibling_fence = RoomClaimFenceContext::new(sibling_entity, me.clone(), epoch);
         assert!(
             !store
                 .check_exact_claim_fence(&jid, &sibling_fence)
                 .await
                 .expect("cross-room exact check"),
-            "same owner and epoch must not authorize a different room entity"
+            "a different room entity must not authorize this room, regardless of its epoch"
         );
         assert_eq!(
             store.current_claim_fence(&jid),

@@ -3220,6 +3220,7 @@ enum SubjectMutationStoreMode {
 struct SubjectMutationStore {
     mode: std::sync::atomic::AtomicU8,
     claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>,
+    durable_parent_rows: std::sync::atomic::AtomicUsize,
 }
 
 impl SubjectMutationStore {
@@ -3227,7 +3228,13 @@ impl SubjectMutationStore {
         Self {
             mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
             claim_store,
+            durable_parent_rows: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn durable_parent_row_count(&self) -> usize {
+        self.durable_parent_rows
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn set_mode(&self, mode: SubjectMutationStoreMode) {
@@ -3301,6 +3308,8 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
     ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
         Box::pin(async move {
             if self.exact_fence_matches(room_jid, fence).await? {
+                self.durable_parent_rows
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             } else {
                 Err(waddle_xmpp::XmppError::OwnershipLost {
@@ -3698,6 +3707,55 @@ async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
             .subject
             .is_none(),
         "the predecessor's subject must never reach the successor"
+    );
+}
+
+#[tokio::test]
+async fn xep_0045_new_clustered_room_subject_is_not_bounced_before_creator_lifecycle_initializes() {
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+
+    // The clustered store deliberately restores no parent and treats the
+    // UPDATE-only subject write as non-fatal. #1352 owns atomic complete
+    // room-plus-Owner initialization; this #1355 boundary must neither bounce
+    // the first valid subject nor manufacture a partial parent row.
+    let (room_registry, room_actor, room_jid, _claim_store, claim_fence, _store) =
+        spawn_subject_mutation_test_room().await;
+    let connection_registry = ConnectionRegistry::new();
+    let mut deps = Deps::registry_only(&connection_registry);
+    deps.room_registry = Some(&room_registry);
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
+
+    let outcome = interpret(
+        vec![
+            persist_subject_event(&room_jid, &sender, "first subject", claim_fence),
+            OutboundEvent::CloseTransport,
+        ],
+        &deps,
+    )
+    .await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "the first subject must not bounce"
+    );
+    assert!(
+        outcome.close,
+        "later effects must continue after the subject"
+    );
+    assert_eq!(
+        _store.durable_parent_row_count(),
+        0,
+        "generic restore and the subject write must not create a partial durable parent"
+    );
+    let snapshot = room_actor.ask(GetSnapshot).await.expect("room snapshot");
+    assert_eq!(
+        snapshot
+            .room
+            .subject
+            .expect("first subject is applied in memory")
+            .texts
+            .get(""),
+        Some("first subject")
     );
 }
 
