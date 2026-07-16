@@ -794,30 +794,17 @@ fn push_registration_client_js_error(error: impl Into<ClientError>) -> JsValue {
 /// `notify_mode`. Used by both `fetch_user_bookmarks` (per-item map)
 /// and `set_room_notification_mode` (response shaping).
 fn surface_bookmark(item: BookmarkItem) -> WaddleBookmarkItem {
-    // A bookmark may (malformed-but-possible, folded by the merge code)
-    // carry more than one `<notify/>` sibling, and a `<notify/>` may
-    // hold only identity-scoped settings with no fallback. Scan ALL
-    // notify children rather than stopping at the first: take the first
-    // fallback mode found, and treat the opt-in as set if ANY notify
-    // sibling carries the rich-payload marker — matching how both
-    // `read_fallback_mode` and the server's `parse_rich_payload_opt_in`
-    // resolve across siblings. Round-2 PR #804 review (Codex P2).
-    let notifies = || {
-        item.extensions.iter().filter(|ext| {
-            ext.is(
-                "notify",
-                waddle_xmpp_client::xep::xep0492::NS_NOTIFICATION_SETTINGS,
-            )
-        })
-    };
-    let notify_mode = notifies().find_map(read_fallback_mode);
-    let rich_payload_opt_in = notifies().any(read_rich_payload_opt_in);
+    // The sibling-scanning rules (multiple `<notify/>` siblings,
+    // fallbackless identity-only elements) live in the shared core
+    // helper so the WASM and UniFFI boundaries surface identical
+    // state. Round-2 PR #804 review (Codex P2).
+    let surfaced = waddle_xmpp_client::xep::xep0492::surface_bookmark_notify(&item.extensions);
     WaddleBookmarkItem {
         jid: item.jid.to_string(),
         name: item.name,
         autojoin: item.autojoin,
-        notify_mode,
-        rich_payload_opt_in,
+        notify_mode: surfaced.fallback_mode,
+        rich_payload_opt_in: surfaced.rich_payload_opt_in,
     }
 }
 
@@ -884,11 +871,8 @@ fn fetch_threads_query_from_options(
 /// [`WaddleDmBookmarkItem`] (issue #720). Used by both
 /// `fetch_dm_bookmarks` per-item parsing.
 fn surface_dm_bookmark(jid: &jid::BareJid, notify: &Element) -> WaddleDmBookmarkItem {
-    surface_dm_bookmark_values(
-        jid,
-        read_fallback_mode(notify),
-        read_rich_payload_opt_in(notify),
-    )
+    let surfaced = waddle_xmpp_client::xep::xep0492::surface_dm_notify(notify);
+    surface_dm_bookmark_values(jid, surfaced.fallback_mode, surfaced.rich_payload_opt_in)
 }
 
 fn surface_dm_bookmark_values(

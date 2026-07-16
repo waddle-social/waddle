@@ -14,7 +14,8 @@ pub use dm_bookmark::{
 };
 pub use notify::{
     merge_notify, merge_notify_into_extensions, read_fallback_mode, read_rich_payload_opt_in,
-    ConversationKind, NotifyMode, NS_NOTIFICATION_SETTINGS, NS_PUSH_RICH_PAYLOAD,
+    surface_bookmark_notify, surface_dm_notify, ConversationKind, NotifyMode,
+    NotifySettingsSurface, NS_NOTIFICATION_SETTINGS, NS_PUSH_RICH_PAYLOAD,
 };
 
 #[cfg(test)]

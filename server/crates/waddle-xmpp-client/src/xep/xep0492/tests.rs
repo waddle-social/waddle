@@ -898,3 +898,104 @@ fn build_retract_dm_bookmark_iq_retracts_jid_item() {
     let item = retract.get_child("item", NS_PUBSUB).expect("item present");
     assert_eq!(item.attr("id"), Some("bob@example.com"));
 }
+
+#[test]
+fn surface_bookmark_notify_reads_fallback_and_rich_opt_in() {
+    // #719 — the surfaced state exposes the rich-payload opt-in from
+    // the fallback's <advanced/> alongside the fallback mode itself.
+    let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'>\
+                    <always>\
+                        <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                            <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                        </advanced>\
+                    </always>\
+                </notify>\
+            </extensions>"
+        .parse()
+        .expect("valid extensions");
+    let children: Vec<Element> = extensions.children().cloned().collect();
+    let surfaced = surface_bookmark_notify(&children);
+    assert_eq!(surfaced.fallback_mode, Some(NotifyMode::Always));
+    assert!(surfaced.rich_payload_opt_in);
+}
+
+#[test]
+fn surface_bookmark_notify_opt_in_defaults_off_without_advanced() {
+    let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'><never /></notify>\
+            </extensions>"
+        .parse()
+        .expect("valid extensions");
+    let children: Vec<Element> = extensions.children().cloned().collect();
+    let surfaced = surface_bookmark_notify(&children);
+    assert_eq!(surfaced.fallback_mode, Some(NotifyMode::Never));
+    assert!(!surfaced.rich_payload_opt_in);
+}
+
+#[test]
+fn surface_bookmark_notify_absent_notify_yields_none() {
+    // No <notify/> extension at all — the caller resolves against the
+    // XEP-0492 §3 conversation-kind default.
+    let surfaced = surface_bookmark_notify(&[]);
+    assert_eq!(surfaced.fallback_mode, None);
+    assert!(!surfaced.rich_payload_opt_in);
+}
+
+#[test]
+fn surface_bookmark_notify_scans_past_fallbackless_sibling() {
+    // Malformed-but-possible state the merge code explicitly folds:
+    // multiple <notify/> siblings. The first carries only an
+    // identity-scoped setting (no fallback, no rich marker); the
+    // user's real fallback + rich opt-in live in the second. ALL
+    // notify siblings must be scanned, not just the first.
+    let extensions: Element = "<extensions xmlns='urn:xmpp:bookmarks:1'>\
+                <notify xmlns='urn:xmpp:notification-settings:1'>\
+                    <never identity-category='client' identity-type='pc' />\
+                </notify>\
+                <notify xmlns='urn:xmpp:notification-settings:1'>\
+                    <always>\
+                        <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                            <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                        </advanced>\
+                    </always>\
+                </notify>\
+            </extensions>"
+        .parse()
+        .expect("valid extensions");
+    let children: Vec<Element> = extensions.children().cloned().collect();
+    let surfaced = surface_bookmark_notify(&children);
+    assert_eq!(surfaced.fallback_mode, Some(NotifyMode::Always));
+    assert!(surfaced.rich_payload_opt_in);
+}
+
+#[test]
+fn surface_dm_notify_reads_hosted_notify() {
+    let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <on-mention>\
+                    <advanced xmlns='urn:xmpp:notification-settings:1'>\
+                        <rich-payload xmlns='urn:waddle:push:rich:0'/>\
+                    </advanced>\
+                </on-mention>\
+            </notify>"
+        .parse()
+        .expect("valid notify");
+    let surfaced = surface_dm_notify(&notify);
+    assert_eq!(surfaced.fallback_mode, Some(NotifyMode::OnMention));
+    assert!(surfaced.rich_payload_opt_in);
+}
+
+#[test]
+fn surface_dm_notify_identity_only_yields_no_fallback() {
+    // A <notify/> holding only identity-scoped siblings has no
+    // fallback; the caller resolves against the §3 direct-chat
+    // default (`always`).
+    let notify: Element = "<notify xmlns='urn:xmpp:notification-settings:1'>\
+                <never identity-category='client' identity-type='pc' />\
+            </notify>"
+        .parse()
+        .expect("valid notify");
+    let surfaced = surface_dm_notify(&notify);
+    assert_eq!(surfaced.fallback_mode, None);
+    assert!(!surfaced.rich_payload_opt_in);
+}

@@ -747,6 +747,14 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
@@ -861,6 +869,14 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_supports_mds_p
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_direct_message(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_message(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_bookmarks(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_bookmarks(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(`ptr`: Long,`dmJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_device(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`deviceId`: RustBuffer.ByValue,
 ): Long
@@ -1111,6 +1127,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks() != 18377) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks() != 4873) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode() != 30190) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {
@@ -1865,6 +1893,48 @@ public interface WaddleClientInterface {
      * rules as [`Self::pin_message`].
      */
     suspend fun `unpinMessage`(`roomJid`: kotlin.String, `targetStanzaId`: kotlin.String): kotlin.Boolean
+
+    /**
+     * Fetch the user's Waddle DM-bookmark items (issue #720) from
+     * PEP, surfaced with the XEP-0492 fallback mode + rich-payload
+     * opt-in (#719) per direct-chat contact. The node is sparse /
+     * override-only; an absent node (`item-not-found`) resolves to
+     * the empty list.
+     */
+    suspend fun `fetchDmBookmarks`(): List<WaddleDmBookmarkItem>
+
+    /**
+     * Fetch the user's XEP-0402 bookmark items from PEP, surfaced
+     * with the XEP-0492 fallback notification mode (when present) per
+     * room. Resolves to the empty list when the PEP node is absent
+     * (first publish hasn't happened — `item-not-found`).
+     *
+     * **Deferred** (WASM parity): no XEP-0163 §4.4 `+notify`
+     * self-subscription on `urn:xmpp:bookmarks:1` yet, so callers
+     * re-fetch on every fresh session-ready; a setting changed on
+     * another device reaches this one on the next reconnect.
+     */
+    suspend fun `fetchUserBookmarks`(): List<WaddleBookmarkItem>
+
+    /**
+     * Set the per-DM XEP-0492 notification mode for one direct-chat
+     * contact via the Waddle DM-bookmark carrier (issue #720). The
+     * node is sparse / override-only: returning the DM to the §3
+     * direct-chat default retracts the item (`Removed` outcome)
+     * instead of publishing.
+     */
+    suspend fun `setDmNotificationMode`(`dmJid`: kotlin.String, `mode`: WaddleNotifyMode, `richPayloadOptIn`: kotlin.Boolean): WaddleSetDmNotificationModeOutcome
+
+    /**
+     * Set the per-chat XEP-0492 notification mode for one room by
+     * merging into the user's XEP-0402 bookmark for that room
+     * (creating one with `autojoin=false` when absent, so the call
+     * never changes join behavior). Foreign `<advanced/>` children
+     * and identity-scoped siblings written by other clients are
+     * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
+     * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+    suspend fun `setRoomNotificationMode`(`roomJid`: kotlin.String, `mode`: WaddleNotifyMode, `name`: kotlin.String?, `richPayloadOptIn`: kotlin.Boolean): WaddleSetRoomNotificationModeOutcome
 
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -2932,6 +3002,124 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * Fetch the user's Waddle DM-bookmark items (issue #720) from
+     * PEP, surfaced with the XEP-0492 fallback mode + rich-payload
+     * opt-in (#719) per direct-chat contact. The node is sparse /
+     * override-only; an absent node (`item-not-found`) resolves to
+     * the empty list.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchDmBookmarks`() : List<WaddleDmBookmarkItem> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_dm_bookmarks(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleDmBookmarkItem.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Fetch the user's XEP-0402 bookmark items from PEP, surfaced
+     * with the XEP-0492 fallback notification mode (when present) per
+     * room. Resolves to the empty list when the PEP node is absent
+     * (first publish hasn't happened — `item-not-found`).
+     *
+     * **Deferred** (WASM parity): no XEP-0163 §4.4 `+notify`
+     * self-subscription on `urn:xmpp:bookmarks:1` yet, so callers
+     * re-fetch on every fresh session-ready; a setting changed on
+     * another device reaches this one on the next reconnect.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchUserBookmarks`() : List<WaddleBookmarkItem> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_bookmarks(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleBookmarkItem.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Set the per-DM XEP-0492 notification mode for one direct-chat
+     * contact via the Waddle DM-bookmark carrier (issue #720). The
+     * node is sparse / override-only: returning the DM to the §3
+     * direct-chat default retracts the item (`Removed` outcome)
+     * instead of publishing.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setDmNotificationMode`(`dmJid`: kotlin.String, `mode`: WaddleNotifyMode, `richPayloadOptIn`: kotlin.Boolean) : WaddleSetDmNotificationModeOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(
+                uniffiHandle,
+                FfiConverterString.lower(`dmJid`),FfiConverterTypeWaddleNotifyMode.lower(`mode`),FfiConverterBoolean.lower(`richPayloadOptIn`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleSetDmNotificationModeOutcome.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Set the per-chat XEP-0492 notification mode for one room by
+     * merging into the user's XEP-0402 bookmark for that room
+     * (creating one with `autojoin=false` when absent, so the call
+     * never changes join behavior). Foreign `<advanced/>` children
+     * and identity-scoped siblings written by other clients are
+     * preserved verbatim (XEP-0492 §3); `rich_payload_opt_in`
+     * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setRoomNotificationMode`(`roomJid`: kotlin.String, `mode`: WaddleNotifyMode, `name`: kotlin.String?, `richPayloadOptIn`: kotlin.Boolean) : WaddleSetRoomNotificationModeOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterTypeWaddleNotifyMode.lower(`mode`),FfiConverterOptionalString.lower(`name`),FfiConverterBoolean.lower(`richPayloadOptIn`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleSetRoomNotificationModeOutcome.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -3450,6 +3638,83 @@ public object FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer<WaddleAvatar>
 
 
 /**
+ * One XEP-0402 bookmark item surfaced with its XEP-0492 fallback
+ * notification mode. `notify_mode == None` means the bookmark has no
+ * fallback `<notify/>` setting — the caller resolves against the
+ * XEP-0492 §3 conversation-kind default.
+ */
+data class WaddleBookmarkItem (
+    /**
+     * The bookmarked room's bare JID (XEP-0402 §2 item id).
+     */
+    var `jid`: kotlin.String
+    ,
+    /**
+     * `<conference name='…'>` attribute, when present.
+     */
+    var `name`: kotlin.String?
+    ,
+    /**
+     * `<conference autojoin='true|false'>`; defaults to `false`.
+     */
+    var `autojoin`: kotlin.Boolean
+    ,
+    /**
+     * XEP-0492 fallback setting read from the bookmark's
+     * `<extensions/>`, when present.
+     */
+    var `notifyMode`: WaddleNotifyMode?
+    ,
+    /**
+     * Waddle rich XEP-0357 push-summary opt-in carried in the
+     * XEP-0492 §2.3 `<advanced/>` block (#719). `false` is the
+     * default / absence-of-marker case.
+     */
+    var `richPayloadOptIn`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleBookmarkItem: FfiConverterRustBuffer<WaddleBookmarkItem> {
+    override fun read(buf: ByteBuffer): WaddleBookmarkItem {
+        return WaddleBookmarkItem(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleNotifyMode.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleBookmarkItem) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`autojoin`) +
+            FfiConverterOptionalTypeWaddleNotifyMode.allocationSize(value.`notifyMode`) +
+            FfiConverterBoolean.allocationSize(value.`richPayloadOptIn`)
+    )
+
+    override fun write(value: WaddleBookmarkItem, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`autojoin`, buf)
+            FfiConverterOptionalTypeWaddleNotifyMode.write(value.`notifyMode`, buf)
+            FfiConverterBoolean.write(value.`richPayloadOptIn`, buf)
+    }
+}
+
+
+
+/**
  * Typed A/V call event surfaced to Swift via
  * `WaddleClientEvent::Call`.
  * `from` is the stamped sender JID (a *full* JID for propose /
@@ -3773,6 +4038,67 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.write(value.`accessToken`, buf)
             FfiConverterString.write(value.`resource`, buf)
             FfiConverterOptionalTypeWaddleSmResumeState.write(value.`resumeState`, buf)
+    }
+}
+
+
+
+/**
+ * One Waddle DM-bookmark item (issue #720): the `urn:waddle:dm-bookmarks:0`
+ * PEP node's item id is the contact's bare JID and its payload hosts
+ * one official XEP-0492 `<notify/>`. The node is sparse /
+ * override-only — an item exists ONLY when the DM has an override —
+ * so `notify_mode == None` means the hosted `<notify/>` carries only
+ * identity-scoped siblings; resolve against the §3 direct-chat
+ * default (`always`).
+ */
+data class WaddleDmBookmarkItem (
+    /**
+     * The contact's bare JID (PEP item id).
+     */
+    var `jid`: kotlin.String
+    ,
+    /**
+     * XEP-0492 fallback setting read from the hosted `<notify/>`.
+     */
+    var `notifyMode`: WaddleNotifyMode?
+    ,
+    /**
+     * Waddle rich XEP-0357 push-summary opt-in (#719).
+     */
+    var `richPayloadOptIn`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleDmBookmarkItem: FfiConverterRustBuffer<WaddleDmBookmarkItem> {
+    override fun read(buf: ByteBuffer): WaddleDmBookmarkItem {
+        return WaddleDmBookmarkItem(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeWaddleNotifyMode.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleDmBookmarkItem) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalTypeWaddleNotifyMode.allocationSize(value.`notifyMode`) +
+            FfiConverterBoolean.allocationSize(value.`richPayloadOptIn`)
+    )
+
+    override fun write(value: WaddleDmBookmarkItem, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalTypeWaddleNotifyMode.write(value.`notifyMode`, buf)
+            FfiConverterBoolean.write(value.`richPayloadOptIn`, buf)
     }
 }
 
@@ -6970,6 +7296,54 @@ public object FfiConverterTypeWaddleMucRole: FfiConverterRustBuffer<WaddleMucRol
 
 
 /**
+ * XEP-0492 §2.1 fallback notification setting (no `identity-*`
+ * attrs). FFI mirror of [`NotifyMode`].
+ */
+
+enum class WaddleNotifyMode {
+
+    /**
+     * `<always/>` — notify for every message.
+     */
+    ALWAYS,
+    /**
+     * `<on-mention/>` — only notify on a XEP-0461/0372 mention.
+     */
+    ON_MENTION,
+    /**
+     * `<never/>` — never notify (muted).
+     */
+    NEVER;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleNotifyMode: FfiConverterRustBuffer<WaddleNotifyMode> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleNotifyMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleNotifyMode) = 4UL
+
+    override fun write(value: WaddleNotifyMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * urn:waddle:pin:0 pin/unpin action carried on a room system message.
  */
 
@@ -7445,6 +7819,243 @@ public object FfiConverterTypeWaddleSendMessageOutcome : FfiConverterRustBuffer<
             }
             is WaddleSendMessageOutcome.Error -> {
                 buf.putInt(7)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Typed outcome of [`WaddleClient::set_dm_notification_mode`] (issue
+ * #720). Mirrors [`WaddleSetRoomNotificationModeOutcome`] with one
+ * extra variant: the DM node is sparse / override-only, so returning
+ * a DM to the XEP-0492 §3 direct-chat default RETRACTS the item.
+ */
+sealed class WaddleSetDmNotificationModeOutcome {
+
+    /**
+     * The DM carried an override; the item was published.
+     */
+    data class Ok(
+        val `item`: social.waddle.client.ffi.WaddleDmBookmarkItem) : WaddleSetDmNotificationModeOutcome()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * The merged `<notify/>` collapsed to the §3 direct-chat default,
+     * so the item was retracted. `jid` echoes the contact so the
+     * caller can drop its override entry.
+     */
+    data class Removed(
+        val `jid`: kotlin.String) : WaddleSetDmNotificationModeOutcome()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * XEP-0060 `precondition-not-met` on the publish.
+     */
+    object NodeConfigMismatch : WaddleSetDmNotificationModeOutcome()
+
+
+    /**
+     * Any other stanza-level error (condition stays on the Rust side).
+     */
+    object Error : WaddleSetDmNotificationModeOutcome()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSetDmNotificationModeOutcome : FfiConverterRustBuffer<WaddleSetDmNotificationModeOutcome>{
+    override fun read(buf: ByteBuffer): WaddleSetDmNotificationModeOutcome {
+        return when(buf.getInt()) {
+            1 -> WaddleSetDmNotificationModeOutcome.Ok(
+                FfiConverterTypeWaddleDmBookmarkItem.read(buf),
+                )
+            2 -> WaddleSetDmNotificationModeOutcome.Removed(
+                FfiConverterString.read(buf),
+                )
+            3 -> WaddleSetDmNotificationModeOutcome.NodeConfigMismatch
+            4 -> WaddleSetDmNotificationModeOutcome.Error
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleSetDmNotificationModeOutcome) = when(value) {
+        is WaddleSetDmNotificationModeOutcome.Ok -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleDmBookmarkItem.allocationSize(value.`item`)
+            )
+        }
+        is WaddleSetDmNotificationModeOutcome.Removed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`jid`)
+            )
+        }
+        is WaddleSetDmNotificationModeOutcome.NodeConfigMismatch -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleSetDmNotificationModeOutcome.Error -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleSetDmNotificationModeOutcome, buf: ByteBuffer) {
+        when(value) {
+            is WaddleSetDmNotificationModeOutcome.Ok -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleDmBookmarkItem.write(value.`item`, buf)
+                Unit
+            }
+            is WaddleSetDmNotificationModeOutcome.Removed -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`jid`, buf)
+                Unit
+            }
+            is WaddleSetDmNotificationModeOutcome.NodeConfigMismatch -> {
+                buf.putInt(3)
+                Unit
+            }
+            is WaddleSetDmNotificationModeOutcome.Error -> {
+                buf.putInt(4)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * Typed outcome of [`WaddleClient::set_room_notification_mode`].
+ * Mirrors the core `SetRoomNotificationModeOutcome` (and the WASM
+ * boundary's tagged shape) so callers branch without parsing
+ * diagnostics.
+ */
+sealed class WaddleSetRoomNotificationModeOutcome {
+
+    /**
+     * The merged bookmark was published. Carries the surfaced item so
+     * the caller reconciles its store without a follow-up fetch.
+     */
+    data class Ok(
+        val `item`: social.waddle.client.ffi.WaddleBookmarkItem) : WaddleSetRoomNotificationModeOutcome()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * XEP-0060 `precondition-not-met` on the publish — typically a
+     * pre-existing PEP node with a divergent `access_model`.
+     */
+    object NodeConfigMismatch : WaddleSetRoomNotificationModeOutcome()
+
+
+    /**
+     * Any other stanza-level error. The specific RFC 6120 §8.3
+     * condition stays on the Rust side (emitted via `tracing::warn`)
+     * rather than crossing the boundary as a stringly-typed payload.
+     */
+    object Error : WaddleSetRoomNotificationModeOutcome()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSetRoomNotificationModeOutcome : FfiConverterRustBuffer<WaddleSetRoomNotificationModeOutcome>{
+    override fun read(buf: ByteBuffer): WaddleSetRoomNotificationModeOutcome {
+        return when(buf.getInt()) {
+            1 -> WaddleSetRoomNotificationModeOutcome.Ok(
+                FfiConverterTypeWaddleBookmarkItem.read(buf),
+                )
+            2 -> WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch
+            3 -> WaddleSetRoomNotificationModeOutcome.Error
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleSetRoomNotificationModeOutcome) = when(value) {
+        is WaddleSetRoomNotificationModeOutcome.Ok -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleBookmarkItem.allocationSize(value.`item`)
+            )
+        }
+        is WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleSetRoomNotificationModeOutcome.Error -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleSetRoomNotificationModeOutcome, buf: ByteBuffer) {
+        when(value) {
+            is WaddleSetRoomNotificationModeOutcome.Ok -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleBookmarkItem.write(value.`item`, buf)
+                Unit
+            }
+            is WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch -> {
+                buf.putInt(2)
+                Unit
+            }
+            is WaddleSetRoomNotificationModeOutcome.Error -> {
+                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -8458,6 +9069,38 @@ public object FfiConverterOptionalTypeWaddleMucRole: FfiConverterRustBuffer<Wadd
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleNotifyMode: FfiConverterRustBuffer<WaddleNotifyMode?> {
+    override fun read(buf: ByteBuffer): WaddleNotifyMode? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleNotifyMode.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleNotifyMode?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleNotifyMode.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleNotifyMode?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleNotifyMode.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleStanzaErrorType: FfiConverterRustBuffer<WaddleStanzaErrorType?> {
     override fun read(buf: ByteBuffer): WaddleStanzaErrorType? {
         if (buf.get().toInt() == 0) {
@@ -8606,6 +9249,34 @@ public object FfiConverterSequenceTypeWaddleArchivedMessage: FfiConverterRustBuf
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleBookmarkItem: FfiConverterRustBuffer<List<WaddleBookmarkItem>> {
+    override fun read(buf: ByteBuffer): List<WaddleBookmarkItem> {
+        val len = buf.getInt()
+        return List<WaddleBookmarkItem>(len) {
+            FfiConverterTypeWaddleBookmarkItem.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleBookmarkItem>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleBookmarkItem.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleBookmarkItem>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleBookmarkItem.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer<List<WaddleChannel>> {
     override fun read(buf: ByteBuffer): List<WaddleChannel> {
         val len = buf.getInt()
@@ -8624,6 +9295,34 @@ public object FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleChannel.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleDmBookmarkItem: FfiConverterRustBuffer<List<WaddleDmBookmarkItem>> {
+    override fun read(buf: ByteBuffer): List<WaddleDmBookmarkItem> {
+        val len = buf.getInt()
+        return List<WaddleDmBookmarkItem>(len) {
+            FfiConverterTypeWaddleDmBookmarkItem.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleDmBookmarkItem>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleDmBookmarkItem.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleDmBookmarkItem>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleDmBookmarkItem.write(it, buf)
         }
     }
 }
