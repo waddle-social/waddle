@@ -1,5 +1,6 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { WASM_PACKAGE_ARTIFACTS } from "./wasm-build-executor.mjs";
 
 const CANONICAL_BUILD_ID = /^[0-9a-f]{64}$/u;
 
@@ -58,6 +59,9 @@ export function finalizeWasmPackage(outDir, buildId) {
 	const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
 	pkg.name = "@waddle/xmpp-client-wasm";
 	pkg.version = wasmPackageVersion(buildId);
+	pkg.files = WASM_PACKAGE_ARTIFACTS.filter(
+		(artifact) => artifact !== "package.json",
+	);
 	pkg.publishConfig = {
 		registry: "https://npm.pkg.github.com",
 		access: "public",

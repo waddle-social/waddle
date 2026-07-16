@@ -344,9 +344,13 @@ describe("canonical WASM build identity", () => {
 						return cargoMetadataByRoot.get(configRoot);
 					},
 				}),
-			).toThrow(`repository Cargo configuration is not allowed for the canonical WASM build: ${configPath}`);
+			).toThrow(
+				`repository Cargo configuration is not allowed for the canonical WASM build: ${configPath}`,
+			);
 			expect(metadataCalls).toBe(0);
-			expect(() => assertNoRepositoryCargoConfig(configRoot)).toThrow(configPath);
+			expect(() => assertNoRepositoryCargoConfig(configRoot)).toThrow(
+				configPath,
+			);
 		}
 
 		const brokenLinkRoot = fixtureRoot();
@@ -1078,7 +1082,7 @@ describe("canonical WASM build execution policy", () => {
 		).toThrow("artifact contract count");
 	});
 
-	test("shared finalizer removes wasm-pack gitignore before exact-six attestation", () => {
+	test("shared finalizer removes wasm-pack gitignore and derives the publish allowlist from the exact-six contract", () => {
 		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-finalize-"));
 		roots.push(root);
 		writeFileSync(resolve(root, ".gitignore"), "*\n");
@@ -1097,15 +1101,48 @@ describe("canonical WASM build execution policy", () => {
 		expect(readdirSync(root).sort()).toEqual(
 			[...WASM_PACKAGE_ARTIFACTS].sort(),
 		);
-		expect(JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")))
-			.toMatchObject({
-				name: "@waddle/xmpp-client-wasm",
-				version: `0.0.0-wasm-${"a".repeat(64)}`,
-				publishConfig: {
-					registry: GITHUB_PACKAGES_REGISTRY,
-					access: "public",
-				},
-			});
+		const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+		expect(pkg).toMatchObject({
+			name: "@waddle/xmpp-client-wasm",
+			version: `0.0.0-wasm-${"a".repeat(64)}`,
+			publishConfig: {
+				registry: GITHUB_PACKAGES_REGISTRY,
+				access: "public",
+			},
+		});
+		expect(pkg.files).toEqual(
+			WASM_PACKAGE_ARTIFACTS.filter((artifact) => artifact !== "package.json"),
+		);
+	});
+
+	test("real Bun pack includes every canonical artifact and excludes temporary build files", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-pack-"));
+		roots.push(root);
+		for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+			const contents =
+				artifact === "package.json"
+					? `${JSON.stringify({ name: "unfinalized" })}\n`
+					: artifact === "waddle_xmpp_client_wasm.d.ts"
+						? "export class Fixture {}\n"
+						: `fixture:${artifact}`;
+			writeFileSync(resolve(root, artifact), contents);
+		}
+		writeFileSync(resolve(root, "temporary-build.log"), "not publishable\n");
+
+		finalizeWasmPackage(root, "b".repeat(64));
+		const output = execFileSync(
+			"bun",
+			["pm", "pack", "--dry-run", "--ignore-scripts"],
+			{ cwd: root, encoding: "utf8" },
+		);
+		const packed = output
+			.split(/\r?\n/u)
+			.map((line) => /^packed\s+\S+\s+(.+)$/u.exec(line)?.[1])
+			.filter((artifact): artifact is string => artifact !== undefined)
+			.sort();
+
+		expect(packed).toEqual([...WASM_PACKAGE_ARTIFACTS].sort());
+		expect(packed).not.toContain("temporary-build.log");
 	});
 
 	test("derives a deterministic unique valid SemVer prerelease from the full build identity", () => {
@@ -1145,7 +1182,12 @@ describe("canonical WASM build execution policy", () => {
 		const built: string[] = [];
 		const logs: string[] = [];
 		let invocation:
-			| { command: string; args: string[]; options: { cwd: string; env: Record<string, string> }; packageJson: string }
+			| {
+					command: string;
+					args: string[];
+					options: { cwd: string; env: Record<string, string> };
+					packageJson: string;
+			  }
 			| undefined;
 		buildAndPublishWasm({
 			environment: {
@@ -1163,17 +1205,28 @@ describe("canonical WASM build execution policy", () => {
 					writeFileSync(
 						resolve(outDir, artifact),
 						artifact === "package.json"
-							? JSON.stringify({ name: "@waddle/xmpp-client-wasm", version: wasmPackageVersion("d".repeat(64)) })
+							? JSON.stringify({
+									name: "@waddle/xmpp-client-wasm",
+									version: wasmPackageVersion("d".repeat(64)),
+								})
 							: `same:${artifact}`,
 					);
 				}
+				finalizeWasmPackage(outDir, "d".repeat(64));
 			},
-			publishExecute: (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => {
+			publishExecute: (
+				command: string,
+				args: string[],
+				options: { cwd: string; env: Record<string, string> },
+			) => {
 				invocation = {
 					command,
 					args,
 					options,
-					packageJson: readFileSync(resolve(options.cwd, "package.json"), "utf8"),
+					packageJson: readFileSync(
+						resolve(options.cwd, "package.json"),
+						"utf8",
+					),
 				};
 			},
 			log: (message: string) => logs.push(message),
@@ -1189,6 +1242,9 @@ describe("canonical WASM build execution policy", () => {
 			"--tolerate-republish",
 		]);
 		expect(invocation?.options.cwd).toBe(built[0]);
+		expect(JSON.parse(invocation?.packageJson ?? "{}").files).toEqual(
+			WASM_PACKAGE_ARTIFACTS.filter((artifact) => artifact !== "package.json"),
+		);
 		expect(invocation?.options.env).toMatchObject({
 			PATH: "/tools",
 			NPM_CONFIG_TOKEN: secret,

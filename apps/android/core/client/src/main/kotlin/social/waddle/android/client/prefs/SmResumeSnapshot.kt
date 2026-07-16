@@ -1,9 +1,9 @@
 package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
-import java.time.Instant
 import social.waddle.client.ffi.WaddleSmResumeEntry
 import social.waddle.client.ffi.WaddleSmResumeState
+import java.time.Instant
 
 /**
  * JSON-serializable mirror of the FFI [WaddleSmResumeState], persisted in
