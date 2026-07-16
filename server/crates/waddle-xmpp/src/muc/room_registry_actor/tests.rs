@@ -1588,6 +1588,17 @@ mod ownership_claims_tests {
                 .store(drop_claim, Ordering::SeqCst);
             self.force_next_steal_conflict.store(true, Ordering::SeqCst);
         }
+
+        fn replace_with_successor(&self, successor: NodeIdentity) -> ClaimEpoch {
+            let mut state = self.state.lock().expect("lock");
+            let next_epoch = ClaimEpoch(
+                state
+                    .as_ref()
+                    .map_or(0, |(_, epoch)| epoch.0.saturating_add(1)),
+            );
+            *state = Some((successor, next_epoch));
+            next_epoch
+        }
     }
 
     #[async_trait]
@@ -2068,8 +2079,8 @@ mod ownership_claims_tests {
     struct RecordingDurableStore {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
-        lose_restore_ownership: bool,
         lose_restore_ownership_on_call: Option<usize>,
+        restore_loss_successor: Option<(Arc<DeadOwnerClaimStore>, NodeIdentity)>,
         fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
         block_load_for: Option<BareJid>,
@@ -2174,9 +2185,13 @@ mod ownership_claims_tests {
                     })
                     .is_ok();
                 let fence_lost = store.fence_lost.load(Ordering::SeqCst);
-                if store.lose_restore_ownership
-                    || store.lose_restore_ownership_on_call == Some(load_call)
-                {
+                if let Some((claim_store, successor)) = &store.restore_loss_successor {
+                    claim_store.replace_with_successor(successor.clone());
+                    return Err(crate::XmppError::OwnershipLost {
+                        entity: fence.entity.clone(),
+                    });
+                }
+                if store.lose_restore_ownership_on_call == Some(load_call) {
                     return Err(crate::XmppError::OwnershipLost {
                         entity: fence.entity.clone(),
                     });
@@ -4031,9 +4046,10 @@ mod ownership_claims_tests {
     #[tokio::test]
     async fn demand_restore_ownership_loss_is_terminal_without_release_or_retry() {
         let registry = spawn_registry().await;
-        let claim_store = Arc::new(InProcessClaimStore::new());
+        let claim_store = Arc::new(DeadOwnerClaimStore::empty());
+        let successor = foreign_identity();
         let durable_store = Arc::new(RecordingDurableStore {
-            lose_restore_ownership: true,
+            restore_loss_successor: Some((Arc::clone(&claim_store), successor.clone())),
             ..RecordingDurableStore::default()
         });
         wire_recording_store_with_claims(
@@ -4065,14 +4081,18 @@ mod ownership_claims_tests {
             .is_none());
         assert_eq!(durable_store.load_calls.load(Ordering::SeqCst), 1);
         assert!(durable_store.current_claim_fence(&jid).is_none());
-        assert!(
-            claim_store
-                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
-                .await
-                .expect("claim lookup")
-                .is_some(),
-            "a terminally lost fence must not be released again"
+        assert_eq!(
+            claim_store.exact_release_calls.load(Ordering::SeqCst),
+            0,
+            "a terminally lost fence must not enqueue or attempt an exact release"
         );
+        let successor_claim = claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("successor claim lookup")
+            .expect("the successor claim must survive terminal restore loss");
+        assert_eq!(successor_claim.owner, successor);
+        assert_eq!(successor_claim.claim_epoch, ClaimEpoch(1));
     }
 
     #[tokio::test]

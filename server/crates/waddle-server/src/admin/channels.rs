@@ -2726,9 +2726,9 @@ async fn group_dm_rename_update_error(
             UpdateGroupDmConfigByMemberError::OwnershipUnavailable => {
                 unavailable("This room's ownership cannot be verified right now; please retry.")
             }
-            UpdateGroupDmConfigByMemberError::PersistFailed(detail) => internal_err(format!(
-                "group-DM rename applied but durable persist failed: {detail}"
-            )),
+            UpdateGroupDmConfigByMemberError::PersistFailed => {
+                internal_err("group-DM rename applied but durable persist failed")
+            }
         },
         error => internal_err(format!("room actor UpdateGroupDmConfigByMember: {error}")),
     }
