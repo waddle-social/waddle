@@ -1651,30 +1651,57 @@ mod tests {
         persisted: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl waddle_xmpp::muc::MucDurableStore for RecordingDurableStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a jid::BareJid,
-        ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>>
-        {
-            Box::pin(async { Ok(None) })
-        }
+    fn expected_local_room_fence(
+        room_jid: &jid::BareJid,
+    ) -> waddle_xmpp::muc::RoomClaimFenceContext {
+        waddle_xmpp::muc::RoomClaimFenceContext::new(
+            waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            ),
+            waddle_xmpp::ownership::NodeIdentity::local(),
+            waddle_xmpp::ownership::ClaimEpoch(0),
+        )
+    }
 
+    fn validate_local_room_fence(
+        room_jid: &jid::BareJid,
+        fence: &waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> Result<(), waddle_xmpp::XmppError> {
+        if fence == &expected_local_room_fence(room_jid) {
+            Ok(())
+        } else {
+            Err(waddle_xmpp::XmppError::internal(
+                "test store received an unexpected room claim fence",
+            ))
+        }
+    }
+
+    impl waddle_xmpp::muc::MucDurableStore for RecordingDurableStore {
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a jid::BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
         ) -> waddle_xmpp::muc::MucDurableFuture<'a, Option<waddle_xmpp::muc::DurableRoomState>>
         {
-            self.load_room_state(room_jid)
+            let validation = validate_local_room_fence(room_jid, fence);
+            Box::pin(async move {
+                validation?;
+                Ok(None)
+            })
         }
 
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a waddle_xmpp::muc::RoomConfig,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
         ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            if let Err(error) = validate_local_room_fence(room_jid, fence) {
+                return Box::pin(async move { Err(error) });
+            }
             Box::pin(async move {
                 self.started.notify_one();
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1684,20 +1711,42 @@ mod tests {
             })
         }
 
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _subject: Option<&'a waddle_xmpp::muc::SubjectState>,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
         ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = validate_local_room_fence(room_jid, fence);
+            Box::pin(async move { validation })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
-            _room_jid: &'a jid::BareJid,
+            room_jid: &'a jid::BareJid,
             _entry: &'a waddle_xmpp::muc::affiliation::AffiliationEntry,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
         ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = validate_local_room_fence(room_jid, fence);
+            Box::pin(async move { validation })
+        }
+
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, ()> {
+            let validation = validate_local_room_fence(room_jid, fence);
+            Box::pin(async move { validation })
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a jid::BareJid,
+            fence: &'a waddle_xmpp::muc::RoomClaimFenceContext,
+        ) -> waddle_xmpp::muc::MucDurableFuture<'a, bool> {
+            let matches = fence == &expected_local_room_fence(room_jid);
+            Box::pin(async move { Ok(matches) })
         }
     }
 

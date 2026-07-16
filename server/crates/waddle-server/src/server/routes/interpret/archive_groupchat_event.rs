@@ -60,9 +60,7 @@ pub(super) async fn archive_groupchat_event(
                 &message,
                 &room,
                 &sender,
-                resource_constraint_error(
-                    "This room's ownership recently moved to another node; please retry.",
-                ),
+                resource_constraint_error("This room is temporarily unavailable; please retry."),
             );
             return ArchiveGroupchatEventOutcome::OwnershipLost(Box::new(bounce));
         }

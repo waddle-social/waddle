@@ -1677,7 +1677,9 @@ mod resolver_sync_retry_tests {
 
     use kameo::actor::Spawn;
     use waddle_xmpp::muc::affiliation::AffiliationEntry;
-    use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+    };
     use waddle_xmpp::muc::room_actor::{
         ChangeAffiliation, GetAffiliation, RestoreDurableRoomState, RoomActor,
     };
@@ -1759,44 +1761,57 @@ mod resolver_sync_retry_tests {
     }
 
     impl MucDurableStore for SequencedOwnershipStore {
-        fn load_room_state<'a>(
-            &'a self,
-            _room_jid: &'a BareJid,
-        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            Box::pin(async { Ok(None) })
-        }
-
         fn load_room_state_fenced<'a>(
             &'a self,
             room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
-            self.load_room_state(room_jid)
+            let validation = validate_test_claim_fence(room_jid, fence);
+            Box::pin(async move {
+                validation?;
+                Ok(None)
+            })
         }
 
-        fn save_config<'a>(
+        fn save_config_fenced<'a>(
             &'a self,
-            _room_jid: &'a BareJid,
+            room_jid: &'a BareJid,
             _waddle_id: &'a str,
             _channel_id: &'a str,
             _config: &'a RoomConfig,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = validate_test_claim_fence(room_jid, fence);
+            Box::pin(async move { validation })
         }
 
-        fn save_subject<'a>(
+        fn save_subject_fenced<'a>(
             &'a self,
-            _room_jid: &'a BareJid,
+            room_jid: &'a BareJid,
             _subject: Option<&'a SubjectState>,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = validate_test_claim_fence(room_jid, fence);
+            Box::pin(async move { validation })
         }
 
-        fn save_affiliation<'a>(
+        fn save_affiliation_fenced<'a>(
             &'a self,
-            _room_jid: &'a BareJid,
+            room_jid: &'a BareJid,
             _entry: &'a AffiliationEntry,
+            fence: &'a RoomClaimFenceContext,
         ) -> MucDurableFuture<'a, ()> {
-            Box::pin(async { Ok(()) })
+            let validation = validate_test_claim_fence(room_jid, fence);
+            Box::pin(async move { validation })
+        }
+
+        fn delete_room_state_fenced<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, ()> {
+            let validation = validate_test_claim_fence(room_jid, fence);
+            Box::pin(async move { validation })
         }
 
         fn check_fenced_fanout<'a>(&'a self, _room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
@@ -1829,6 +1844,41 @@ mod resolver_sync_retry_tests {
                 }
             })
         }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            room_jid: &'a BareJid,
+            fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            if fence != &test_claim_fence(room_jid) {
+                return Box::pin(async { Ok(false) });
+            }
+            self.check_fenced_fanout(room_jid)
+        }
+    }
+
+    fn test_claim_fence(room_jid: &BareJid) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            waddle_xmpp::ownership::Entity::new(
+                waddle_xmpp::ownership::EntityType::RoomActor,
+                room_jid.to_string(),
+            ),
+            waddle_xmpp::ownership::NodeIdentity::local(),
+            waddle_xmpp::ownership::ClaimEpoch(1),
+        )
+    }
+
+    fn validate_test_claim_fence(
+        room_jid: &BareJid,
+        fence: &RoomClaimFenceContext,
+    ) -> Result<(), waddle_xmpp::XmppError> {
+        if fence == &test_claim_fence(room_jid) {
+            Ok(())
+        } else {
+            Err(waddle_xmpp::XmppError::internal(
+                "test store received an unexpected room claim fence",
+            ))
+        }
     }
 
     async fn spawn_sync_test_room(
@@ -1857,6 +1907,7 @@ mod resolver_sync_retry_tests {
         actor
             .ask(RestoreDurableRoomState {
                 store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+                claim_fence: test_claim_fence(&room_jid),
             })
             .await
             .expect("install durable store");
@@ -1977,6 +2028,7 @@ mod resolver_sync_retry_tests {
         actor
             .ask(RestoreDurableRoomState {
                 store: Arc::clone(&store) as Arc<dyn MucDurableStore>,
+                claim_fence: test_claim_fence(&room_jid),
             })
             .await
             .expect("install deposed ownership store");

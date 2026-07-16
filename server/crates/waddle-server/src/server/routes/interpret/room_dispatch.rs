@@ -1,5 +1,26 @@
 use super::*;
 
+/// Bind the subject mutation emitted from one frozen room snapshot to
+/// that actor incarnation's immutable ownership proof. This is mandatory
+/// post-processing before interpretation: the pure protocol chain cannot carry
+/// actor state in `RoomContext`, so it emits an unbound event. Bypassing this
+/// boundary leaves a durable actor without its exact snapshot fence (or with a
+/// different one), which it rejects before applying the mutation.
+pub(super) fn bind_room_claim_fence(
+    events: &mut [OutboundEvent],
+    claim_fence: Option<&waddle_xmpp::muc::RoomClaimFenceContext>,
+) {
+    for event in events {
+        if let OutboundEvent::PersistRoomSubject {
+            claim_fence: event_fence @ None,
+            ..
+        } = event
+        {
+            *event_fence = claim_fence.cloned();
+        }
+    }
+}
+
 pub(super) async fn dispatch_to_room(
     deps: &Deps<'_>,
     room_jid: jid::BareJid,
@@ -213,8 +234,8 @@ pub(super) async fn dispatch_to_room(
     // production caller). `None` (clustering disabled, non-Postgres, or a
     // build without the `clustering` feature) skips this entirely —
     // single-node behavior, unchanged. A transient backend error fails
-    // open (logged, not blocking); only a definitive 0-rows result
-    // demotes.
+    // open (logged, not blocking); only a definitive non-serving result
+    // demotes. That includes a missing exact row and local identity rotation.
     #[cfg(feature = "clustering")]
     if let Some(store) = &state.deps.app_state.clustering_claims.muc_durable_store {
         match store.check_fenced_fanout(&room_jid).await {
@@ -222,32 +243,25 @@ pub(super) async fn dispatch_to_room(
             Ok(false) => {
                 warn!(
                     room = %room_jid,
-                    "DispatchToRoom: fenced ownership check observed 0 rows; this node has \
-                     been deposed — evicting the local room actor and bouncing the sender"
+                    "DispatchToRoom: retained room fence is non-serving; evicting the local \
+                     room actor and bouncing the sender"
                 );
                 match room_registry
-                    .ask(DestroyRoom {
+                    .ask(DemoteRoomIfExactActor {
                         room_jid: room_jid.clone(),
-                        // Eviction, not destruction: the room now lives
-                        // on the stealing node — its durable rows MUST
-                        // survive this local teardown.
-                        reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::DeposedEviction,
+                        actor_ref: room_actor,
                     })
                     .await
                 {
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
-                        | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
-                    ) => {}
-                    Ok(outcome) => warn!(
+                    Ok(true) => {}
+                    Ok(false) => warn!(
                         room = %room_jid,
-                        ?outcome,
-                        "DispatchToRoom: deposed local actor eviction was unexpectedly refused"
+                        "DispatchToRoom: exact actor demotion found a different room incarnation"
                     ),
                     Err(error) => warn!(
                         room = %room_jid,
                         %error,
-                        "DispatchToRoom: failed to ask registry to evict deposed local actor"
+                        "DispatchToRoom: failed to ask registry to evict non-serving local actor"
                     ),
                 }
                 let reply = build_message_error_reply(
@@ -255,7 +269,7 @@ pub(super) async fn dispatch_to_room(
                     &room_jid,
                     &sender_full,
                     resource_constraint_error(
-                        "This room's ownership recently moved to another node; please retry.",
+                        "This room is temporarily unavailable; please retry.",
                     ),
                 );
                 match Stanza::Message(reply).to_element_string() {
@@ -486,6 +500,8 @@ pub(super) async fn dispatch_to_room(
     // the full `default_room_dispatcher()` here would re-run it.
     let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
     let observer_message = working.clone();
+    let mut dispatch_events = dispatch_outcome.events;
+    bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
 
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
@@ -495,12 +511,7 @@ pub(super) async fn dispatch_to_room(
     //    promotes to a headless recipient pass (depth bumped there).
     //    Bumping here would break that path for every offline
     //    occupant.
-    let nested = Box::pin(interpret_with_depth(
-        dispatch_outcome.events,
-        deps,
-        recursion_depth,
-    ))
-    .await;
+    let nested = Box::pin(interpret_with_depth(dispatch_events, deps, recursion_depth)).await;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;
@@ -619,4 +630,57 @@ async fn session_is_server_owner(state: &WebSocketState, session: Option<&Sessio
         })
         .await
         .is_ok_and(|response| response.allowed)
+}
+
+#[cfg(test)]
+mod room_claim_fence_tests {
+    use super::*;
+    use chrono::Utc;
+    use waddle_xmpp::muc::{RoomClaimFenceContext, RoomSubjectTexts};
+    use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+
+    fn fence(owner: &str) -> RoomClaimFenceContext {
+        RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, "room@muc.example.com"),
+            NodeIdentity::new(owner, "epoch-a"),
+            ClaimEpoch(7),
+        )
+    }
+
+    fn persist_subject_event(claim_fence: Option<RoomClaimFenceContext>) -> OutboundEvent {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room bare jid");
+        OutboundEvent::PersistRoomSubject {
+            room: room.clone(),
+            claim_fence,
+            texts: RoomSubjectTexts::from_iter([(String::new(), "subject".to_string())]),
+            setter: "alice@example.com".parse().expect("setter bare jid"),
+            sender: "alice@example.com/web".parse().expect("sender full jid"),
+            message: Box::new(Message::new(Some(jid::Jid::from(room)))),
+            setter_nick: "alice".to_string(),
+            set_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn bind_room_claim_fence_binds_missing_fence_without_overwriting_or_touching_other_events() {
+        let snapshot_fence = fence("snapshot-owner");
+        let other_actor_fence = fence("other-owner");
+        let mut events = vec![
+            persist_subject_event(None),
+            OutboundEvent::CloseTransport,
+            persist_subject_event(Some(other_actor_fence.clone())),
+        ];
+
+        bind_room_claim_fence(&mut events, Some(&snapshot_fence));
+
+        let OutboundEvent::PersistRoomSubject { claim_fence, .. } = &events[0] else {
+            panic!("first event must be PersistRoomSubject");
+        };
+        assert_eq!(claim_fence.as_ref(), Some(&snapshot_fence));
+        assert!(matches!(events[1], OutboundEvent::CloseTransport));
+        let OutboundEvent::PersistRoomSubject { claim_fence, .. } = &events[2] else {
+            panic!("third event must be PersistRoomSubject");
+        };
+        assert_eq!(claim_fence.as_ref(), Some(&other_actor_fence));
+    }
 }
