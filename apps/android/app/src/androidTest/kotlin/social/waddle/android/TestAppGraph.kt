@@ -20,11 +20,22 @@ import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMessage
 
-/** Scriptable [LoginAuthGateway]: tests preset each call's result. */
+/**
+ * Scriptable [LoginAuthGateway]: tests preset each call's result. The
+ * fields are volatile because tests write them on the instrumentation
+ * thread while ViewModel coroutines read them elsewhere.
+ */
 class FakeLoginAuthGateway : LoginAuthGateway {
+    @Volatile
     var providersResult: Result<List<AuthProvider>> = Result.success(listOf(testAuthProvider()))
+
+    @Volatile
     var startResult: Result<DeviceStartResponse> = Result.success(testDeviceStart())
+
+    @Volatile
     var pollResult: Result<DevicePollResult> = Result.success(DevicePollResult.Pending)
+
+    @Volatile
     var sessionResult: Result<WaddleSessionInfo?> = Result.success(testSessionInfo())
 
     override suspend fun providers(): Result<List<AuthProvider>> = providersResult
