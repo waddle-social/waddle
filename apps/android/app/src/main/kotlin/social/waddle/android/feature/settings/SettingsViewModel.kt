@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
+import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.ThemeMode
@@ -52,7 +53,17 @@ class SettingsViewModel(
 
     init {
         sessionManager?.let { manager ->
-            viewModelScope.launch { _isCommunityOwner.value = manager.isCommunityOwner() }
+            viewModelScope.launch {
+                // Probe on every Ready transition until it succeeds: an
+                // early probe would race the connect and stick false,
+                // and a transient IQ failure gets retried on the next
+                // reconnect instead of hiding the entry forever.
+                manager.connectionState.collect { state ->
+                    if (state is ConnectionState.Ready && !_isCommunityOwner.value) {
+                        _isCommunityOwner.value = manager.isCommunityOwner()
+                    }
+                }
+            }
         }
     }
 

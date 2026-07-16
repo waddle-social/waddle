@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
@@ -95,10 +94,14 @@ class HomeViewModel(
 
     init {
         viewModelScope.launch {
-            // Probe once per screen, after the session is connected —
-            // an early probe would race the connect and stick false.
-            sessionManager.connectionState.first { it is ConnectionState.Ready }
-            _canCreateChannel.value = sessionManager.isCommunityOwner()
+            // Probe on every Ready transition until it succeeds: an
+            // early probe would race the connect and stick false, and
+            // a transient IQ failure retries on the next reconnect.
+            sessionManager.connectionState.collect { state ->
+                if (state is ConnectionState.Ready && !_canCreateChannel.value) {
+                    _canCreateChannel.value = sessionManager.isCommunityOwner()
+                }
+            }
         }
     }
 

@@ -28,6 +28,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.client.RoomAdminResult
 import social.waddle.client.ffi.WaddlePinPermission
 
 /**
@@ -42,7 +43,6 @@ fun RoomSettingsSheet(
     viewModel: RoomSettingsViewModel,
     onDismiss: () -> Unit,
     onDestroyed: () -> Unit,
-    onActionFailed: (RoomSettingsEvent.Failed) -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var confirmDestroy by remember { mutableStateOf(false) }
@@ -52,7 +52,6 @@ fun RoomSettingsSheet(
             when (event) {
                 RoomSettingsEvent.Saved -> onDismiss()
                 RoomSettingsEvent.Destroyed -> onDestroyed()
-                is RoomSettingsEvent.Failed -> onActionFailed(event)
             }
         }
     }
@@ -141,6 +140,22 @@ private fun RoomSettingsForm(
         modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
     )
     PinPermissionSelector(selected = state.pinPermission, onSelect = viewModel::setPinPermission)
+    // A refused save/destroy must never fail silently — a demoted
+    // owner's `forbidden` renders here (the server is the authority).
+    state.lastFailure?.let { failure ->
+        Text(
+            text = stringResource(
+                when (failure) {
+                    RoomAdminResult.NotConnected -> R.string.action_failed_offline
+                    RoomAdminResult.NotPermitted -> R.string.members_action_not_permitted
+                    else -> R.string.action_failed
+                },
+            ),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
     Button(
         onClick = viewModel::save,
         enabled = !state.saving && state.name.isNotBlank(),

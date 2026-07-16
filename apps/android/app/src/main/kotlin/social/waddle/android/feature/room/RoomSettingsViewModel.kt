@@ -23,8 +23,6 @@ sealed interface RoomSettingsEvent {
 
     /** The room was destroyed: leave the channel screen. */
     data object Destroyed : RoomSettingsEvent
-
-    data class Failed(val result: RoomAdminResult) : RoomSettingsEvent
 }
 
 data class RoomSettingsUiState(
@@ -36,6 +34,12 @@ data class RoomSettingsUiState(
     /** Current server-side policy; `null` when the field was not offered. */
     val pinPermission: WaddlePinPermission? = null,
     val saving: Boolean = false,
+    /**
+     * The last refused/failed save or destroy, rendered inline in the
+     * sheet (a demoted owner's `forbidden` must never fail silently).
+     * Cleared on the next attempt.
+     */
+    val lastFailure: RoomAdminResult? = null,
 )
 
 /**
@@ -91,7 +95,7 @@ class RoomSettingsViewModel(
         val state = _uiState.value
         val name = state.name.trim()
         if (name.isEmpty() || state.saving) return
-        _uiState.update { it.copy(saving = true) }
+        _uiState.update { it.copy(saving = true, lastFailure = null) }
         viewModelScope.launch {
             val result = sessionManager.submitRoomConfig(
                 roomJid,
@@ -102,27 +106,27 @@ class RoomSettingsViewModel(
                     pinPermission = state.pinPermission,
                 ),
             )
-            _uiState.update { it.copy(saving = false) }
-            _events.tryEmit(
-                if (result == RoomAdminResult.Ok) RoomSettingsEvent.Saved else RoomSettingsEvent.Failed(result),
-            )
+            if (result == RoomAdminResult.Ok) {
+                _uiState.update { it.copy(saving = false) }
+                _events.tryEmit(RoomSettingsEvent.Saved)
+            } else {
+                _uiState.update { it.copy(saving = false, lastFailure = result) }
+            }
         }
     }
 
     /** XEP-0045 §10.9: destroy the room (the host confirms first). */
     fun destroyRoom() {
         if (_uiState.value.saving) return
-        _uiState.update { it.copy(saving = true) }
+        _uiState.update { it.copy(saving = true, lastFailure = null) }
         viewModelScope.launch {
             val result = sessionManager.destroyRoom(roomJid)
-            _uiState.update { it.copy(saving = false) }
-            _events.tryEmit(
-                if (result == RoomAdminResult.Ok) {
-                    RoomSettingsEvent.Destroyed
-                } else {
-                    RoomSettingsEvent.Failed(result)
-                },
-            )
+            if (result == RoomAdminResult.Ok) {
+                _uiState.update { it.copy(saving = false) }
+                _events.tryEmit(RoomSettingsEvent.Destroyed)
+            } else {
+                _uiState.update { it.copy(saving = false, lastFailure = result) }
+            }
         }
     }
 
