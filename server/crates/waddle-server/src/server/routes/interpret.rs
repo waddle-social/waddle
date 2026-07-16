@@ -105,7 +105,7 @@ use waddle_xmpp::muc::room_actor::{
     JoinWithAffiliation, RoomActor, SetSubject,
 };
 #[cfg(feature = "clustering")]
-use waddle_xmpp::muc::room_registry_actor::DestroyRoom;
+use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
 use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};

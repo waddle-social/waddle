@@ -285,7 +285,10 @@ impl PostgresMucRoomStore {
         if fence.entity != expected_entity {
             return Ok(false);
         }
-        let _identity_guard = self.guard_fence_identity(fence).await?;
+        if self.node_identity.current() != fence.owner {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Ok(false);
+        }
         let conn = self
             .db
             .guard()
@@ -293,7 +296,8 @@ impl PostgresMucRoomStore {
             .map_err(|error| fence_db_unavailable(error, fence))?;
         let mut rows = conn
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? \
+                "/* muc_exact_claim_check */ \
+                 SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? \
                  AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
                 crate::db_params![
                     room_entity_key(room_jid),
@@ -314,7 +318,15 @@ impl PostgresMucRoomStore {
             remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
             return Ok(false);
         }
-        debug_assert_eq!(self.node_identity.current(), fence.owner);
+        // The database proof may block, so it deliberately runs without a
+        // rotation guard. Confirm the local incarnation only after all
+        // backend I/O; this short guard is dropped before returning and can
+        // never delay identity rotation behind a stalled database call.
+        let Some(identity_guard) = self.node_identity.guard_if_current(&fence.owner).await else {
+            remove_room_claim_fence_if(&self.claim_fences, room_jid, fence);
+            return Ok(false);
+        };
+        drop(identity_guard);
         Ok(true)
     }
 
@@ -605,15 +617,19 @@ impl MucDurableStore for PostgresMucRoomStore {
     /// it; actor-owned durable operations use their immutable fence instead.
     fn check_fenced_fanout<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
         Box::pin(async move {
-            let fence = self
-                .claim_fences
-                .get(room_jid)
-                .map(|entry| entry.clone())
-                .ok_or_else(|| {
-                    XmppError::internal(format!(
-                        "no claim epoch recorded for room {room_jid}; fenced fan-out skipped"
-                    ))
-                })?;
+            let Some(fence) = self.claim_fences.get(room_jid).map(|entry| entry.clone()) else {
+                // Ready clustered rooms publish this cache entry before the
+                // registry exposes their actor. Absence therefore means this
+                // process cannot serve the retained room incarnation. It is
+                // local state, not backend uncertainty, and must not enter
+                // dispatch's legacy fail-open error branch.
+                return Ok(false);
+            };
+            // Legacy dispatch treats backend errors as fail-open until #1283
+            // replaces this cache-backed boundary. The exact check keeps
+            // backend uncertainty typed while classifying local identity
+            // rotation as definitively non-serving, without holding the
+            // rotation gate across database I/O.
             self.exact_claim_is_held(room_jid, &fence).await
         })
     }
@@ -751,14 +767,20 @@ mod tests {
             }) if unavailable_entity == entity
         ));
 
-        assert!(matches!(
-            store.check_fenced_fanout(&jid).await,
-            Err(XmppError::OwnershipUnavailable {
-                entity: unavailable_entity
-            }) if unavailable_entity == entity
-        ));
+        assert!(!store
+            .check_fenced_fanout(&jid)
+            .await
+            .expect("identity rotation is a non-serving fanout result"));
+        assert!(!store
+            .check_exact_claim_fence(&jid, &fence)
+            .await
+            .expect("identity rotation makes the actor fence non-serving"));
         assert!(store.current_claim_fence(&jid).is_none());
         assert!(store.claim_fences.get(&jid).is_none());
+        assert!(!store
+            .check_fenced_fanout(&jid)
+            .await
+            .expect("an absent published fence remains non-serving"));
     }
 
     /// Open a clean `PostgresMucRoomStore` alongside a `PostgresClaimStore`
@@ -807,6 +829,96 @@ mod tests {
             .await
             .expect("clean affiliations");
         Some((store, claim_store, db, me))
+    }
+
+    #[tokio::test]
+    async fn exact_claim_check_does_not_block_identity_rotation_on_database_io() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, db, me)) = clean_store().await else {
+            return;
+        };
+        let jid = room_jid("rotation-during-exact-check");
+        let entity = Entity::new(EntityType::RoomActor, jid.to_string());
+        let epoch = claim_store
+            .ensure_claimed(&entity, &me)
+            .await
+            .expect("claim");
+        let fence = RoomClaimFenceContext::new(entity, me, epoch);
+        store.record_claim_fence(&jid, fence.clone());
+
+        let mut blocker = db.begin().await.expect("begin claim-row blocker");
+        let mut rows = blocker
+            .query(
+                "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+                crate::db_params![room_entity_key(&jid)],
+            )
+            .await
+            .expect("lock exact claim row");
+        assert!(rows.next().await.expect("locked row result").is_some());
+        drop(rows);
+
+        let store = Arc::new(store);
+        let check_store = Arc::clone(&store);
+        let check_jid = jid.clone();
+        let check_fence = fence.clone();
+        let check = tokio::spawn(async move {
+            check_store
+                .exact_claim_is_held(&check_jid, &check_fence)
+                .await
+        });
+
+        // Prove the exact check reached Postgres and is blocked on the row
+        // lock before rotating. A task-start notification or sleep can pass
+        // without the query ever being polled, which would exercise only the
+        // early identity-mismatch branch.
+        let monitor = db.guard().await.expect("monitor guard");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE '%muc_exact_claim_check%'
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        (),
+                    )
+                    .await
+                    .expect("inspect blocked exact claim check");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read blocked exact-check count")
+                    .expect("blocked exact-check count row")
+                    .get::<i64>(0)
+                    .expect("blocked exact-check count");
+                if blocked > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact claim check reached the claim-row lock");
+        drop(monitor);
+        assert!(
+            !check.is_finished(),
+            "the exact check must be waiting behind the held database row lock"
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.node_identity.rotate(node_identity()),
+        )
+        .await
+        .expect("database I/O must not retain the identity rotation guard");
+        blocker.commit().await.expect("release claim-row blocker");
+
+        assert!(!check
+            .await
+            .expect("exact-check task")
+            .expect("database proof completes after the row lock is released"));
     }
 
     #[tokio::test]
@@ -1094,6 +1206,13 @@ mod tests {
                 .await
                 .expect("check_fenced_fanout"),
             "the deposed owner's very next fenced check must observe 0 rows"
+        );
+        assert!(
+            !store
+                .check_fenced_fanout(&jid)
+                .await
+                .expect("a removed stale cache fence is still non-serving"),
+            "concurrent stale dispatches must not fail open after the first check clears the cache"
         );
     }
 

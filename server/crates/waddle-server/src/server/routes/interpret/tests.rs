@@ -3221,6 +3221,8 @@ struct SubjectMutationStore {
     mode: std::sync::atomic::AtomicU8,
     claim_store: Arc<waddle_xmpp::ownership::InProcessClaimStore>,
     durable_parent_rows: std::sync::atomic::AtomicUsize,
+    fanout_owned: std::sync::atomic::AtomicBool,
+    fanout_check_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl SubjectMutationStore {
@@ -3229,6 +3231,8 @@ impl SubjectMutationStore {
             mode: std::sync::atomic::AtomicU8::new(SubjectMutationStoreMode::Succeed as u8),
             claim_store,
             durable_parent_rows: std::sync::atomic::AtomicUsize::new(1),
+            fanout_owned: std::sync::atomic::AtomicBool::new(true),
+            fanout_check_barrier: std::sync::Mutex::new(None),
         }
     }
 
@@ -3240,6 +3244,20 @@ impl SubjectMutationStore {
     fn remove_durable_parent(&self) {
         self.durable_parent_rows
             .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn set_fanout_owned(&self, owned: bool) {
+        self.fanout_owned
+            .store(owned, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn block_fanout_checks(&self, count: usize) -> Arc<tokio::sync::Barrier> {
+        let barrier = Arc::new(tokio::sync::Barrier::new(count + 1));
+        *self
+            .fanout_check_barrier
+            .lock()
+            .expect("fanout barrier lock") = Some(Arc::clone(&barrier));
+        barrier
     }
 
     fn set_mode(&self, mode: SubjectMutationStoreMode) {
@@ -3287,6 +3305,24 @@ impl SubjectMutationStore {
 }
 
 impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
+    fn check_fenced_fanout<'a>(
+        &'a self,
+        _room_jid: &'a jid::BareJid,
+    ) -> waddle_xmpp::muc::MucDurableFuture<'a, bool> {
+        Box::pin(async move {
+            let barrier = self
+                .fanout_check_barrier
+                .lock()
+                .expect("fanout barrier lock")
+                .clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+                barrier.wait().await;
+            }
+            Ok(self.fanout_owned.load(std::sync::atomic::Ordering::SeqCst))
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a jid::BareJid,
@@ -3757,6 +3793,156 @@ async fn xep_0045_new_clustered_room_subject_fails_closed_without_a_durable_pare
         snapshot.room.subject.is_none(),
         "the rejected subject must not be applied in actor memory"
     );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppresses_effects() {
+    use waddle_xmpp::mam::{MamArchiveKind, MamQuery};
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};
+    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::ownership::InProcessClaimStore;
+    use waddle_xmpp::{Affiliation, Role};
+
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store));
+    store.set_fanout_owned(false);
+    let fanout_barrier = store.block_fanout_checks(2);
+    let clustering = crate::clustering::ClusteringHandles {
+        muc_durable_store: Some(Arc::clone(&store) as Arc<dyn waddle_xmpp::muc::MucDurableStore>),
+        ..Default::default()
+    };
+    let state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
+            clustering,
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+        )
+        .await;
+    let room_registry = &state.deps.protocol.room_registry;
+    let room_jid: jid::BareJid = "rotated@muc.example.com".parse().expect("room JID");
+    let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender JID");
+    let actor = room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-rotated".to_string(),
+            channel_id: "c-rotated".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: sender.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join room");
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(
+        &state.deps.protocol.connection_registry,
+        &state.deps.protocol.user_registry,
+        &sender,
+        sender_tx,
+    )
+    .await;
+
+    let deps = Deps {
+        connection_registry: &state.deps.protocol.connection_registry,
+        user_registry: Some(&state.deps.protocol.user_registry),
+        sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
+        mam_storage: Some(&state.deps.protocol.mam_storage),
+        inbox_storage: Some(&state.deps.protocol.inbox_storage),
+        extension_manager: Some(&state.deps.protocol.extension_manager),
+        room_registry: Some(room_registry),
+        web_socket_state: Some(state.as_ref()),
+        authenticated_session: None,
+        local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        blocking_storage: Some(&state.deps.protocol.blocking_storage),
+        message_dispatcher: Some(&state.deps.protocol.dispatcher),
+        pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
+        ordered_relay_origin: None,
+    };
+    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(jid::Jid::from(sender));
+    message.type_ = XmppMessageType::Groupchat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "must not fan out".to_string(),
+    );
+
+    let first_dispatch = interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room: room_jid.clone(),
+            message: Box::new(message.clone()),
+        }],
+        &deps,
+    );
+    let second_dispatch = interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room: room_jid.clone(),
+            message: Box::new(message),
+        }],
+        &deps,
+    );
+    let replace_while_checking = async {
+        // Both dispatches have captured the old actor/snapshot and reached
+        // the legacy cache check before the replacement is published.
+        fanout_barrier.wait().await;
+        assert!(room_registry
+            .ask(DemoteRoomIfExactActor {
+                room_jid: room_jid.clone(),
+                actor_ref: actor,
+            })
+            .await
+            .expect("demote original actor"));
+        let successor = room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-successor".to_string(),
+                channel_id: "c-successor".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create same-JID successor");
+        fanout_barrier.wait().await;
+        successor
+    };
+    let (first_outcome, second_outcome, successor) =
+        tokio::join!(first_dispatch, second_dispatch, replace_while_checking);
+
+    for outcome in [&first_outcome, &second_outcome] {
+        assert_eq!(outcome.frames.len(), 1, "sender receives one retry bounce");
+        assert!(outcome.frames[0].contains("resource-constraint"));
+    }
+    let archive = state
+        .deps
+        .protocol
+        .mam_storage
+        .query_messages(&room_jid, MamArchiveKind::Room, &MamQuery::default())
+        .await
+        .expect("room archive query");
+    assert!(
+        archive.messages.is_empty(),
+        "the rejected message is not archived"
+    );
+    assert!(
+        matches!(
+            sender_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "neither stale dispatch reflects the rejected message to the occupant"
+    );
+    let registered = room_registry
+        .ask(GetRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("room lookup")
+        .expect("same-JID successor survives exact demotion");
+    assert_eq!(registered.id(), successor.id());
 }
 
 #[tokio::test]

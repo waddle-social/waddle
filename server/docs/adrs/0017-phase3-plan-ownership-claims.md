@@ -3230,7 +3230,17 @@ record the retained work.
     `ArchiveGroupchat`, system messages, bots, and general dispatch were
     removed from #1355. Those effects continue to use the published cache's
     legacy pre-fanout backstop until #1283 supplies their replacement. This
-    ADR makes no completion claim for that future work.
+    ADR makes no completion claim for that future work. The retained backstop
+    still fails closed on definitive local non-serving state: a missing
+    published cache fence, a missing exact database tuple, or local identity
+    rotation returns `Ok(false)`, while backend uncertainty remains typed as
+    an error for the documented legacy fail-open path. Dispatch handles
+    `Ok(false)` with `DemoteRoomIfExactActor` against the actor it already
+    snapshotted, so a same-JID successor published while the database check is
+    in flight cannot be evicted by the stale dispatch. The concurrent
+    regression holds two old-actor dispatches at this boundary, publishes a
+    successor, then proves both messages bounce with no archive or occupant
+    reflection and the successor remains registered.
 66. **FIX 2 (critical) — every durable-relevant `RoomActor` mutation
     handler now runs a two-stage gate: verify ownership BEFORE mutating,
     surface a non-ownership persist failure typed AFTER mutating.**

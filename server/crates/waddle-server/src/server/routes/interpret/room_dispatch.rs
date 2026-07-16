@@ -234,8 +234,8 @@ pub(super) async fn dispatch_to_room(
     // production caller). `None` (clustering disabled, non-Postgres, or a
     // build without the `clustering` feature) skips this entirely —
     // single-node behavior, unchanged. A transient backend error fails
-    // open (logged, not blocking); only a definitive 0-rows result
-    // demotes.
+    // open (logged, not blocking); only a definitive non-serving result
+    // demotes. That includes a missing exact row and local identity rotation.
     #[cfg(feature = "clustering")]
     if let Some(store) = &state.deps.app_state.clustering_claims.muc_durable_store {
         match store.check_fenced_fanout(&room_jid).await {
@@ -243,32 +243,25 @@ pub(super) async fn dispatch_to_room(
             Ok(false) => {
                 warn!(
                     room = %room_jid,
-                    "DispatchToRoom: fenced ownership check observed 0 rows; this node has \
-                     been deposed — evicting the local room actor and bouncing the sender"
+                    "DispatchToRoom: retained room fence is non-serving; evicting the local \
+                     room actor and bouncing the sender"
                 );
                 match room_registry
-                    .ask(DestroyRoom {
+                    .ask(DemoteRoomIfExactActor {
                         room_jid: room_jid.clone(),
-                        // Eviction, not destruction: the room now lives
-                        // on the stealing node — its durable rows MUST
-                        // survive this local teardown.
-                        reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::DeposedEviction,
+                        actor_ref: room_actor,
                     })
                     .await
                 {
-                    Ok(
-                        waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
-                        | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
-                    ) => {}
-                    Ok(outcome) => warn!(
+                    Ok(true) => {}
+                    Ok(false) => warn!(
                         room = %room_jid,
-                        ?outcome,
-                        "DispatchToRoom: deposed local actor eviction was unexpectedly refused"
+                        "DispatchToRoom: exact actor demotion found a different room incarnation"
                     ),
                     Err(error) => warn!(
                         room = %room_jid,
                         %error,
-                        "DispatchToRoom: failed to ask registry to evict deposed local actor"
+                        "DispatchToRoom: failed to ask registry to evict non-serving local actor"
                     ),
                 }
                 let reply = build_message_error_reply(
@@ -276,7 +269,7 @@ pub(super) async fn dispatch_to_room(
                     &room_jid,
                     &sender_full,
                     resource_constraint_error(
-                        "This room's ownership recently moved to another node; please retry.",
+                        "This room is temporarily unavailable; please retry.",
                     ),
                 );
                 match Stanza::Message(reply).to_element_string() {

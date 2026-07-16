@@ -207,8 +207,10 @@ pub trait MucDurableStore: Send + Sync {
     /// Cache-based ownership check for the legacy pre-fanout groupchat
     /// dispatch/MAM path. New room actor paths must use
     /// [`Self::check_exact_claim_fence`] with the fence retained by their actor
-    /// incarnation. `Ok(true)` iff this node still holds the published claim;
-    /// `Ok(false)` means a steal has committed.
+    /// incarnation. `Ok(true)` iff this process can still serve the published
+    /// claim; `Ok(false)` means no published fence is currently serviceable,
+    /// including an absent cache entry, local identity rotation, or a
+    /// definitive missing exact database tuple.
     /// Default `Ok(true)` (never demotes):
     /// single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests
@@ -221,7 +223,8 @@ pub trait MucDurableStore: Send + Sync {
     /// Check the actor incarnation's retained claim rather than whichever
     /// claim is currently cached for the same room JID. Implementations must
     /// validate that `fence.entity` names `room_jid` and fail closed on
-    /// backend errors.
+    /// backend errors. `Ok(false)` is a definitive non-serving result, not
+    /// necessarily proof that another node has already committed a steal.
     fn check_exact_claim_fence<'a>(
         &'a self,
         room_jid: &'a BareJid,

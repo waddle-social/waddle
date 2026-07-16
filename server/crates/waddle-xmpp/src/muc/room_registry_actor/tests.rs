@@ -2080,7 +2080,7 @@ mod ownership_claims_tests {
         load_result: Option<DurableRoomState>,
         fail_load: bool,
         lose_restore_ownership_on_call: Option<usize>,
-        restore_loss_successor: Option<(Arc<DeadOwnerClaimStore>, NodeIdentity)>,
+        restore_loss_successor_on_call: Option<(usize, Arc<DeadOwnerClaimStore>, NodeIdentity)>,
         rotate_identity_during_load: Option<(SharedNodeIdentity, NodeIdentity)>,
         fail_fenced_loads_remaining: AtomicUsize,
         block_all_loads: bool,
@@ -2098,6 +2098,7 @@ mod ownership_claims_tests {
         demote_notifications: Mutex<Vec<(String, String)>>,
         deleted_rooms: Mutex<Vec<String>>,
         fail_deletes: bool,
+        local_identity: Option<SharedNodeIdentity>,
         authoritative_claim_store: Mutex<Option<Arc<dyn ClaimStore>>>,
         claim_fences: Arc<Mutex<HashMap<BareJid, RoomClaimFenceContext>>>,
     }
@@ -2186,11 +2187,15 @@ mod ownership_claims_tests {
                     })
                     .is_ok();
                 let fence_lost = store.fence_lost.load(Ordering::SeqCst);
-                if let Some((claim_store, successor)) = &store.restore_loss_successor {
-                    claim_store.replace_with_successor(successor.clone());
-                    return Err(crate::XmppError::OwnershipLost {
-                        entity: fence.entity.clone(),
-                    });
+                if let Some((loss_call, claim_store, successor)) =
+                    &store.restore_loss_successor_on_call
+                {
+                    if *loss_call == load_call {
+                        claim_store.replace_with_successor(successor.clone());
+                        return Err(crate::XmppError::OwnershipLost {
+                            entity: fence.entity.clone(),
+                        });
+                    }
                 }
                 if let Some((identity, successor)) = &store.rotate_identity_during_load {
                     identity.rotate(successor.clone()).await;
@@ -2280,6 +2285,13 @@ mod ownership_claims_tests {
         ) -> MucDurableFuture<'a, bool> {
             let store = self;
             Box::pin(async move {
+                if store
+                    .local_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.current() != fence.owner)
+                {
+                    return Ok(false);
+                }
                 let exact = store.authoritative_claim_matches(room_jid, fence).await?;
                 if !exact {
                     return Ok(false);
@@ -4056,7 +4068,7 @@ mod ownership_claims_tests {
         let claim_store = Arc::new(DeadOwnerClaimStore::empty());
         let successor = foreign_identity();
         let durable_store = Arc::new(RecordingDurableStore {
-            restore_loss_successor: Some((Arc::clone(&claim_store), successor.clone())),
+            restore_loss_successor_on_call: Some((1, Arc::clone(&claim_store), successor.clone())),
             ..RecordingDurableStore::default()
         });
         wire_recording_store_with_claims(
@@ -4404,9 +4416,10 @@ mod ownership_claims_tests {
         let registry = spawn_registry().await;
         let epoch = ClaimEpoch(51);
         let claim_store = Arc::new(DeadOwnerClaimStore::seeded(this_identity(), epoch));
+        let successor = foreign_identity();
         let durable_store = Arc::new(RecordingDurableStore {
             load_result: Some(reclaimed_snapshot("must-not-publish")),
-            lose_restore_ownership_on_call: Some(2),
+            restore_loss_successor_on_call: Some((2, Arc::clone(&claim_store), successor.clone())),
             ..RecordingDurableStore::default()
         });
         wire_recording_store_with_claims(
@@ -4455,14 +4468,13 @@ mod ownership_claims_tests {
             durable_store.current_claim_fence(&jid).is_none(),
             "a terminally lost reclaimed fence must not remain published"
         );
-        assert!(
-            claim_store
-                .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
-                .await
-                .expect("claim lookup")
-                .is_some(),
-            "the already-lost fence must not be released again"
-        );
+        let successor_claim = claim_store
+            .current_claim(&Entity::new(EntityType::RoomActor, jid.to_string()))
+            .await
+            .expect("successor claim lookup")
+            .expect("the successor claim must survive terminal restore loss");
+        assert_eq!(successor_claim.owner, successor);
+        assert_eq!(successor_claim.claim_epoch, ClaimEpoch(epoch.0 + 1));
     }
 
     #[tokio::test]
@@ -7770,8 +7782,11 @@ mod ownership_claims_tests {
     async fn reaping_an_identity_rotated_actor_releases_its_old_exact_claim() {
         let registry = spawn_registry().await;
         let claim_store = Arc::new(InProcessClaimStore::new());
-        let durable_store = Arc::new(RecordingDurableStore::default());
         let identity = SharedNodeIdentity::new(this_identity());
+        let durable_store = Arc::new(RecordingDurableStore {
+            local_identity: Some(identity.clone()),
+            ..RecordingDurableStore::default()
+        });
         wire_recording_store_with_claims(
             &registry,
             Arc::clone(&claim_store) as Arc<dyn ClaimStore>,
@@ -7793,7 +7808,6 @@ mod ownership_claims_tests {
             .actor_ref;
 
         identity.rotate(foreign_identity()).await;
-        durable_store.fence_lost.store(true, Ordering::SeqCst);
         assert!(matches!(
             actor
                 .ask(JoinWithAffiliation {
