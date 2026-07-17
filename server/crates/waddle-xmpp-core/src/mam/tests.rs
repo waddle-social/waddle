@@ -556,6 +556,50 @@ fn xep_0201_typed_replay_emits_thread_parent() {
 }
 
 #[test]
+fn typed_fallback_replay_emits_default_and_language_keyed_subjects() {
+    for stanza_xml in [None, Some("<malformed".to_string())] {
+        let archived = ArchivedMessage {
+            id: "subject-row".to_string(),
+            body: None,
+            message_type: MessageType::Chat,
+            stanza_xml,
+            rich: Some(ArchivedRichMessage {
+                subjects: [
+                    (String::new(), "Default subject".to_string()),
+                    ("en".to_string(), "English subject".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..ArchivedRichMessage::default()
+            }),
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
+        };
+
+        let inner = archived_inner_message(&archived);
+        let subjects: Vec<&Element> = inner
+            .children()
+            .filter(|child| child.name() == "subject" && child.ns() == CLIENT_NS)
+            .collect();
+
+        assert_eq!(subjects.len(), 2);
+        let default_subject = subjects
+            .iter()
+            .find(|subject| {
+                subject
+                    .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                    .is_none()
+            })
+            .expect("default-language subject");
+        assert_eq!(default_subject.text(), "Default subject");
+        let english_subject = subjects
+            .iter()
+            .find(|subject| subject.attr_ns(&minidom::rxml::Namespace::XML, "lang") == Some("en"))
+            .expect("English subject");
+        assert_eq!(english_subject.text(), "English subject");
+    }
+}
+
+#[test]
 fn xep_0201_legacy_replay_emits_thread_parent() {
     // Legacy reconstruction path: stanza_xml is None AND rich is
     // None — `build_legacy_inner_message` rebuilds purely from

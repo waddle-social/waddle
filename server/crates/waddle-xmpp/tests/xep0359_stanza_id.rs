@@ -89,11 +89,11 @@ async fn xep0359_groupchat_origin_retry_after_rejoin_reuses_archive_id() {
     );
 }
 
-/// XEP-0359 §2 keeps an origin-id stable for a retry, but the identifier is
-/// not a license to collapse distinct client-authored content. Subject-only
-/// MUC messages therefore participate in the retry content key.
+/// XEP-0359 §2 keeps an origin-id stable for a retry. XEP-0045 §8.1 room
+/// subjects are state operations rather than timeline content, so their retries
+/// deliberately remain outside conversational-content dedupe and fail open.
 #[tokio::test]
-async fn xep0359_groupchat_origin_retry_distinguishes_subject_content() {
+async fn xep0359_groupchat_subjects_are_exempt_from_origin_retry_dedup() {
     use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedMucSender, ArchivedRichMessage};
     use waddle_xmpp_core::types::{Affiliation, Role};
     use waddle_xmpp_core::xep0359::OriginId;
@@ -147,9 +147,9 @@ async fn xep0359_groupchat_origin_retry_distinguishes_subject_content() {
             .store_message(&room, &archived("subject-identical-retry", "Changed topic"),)
             .await
             .expect("identical retry"),
-        StoreOutcome::Deduplicated("subject-changed".to_string())
+        StoreOutcome::Stored("subject-identical-retry".to_string())
     );
-    assert_eq!(storage.count_messages(&room).await.expect("count"), 2);
+    assert_eq!(storage.count_messages(&room).await.expect("count"), 3);
 }
 
 /// XEP-0359 §3: `<stanza-id/>` MUST carry the `by` attribute (the

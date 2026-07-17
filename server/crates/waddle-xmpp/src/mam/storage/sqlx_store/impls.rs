@@ -9,7 +9,7 @@ use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
-use crate::mam::storage::{MamStorage, MamStorageError, StoreOutcome};
+use crate::mam::storage::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
@@ -498,5 +498,14 @@ impl MamStorage for SqlxMamStorage {
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError> {
         super::write::replace_with_tombstone(&self.backend, archive_id, tombstone).await
+    }
+
+    #[instrument(skip(self, tombstone))]
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        super::write::replace_with_terminal_tombstone(&self.backend, archive_id, tombstone).await
     }
 }

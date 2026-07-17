@@ -1227,20 +1227,26 @@ async fn fresh_groupchat_origin_fans_out_to_every_recipient() {
 }
 
 #[tokio::test]
-async fn deduplicated_subject_retry_is_suppressed_before_room_mutation() {
+async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, StoreOutcome};
     use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::registry::UserRegistryActor;
     use waddle_xmpp_core::xep0359::{build_origin_id_element, build_stanza_id_element, OriginId};
 
     let (room_registry, room_actor, room, _claim_store, claim_fence, _store) =
         spawn_subject_mutation_test_room().await;
     let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let recipient: jid::FullJid = "bob@example.com/phone".parse().expect("recipient JID");
+    let (recipient_tx, mut recipient_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &recipient, recipient_tx).await;
     let mam_concrete = Arc::new(InMemoryMamStorage::new());
     let mam: Arc<dyn MamStorage> = mam_concrete.clone();
     let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
     let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
     deps.room_registry = Some(&room_registry);
+    deps.user_registry = Some(&user_registry);
 
     let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender JID");
     let occupant: jid::FullJid = format!("{room}/alice-nick").parse().expect("occupant JID");
@@ -1275,36 +1281,52 @@ async fn deduplicated_subject_retry_is_suppressed_before_room_mutation() {
             .expect("seed subject row"),
         StoreOutcome::Stored("original-subject-archive-id".to_string())
     );
+    let mut recipient_reflection = retry.clone();
+    recipient_reflection.to = Some(jid::Jid::from(recipient.clone()));
 
     let events = room_dispatch::order_subject_persistence_after_archive(vec![
         persist_subject_event(&room, &sender, subject, claim_fence),
         OutboundEvent::ArchiveGroupchat {
             room: room.clone(),
-            sender,
+            sender: sender.clone(),
             message: Box::new(retry),
             sender_nickname_generation: 8,
             sender_item: Some(sender_item),
+        },
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(recipient),
+            stanza: Box::new(Stanza::Message(recipient_reflection)),
         },
         OutboundEvent::CloseTransport,
     ]);
     let outcome = interpret(events, &deps).await;
 
-    assert_eq!(
-        outcome.retry_suppression,
-        Some(GroupchatRetrySuppression::Deduplicated)
-    );
+    assert_eq!(outcome.retry_suppression, None);
     assert!(outcome.frames.is_empty());
-    assert!(!outcome.close, "post-dedupe canary must be suppressed");
-    assert!(
-        room_actor
-            .ask(GetSnapshot)
-            .await
-            .expect("room snapshot")
-            .room
-            .subject
-            .is_none(),
-        "a deduplicated subject retry must not mutate room subject state"
+    assert!(outcome.close, "post-subject canary must not be suppressed");
+    assert_eq!(
+        mam_concrete.count_messages(&room).await.expect("count"),
+        2,
+        "room-state subject retries remain outside timeline retry dedupe"
     );
+    let deliveries = drain_inbound(&mut recipient_rx);
+    assert_eq!(deliveries.len(), 1, "subject retry fans out normally");
+    let Stanza::Message(reflection) = &deliveries[0].stanza else {
+        panic!("expected subject reflection");
+    };
+    assert_eq!(
+        reflection.subjects.get("").map(String::as_str),
+        Some(subject)
+    );
+    let stored_subject = room_actor
+        .ask(GetSnapshot)
+        .await
+        .expect("room snapshot")
+        .room
+        .subject
+        .expect("subject retry applies room state");
+    assert_eq!(stored_subject.texts.get(""), Some(subject));
+    assert_eq!(stored_subject.setter, sender.to_bare());
 }
 
 #[tokio::test]
@@ -1409,6 +1431,13 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
             _: waddle_xmpp::mam::ArchivedTombstone,
         ) -> Result<bool, MamStorageError> {
             Ok(false)
+        }
+        async fn replace_with_terminal_tombstone(
+            &self,
+            _: &str,
+            _: waddle_xmpp::mam::ArchivedTombstone,
+        ) -> Result<waddle_xmpp::mam::TerminalTombstoneOutcome, MamStorageError> {
+            Ok(waddle_xmpp::mam::TerminalTombstoneOutcome::NotFound)
         }
         async fn get_message_by_stanza_id(
             &self,
@@ -1964,6 +1993,14 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
             _: ArchivedTombstone,
         ) -> Result<bool, MamStorageError> {
             Ok(false)
+        }
+
+        async fn replace_with_terminal_tombstone(
+            &self,
+            _: &str,
+            _: ArchivedTombstone,
+        ) -> Result<waddle_xmpp::mam::TerminalTombstoneOutcome, MamStorageError> {
+            Ok(waddle_xmpp::mam::TerminalTombstoneOutcome::NotFound)
         }
 
         async fn get_message_by_stanza_id(
@@ -4935,6 +4972,64 @@ async fn xep_0424_apply_groupchat_retraction_tombstone_keys_off_room_stanza_id()
             panic!("expected ArchivedRichPayload::Tombstone after retraction, got {other:?}")
         }
     }
+}
+
+#[tokio::test]
+async fn xep_0424_retraction_retry_preserves_existing_moderation_tombstone() {
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::mam::{ArchivedModeration, ArchivedTombstone, RichMessageId, RichText};
+
+    let mam: Arc<dyn MamStorage> = Arc::new(InMemoryMamStorage::new());
+    let room: jid::BareJid = "moderated-retraction@muc.example.com"
+        .parse()
+        .expect("room");
+    let archive_pk = "moderated-room-stamp";
+    seed_groupchat_archive_row(&mam, &room, archive_pk, "original-wire-id").await;
+
+    let moderation_tombstone = ArchivedTombstone {
+        retraction_id: RichMessageId::new("moderation-archive-id"),
+        stamp: chrono::Utc::now(),
+        moderation: Some(ArchivedModeration {
+            target_id: RichMessageId::new(archive_pk).expect("non-empty target id"),
+            moderated_by: "room-owner@example.com".parse().expect("moderator JID"),
+            stamp: Some(chrono::Utc::now()),
+            reason: RichText::new("room policy violation"),
+        }),
+    };
+    assert!(
+        mam.replace_with_tombstone(archive_pk, moderation_tombstone.clone())
+            .await
+            .expect("moderation tombstone replacement"),
+        "the real storage replacement path must tombstone the target"
+    );
+
+    let mut retry = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    retry.id = Some(xmpp_parsers::message::Id(
+        "author-retraction-retry".to_string(),
+    ));
+    retry.from = Some(format!("{room}/alice").parse().expect("room/nick"));
+    retry.type_ = XmppMessageType::Groupchat;
+
+    assert!(
+        apply_groupchat_retraction_tombstone(&mam, None, None, &room, archive_pk, &retry).await,
+        "an already-applied retraction remains a successful heal-retry no-op"
+    );
+
+    let row = mam
+        .get_message(archive_pk)
+        .await
+        .expect("post-retry lookup")
+        .expect("moderation tombstone remains stored");
+    let actual = row
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.payload.as_ref())
+        .expect("tombstone payload remains present");
+    assert_eq!(
+        actual,
+        &waddle_xmpp::mam::ArchivedRichPayload::Tombstone(moderation_tombstone),
+        "XEP-0424 retry must not overwrite XEP-0425 attribution, reason, id, or stamp"
+    );
 }
 
 #[tokio::test]

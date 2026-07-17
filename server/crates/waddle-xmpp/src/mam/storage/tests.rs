@@ -199,18 +199,18 @@ async fn test_inmemory_deduplicates_origin_id_within_archive_sender_scope() {
 }
 
 #[tokio::test]
-async fn test_sqlite_origin_id_dedup_distinguishes_subject_content() {
+async fn test_sqlite_groupchat_subjects_are_exempt_from_origin_id_dedup() {
     let storage = create_test_storage().await;
-    assert_origin_id_dedup_distinguishes_subject_content(&storage).await;
+    assert_groupchat_subjects_are_exempt_from_origin_id_dedup(&storage).await;
 }
 
 #[tokio::test]
-async fn test_inmemory_origin_id_dedup_distinguishes_subject_content() {
+async fn test_inmemory_groupchat_subjects_are_exempt_from_origin_id_dedup() {
     let storage = InMemoryMamStorage::new();
-    assert_origin_id_dedup_distinguishes_subject_content(&storage).await;
+    assert_groupchat_subjects_are_exempt_from_origin_id_dedup(&storage).await;
 }
 
-async fn assert_origin_id_dedup_distinguishes_subject_content(storage: &dyn MamStorage) {
+async fn assert_groupchat_subjects_are_exempt_from_origin_id_dedup(storage: &dyn MamStorage) {
     use waddle_xmpp_core::xep0359::OriginId;
 
     let archive = bare("room@conference.example.com");
@@ -243,10 +243,10 @@ async fn assert_origin_id_dedup_distinguishes_subject_content(storage: &dyn MamS
             .store_message(&archive, &identical_retry)
             .await
             .unwrap(),
-        StoreOutcome::Deduplicated("subject-changed".to_string()),
-        "an identical subject retry reuses the matching archive row"
+        StoreOutcome::Stored("subject-identical-retry".to_string()),
+        "a groupchat subject retry fails open so room state can self-heal"
     );
-    assert_eq!(storage.count_messages(&archive).await.unwrap(), 2);
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 3);
 }
 
 async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn MamStorage) {
@@ -600,6 +600,92 @@ async fn test_sqlite_origin_id_dedup_uses_bare_sender_for_direct_messages() {
 async fn test_inmemory_origin_id_dedup_uses_bare_sender_for_direct_messages() {
     let storage = InMemoryMamStorage::new();
     assert_origin_id_dedup_uses_bare_sender_for_direct_messages(&storage).await;
+}
+
+#[tokio::test]
+async fn test_sqlite_direct_message_origin_id_dedup_includes_subjects() {
+    let storage = create_test_storage().await;
+    assert_direct_message_origin_id_dedup_includes_subjects(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_direct_message_origin_id_dedup_includes_subjects() {
+    let storage = InMemoryMamStorage::new();
+    assert_direct_message_origin_id_dedup_includes_subjects(&storage).await;
+}
+
+async fn assert_direct_message_origin_id_dedup_includes_subjects(storage: &dyn MamStorage) {
+    use waddle_xmpp_core::xep0359::{build_origin_id_element, build_stanza_id_element};
+    use xmpp_parsers::message::{Lang, Message, MessageType};
+
+    let archive = bare("alice@example.com");
+    let archive_jid = jid("alice@example.com");
+    let direct_subject = |id: &str, from: &str, subject: &str| {
+        let mut message = Message::new(Some(jid("bob@example.com")));
+        message.from = Some(jid(from));
+        message.type_ = MessageType::Chat;
+        message
+            .bodies
+            .insert(Lang::new(), "Timeline body".to_string());
+        message.subjects.insert(Lang::new(), subject.to_string());
+        message
+            .subjects
+            .insert(Lang("en".to_string()), format!("{subject} (English)"));
+        message
+            .payloads
+            .push(build_origin_id_element("stable-dm-subject-origin"));
+        message
+            .payloads
+            .push(build_stanza_id_element(id, &archive_jid));
+        crate::mam::projection::build_direct_archived_message(
+            &archive_jid,
+            jid(from),
+            jid("bob@example.com"),
+            &message,
+        )
+    };
+
+    let first = direct_subject("dm-subject-first", "alice@example.com/old", "Topic");
+    let retry = direct_subject("dm-subject-retry", "alice@example.com/new", "Topic");
+    let changed = direct_subject(
+        "dm-subject-changed",
+        "alice@example.com/new",
+        "Changed topic",
+    );
+
+    assert_eq!(
+        first
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.subjects.get(""))
+            .map(String::as_str),
+        Some("Topic"),
+        "the direct-message projection carries the default-language subject"
+    );
+    assert_eq!(
+        first
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.subjects.get("en"))
+            .map(String::as_str),
+        Some("Topic (English)"),
+        "the direct-message projection preserves each xml:lang key"
+    );
+    assert_eq!(
+        storage.store_message(&archive, &first).await.unwrap(),
+        StoreOutcome::Stored("dm-subject-first".to_string())
+    );
+    assert_eq!(
+        storage.store_message(&archive, &retry).await.unwrap(),
+        StoreOutcome::Deduplicated("dm-subject-first".to_string()),
+        "an identical direct-message subject remains retry-deduplicated"
+    );
+    assert_eq!(
+        storage.store_message(&archive, &changed).await.unwrap(),
+        StoreOutcome::Stored("dm-subject-changed".to_string()),
+        "a different direct-message subject is distinct timeline content"
+    );
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 2);
 }
 
 async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &dyn MamStorage) {

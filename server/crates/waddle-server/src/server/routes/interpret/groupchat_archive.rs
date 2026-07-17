@@ -1,5 +1,5 @@
 use super::*;
-use waddle_xmpp::mam::{MamStorageError, StoreOutcome};
+use waddle_xmpp::mam::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use waddle_xmpp::muc::RoomClaimFenceContext;
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
@@ -393,6 +393,22 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             return false;
         }
     };
+    // Tombstones are terminal. A heal-retry of an XEP-0424 author
+    // retraction must never downgrade the attribution or reason on an
+    // existing XEP-0425 moderation tombstone.
+    if original.rich.as_ref().is_some_and(|rich| {
+        matches!(
+            rich.payload.as_ref(),
+            Some(ArchivedRichPayload::Tombstone(_))
+        )
+    }) {
+        debug!(
+            archive = %room,
+            original_id = %original.id,
+            "ApplyGroupchatRetractionTombstone: target is already tombstoned; preserving terminal tombstone"
+        );
+        return true;
+    }
     let Some(retraction_id) = retraction_message
         .id
         .as_ref()
@@ -412,17 +428,25 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         moderation: None,
     };
     match mam_storage
-        .replace_with_tombstone(&original.id, tombstone)
+        .replace_with_terminal_tombstone(&original.id, tombstone)
         .await
     {
-        Ok(true) => {
+        Ok(TerminalTombstoneOutcome::Replaced) => {
             debug!(
                 archive = %room,
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: replaced with tombstone"
             );
         }
-        Ok(false) => {
+        Ok(TerminalTombstoneOutcome::AlreadyTombstoned) => {
+            debug!(
+                archive = %room,
+                original_id = %original.id,
+                "ApplyGroupchatRetractionTombstone: concurrent tombstone won; preserving terminal tombstone"
+            );
+            return true;
+        }
+        Ok(TerminalTombstoneOutcome::NotFound) => {
             warn!(
                 archive = %room,
                 original_id = %original.id,
@@ -442,7 +466,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 archive = %room,
                 original_id = %original.id,
                 %error,
-                "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
+                "ApplyGroupchatRetractionTombstone: terminal tombstone replacement failed"
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,

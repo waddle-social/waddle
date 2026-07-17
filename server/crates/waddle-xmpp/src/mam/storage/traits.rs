@@ -32,6 +32,17 @@ pub enum StoreOutcome {
     TombstoneHit(String),
 }
 
+/// Outcome of an atomic terminal-preserving tombstone replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTombstoneOutcome {
+    /// The live archive row was replaced with the supplied tombstone.
+    Replaced,
+    /// The row already carried a tombstone and was left unchanged.
+    AlreadyTombstoned,
+    /// No archive row matched the requested primary key.
+    NotFound,
+}
+
 /// Trait for MAM message storage backends.
 ///
 /// Per XEP-0313 §4.1, archive addressing is normatively a **bare JID**
@@ -136,6 +147,16 @@ pub trait MamStorage: Send + Sync {
         archive_id: &str,
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError>;
+
+    /// Atomically replace a live row with a tombstone without overwriting an
+    /// existing XEP-0424 / XEP-0425 tombstone. This is the terminal-state
+    /// operation used by groupchat author-retraction heal retries, where a
+    /// concurrent moderation tombstone must retain its attribution and reason.
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError>;
 
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(

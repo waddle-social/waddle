@@ -2670,6 +2670,15 @@ impl MamStorage for LookupOutageMamStorage {
             .replace_with_tombstone(archive_id, tombstone)
             .await
     }
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<waddle_xmpp::mam::TerminalTombstoneOutcome, MamStorageError> {
+        self.inner
+            .replace_with_terminal_tombstone(archive_id, tombstone)
+            .await
+    }
     async fn get_message_by_stanza_id(
         &self,
         archive_jid: &BareJid,

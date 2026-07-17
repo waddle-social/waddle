@@ -8,13 +8,15 @@ use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
 use xmpp_parsers::message::MessageType;
 
-use crate::mam::storage::origin_dedup::{origin_id_dedup_match, origin_id_tombstone_match};
-use crate::mam::storage::{MamStorageError, StoreOutcome};
+use crate::mam::storage::origin_dedup::{
+    groupchat_subject_is_retry_dedup_exempt, origin_id_dedup_match, origin_id_tombstone_match,
+};
+use crate::mam::storage::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{
-    decode_postgres_message_row, decode_sqlite_message_row, encode_nickname_generation,
-    encode_rich_payload,
+    decode_postgres_message_row, decode_rich_payload, decode_sqlite_message_row,
+    encode_nickname_generation, encode_rich_payload,
 };
 use super::schema::SELECT_COLUMNS;
 use super::MamDatabaseBackend;
@@ -28,6 +30,7 @@ pub(super) async fn store_message(
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
+        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
     let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
 
@@ -189,6 +192,7 @@ pub(super) async fn store_message_fenced(
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
+        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
     let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
 
@@ -580,20 +584,7 @@ pub(super) async fn replace_with_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let payload = ArchivedRichMessage {
-        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
-        reply: None,
-        references: Vec::new(),
-        mentions: Vec::new(),
-        subjects: Default::default(),
-        // XEP-0424 §Tombstones: the occupant-id and real-JID item
-        // identify the original sender and MUST NOT survive the
-        // tombstone replacement.
-        occupant_id: None,
-        muc_sender: None,
-    };
-    let encoded = serde_json::to_string(&payload)
-        .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
+    let encoded = encode_tombstone_payload(tombstone)?;
 
     // XEP-0424 §Tombstones / XEP-0425 §Tombstones: drop the body
     // entirely on tombstone. With wire-fidelity body semantics, SQL NULL
@@ -627,4 +618,106 @@ pub(super) async fn replace_with_tombstone(
         "Replaced archived message with tombstone"
     );
     Ok(rows > 0)
+}
+
+pub(super) async fn replace_with_terminal_tombstone(
+    backend: &MamDatabaseBackend,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+
+    loop {
+        let current_rich_payload: Option<Option<String>> = match backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "SELECT rich_payload FROM mam_messages WHERE id = ",
+                );
+                builder.push_bind(archive_id);
+                builder
+                    .build_query_scalar::<Option<String>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "SELECT rich_payload FROM mam_messages WHERE id = ",
+                );
+                builder.push_bind(archive_id);
+                builder
+                    .build_query_scalar::<Option<String>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        let Some(current_rich_payload) = current_rich_payload else {
+            return Ok(TerminalTombstoneOutcome::NotFound);
+        };
+        let current_rich = decode_rich_payload(current_rich_payload.as_deref())?;
+        if current_rich.as_ref().is_some_and(|rich| {
+            matches!(
+                rich.payload.as_ref(),
+                Some(ArchivedRichPayload::Tombstone(_))
+            )
+        }) {
+            return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
+        }
+
+        // Compare-and-swap the exact raw rich projection observed above. If a
+        // concurrent XEP-0425 moderation wins first, its different tombstone
+        // projection makes this update affect zero rows; the next iteration
+        // decodes that typed terminal state and preserves its metadata.
+        let rows = match backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id)
+                    .push(" AND rich_payload IS ")
+                    .push_bind(current_rich_payload.as_deref());
+                builder.build().execute(pool).await?.rows_affected()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id)
+                    .push(" AND rich_payload IS NOT DISTINCT FROM ")
+                    .push_bind(current_rich_payload.as_deref());
+                builder.build().execute(pool).await?.rows_affected()
+            }
+        };
+        if rows > 0 {
+            debug!(
+                archive_id = %archive_id,
+                "Replaced live archived message with terminal tombstone"
+            );
+            return Ok(TerminalTombstoneOutcome::Replaced);
+        }
+    }
+}
+
+fn encode_tombstone_payload(
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<String, MamStorageError> {
+    let payload = ArchivedRichMessage {
+        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+        reply: None,
+        references: Vec::new(),
+        mentions: Vec::new(),
+        subjects: Default::default(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
+    };
+    serde_json::to_string(&payload)
+        .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }

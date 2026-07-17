@@ -278,8 +278,18 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let subjects = message
+        .subjects
+        .iter()
+        .map(|(lang, text)| (lang.0.clone(), text.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
 
-    if payload.is_none() && reply.is_none() && references.is_empty() && mentions.is_empty() {
+    if payload.is_none()
+        && reply.is_none()
+        && references.is_empty()
+        && mentions.is_empty()
+        && subjects.is_empty()
+    {
         None
     } else {
         Some(ArchivedRichMessage {
@@ -287,7 +297,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
             reply,
             references,
             mentions,
-            subjects: Default::default(),
+            subjects,
             // 1:1 archive rows have no MUC occupant identity; the
             // groupchat projection (`rich_archive_payload` in the
             // interpreter) is the path that captures these.

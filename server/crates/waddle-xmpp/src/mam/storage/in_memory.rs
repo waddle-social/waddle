@@ -17,7 +17,7 @@ use super::query_semantics::{
     missing_requested_id, uses_backward_pagination,
 };
 use super::tombstone::apply_tombstone;
-use super::{MamStorage, MamStorageError, StoreOutcome};
+use super::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 
 #[derive(Clone, Default)]
 pub struct InMemoryMamStorage {
@@ -349,5 +349,29 @@ impl MamStorage for InMemoryMamStorage {
             }
         }
         Ok(false)
+    }
+
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        let mut entries = self.entries.write().await;
+        let Some((_, message)) = entries
+            .iter_mut()
+            .find(|(_, message)| message.id == archive_id)
+        else {
+            return Ok(TerminalTombstoneOutcome::NotFound);
+        };
+        if message.rich.as_ref().is_some_and(|rich| {
+            matches!(
+                rich.payload.as_ref(),
+                Some(waddle_xmpp_core::mam::ArchivedRichPayload::Tombstone(_))
+            )
+        }) {
+            return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
+        }
+        apply_tombstone(message, tombstone);
+        Ok(TerminalTombstoneOutcome::Replaced)
     }
 }

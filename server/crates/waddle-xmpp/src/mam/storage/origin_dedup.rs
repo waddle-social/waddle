@@ -5,6 +5,12 @@ pub(super) fn origin_id_dedup_match(
     existing: &ArchivedMessage,
     incoming: &ArchivedMessage,
 ) -> bool {
+    if groupchat_subject_is_retry_dedup_exempt(existing)
+        || groupchat_subject_is_retry_dedup_exempt(incoming)
+    {
+        return false;
+    }
+
     let Some(existing_origin_id) = existing.origin_id.as_ref() else {
         return false;
     };
@@ -21,10 +27,12 @@ pub(super) fn origin_id_tombstone_match(
     existing: &ArchivedMessage,
     incoming: &ArchivedMessage,
 ) -> bool {
-    matches!(
-        (&existing.message_type, &incoming.message_type),
-        (MessageType::Groupchat, MessageType::Groupchat)
-    ) && existing.origin_id.is_some()
+    !groupchat_subject_is_retry_dedup_exempt(incoming)
+        && matches!(
+            (&existing.message_type, &incoming.message_type),
+            (MessageType::Groupchat, MessageType::Groupchat)
+        )
+        && existing.origin_id.is_some()
         && existing.origin_id == incoming.origin_id
         && existing.from == incoming.from
         && matches!(
@@ -34,6 +42,27 @@ pub(super) fn origin_id_tombstone_match(
                 .and_then(|rich| rich.payload.as_ref()),
             Some(ArchivedRichPayload::Tombstone(_))
         )
+}
+
+/// XEP-0045 §8.1 subject changes are room-state operations, not timeline
+/// content. Re-applying and re-broadcasting a retry is benign and self-healing,
+/// so groupchat subject rows deliberately fail open outside origin-id dedupe.
+/// The exemption mirrors §8.1's shape exactly, matching the chain's
+/// `MucSubjectHandler` detection: a `<subject/>` accompanied by body content
+/// or a `<thread/>` is a regular timeline message, keeps normal content-key
+/// dedupe, and must not fail open. Direct-chat subjects remain
+/// timeline-message headers and stay in the content key.
+pub(super) fn groupchat_subject_is_retry_dedup_exempt(message: &ArchivedMessage) -> bool {
+    matches!(message.message_type, MessageType::Groupchat)
+        && message
+            .rich
+            .as_ref()
+            .is_some_and(|rich| !rich.subjects.is_empty())
+        && message.thread.is_none()
+        && message
+            .body
+            .as_deref()
+            .is_none_or(|body| body.trim().is_empty())
 }
 
 fn sender_scope_matches(existing: &ArchivedMessage, incoming: &ArchivedMessage) -> bool {
@@ -236,6 +265,92 @@ mod tests {
     }
 
     #[test]
+    fn groupchat_subjects_are_exempt_but_direct_subjects_stay_in_content_key() {
+        let mut existing = groupchat_message(
+            "room@conference.example.com/alice",
+            Some("alice@example.com/old"),
+            "origin-1",
+            "",
+            7,
+        );
+        existing.body = None;
+        existing
+            .rich
+            .as_mut()
+            .expect("groupchat rich payload")
+            .subjects
+            .insert(String::new(), "Topic".to_string());
+        let mut incoming = existing.clone();
+        incoming.id = "incoming-subject".to_string();
+
+        assert!(!origin_id_dedup_match(&existing, &incoming));
+        let mut without_subject = incoming.clone();
+        without_subject
+            .rich
+            .as_mut()
+            .expect("groupchat rich payload")
+            .subjects
+            .clear();
+        assert!(!origin_id_dedup_match(&existing, &without_subject));
+        assert!(!origin_id_dedup_match(&without_subject, &incoming));
+
+        existing.message_type = MessageType::Chat;
+        existing.from = jid("alice@example.com/old");
+        existing.to = jid("bob@example.com");
+        incoming.message_type = MessageType::Chat;
+        incoming.from = jid("alice@example.com/new");
+        incoming.to = jid("bob@example.com");
+        assert!(origin_id_dedup_match(&existing, &incoming));
+
+        incoming
+            .rich
+            .as_mut()
+            .expect("direct rich payload")
+            .subjects
+            .insert(String::new(), "Changed topic".to_string());
+        assert!(!origin_id_dedup_match(&existing, &incoming));
+    }
+
+    #[test]
+    fn groupchat_subject_with_body_or_thread_is_not_exempt_from_dedup() {
+        // XEP-0045 §8.1: `<subject/>` + body content (or `<thread/>`) is a
+        // regular timeline message, not a subject change — it must keep
+        // normal retry-dedupe or the #1374 duplication returns for that
+        // shape.
+        let mut existing = groupchat_message(
+            "room@conference.example.com/alice",
+            Some("alice@example.com/old"),
+            "origin-1",
+            "hello",
+            7,
+        );
+        existing
+            .rich
+            .as_mut()
+            .expect("groupchat rich payload")
+            .subjects
+            .insert(String::new(), "Legacy header".to_string());
+        let mut incoming = existing.clone();
+        incoming.id = "incoming-retry".to_string();
+        if let Some(sender) = incoming
+            .rich
+            .as_mut()
+            .and_then(|rich| rich.muc_sender.as_mut())
+        {
+            sender.jid = jid("alice@example.com/new-session");
+        }
+
+        assert!(origin_id_dedup_match(&existing, &incoming));
+
+        let mut subject_only = existing.clone();
+        subject_only.body = None;
+        assert!(super::groupchat_subject_is_retry_dedup_exempt(
+            &subject_only
+        ));
+        assert!(!super::groupchat_subject_is_retry_dedup_exempt(&existing));
+    }
+
+    #[test]
     fn tombstone_match_is_groupchat_origin_and_occupant_scoped() {
         let incoming = groupchat_message(
             "room@conference.example.com/alice",
@@ -284,5 +399,15 @@ mod tests {
             7,
         );
         assert!(!origin_id_tombstone_match(&live, &incoming));
+
+        let mut subject_retry = incoming;
+        subject_retry.body = None;
+        subject_retry
+            .rich
+            .as_mut()
+            .expect("groupchat rich payload")
+            .subjects
+            .insert(String::new(), "Topic".to_string());
+        assert!(!origin_id_tombstone_match(&tombstone, &subject_retry));
     }
 }

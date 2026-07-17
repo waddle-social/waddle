@@ -29,6 +29,131 @@ use waddle_xmpp::xep::xep0424::{
     NS_MESSAGE_RETRACT,
 };
 
+async fn assert_author_retry_cannot_downgrade_moderation_tombstone<S>(storage: S)
+where
+    S: waddle_xmpp::mam::MamStorage + Clone,
+{
+    use jid::{BareJid, Jid};
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedModeration, ArchivedRichPayload, ArchivedTombstone, RichMessageId,
+        RichText, StoreOutcome, TerminalTombstoneOutcome,
+    };
+    use xmpp_parsers::message::MessageType;
+
+    let room = "terminal-tombstone@conference.example.com"
+        .parse::<BareJid>()
+        .expect("room JID");
+    let archive_id = "terminal-tombstone-target";
+    let original = ArchivedMessage {
+        id: archive_id.to_string(),
+        body: Some("moderated content".to_string()),
+        message_type: MessageType::Groupchat,
+        ..ArchivedMessage::for_test(
+            "terminal-tombstone@conference.example.com/alice"
+                .parse::<Jid>()
+                .expect("occupant JID"),
+            Jid::from(room.clone()),
+        )
+    };
+    assert_eq!(
+        storage
+            .store_message(&room, &original)
+            .await
+            .expect("store original"),
+        StoreOutcome::Stored(archive_id.to_string())
+    );
+
+    let moderation = ArchivedTombstone {
+        retraction_id: None,
+        stamp: chrono::Utc::now(),
+        moderation: Some(ArchivedModeration {
+            target_id: RichMessageId::new(archive_id).expect("target id"),
+            moderated_by: "owner@example.com".parse::<Jid>().expect("moderator JID"),
+            stamp: Some(chrono::Utc::now()),
+            reason: RichText::new("room policy"),
+        }),
+    };
+    assert!(storage
+        .replace_with_tombstone(archive_id, moderation.clone())
+        .await
+        .expect("install moderation tombstone"));
+
+    let author_retry = ArchivedTombstone {
+        retraction_id: RichMessageId::new("author-retraction-retry"),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+    };
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(archive_id, author_retry)
+            .await
+            .expect("apply terminal author retry"),
+        TerminalTombstoneOutcome::AlreadyTombstoned
+    );
+
+    let retained = storage
+        .get_message(archive_id)
+        .await
+        .expect("lookup retained row")
+        .expect("retained row");
+    assert_eq!(
+        retained.rich.and_then(|rich| rich.payload),
+        Some(ArchivedRichPayload::Tombstone(moderation)),
+        "an XEP-0424 author retry must not downgrade XEP-0425 attribution or reason"
+    );
+
+    let live_id = "terminal-tombstone-live-target";
+    let mut live = original;
+    live.id = live_id.to_string();
+    assert_eq!(
+        storage
+            .store_message(&room, &live)
+            .await
+            .expect("store live terminal-replacement target"),
+        StoreOutcome::Stored(live_id.to_string())
+    );
+    let author_tombstone = ArchivedTombstone {
+        retraction_id: RichMessageId::new("live-author-retraction"),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+    };
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(live_id, author_tombstone.clone())
+            .await
+            .expect("replace live row terminally"),
+        TerminalTombstoneOutcome::Replaced
+    );
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(live_id, author_tombstone.clone())
+            .await
+            .expect("repeat terminal replacement"),
+        TerminalTombstoneOutcome::AlreadyTombstoned
+    );
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone("missing-terminal-target", author_tombstone)
+            .await
+            .expect("missing terminal replacement"),
+        TerminalTombstoneOutcome::NotFound
+    );
+}
+
+#[tokio::test]
+async fn xep0424_author_retry_preserves_terminal_moderation_tombstone_in_all_backends() {
+    assert_author_retry_cannot_downgrade_moderation_tombstone(
+        waddle_xmpp::mam::InMemoryMamStorage::new(),
+    )
+    .await;
+    assert_author_retry_cannot_downgrade_moderation_tombstone(
+        waddle_xmpp::mam::SqlxMamStorage::open_in_memory()
+            .await
+            .expect("SQLite MAM storage"),
+    )
+    .await;
+}
+
 // ── §3 namespace ─────────────────────────────────────────────────────
 
 #[test]
