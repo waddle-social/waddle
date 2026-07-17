@@ -228,13 +228,6 @@
             WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
-            # Cap parallel cargo compile units so the test build doesn't
-            # OOM the runner. The waddle-server-test step used to hit
-            # SIGKILL (exit 137) under default parallelism with fat-LTO
-            # release linking; with the `ci` profile (thin LTO) peak
-            # memory is far lower, so the cap is looser but kept as a
-            # guard on the namespace-profile-linux-x86 runner.
-            CARGO_BUILD_JOBS = "8";
           };
           testArgs = baseArgs // testRuntimeEnv;
           serverTestArgs = testArgs // {
