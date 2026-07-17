@@ -69,6 +69,15 @@ data:
   {{- if .Values.telemetry.serviceVersion }}
   OTEL_SERVICE_VERSION: {{ .Values.telemetry.serviceVersion | quote }}
   {{- end }}
+  {{- if .Values.telemetry.deploymentEnvironment }}
+  OTEL_DEPLOYMENT_ENVIRONMENT: {{ .Values.telemetry.deploymentEnvironment | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.tracesSampler }}
+  OTEL_TRACES_SAMPLER: {{ .Values.telemetry.tracesSampler | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.tracesSamplerArg }}
+  OTEL_TRACES_SAMPLER_ARG: {{ .Values.telemetry.tracesSamplerArg | quote }}
+  {{- end }}
   {{- if .Values.config.s3Endpoint }}
   WADDLE_S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
   {{- end }}

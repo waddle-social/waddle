@@ -39,13 +39,77 @@ fn build_resource() -> Resource {
         uuid::Uuid::new_v4().simple().to_string().as_str(),
     );
 
-    Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", service_name),
-            KeyValue::new("service.version", service_version),
-            KeyValue::new("service.instance.id", service_instance_id),
-        ])
-        .build()
+    let mut attributes = vec![
+        KeyValue::new("service.name", service_name),
+        KeyValue::new("service.version", service_version),
+        KeyValue::new("service.instance.id", service_instance_id),
+    ];
+    if let Some(environment) = nonblank(std::env::var("OTEL_DEPLOYMENT_ENVIRONMENT").ok()) {
+        attributes.push(KeyValue::new("deployment.environment", environment));
+    }
+
+    Resource::builder().with_attributes(attributes).build()
+}
+
+/// Parsed trace-sampler configuration. Mirrors the OTel spec's
+/// `OTEL_TRACES_SAMPLER` values; a typed intermediate so selection is
+/// unit-testable (`Sampler::ParentBased` boxes a `dyn ShouldSample`
+/// and cannot be inspected after construction).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SamplerChoice {
+    AlwaysOn,
+    AlwaysOff,
+    TraceIdRatio(f64),
+    ParentBasedAlwaysOn,
+    ParentBasedAlwaysOff,
+    ParentBasedTraceIdRatio(f64),
+}
+
+/// Resolve the trace sampler from `OTEL_TRACES_SAMPLER` /
+/// `OTEL_TRACES_SAMPLER_ARG` (helm `telemetry.tracesSampler*`).
+/// Unset or unrecognized values fall back to the spec default,
+/// `parentbased_traceidratio` with ratio 1.0, so trace volume has a
+/// dial before it has a bill without changing today's behavior.
+fn sampler_choice(name: Option<String>, arg: Option<String>) -> SamplerChoice {
+    let ratio = nonblank(arg)
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|ratio| (0.0..=1.0).contains(ratio))
+        .unwrap_or(1.0);
+
+    match nonblank(name).as_deref() {
+        Some("always_on") => SamplerChoice::AlwaysOn,
+        Some("always_off") => SamplerChoice::AlwaysOff,
+        Some("traceidratio") => SamplerChoice::TraceIdRatio(ratio),
+        Some("parentbased_always_on") => SamplerChoice::ParentBasedAlwaysOn,
+        Some("parentbased_always_off") => SamplerChoice::ParentBasedAlwaysOff,
+        // "parentbased_traceidratio", unset, and anything
+        // unrecognized: the spec default.
+        _ => SamplerChoice::ParentBasedTraceIdRatio(ratio),
+    }
+}
+
+impl SamplerChoice {
+    fn build(self) -> opentelemetry_sdk::trace::Sampler {
+        use opentelemetry_sdk::trace::Sampler;
+        match self {
+            Self::AlwaysOn => Sampler::AlwaysOn,
+            Self::AlwaysOff => Sampler::AlwaysOff,
+            Self::TraceIdRatio(ratio) => Sampler::TraceIdRatioBased(ratio),
+            Self::ParentBasedAlwaysOn => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+            Self::ParentBasedAlwaysOff => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
+            Self::ParentBasedTraceIdRatio(ratio) => {
+                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
+            }
+        }
+    }
+}
+
+fn sampler_from_env() -> opentelemetry_sdk::trace::Sampler {
+    sampler_choice(
+        std::env::var("OTEL_TRACES_SAMPLER").ok(),
+        std::env::var("OTEL_TRACES_SAMPLER_ARG").ok(),
+    )
+    .build()
 }
 
 /// Resolve the `service.instance.id` resource attribute.
@@ -165,6 +229,10 @@ fn build_log_filter() -> EnvFilter {
 /// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default:
 ///   `<HOSTNAME>-<pid>` — the pod name in Kubernetes — then a
 ///   pid+entropy fallback when no hostname is available)
+/// - `OTEL_DEPLOYMENT_ENVIRONMENT`: Sets the `deployment.environment`
+///   resource attribute (omitted when unset)
+/// - `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`: Trace sampler
+///   (default: `parentbased_traceidratio` with ratio 1.0)
 /// - `RUST_LOG`: Log filter (default: info)
 ///
 /// # Example
@@ -205,9 +273,14 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_endpoint(&otlp_endpoint)
         .build()?;
 
-    // Build tracer provider with batch processor
+    // Build tracer provider with batch processor. The sampler comes
+    // from OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG (default
+    // parentbased_traceidratio 1.0 — today's sample-everything
+    // behavior, but now operator-tunable from helm values).
+    let sampler = sampler_from_env();
     let tracer_provider = SdkTracerProvider::builder()
         .with_batch_exporter(trace_exporter)
+        .with_sampler(sampler)
         .with_resource(resource.clone())
         .build();
 
@@ -413,6 +486,78 @@ mod tests {
         // Note: Can only initialize once per process
         // This test just verifies the function compiles
         // let _ = super::init_local();
+    }
+
+    #[test]
+    fn sampler_defaults_to_parentbased_ratio_one() {
+        assert_eq!(
+            super::sampler_choice(None, None),
+            super::SamplerChoice::ParentBasedTraceIdRatio(1.0)
+        );
+    }
+
+    #[test]
+    fn sampler_honors_parentbased_traceidratio_arg() {
+        assert_eq!(
+            super::sampler_choice(
+                Some("parentbased_traceidratio".to_string()),
+                Some("0.25".to_string()),
+            ),
+            super::SamplerChoice::ParentBasedTraceIdRatio(0.25)
+        );
+    }
+
+    #[test]
+    fn sampler_supports_every_spec_variant() {
+        use super::SamplerChoice;
+        assert_eq!(
+            super::sampler_choice(Some("always_on".to_string()), None),
+            SamplerChoice::AlwaysOn
+        );
+        assert_eq!(
+            super::sampler_choice(Some("always_off".to_string()), None),
+            SamplerChoice::AlwaysOff
+        );
+        assert_eq!(
+            super::sampler_choice(Some("traceidratio".to_string()), Some("0.5".to_string())),
+            SamplerChoice::TraceIdRatio(0.5)
+        );
+        assert_eq!(
+            super::sampler_choice(Some("parentbased_always_on".to_string()), None),
+            SamplerChoice::ParentBasedAlwaysOn
+        );
+        assert_eq!(
+            super::sampler_choice(Some("parentbased_always_off".to_string()), None),
+            SamplerChoice::ParentBasedAlwaysOff
+        );
+    }
+
+    #[test]
+    fn sampler_falls_back_on_garbage_input() {
+        // Unknown sampler name and out-of-range/unparsable ratios must
+        // not disable tracing; they fall back to the 1.0 default.
+        for arg in [Some("7.5".to_string()), Some("nan".to_string()), None] {
+            assert_eq!(
+                super::sampler_choice(Some("bogus_sampler".to_string()), arg),
+                super::SamplerChoice::ParentBasedTraceIdRatio(1.0)
+            );
+        }
+    }
+
+    #[test]
+    fn every_sampler_choice_builds() {
+        // Building must not panic for any variant; the ParentBased
+        // internals are opaque past this point by SDK design.
+        for choice in [
+            super::SamplerChoice::AlwaysOn,
+            super::SamplerChoice::AlwaysOff,
+            super::SamplerChoice::TraceIdRatio(0.5),
+            super::SamplerChoice::ParentBasedAlwaysOn,
+            super::SamplerChoice::ParentBasedAlwaysOff,
+            super::SamplerChoice::ParentBasedTraceIdRatio(1.0),
+        ] {
+            let _sampler = choice.build();
+        }
     }
 
     #[test]

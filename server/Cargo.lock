@@ -7797,6 +7797,7 @@ dependencies = [
  "minidom",
  "mockito",
  "opentelemetry",
+ "opentelemetry_sdk",
  "p256",
  "pbkdf2",
  "rand 0.10.1",
