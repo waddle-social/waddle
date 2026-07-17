@@ -749,7 +749,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
     // always errors and assert interpret returns normally; the
     // archive write is logged-and-dropped.
     use async_trait::async_trait;
-    use waddle_xmpp::mam::storage::{MamStorage, MamStorageError};
+    use waddle_xmpp::mam::storage::{MamStorage, MamStorageError, StoreOutcome};
     use waddle_xmpp::mam::{ArchivedMessage, MamQuery, MamResult};
 
     struct FailingMam;
@@ -759,7 +759,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
             &self,
             _: &jid::BareJid,
             _: &ArchivedMessage,
-        ) -> Result<String, MamStorageError> {
+        ) -> Result<StoreOutcome, MamStorageError> {
             Err(MamStorageError::Database("simulated".into()))
         }
         async fn query_messages(
@@ -1291,6 +1291,7 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
     use async_trait::async_trait;
     use waddle_xmpp::mam::{
         ArchivedMessage, ArchivedTombstone, MamArchiveKind, MamQuery, MamResult, MamStorageError,
+        StoreOutcome,
     };
     use waddle_xmpp::protocol::event::CallbackId;
     use waddle_xmpp_core::xep0359::OriginId;
@@ -1305,7 +1306,7 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
             &self,
             _: &jid::BareJid,
             _: &ArchivedMessage,
-        ) -> Result<String, MamStorageError> {
+        ) -> Result<StoreOutcome, MamStorageError> {
             unreachable!("lookup regression never stores")
         }
 

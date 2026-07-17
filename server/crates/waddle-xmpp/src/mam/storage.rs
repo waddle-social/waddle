@@ -20,4 +20,4 @@ mod tests;
 pub use error::MamStorageError;
 pub use in_memory::InMemoryMamStorage;
 pub use sqlx_store::SqlxMamStorage;
-pub use traits::{MamArchiveKind, MamStorage};
+pub use traits::{MamArchiveKind, MamStorage, StoreOutcome};

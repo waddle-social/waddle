@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 
 use jid::{BareJid, Jid};
-use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, MamQuery, MamStorage};
+use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, MamQuery, MamStorage, StoreOutcome};
 use waddle_xmpp_core::xep0359::{add_stanza_id, OriginId, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::minidom::Element;
@@ -338,7 +338,10 @@ async fn xep_0359_typed_stanza_id_round_trips_through_storage_with_typed_by_jid(
             archive_jid.clone(),
         )
     };
-    let stored_id = storage.store_message(&archive, &row).await.expect("store");
+    let stored_id = match storage.store_message(&archive, &row).await.expect("store") {
+        StoreOutcome::Stored(id) => id,
+        other => panic!("expected stored row, got {other:?}"),
+    };
 
     let retrieved = storage
         .get_message(&stored_id)
@@ -374,7 +377,10 @@ async fn xep_0359_typed_origin_id_round_trips_through_storage() {
             archive_jid,
         )
     };
-    let stored_id = storage.store_message(&archive, &row).await.expect("store");
+    let stored_id = match storage.store_message(&archive, &row).await.expect("store") {
+        StoreOutcome::Stored(id) => id,
+        other => panic!("expected stored row, got {other:?}"),
+    };
 
     let retrieved = storage
         .get_message(&stored_id)

@@ -30,6 +30,27 @@ fn archive_alice(archive: &BareJid) -> Jid {
         .expect("valid jid")
 }
 
+fn expect_stored(outcome: StoreOutcome) -> String {
+    match outcome {
+        StoreOutcome::Stored(id) => id,
+        other => panic!("expected a newly stored row, got {other:?}"),
+    }
+}
+
+fn muc_rich(real_jid: &str) -> waddle_xmpp_core::mam::ArchivedRichMessage {
+    use waddle_xmpp_core::mam::{ArchivedMucSender, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+
+    ArchivedRichMessage {
+        muc_sender: Some(ArchivedMucSender {
+            jid: jid(real_jid),
+            affiliation: Affiliation::Member,
+            role: Role::Participant,
+        }),
+        ..ArchivedRichMessage::default()
+    }
+}
+
 async fn assert_sender_origin_lookup_precedence_and_room_scope(storage: &dyn MamStorage) {
     use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
@@ -145,7 +166,7 @@ async fn test_store_and_retrieve_message() {
         )
     };
 
-    let archive_id = storage.store_message(&archive, &msg).await.unwrap();
+    let archive_id = expect_stored(storage.store_message(&archive, &msg).await.unwrap());
     assert!(!archive_id.is_empty());
 
     let retrieved = storage.get_message(&archive_id).await.unwrap();
@@ -186,6 +207,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         nickname_generation: Some(7),
+        rich: Some(muc_rich("alice@example.com/session-a")),
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
     let retry = ArchivedMessage {
@@ -194,7 +216,8 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         body: Some("first copy".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
-        nickname_generation: Some(7),
+        nickname_generation: Some(8),
+        rich: Some(muc_rich("alice@example.com/session-b")),
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
     let same_sender_different_body = ArchivedMessage {
@@ -204,6 +227,7 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         nickname_generation: Some(7),
+        rich: Some(muc_rich("alice@example.com/session-a")),
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
     let other_sender = ArchivedMessage {
@@ -213,15 +237,27 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         nickname_generation: Some(7),
+        rich: Some(muc_rich("bob@example.com/session-a")),
         ..ArchivedMessage::for_test(jid("room@conference.example.com/bob"), archive_jid.clone())
+    };
+    let reused_nick_different_account = ArchivedMessage {
+        id: "archive-nick-reuse".to_string(),
+        timestamp: base_timestamp + ChronoDuration::seconds(3),
+        body: Some("first copy".to_string()),
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(9),
+        rich: Some(muc_rich("mallory@example.com/session-a")),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
     let same_nick_next_generation = ArchivedMessage {
         id: "archive-next-generation".to_string(),
-        timestamp: base_timestamp + ChronoDuration::seconds(3),
+        timestamp: base_timestamp + ChronoDuration::seconds(4),
         body: Some("same nick next generation".to_string()),
         origin_id: Some(origin_id),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         nickname_generation: Some(8),
+        rich: Some(muc_rich("alice@example.com/session-b")),
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid)
     };
 
@@ -235,19 +271,37 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
         .store_message(&archive, &other_sender)
         .await
         .unwrap();
+    let nick_reuse_id = storage
+        .store_message(&archive, &reused_nick_different_account)
+        .await
+        .unwrap();
     let next_generation_id = storage
         .store_message(&archive, &same_nick_next_generation)
         .await
         .unwrap();
 
-    assert_eq!(first_id, "archive-first");
+    assert_eq!(first_id, StoreOutcome::Stored("archive-first".to_string()));
     assert_eq!(
-        retry_id, first_id,
-        "same archive + same sender + same XEP-0359 origin-id must return the existing archive row"
+        retry_id,
+        StoreOutcome::Deduplicated("archive-first".to_string()),
+        "same real bare JID must dedupe across a leave/rejoin generation change"
     );
-    assert_eq!(distinct_body_id, "archive-distinct-body");
-    assert_eq!(other_sender_id, "archive-other-sender");
-    assert_eq!(next_generation_id, "archive-next-generation");
+    assert_eq!(
+        distinct_body_id,
+        StoreOutcome::Stored("archive-distinct-body".to_string())
+    );
+    assert_eq!(
+        other_sender_id,
+        StoreOutcome::Stored("archive-other-sender".to_string())
+    );
+    assert_eq!(
+        nick_reuse_id,
+        StoreOutcome::Stored("archive-nick-reuse".to_string())
+    );
+    assert_eq!(
+        next_generation_id,
+        StoreOutcome::Stored("archive-next-generation".to_string())
+    );
 
     let result = storage
         .query_messages(&archive, MamArchiveKind::Room, &MamQuery::default())
@@ -264,10 +318,11 @@ async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn
             "archive-first",
             "archive-distinct-body",
             "archive-other-sender",
+            "archive-nick-reuse",
             "archive-next-generation"
         ]
     );
-    assert_eq!(result.count, Some(4));
+    assert_eq!(result.count, Some(5));
 
     let stored = storage
         .get_message("archive-first")
@@ -315,7 +370,7 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
         body: Some("resent across sessions".to_string()),
         origin_id: Some(origin_id.clone()),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
-        nickname_generation: Some(3),
+        nickname_generation: Some(4),
         rich: Some(ArchivedRichMessage {
             occupant_id: stable_occupant_id.clone(),
             muc_sender: Some(ArchivedMucSender {
@@ -348,11 +403,8 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
         ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
     };
 
-    // A retry whose rich projection is entirely absent (`None`) — e.g.
-    // a legacy row or a path that didn't capture identity — must STILL
-    // dedup against an identity-only stored row: the identity-only
-    // projection normalizes to "no dedup-relevant content", same as
-    // `None` (codex second-pass finding).
+    // Missing real-JID evidence must fail open to a new row. Origin-id is
+    // client supplied and cannot safely merge two groupchat rows by itself.
     let retry_no_rich = ArchivedMessage {
         id: "archive-session-retry-no-rich".to_string(),
         timestamp: base_timestamp,
@@ -374,14 +426,19 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
         .await
         .unwrap();
 
-    assert_eq!(first_id, "archive-session-first");
     assert_eq!(
-        retry_id, first_id,
+        first_id,
+        StoreOutcome::Stored("archive-session-first".to_string())
+    );
+    assert_eq!(
+        retry_id,
+        StoreOutcome::Deduplicated("archive-session-first".to_string()),
         "fresh-session retry must dedup despite a differing per-session muc_sender"
     );
     assert_eq!(
-        retry_no_rich_id, first_id,
-        "a rich=None retry must dedup against an identity-only stored row"
+        retry_no_rich_id,
+        StoreOutcome::Stored("archive-session-retry-no-rich".to_string()),
+        "a rich=None retry must fail open because its real sender is unknown"
     );
 
     let result = storage
@@ -390,9 +447,90 @@ async fn assert_origin_id_dedup_ignores_per_session_muc_sender(storage: &dyn Mam
         .unwrap();
     assert_eq!(
         result.messages.len(),
-        1,
-        "the message must be archived exactly once"
+        2,
+        "the identified retry deduplicates while the unidentified retry fails open"
     );
+}
+
+#[tokio::test]
+async fn test_sqlite_groupchat_origin_retry_honors_tombstones() {
+    let storage = create_test_storage().await;
+    assert_groupchat_origin_retry_honors_tombstones(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_groupchat_origin_retry_honors_tombstones() {
+    let storage = InMemoryMamStorage::new();
+    assert_groupchat_origin_retry_honors_tombstones(&storage).await;
+}
+
+async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorage) {
+    use waddle_xmpp_core::mam::ArchivedTombstone;
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    fn message(id: &str, origin_id: &str, body: &str, generation: u64) -> ArchivedMessage {
+        ArchivedMessage {
+            id: id.to_string(),
+            body: Some(body.to_string()),
+            origin_id: Some(OriginId::new(origin_id)),
+            message_type: xmpp_parsers::message::MessageType::Groupchat,
+            nickname_generation: Some(generation),
+            rich: Some(muc_rich("alice@example.com/session")),
+            ..ArchivedMessage::for_test(
+                jid("room@conference.example.com/alice"),
+                jid("room@conference.example.com"),
+            )
+        }
+    }
+
+    fn tombstone() -> ArchivedTombstone {
+        ArchivedTombstone {
+            retraction_id: None,
+            stamp: Utc::now(),
+            moderation: None,
+        }
+    }
+
+    let archive = bare("room@conference.example.com");
+    let original = message("tombstone-original", "tombstone-origin", "secret", 1);
+    assert_eq!(
+        storage.store_message(&archive, &original).await.unwrap(),
+        StoreOutcome::Stored("tombstone-original".to_string())
+    );
+    assert!(storage
+        .replace_with_tombstone("tombstone-original", tombstone())
+        .await
+        .unwrap());
+
+    let retry = message("tombstone-retry", "tombstone-origin", "secret", 2);
+    assert_eq!(
+        storage.store_message(&archive, &retry).await.unwrap(),
+        StoreOutcome::TombstoneHit("tombstone-original".to_string())
+    );
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 1);
+
+    // Construct the pathological ordering before retracting the older row:
+    // the complete live pass must win even though the tombstone sorts first.
+    let old = message("ordering-old", "ordering-origin", "old content", 3);
+    let live = message("ordering-live", "ordering-origin", "live content", 4);
+    assert_eq!(
+        storage.store_message(&archive, &old).await.unwrap(),
+        StoreOutcome::Stored("ordering-old".to_string())
+    );
+    assert_eq!(
+        storage.store_message(&archive, &live).await.unwrap(),
+        StoreOutcome::Stored("ordering-live".to_string())
+    );
+    assert!(storage
+        .replace_with_tombstone("ordering-old", tombstone())
+        .await
+        .unwrap());
+    let live_retry = message("ordering-retry", "ordering-origin", "live content", 5);
+    assert_eq!(
+        storage.store_message(&archive, &live_retry).await.unwrap(),
+        StoreOutcome::Deduplicated("ordering-live".to_string())
+    );
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 3);
 }
 
 #[tokio::test]
@@ -464,10 +602,26 @@ async fn assert_origin_id_dedup_uses_bare_sender_for_direct_messages(storage: &d
         .await
         .unwrap();
 
-    assert_eq!(retry_id, first_id);
-    assert_eq!(different_recipient_id, "dm-different-recipient");
-    assert_eq!(distinct_body_id, "dm-distinct-body");
-    assert_eq!(different_sender_id, "dm-other-sender");
+    assert_eq!(
+        first_id,
+        StoreOutcome::Stored("dm-archive-first".to_string())
+    );
+    assert_eq!(
+        retry_id,
+        StoreOutcome::Deduplicated("dm-archive-first".to_string())
+    );
+    assert_eq!(
+        different_recipient_id,
+        StoreOutcome::Stored("dm-different-recipient".to_string())
+    );
+    assert_eq!(
+        distinct_body_id,
+        StoreOutcome::Stored("dm-distinct-body".to_string())
+    );
+    assert_eq!(
+        different_sender_id,
+        StoreOutcome::Stored("dm-other-sender".to_string())
+    );
     assert_eq!(storage.count_messages(&archive).await.unwrap(), 4);
 }
 
@@ -500,10 +654,12 @@ async fn test_store_and_retrieve_reply_thread_metadata() {
             )
         };
 
-    let archive_id = storage
-        .store_message(&bare("room@conference.example.com"), &msg)
-        .await
-        .unwrap();
+    let archive_id = expect_stored(
+        storage
+            .store_message(&bare("room@conference.example.com"), &msg)
+            .await
+            .unwrap(),
+    );
 
     let retrieved = storage
         .get_message(&archive_id)
@@ -555,10 +711,12 @@ async fn xep_0201_parent_thread_id_round_trips_through_storage() {
         )
     };
 
-    let archive_id = storage
-        .store_message(&bare("room@conference.example.com"), &msg)
-        .await
-        .unwrap();
+    let archive_id = expect_stored(
+        storage
+            .store_message(&bare("room@conference.example.com"), &msg)
+            .await
+            .unwrap(),
+    );
 
     let retrieved = storage
         .get_message(&archive_id)
@@ -1948,7 +2106,7 @@ async fn xep_0424_tombstone_scrubs_parent_thread_id() {
             ),
             ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
         };
-    let archive_id = storage.store_message(&archive, &msg).await.unwrap();
+    let archive_id = expect_stored(storage.store_message(&archive, &msg).await.unwrap());
 
     let tombstone = ArchivedTombstone {
         retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
@@ -2023,7 +2181,7 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
             ),
             ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
         };
-    let archive_id = storage.store_message(&archive, &msg).await.unwrap();
+    let archive_id = expect_stored(storage.store_message(&archive, &msg).await.unwrap());
 
     let moderator: jid::Jid = "mod@example.com".parse().expect("jid");
     let tombstone = ArchivedTombstone {

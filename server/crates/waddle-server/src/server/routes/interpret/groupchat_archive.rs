@@ -1,5 +1,5 @@
 use super::*;
-use waddle_xmpp::mam::MamStorageError;
+use waddle_xmpp::mam::{MamStorageError, StoreOutcome};
 use waddle_xmpp::muc::RoomClaimFenceContext;
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
@@ -234,14 +234,24 @@ pub(super) async fn finish_archive_groupchat_message(
         RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
     };
     match store_result {
-        Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
-            rewrite: ArchiveIdRewrite::from_store_result(
-                jid::Jid::from(room.clone()),
-                archive_id,
-                stored_id.clone(),
-            ),
-            stored_id,
-        }),
+        Ok(StoreOutcome::Stored(stored_id) | StoreOutcome::Deduplicated(stored_id)) => {
+            ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
+                rewrite: ArchiveIdRewrite::from_store_result(
+                    jid::Jid::from(room.clone()),
+                    archive_id,
+                    stored_id.clone(),
+                ),
+                stored_id,
+            })
+        }
+        Ok(StoreOutcome::TombstoneHit(existing_id)) => {
+            debug!(
+                room = %room,
+                archive_id = %existing_id,
+                "ArchiveGroupchat: origin-id retry matched a tombstone; skipping archive write"
+            );
+            ArchiveGroupchatOutcome::Skipped
+        }
         Err(MamStorageError::NotOwner { entity }) => {
             warn!(
                 room = %room,

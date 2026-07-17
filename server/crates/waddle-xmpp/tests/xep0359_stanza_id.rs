@@ -14,6 +14,7 @@
 
 use chrono::Utc;
 use jid::{BareJid, Jid};
+use waddle_xmpp::mam::{InMemoryMamStorage, MamStorage, StoreOutcome};
 use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
 };
@@ -32,6 +33,60 @@ fn dm(from: &str, to: &str, body: &str) -> Message {
     m.bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     m
+}
+
+/// XEP-0359 §2: an origin-id remains stable when the originating client
+/// retries. A MUC leave/rejoin changes the nickname generation and the real
+/// full-JID resource, but the same real bare account and occupant JID still
+/// identify the retry for storage dedupe (issue #1374).
+#[tokio::test]
+async fn xep0359_groupchat_origin_retry_after_rejoin_reuses_archive_id() {
+    use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedMucSender, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    fn archived(id: &str, real_jid: &str, generation: u64) -> ArchivedMessage {
+        ArchivedMessage {
+            id: id.to_string(),
+            body: Some("retry me".to_string()),
+            origin_id: Some(OriginId::new("stable-client-origin")),
+            message_type: MessageType::Groupchat,
+            nickname_generation: Some(generation),
+            rich: Some(ArchivedRichMessage {
+                muc_sender: Some(ArchivedMucSender {
+                    jid: real_jid.parse().expect("real sender JID"),
+                    affiliation: Affiliation::Member,
+                    role: Role::Participant,
+                }),
+                ..ArchivedRichMessage::default()
+            }),
+            ..ArchivedMessage::for_test(
+                "room@conference.example.com/alice"
+                    .parse()
+                    .expect("occupant JID"),
+                "room@conference.example.com".parse().expect("room JID"),
+            )
+        }
+    }
+
+    let storage = InMemoryMamStorage::new();
+    let room = bare("room@conference.example.com");
+    let first = archived("archive-first", "alice@example.com/session-a", 7);
+    let retry = archived("archive-retry", "alice@example.com/session-b", 8);
+
+    assert_eq!(
+        storage.store_message(&room, &first).await.expect("store"),
+        StoreOutcome::Stored("archive-first".to_string())
+    );
+    assert_eq!(
+        storage.store_message(&room, &retry).await.expect("retry"),
+        StoreOutcome::Deduplicated("archive-first".to_string())
+    );
+    assert_eq!(
+        storage.count_messages(&room).await.expect("count"),
+        1,
+        "the retry must not create a second MAM row"
+    );
 }
 
 /// XEP-0359 §3: `<stanza-id/>` MUST carry the `by` attribute (the
