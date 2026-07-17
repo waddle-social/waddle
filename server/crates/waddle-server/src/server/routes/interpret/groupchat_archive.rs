@@ -396,12 +396,11 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
     // Tombstones are terminal. A heal-retry of an XEP-0424 author
     // retraction must never downgrade the attribution or reason on an
     // existing XEP-0425 moderation tombstone.
-    if original.rich.as_ref().is_some_and(|rich| {
-        matches!(
-            rich.payload.as_ref(),
-            Some(ArchivedRichPayload::Tombstone(_))
-        )
-    }) {
+    if original
+        .rich
+        .as_ref()
+        .is_some_and(ArchivedRichMessage::is_tombstoned)
+    {
         debug!(
             archive = %room,
             original_id = %original.id,

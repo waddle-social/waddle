@@ -654,12 +654,10 @@ pub(super) async fn replace_with_terminal_tombstone(
             return Ok(TerminalTombstoneOutcome::NotFound);
         };
         let current_rich = decode_rich_payload(current_rich_payload.as_deref())?;
-        if current_rich.as_ref().is_some_and(|rich| {
-            matches!(
-                rich.payload.as_ref(),
-                Some(ArchivedRichPayload::Tombstone(_))
-            )
-        }) {
+        if current_rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
+        {
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
 

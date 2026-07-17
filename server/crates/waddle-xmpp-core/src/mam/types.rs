@@ -207,6 +207,15 @@ impl ArchivedRichMessage {
         }
     }
 
+    /// True when this payload is an XEP-0424 / XEP-0425 tombstone — the
+    /// terminal state an archive row never leaves.
+    pub fn is_tombstoned(&self) -> bool {
+        matches!(
+            self.payload.as_ref(),
+            Some(ArchivedRichPayload::Tombstone(_))
+        )
+    }
+
     /// True when this payload carries no client-authored content
     /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).

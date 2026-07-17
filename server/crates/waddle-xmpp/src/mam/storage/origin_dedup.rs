@@ -1,4 +1,4 @@
-use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichPayload};
+use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage};
 use xmpp_parsers::message::MessageType;
 
 pub(super) fn origin_id_dedup_match(
@@ -35,13 +35,10 @@ pub(super) fn origin_id_tombstone_match(
         && existing.origin_id.is_some()
         && existing.origin_id == incoming.origin_id
         && existing.from == incoming.from
-        && matches!(
-            existing
-                .rich
-                .as_ref()
-                .and_then(|rich| rich.payload.as_ref()),
-            Some(ArchivedRichPayload::Tombstone(_))
-        )
+        && existing
+            .rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
 }
 
 /// XEP-0045 §8.1 subject changes are room-state operations, not timeline

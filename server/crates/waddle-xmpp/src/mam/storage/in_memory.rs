@@ -363,12 +363,11 @@ impl MamStorage for InMemoryMamStorage {
         else {
             return Ok(TerminalTombstoneOutcome::NotFound);
         };
-        if message.rich.as_ref().is_some_and(|rich| {
-            matches!(
-                rich.payload.as_ref(),
-                Some(waddle_xmpp_core::mam::ArchivedRichPayload::Tombstone(_))
-            )
-        }) {
+        if message
+            .rich
+            .as_ref()
+            .is_some_and(waddle_xmpp_core::mam::ArchivedRichMessage::is_tombstoned)
+        {
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
         apply_tombstone(message, tombstone);

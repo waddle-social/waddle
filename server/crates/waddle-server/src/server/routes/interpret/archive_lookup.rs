@@ -81,10 +81,10 @@ pub(super) fn project_archived_row(
     archive: &jid::BareJid,
     row: MamArchivedMessage,
 ) -> Option<Box<ProtocolArchivedMessage>> {
-    let tombstoned = matches!(
-        row.rich.as_ref().and_then(|r| r.payload.as_ref()),
-        Some(waddle_xmpp::mam::ArchivedRichPayload::Tombstone(_))
-    );
+    let tombstoned = row
+        .rich
+        .as_ref()
+        .is_some_and(waddle_xmpp::mam::ArchivedRichMessage::is_tombstoned);
 
     let message = match parse_archived_message_xml(row.stanza_xml.as_deref()) {
         Some(m) => m,
