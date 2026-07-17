@@ -29,7 +29,12 @@
  */
 
 import { reportError } from "@/lib/telemetry";
-import type { DurableOutcome } from "@/lib/outbound-durable-store";
+import type {
+  DurableOutcome,
+  OutboundOwnerContext,
+  OutboundOwnerHandoff,
+  OutboundOwnerHint,
+} from "@/lib/outbound-durable-store";
 import {
   IndexedDbDurableSmResumeStore,
   MemoryDurableSmResumeStore,
@@ -40,8 +45,8 @@ import {
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
 const JOINED_ROOMS_PREFIX = "waddle.chat.joined-rooms";
-const OWNER_LEASE_PREFIX = `${SM_PREFIX}.owner-lease`;
-const OWNER_HANDOFF_PREFIX = `${SM_PREFIX}.owner-handoff`;
+const OWNER_KEY = `${SM_PREFIX}.owner`;
+const OWNER_HANDOFF_TOKEN_KEY = `${SM_PREFIX}.owner-handoff-token`;
 
 type PersistedSeenCursor = {
   timestamp: string;
@@ -103,18 +108,7 @@ type ResumeOwner = {
   ownerId: string;
   instanceId: string;
   explicit: boolean;
-};
-
-type OwnerLease = {
-  ownerId: string;
-  instanceId: string;
-  updatedAt: number;
-};
-
-type OwnerHandoff = {
-  ownerId: string;
-  instanceId: string;
-  expiresAt: number;
+  handoffToken?: string;
 };
 
 /**
@@ -124,11 +118,8 @@ type OwnerHandoff = {
  */
 const DEFAULT_SM_MAX_RESUME_SECONDS = 300;
 const SM_SAVED_AT_FUTURE_SKEW_MS = 60_000;
-const OWNER_LEASE_TTL_MS = 45_000;
-const OWNER_HEARTBEAT_MS = 15_000;
-const OWNER_HANDOFF_TTL_MS = OWNER_LEASE_TTL_MS;
+const OWNER_HANDOFF_TTL_MS = 45_000;
 const liveOwnerInstances = new Map<string, string>();
-const liveOwnerHeartbeats = new Set<string>();
 let testSmStorageIdentity: Storage | null | undefined;
 let testSmStore: MemoryDurableSmResumeStore | null = null;
 let testSmStoreToken: string | null = null;
@@ -196,7 +187,9 @@ export interface ResumePersistence {
   consumeSm(): Promise<DurableOutcome<PersistedSmResumeState | null>>;
   saveSm(state: PersistedSmResumeState): Promise<DurableOutcome<void>>;
   clearSm(): Promise<DurableOutcome<boolean>>;
-  preparePagehideHandoff(): void;
+  outboundOwnerHint(): OutboundOwnerHint;
+  acceptOutboundOwner(owner: OutboundOwnerContext): void;
+  preparePagehideHandoff(): OutboundOwnerHandoff;
   reclaimPagehideOwnership(): void;
   loadJoinedRooms(): string[];
   saveJoinedRooms(roomJids: readonly string[]): void;
@@ -212,7 +205,9 @@ export const nullResumePersistence: ResumePersistence = {
   consumeSm: async () => ({ kind: "committed", value: null }),
   saveSm: async () => ({ kind: "committed", value: undefined }),
   clearSm: async () => ({ kind: "committed", value: false }),
-  preparePagehideHandoff: () => undefined,
+  outboundOwnerHint: () => ({ ownerId: "null-owner", ownerInstanceId: "null-instance" }),
+  acceptOutboundOwner: () => undefined,
+  preparePagehideHandoff: () => ({ token: "null-handoff", expiresAt: 0 }),
   reclaimPagehideOwnership: () => undefined,
   loadJoinedRooms: () => [],
   saveJoinedRooms: () => undefined,
@@ -228,15 +223,15 @@ export function createLocalStorageResumePersistence(
   // Length-prefix the account segment so prefix enumeration cannot make
   // `alice@example.com` consume `alice@example.com.evil` shards.
   const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
-  const catchupKey = `${catchupKeyPrefix}.${owner.ownerId}`;
-  const joinedRoomsKey = `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  const catchupKey = () => `${catchupKeyPrefix}.${owner.ownerId}`;
+  const joinedRoomsKey = () => `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
 
   return {
     loadCatchup() {
       return readCatchupShards(catchupKeyPrefix);
     },
     saveCatchup(snapshot) {
-      writeJson(catchupKey, snapshot, "catchup");
+      writeJson(catchupKey(), snapshot, "catchup");
     },
     clearCatchup() {
       removeKeysWithPrefix(`${catchupKeyPrefix}.`, "catchup");
@@ -280,27 +275,47 @@ export function createLocalStorageResumePersistence(
         : { kind: "committed", value: undefined };
     },
     clearSm() {
-      return durableSmStore.clear(accountKey);
+      return durableSmStore.clear(accountKey, owner.ownerId);
+    },
+    outboundOwnerHint() {
+      return {
+        ownerId: owner.ownerId,
+        ownerInstanceId: owner.instanceId,
+        ...(owner.handoffToken ? { handoffToken: owner.handoffToken } : {}),
+      };
+    },
+    acceptOutboundOwner(resolved) {
+      owner.ownerId = resolved.ownerId;
+      owner.instanceId = resolved.ownerInstanceId;
+      delete owner.handoffToken;
+      writeOwnerSession(owner);
     },
     preparePagehideHandoff() {
-      markOwnerHandoff(owner);
+      const handoff = {
+        token: randomClaimId(),
+        expiresAt: Date.now() + OWNER_HANDOFF_TTL_MS,
+      };
+      owner.handoffToken = handoff.token;
+      writeOwnerSession(owner);
+      return handoff;
     },
     reclaimPagehideOwnership() {
-      reclaimOwnerAfterPageShow(owner);
+      delete owner.handoffToken;
+      writeOwnerSession(owner);
     },
     loadJoinedRooms() {
-      const stored = readJson<string[]>(joinedRoomsKey, isStringArray, "joined-rooms") ?? [];
+      const stored = readJson<string[]>(joinedRoomsKey(), isStringArray, "joined-rooms") ?? [];
       return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
     },
     saveJoinedRooms(roomJids) {
       writeJson(
-        joinedRoomsKey,
+        joinedRoomsKey(),
         [...new Set(roomJids.map(normalizeRoomJid).filter(Boolean))],
         "joined-rooms",
       );
     },
     clearJoinedRooms() {
-      removeKey(joinedRoomsKey, "joined-rooms");
+      removeKey(joinedRoomsKey(), "joined-rooms");
     },
   };
 }
@@ -330,18 +345,17 @@ function resumeOwner(): ResumeOwner {
     const ownerId = randomClaimId();
     return { ownerId, instanceId: ownerInstanceId(ownerId), explicit: false };
   }
-  const key = `${SM_PREFIX}.owner`;
   try {
-    let ownerId = s.getItem(key) || randomClaimId();
-    let instanceId = ownerInstanceId(ownerId);
-    if (copiedLiveOwnerNeedsRotation(ownerId, instanceId)) {
-      ownerId = randomClaimId();
-      instanceId = ownerInstanceId(ownerId);
-    }
-    s.setItem(key, ownerId);
-    const owner: ResumeOwner = { ownerId, instanceId, explicit: false };
-    claimOwnerLease(owner);
-    startOwnerHeartbeat(owner);
+    const ownerId = s.getItem(OWNER_KEY) || randomClaimId();
+    const owner: ResumeOwner = {
+      ownerId,
+      instanceId: ownerInstanceId(ownerId),
+      explicit: false,
+      ...(s.getItem(OWNER_HANDOFF_TOKEN_KEY)
+        ? { handoffToken: s.getItem(OWNER_HANDOFF_TOKEN_KEY)! }
+        : {}),
+    };
+    writeOwnerSession(owner);
     return owner;
   } catch {
     const ownerId = randomClaimId();
@@ -357,63 +371,20 @@ function ownerInstanceId(ownerId: string): string {
   return next;
 }
 
-function copiedLiveOwnerNeedsRotation(ownerId: string, instanceId: string): boolean {
-  const lease = readOwnerLease(ownerLeaseKey(ownerId));
-  if (!lease || lease.instanceId === instanceId || Date.now() - lease.updatedAt > OWNER_LEASE_TTL_MS) {
-    return false;
-  }
-  const handoff = readOwnerHandoff(ownerHandoffKey(ownerId));
-  return !handoff || handoff.expiresAt <= Date.now();
-}
-
-function claimOwnerLease(owner: ResumeOwner): void {
+function writeOwnerSession(owner: ResumeOwner): void {
   if (owner.explicit) return;
-  writeJson(ownerLeaseKey(owner.ownerId), {
-    ownerId: owner.ownerId,
-    instanceId: owner.instanceId,
-    updatedAt: Date.now(),
-  }, "owner-lease");
-  removeKey(ownerHandoffKey(owner.ownerId), "owner-handoff");
-}
-
-function startOwnerHeartbeat(owner: ResumeOwner): void {
-  if (owner.explicit || liveOwnerHeartbeats.has(owner.ownerId)) return;
-  if (typeof document === "undefined") return;
-  liveOwnerHeartbeats.add(owner.ownerId);
-  const timer = setInterval(() => claimOwnerLease(owner), OWNER_HEARTBEAT_MS);
-  (timer as { unref?: () => void }).unref?.();
-}
-
-function markOwnerHandoff(owner: ResumeOwner): void {
-  writeJson(ownerHandoffKey(owner.ownerId), {
-    ownerId: owner.ownerId,
-    instanceId: owner.instanceId,
-    expiresAt: Date.now() + OWNER_HANDOFF_TTL_MS,
-  }, "owner-handoff");
-}
-
-function reclaimOwnerAfterPageShow(owner: ResumeOwner): void {
-  if (owner.explicit) {
-    removeKey(ownerHandoffKey(owner.ownerId), "owner-handoff");
-    return;
+  const s = sessionStorageForOwner();
+  if (!s) return;
+  try {
+    s.setItem(OWNER_KEY, owner.ownerId);
+    if (owner.handoffToken) {
+      s.setItem(OWNER_HANDOFF_TOKEN_KEY, owner.handoffToken);
+    } else {
+      s.removeItem(OWNER_HANDOFF_TOKEN_KEY);
+    }
+  } catch {
+    // IndexedDB owner activation fails closed; sessionStorage is only a hint.
   }
-  claimOwnerLease(owner);
-}
-
-function ownerLeaseKey(ownerId: string): string {
-  return `${OWNER_LEASE_PREFIX}.${ownerId}`;
-}
-
-function ownerHandoffKey(ownerId: string): string {
-  return `${OWNER_HANDOFF_PREFIX}.${ownerId}`;
-}
-
-function readOwnerLease(key: string): OwnerLease | null {
-  return readJson<OwnerLease>(key, isOwnerLease, "owner-lease");
-}
-
-function readOwnerHandoff(key: string): OwnerHandoff | null {
-  return readJson<OwnerHandoff>(key, isOwnerHandoff, "owner-handoff");
 }
 
 function storage(): Storage | null {
@@ -552,26 +523,6 @@ function isPersistedReconnectCatchup(value: unknown): value is PersistedReconnec
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isOwnerLease(value: unknown): value is OwnerLease {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.ownerId === "string" &&
-    typeof candidate.instanceId === "string" &&
-    typeof candidate.updatedAt === "number"
-  );
-}
-
-function isOwnerHandoff(value: unknown): value is OwnerHandoff {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.ownerId === "string" &&
-    typeof candidate.instanceId === "string" &&
-    typeof candidate.expiresAt === "number"
-  );
 }
 
 function normalizeRoomJid(roomJid: string): string {
