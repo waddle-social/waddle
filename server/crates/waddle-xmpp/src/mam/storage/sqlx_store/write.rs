@@ -539,11 +539,27 @@ fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<String> {
     if !matches!(message.message_type, MessageType::Groupchat) || message.origin_id.is_none() {
         return None;
     }
-    message
+    let scope = message
         .rich
         .as_ref()
         .and_then(|rich| rich.muc_sender.as_ref())
-        .map(|sender| sender.jid.to_bare().to_string())
+        .map(|sender| sender.jid.to_bare().to_string());
+    if scope.is_none() {
+        // A groupchat row with an origin-id but no server-authored
+        // `muc_sender` sits outside BOTH retry-dedup layers (the Rust
+        // predicate fails open by design; the partial unique index
+        // requires a non-NULL scope). Today every archivable groupchat
+        // stanza carries a sender snapshot (the occupancy gate runs
+        // first), so this fires only if a future write path breaks
+        // that invariant — surface it instead of silently losing
+        // dedup coverage.
+        warn!(
+            from = %message.from,
+            "groupchat archive write carries an origin-id but no muc_sender; \
+             origin-id retry-dedup cannot protect this row"
+        );
+    }
+    scope
 }
 
 fn update_hash_part(hasher: &mut Sha256, label: &str, value: Option<&str>) {
@@ -569,6 +585,7 @@ pub(super) async fn replace_with_tombstone(
         reply: None,
         references: Vec::new(),
         mentions: Vec::new(),
+        subjects: Default::default(),
         // XEP-0424 §Tombstones: the occupant-id and real-JID item
         // identify the original sender and MUST NOT survive the
         // tombstone replacement.

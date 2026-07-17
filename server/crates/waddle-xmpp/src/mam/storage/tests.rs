@@ -51,6 +51,12 @@ fn muc_rich(real_jid: &str) -> waddle_xmpp_core::mam::ArchivedRichMessage {
     }
 }
 
+fn muc_subject_rich(real_jid: &str, subject: &str) -> waddle_xmpp_core::mam::ArchivedRichMessage {
+    let mut rich = muc_rich(real_jid);
+    rich.subjects.insert(String::new(), subject.to_string());
+    rich
+}
+
 async fn assert_sender_origin_lookup_precedence_and_room_scope(storage: &dyn MamStorage) {
     use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 
@@ -190,6 +196,57 @@ async fn test_sqlite_deduplicates_origin_id_within_archive_sender_scope() {
 async fn test_inmemory_deduplicates_origin_id_within_archive_sender_scope() {
     let storage = InMemoryMamStorage::new();
     assert_deduplicates_origin_id_within_archive_sender_scope(&storage).await;
+}
+
+#[tokio::test]
+async fn test_sqlite_origin_id_dedup_distinguishes_subject_content() {
+    let storage = create_test_storage().await;
+    assert_origin_id_dedup_distinguishes_subject_content(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_origin_id_dedup_distinguishes_subject_content() {
+    let storage = InMemoryMamStorage::new();
+    assert_origin_id_dedup_distinguishes_subject_content(&storage).await;
+}
+
+async fn assert_origin_id_dedup_distinguishes_subject_content(storage: &dyn MamStorage) {
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    let archive = bare("room@conference.example.com");
+    let archive_jid = jid("room@conference.example.com");
+    let origin_id = OriginId::new("reused-subject-origin");
+    let subject_message = |id: &str, subject: &str| ArchivedMessage {
+        id: id.to_string(),
+        body: None,
+        origin_id: Some(origin_id.clone()),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        rich: Some(muc_subject_rich("alice@example.com/session", subject)),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let first = subject_message("subject-first", "First topic");
+    let changed = subject_message("subject-changed", "Changed topic");
+    let identical_retry = subject_message("subject-identical-retry", "Changed topic");
+
+    assert_eq!(
+        storage.store_message(&archive, &first).await.unwrap(),
+        StoreOutcome::Stored("subject-first".to_string())
+    );
+    assert_eq!(
+        storage.store_message(&archive, &changed).await.unwrap(),
+        StoreOutcome::Stored("subject-changed".to_string()),
+        "reusing an origin-id with different subject content is a new message"
+    );
+    assert_eq!(
+        storage
+            .store_message(&archive, &identical_retry)
+            .await
+            .unwrap(),
+        StoreOutcome::Deduplicated("subject-changed".to_string()),
+        "an identical subject retry reuses the matching archive row"
+    );
+    assert_eq!(storage.count_messages(&archive).await.unwrap(), 2);
 }
 
 async fn assert_deduplicates_origin_id_within_archive_sender_scope(storage: &dyn MamStorage) {

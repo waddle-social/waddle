@@ -134,9 +134,13 @@ pub(super) async fn dispatch_bot_groupchat_response(
         bot_ctx.recursion_depth,
     ))
     .await;
+    let _retry_suppression = nested.retry_suppression;
     outcome.frames.extend(nested.frames);
     outcome.close = nested.close;
     outcome.feedback.extend(nested.feedback);
+    // Extension-bot dispatch returns only transport/callback effects. The
+    // explicit discard above keeps a nested room retry marker local to that
+    // batch so it cannot label subsequent bot work.
     Ok(ExtensionRoomDispatchResult { outcome, stanza_id })
 }
 

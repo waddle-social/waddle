@@ -89,6 +89,69 @@ async fn xep0359_groupchat_origin_retry_after_rejoin_reuses_archive_id() {
     );
 }
 
+/// XEP-0359 §2 keeps an origin-id stable for a retry, but the identifier is
+/// not a license to collapse distinct client-authored content. Subject-only
+/// MUC messages therefore participate in the retry content key.
+#[tokio::test]
+async fn xep0359_groupchat_origin_retry_distinguishes_subject_content() {
+    use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedMucSender, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    fn archived(id: &str, subject: &str) -> ArchivedMessage {
+        let mut rich = ArchivedRichMessage {
+            muc_sender: Some(ArchivedMucSender {
+                jid: "alice@example.com/session"
+                    .parse()
+                    .expect("real sender JID"),
+                affiliation: Affiliation::Member,
+                role: Role::Participant,
+            }),
+            ..ArchivedRichMessage::default()
+        };
+        rich.subjects.insert(String::new(), subject.to_string());
+        ArchivedMessage {
+            id: id.to_string(),
+            body: None,
+            origin_id: Some(OriginId::new("stable-subject-origin")),
+            message_type: MessageType::Groupchat,
+            nickname_generation: Some(7),
+            rich: Some(rich),
+            ..ArchivedMessage::for_test(
+                "room@conference.example.com/alice"
+                    .parse()
+                    .expect("occupant JID"),
+                "room@conference.example.com".parse().expect("room JID"),
+            )
+        }
+    }
+
+    let storage = InMemoryMamStorage::new();
+    let room = bare("room@conference.example.com");
+    assert_eq!(
+        storage
+            .store_message(&room, &archived("subject-first", "First topic"))
+            .await
+            .expect("first store"),
+        StoreOutcome::Stored("subject-first".to_string())
+    );
+    assert_eq!(
+        storage
+            .store_message(&room, &archived("subject-changed", "Changed topic"))
+            .await
+            .expect("changed store"),
+        StoreOutcome::Stored("subject-changed".to_string())
+    );
+    assert_eq!(
+        storage
+            .store_message(&room, &archived("subject-identical-retry", "Changed topic"),)
+            .await
+            .expect("identical retry"),
+        StoreOutcome::Deduplicated("subject-changed".to_string())
+    );
+    assert_eq!(storage.count_messages(&room).await.expect("count"), 2);
+}
+
 /// XEP-0359 §3: `<stanza-id/>` MUST carry the `by` attribute (the
 /// JID that stamped it). Verify the helper enforces this so the
 /// typed `StanzaIdRef` cannot be lossy at the wire boundary.

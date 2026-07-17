@@ -821,6 +821,11 @@ pub(super) fn rich_archive_payload(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let subjects = message
+        .subjects
+        .iter()
+        .map(|(lang, text)| (lang.0.clone(), text.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     // XEP-0421: capture the server-stamped occupant-id into the typed
     // projection so the non-`stanza_xml` fallback reconstruction can
     // re-emit it (#1268). `MucCanonicalizeHandler` stamped it (and
@@ -833,6 +838,7 @@ pub(super) fn rich_archive_payload(
         && reply.is_none()
         && references.is_empty()
         && mentions.is_empty()
+        && subjects.is_empty()
         && occupant_id.is_none()
         && muc_sender.is_none()
     {
@@ -843,6 +849,7 @@ pub(super) fn rich_archive_payload(
             reply,
             references,
             mentions,
+            subjects,
             occupant_id,
             muc_sender,
         })

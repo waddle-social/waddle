@@ -642,6 +642,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     reply: None,
                     references: Vec::new(),
                     mentions: Vec::new(),
+                    subjects: Default::default(),
                     // Room-authored moderation event row: no occupant
                     // sender to identify.
                     occupant_id: None,

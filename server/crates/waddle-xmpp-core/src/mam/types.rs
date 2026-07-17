@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
 use serde::{Deserialize, Serialize};
@@ -170,6 +172,10 @@ pub struct ArchivedRichMessage {
     pub reply: Option<ArchivedReply>,
     pub references: Vec<ArchivedReference>,
     pub mentions: Vec<ArchivedMention>,
+    /// Client-authored message subjects keyed by their wire `xml:lang`
+    /// value (`""` is the default language).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subjects: BTreeMap<String, String>,
     /// XEP-0421 occupant-id of the sender (groupchat rows only).
     /// `#[serde(default)]` keeps previously-serialized rich payloads
     /// decodable.
@@ -202,13 +208,14 @@ impl ArchivedRichMessage {
     }
 
     /// True when this payload carries no client-authored content
-    /// (`payload` / `reply` / `references` / `mentions`) and no
+    /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).
     pub fn is_empty(&self) -> bool {
         self.payload.is_none()
             && self.reply.is_none()
             && self.references.is_empty()
             && self.mentions.is_empty()
+            && self.subjects.is_empty()
             && self.occupant_id.is_none()
             && self.muc_sender.is_none()
     }

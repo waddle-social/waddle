@@ -207,7 +207,9 @@ use routing::{
 
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
-pub use deps::{Deps, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand};
+pub use deps::{
+    Deps, GroupchatRetrySuppression, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand,
+};
 pub(crate) use groupchat_archive::push_inbox_update;
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
@@ -334,6 +336,10 @@ impl BatchSuppression {
             Self::None => true,
             Self::All => false,
             Self::NonSender { sender } => match event {
+                // A crash can commit the retraction-request archive row before
+                // applying its target tombstone. A deduplicated retry must
+                // finish that idempotent, monotonic second effect.
+                OutboundEvent::ApplyGroupchatRetractionTombstone { .. } => true,
                 OutboundEvent::RouteToConnection { jid, .. } => &jid.to_bare() == sender,
                 OutboundEvent::ProjectGroupchatInbox { owner, .. } => owner == sender,
                 _ => false,
@@ -467,6 +473,10 @@ async fn interpret_with_depth(
                     feedback: nested_feedback,
                     keepalive_probes: nested_probes,
                     timer_commands: nested_timer_commands,
+                    // Retry suppression is local to the nested room batch;
+                    // dispatch_to_room consumes it before returning so it
+                    // cannot suppress unrelated siblings in this outer batch.
+                    retry_suppression: _,
                     archive_id_rewrites: nested_rewrites,
                 } = nested;
                 outcome.frames.extend(nested_frames);
@@ -574,12 +584,15 @@ async fn interpret_with_depth(
                         if let Some(rewrite) = rewrite {
                             archive_id_rewrites.push(rewrite);
                         }
+                        outcome.retry_suppression = Some(GroupchatRetrySuppression::Deduplicated);
                         batch_suppression = BatchSuppression::NonSender { sender };
                     }
                     ArchiveGroupchatEventOutcome::TombstoneHit => {
                         debug!(
                             "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"
                         );
+                        outcome.retry_suppression =
+                            Some(GroupchatRetrySuppression::TombstoneSwallowed);
                         batch_suppression = BatchSuppression::All;
                     }
                     ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {

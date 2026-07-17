@@ -540,6 +540,7 @@ fn xep_0201_typed_replay_emits_thread_parent() {
             reply: None,
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..nested_thread_archived_for_replay(None)
     };
@@ -778,6 +779,7 @@ fn stanza_xml_preferred_over_rich_payload() {
             reply: None,
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..ArchivedMessage::for_test(
             jid("room@conference.example.com/alice"),
@@ -840,6 +842,7 @@ fn stanza_xml_preserves_reply_fallback() {
             }),
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..ArchivedMessage::for_test(
             jid("room@conference.example.com/bob"),
