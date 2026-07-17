@@ -136,6 +136,18 @@ inherits = "release"
 lto = "thin"
 codegen-units = 4
 
+# CI lint/test builds only — never shipped (release and ci cover shipped
+# binaries). No LTO and wide codegen parallelism to minimize compile and
+# link time of the ~200 test binaries; light optimization keeps the test
+# suite fast at runtime; line-tables keep backtraces usable.
+[profile.ci-test]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+opt-level = 1
+strip = false
+debug = "line-tables-only"
+
 [profile.dev]
 opt-level = 0
 # line-tables-only keeps usable backtraces while cutting test-binary size

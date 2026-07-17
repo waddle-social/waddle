@@ -1079,6 +1079,15 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), revoked)
             .await
             .expect("second revoke succeeds after first failure");
+        // `revoked` is notified inside the store call; the worker frees
+        // the queue slot only after that call returns, so wait for it.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while queue.pending_len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retrying worker releases queue capacity");
 
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);
@@ -1108,6 +1117,15 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), revoked)
             .await
             .expect("replacement worker revokes after predecessor panic");
+        // `revoked` is notified inside the store call; the worker frees
+        // the queue slot only after that call returns, so wait for it.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while queue.pending_len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement worker releases queue capacity");
 
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);
@@ -1161,6 +1179,15 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
                 .await
                 .expect("captured runtime completes exact revocation");
+            // `revoked` is notified inside the store call; the worker frees
+            // the queue slot only after that call returns, so wait for it.
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while queue.pending_len() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("revocation worker releases queue capacity");
         });
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);
@@ -1213,7 +1240,15 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
                 .await
                 .expect("later live runtime recovers retained cleanup");
-            assert_eq!(queue.pending_len(), 0);
+            // `revoked` is notified inside the store call; the worker frees
+            // the queue slot only after that call returns, so wait for it.
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while queue.pending_len() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recovered worker releases queue capacity");
 
             let dyn_store: Arc<dyn IsrTokenStore> = store.clone();
             queue
@@ -1276,6 +1311,15 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(1), store.revoked.notified())
                 .await
                 .expect("in-flight cleanup restarts on the lent live runtime");
+            // `revoked` is notified inside the store call; the worker frees
+            // the queue slot only after that call returns, so wait for it.
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while queue.pending_len() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("restarted worker releases queue capacity");
         });
         assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(queue.pending_len(), 0);

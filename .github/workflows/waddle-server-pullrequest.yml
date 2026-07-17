@@ -38,6 +38,8 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
     - server/**/env.cue
+    - server/.config/nextest.toml
+    - server/.config/nextest.toml/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
@@ -328,6 +330,32 @@ jobs:
         extra_nix_config: accept-flake-config = true
     - name: nixClippy
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-clippy
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+  nixDoctest:
+    name: nixDoctest
+    runs-on: namespace-profile-linux-x86
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
+      with:
+        cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: accept-flake-config = true
+    - name: nixDoctest
+      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-doctest
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

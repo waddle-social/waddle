@@ -5,27 +5,32 @@ default:
 
 # Run all XMPP protocol unit/integration tests.
 test:
-    cargo test -p waddle-xmpp --features test-utils
+    cargo nextest run -p waddle-xmpp --features test-utils
 
 # Run all waddle-xmpp integration tests.
 integration:
-    cargo test -p waddle-xmpp --features test-utils --tests --verbose
+    cargo nextest run -p waddle-xmpp --features test-utils --tests
 
 # Run active WebSocket C2S integration tests.
 websocket:
-    cargo test -p waddle-server --test xep0092_software_version_ws --test xep0012_0202_ws --test xep0054_0049_0191_ws --verbose
+    cargo nextest run -p waddle-server --test xep0092_software_version_ws --test xep0012_0202_ws --test xep0054_0049_0191_ws
 
 # Run CUE-authored XMPP E2E protocol scenarios.
 e2e:
-    cargo test -p waddle-server --test xmpp_e2e_cue --verbose
+    cargo nextest run -p waddle-server --test xmpp_e2e_cue
 
 # Run only inline unit tests.
 unit:
-    cargo test -p waddle-xmpp --features test-utils --lib --verbose
+    cargo nextest run -p waddle-xmpp --features test-utils --lib
 
-# Run the full workspace test suite (all crates).
+# Run workspace doctests (nextest cannot run doctests).
+doctest:
+    cargo test --doc --workspace --all-features
+
+# Run the full workspace test suite (all crates), including doctests.
 test-all:
-    cargo test --workspace --all-targets --all-features
+    cargo nextest run --workspace --all-targets --all-features
+    cargo test --doc --workspace --all-features
 
 # Lint and format check.
 lint:
