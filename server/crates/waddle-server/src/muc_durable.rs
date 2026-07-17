@@ -1236,7 +1236,7 @@ mod tests {
     /// path remains cache-backed until #1283 replaces it.
     #[tokio::test]
     async fn mam_store_message_fenced_blocks_the_deposed_owners_next_archive_write() {
-        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage};
+        use waddle_xmpp::mam::{MamStorage, MamStorageError, SqlxMamStorage, StoreOutcome};
         use waddle_xmpp_core::mam::ArchivedMessage;
 
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -1287,13 +1287,13 @@ mod tests {
                 jid::Jid::from(jid.clone()),
             )
         };
-        let archive_id = mam_storage
+        let archive_outcome = mam_storage
             .store_message_fenced(&jid, &message, &fence)
             .await
             .expect("the current owner's fenced write must succeed");
-        assert_eq!(archive_id, first_id);
+        assert_eq!(archive_outcome, StoreOutcome::Stored(first_id.clone()));
         let stored = mam_storage
-            .get_message(&archive_id)
+            .get_message(&first_id)
             .await
             .expect("get_message")
             .expect("row exists");

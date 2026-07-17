@@ -116,6 +116,21 @@ pub(super) async fn broadcast_room_system_message_event(
                 stanza_id = %result.stored_id,
                 "BroadcastRoomSystemMessage: archived"
             ),
+            ArchiveGroupchatOutcome::Deduplicated(result) => {
+                debug!(
+                    room = %room,
+                    stanza_id = %result.stored_id,
+                    "BroadcastRoomSystemMessage: archive write deduplicated; dropping"
+                );
+                return None;
+            }
+            ArchiveGroupchatOutcome::TombstoneHit => {
+                debug!(
+                    room = %room,
+                    "BroadcastRoomSystemMessage: archive write matched a tombstone; dropping"
+                );
+                return None;
+            }
             ArchiveGroupchatOutcome::Skipped => debug!(
                 room = %room,
                 "BroadcastRoomSystemMessage: archive helper declined (chain bug?)"

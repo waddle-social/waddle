@@ -1,4 +1,5 @@
 use super::*;
+use waddle_xmpp::mam::StoreOutcome;
 
 const DM_CALL_PENDING_TTL_SECS: i64 = 30 * 60;
 const DM_CALL_ACTIVE_TTL_SECS: i64 = 12 * 60 * 60;
@@ -58,7 +59,18 @@ pub(super) async fn archive_direct(
     );
     let requested_archive_id = archived.id.clone();
     match mam_storage.store_message(&archive_jid, &archived).await {
-        Ok(archive_id) => {
+        Ok(outcome) => {
+            let archive_id = match outcome {
+                StoreOutcome::Stored(id) | StoreOutcome::Deduplicated(id) => id,
+                StoreOutcome::TombstoneHit(id) => {
+                    warn!(
+                        archive_jid = %archive_jid,
+                        archive_id = %id,
+                        "ArchiveDirect: unexpected groupchat tombstone outcome; treating as deduplicated"
+                    );
+                    id
+                }
+            };
             debug!(
                 archive_jid = %archive_jid,
                 archive_id,

@@ -19,6 +19,30 @@ pub enum MamArchiveKind {
     Room,
 }
 
+/// Outcome of an archive write attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreOutcome {
+    /// A new row was inserted under this archive id.
+    Stored(String),
+    /// An existing live row matched the origin-id retry-dedupe; no row was
+    /// written. Carries the existing row's archive id.
+    Deduplicated(String),
+    /// A tombstoned (XEP-0424 retracted) groupchat row matched the retry;
+    /// no row was written and the caller must swallow the message entirely.
+    TombstoneHit(String),
+}
+
+/// Outcome of an atomic terminal-preserving tombstone replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTombstoneOutcome {
+    /// The live archive row was replaced with the supplied tombstone.
+    Replaced,
+    /// The row already carried a tombstone and was left unchanged.
+    AlreadyTombstoned,
+    /// No archive row matched the requested primary key.
+    NotFound,
+}
+
 /// Trait for MAM message storage backends.
 ///
 /// Per XEP-0313 §4.1, archive addressing is normatively a **bare JID**
@@ -37,12 +61,13 @@ pub trait MamStorage: Send + Sync {
     /// - For MUC messages: the room bare JID
     /// - For 1:1 messages: the user's bare JID (personal archive)
     ///
-    /// Returns the unique archive ID assigned to the message.
+    /// Returns whether a new row was stored or an existing retry target was
+    /// found, together with the relevant archive id.
     async fn store_message(
         &self,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
-    ) -> Result<String, MamStorageError>;
+    ) -> Result<StoreOutcome, MamStorageError>;
 
     /// Fenced variant of [`Self::store_message`] for the MUC groupchat
     /// archive write path (ADR-0017 Phase 3 Slice 7 FIX 1,
@@ -77,7 +102,7 @@ pub trait MamStorage: Send + Sync {
         archive_jid: &BareJid,
         message: &ArchivedMessage,
         fence: &RoomClaimFenceContext,
-    ) -> Result<String, MamStorageError> {
+    ) -> Result<StoreOutcome, MamStorageError> {
         let _ = fence;
         self.store_message(archive_jid, message).await
     }
@@ -122,6 +147,16 @@ pub trait MamStorage: Send + Sync {
         archive_id: &str,
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError>;
+
+    /// Atomically replace a live row with a tombstone without overwriting an
+    /// existing XEP-0424 / XEP-0425 tombstone. This is the terminal-state
+    /// operation used by groupchat author-retraction heal retries, where a
+    /// concurrent moderation tombstone must retain its attribution and reason.
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError>;
 
     /// Get a single message by its original message/stanza id inside an archive.
     async fn get_message_by_stanza_id(

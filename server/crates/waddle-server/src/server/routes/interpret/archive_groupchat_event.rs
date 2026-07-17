@@ -1,14 +1,13 @@
 use super::*;
 
-/// Outcome of the [`OutboundEvent::ArchiveGroupchat`] interpreter arm
-/// (ADR-0017 Phase 3 Slice 7 FIX 1, council-adjudicated). `OwnershipLost`
-/// carries the pre-built bounce reply the caller pushes to `outcome.frames`
-/// AND uses as the signal to suppress every remaining event in this same
-/// dispatch batch (the archive handler always runs before the reflector
-/// fan-out handler in the locked Q7 chain order, so this is reached before
-/// any `RouteToConnection` fan-out for the same message).
 pub(super) enum ArchiveGroupchatEventOutcome {
-    Rewrite(Option<ArchiveIdRewrite>),
+    Stored(Option<ArchiveIdRewrite>),
+    Deduplicated {
+        rewrite: Option<ArchiveIdRewrite>,
+        sender: BareJid,
+    },
+    TombstoneHit,
+    Skipped,
     OwnershipLost(Box<Message>),
 }
 
@@ -26,7 +25,7 @@ pub(super) async fn archive_groupchat_event(
             sender = %sender,
             "ArchiveGroupchat: no mam_storage in Deps; skipping (test fixture?)"
         );
-        return ArchiveGroupchatEventOutcome::Rewrite(None);
+        return ArchiveGroupchatEventOutcome::Skipped;
     };
     // Per XEP-0313 §5.1.3 the eligibility check ran inside
     // `MucArchiveHandler` before this event was emitted —
@@ -54,7 +53,16 @@ pub(super) async fn archive_groupchat_event(
     .await
     {
         ArchiveGroupchatOutcome::Stored(result) => result,
-        ArchiveGroupchatOutcome::Skipped => return ArchiveGroupchatEventOutcome::Rewrite(None),
+        ArchiveGroupchatOutcome::Deduplicated(result) => {
+            return ArchiveGroupchatEventOutcome::Deduplicated {
+                rewrite: result.rewrite,
+                sender: sender.to_bare(),
+            };
+        }
+        ArchiveGroupchatOutcome::TombstoneHit => {
+            return ArchiveGroupchatEventOutcome::TombstoneHit;
+        }
+        ArchiveGroupchatOutcome::Skipped => return ArchiveGroupchatEventOutcome::Skipped,
         ArchiveGroupchatOutcome::OwnershipLost => {
             let bounce = build_message_error_reply(
                 &message,
@@ -84,7 +92,7 @@ pub(super) async fn archive_groupchat_event(
         &message,
     )
     .await;
-    ArchiveGroupchatEventOutcome::Rewrite(archive_id.rewrite)
+    ArchiveGroupchatEventOutcome::Stored(archive_id.rewrite)
 }
 
 async fn update_groupchat_link_preview_refs(

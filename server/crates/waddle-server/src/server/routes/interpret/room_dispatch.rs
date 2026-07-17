@@ -21,6 +21,41 @@ pub(super) fn bind_room_claim_fence(
     }
 }
 
+/// Move the one subject-persistence effect emitted by the room chain directly
+/// after its archive effect while preserving every other event's order.
+///
+/// The handler chain itself remains subject-before-archive so an unauthorized
+/// XEP-0045 subject change still halts before archival. Reordering only the
+/// admitted event batch lets `ArchiveGroupchat` arm ownership-loss,
+/// tombstone-hit, or deduplication suppression before the room mutation, while
+/// `PersistRoomSubject` still completes before the reflector's
+/// `RouteToConnection` effects as required by the ordering contract on that
+/// event. The chain emits at most one of each effect for a message.
+pub(super) fn order_subject_persistence_after_archive(
+    mut events: Vec<OutboundEvent>,
+) -> Vec<OutboundEvent> {
+    let Some(subject_index) = events
+        .iter()
+        .position(|event| matches!(event, OutboundEvent::PersistRoomSubject { .. }))
+    else {
+        return events;
+    };
+    let Some(archive_index) = events
+        .iter()
+        .position(|event| matches!(event, OutboundEvent::ArchiveGroupchat { .. }))
+    else {
+        return events;
+    };
+    let insertion_index = if subject_index < archive_index {
+        archive_index
+    } else {
+        archive_index + 1
+    };
+    let subject = events.remove(subject_index);
+    events.insert(insertion_index, subject);
+    events
+}
+
 pub(super) async fn dispatch_to_room(
     deps: &Deps<'_>,
     room_jid: jid::BareJid,
@@ -367,6 +402,8 @@ pub(super) async fn dispatch_to_room(
         outcome.frames.extend(nested.frames);
         outcome.close = outcome.close || nested.close;
         outcome.feedback.extend(nested.feedback);
+        // The gate cannot emit ArchiveGroupchat. Any future batch-local retry
+        // marker is deliberately not folded into the enclosing dispatch.
         return outcome;
     }
 
@@ -502,6 +539,7 @@ pub(super) async fn dispatch_to_room(
     let observer_message = working.clone();
     let mut dispatch_events = dispatch_outcome.events;
     bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
+    let dispatch_events = order_subject_persistence_after_archive(dispatch_events);
 
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
@@ -512,40 +550,46 @@ pub(super) async fn dispatch_to_room(
     //    Bumping here would break that path for every offline
     //    occupant.
     let nested = Box::pin(interpret_with_depth(dispatch_events, deps, recursion_depth)).await;
+    let retry_suppression = nested.retry_suppression;
     outcome.frames.extend(nested.frames);
     if nested.close {
         outcome.close = true;
     }
     outcome.feedback.extend(nested.feedback);
 
-    let mut observer_message = observer_message;
-    let observer_outcome = state
-        .deps
-        .protocol
-        .extension_manager
-        .process_message_observers_for_waddle_with_requester(
-            &mut observer_message,
-            waddle_id_for_room_jid(&room_jid),
-            Some(sender_full.to_bare()),
-        )
-        .await;
-    for effect in observer_outcome.effects {
-        if let ExtensionEffect::HostWarning(message) = effect {
-            warn!(warning = %message.as_str(), "extension message observer emitted host warning");
-            let reply = build_message_error_reply(
-                &incoming,
-                &room_jid,
-                &sender_full,
-                service_unavailable_error(message.as_str()),
-            );
-            match Stanza::Message(reply).to_element_string() {
-                Ok(xml) => outcome.frames.push(xml),
-                Err(error) => {
-                    warn!(
-                        room = %room_jid,
-                        %error,
-                        "DispatchToRoom: failed to serialize extension warning error reply"
-                    );
+    // The marker controls only this nested room batch. Consume it here rather
+    // than folding it into the returned outcome, where it could leak into an
+    // unrelated sibling event in the enclosing interpreter batch.
+    if retry_suppression.is_none() {
+        let mut observer_message = observer_message;
+        let observer_outcome = state
+            .deps
+            .protocol
+            .extension_manager
+            .process_message_observers_for_waddle_with_requester(
+                &mut observer_message,
+                waddle_id_for_room_jid(&room_jid),
+                Some(sender_full.to_bare()),
+            )
+            .await;
+        for effect in observer_outcome.effects {
+            if let ExtensionEffect::HostWarning(message) = effect {
+                warn!(warning = %message.as_str(), "extension message observer emitted host warning");
+                let reply = build_message_error_reply(
+                    &incoming,
+                    &room_jid,
+                    &sender_full,
+                    service_unavailable_error(message.as_str()),
+                );
+                match Stanza::Message(reply).to_element_string() {
+                    Ok(xml) => outcome.frames.push(xml),
+                    Err(error) => {
+                        warn!(
+                            room = %room_jid,
+                            %error,
+                            "DispatchToRoom: failed to serialize extension warning error reply"
+                        );
+                    }
                 }
             }
         }
@@ -661,6 +705,17 @@ mod room_claim_fence_tests {
         }
     }
 
+    fn archive_event() -> OutboundEvent {
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room bare jid");
+        OutboundEvent::ArchiveGroupchat {
+            room: room.clone(),
+            sender: "alice@example.com/web".parse().expect("sender full jid"),
+            message: Box::new(Message::new(Some(jid::Jid::from(room)))),
+            sender_nickname_generation: 7,
+            sender_item: None,
+        }
+    }
+
     #[test]
     fn bind_room_claim_fence_binds_missing_fence_without_overwriting_or_touching_other_events() {
         let snapshot_fence = fence("snapshot-owner");
@@ -682,5 +737,56 @@ mod room_claim_fence_tests {
             panic!("third event must be PersistRoomSubject");
         };
         assert_eq!(claim_fence.as_ref(), Some(&other_actor_fence));
+    }
+
+    #[test]
+    fn subject_persistence_moves_immediately_after_archive_and_other_events_stay_stable() {
+        let events = vec![
+            OutboundEvent::SendKeepaliveProbe,
+            persist_subject_event(None),
+            OutboundEvent::CloseTransport,
+            archive_event(),
+            OutboundEvent::SendKeepaliveProbe,
+        ];
+
+        let reordered = order_subject_persistence_after_archive(events);
+
+        assert!(matches!(reordered[0], OutboundEvent::SendKeepaliveProbe));
+        assert!(matches!(reordered[1], OutboundEvent::CloseTransport));
+        assert!(matches!(
+            reordered[2],
+            OutboundEvent::ArchiveGroupchat { .. }
+        ));
+        assert!(matches!(
+            reordered[3],
+            OutboundEvent::PersistRoomSubject { .. }
+        ));
+        assert!(matches!(reordered[4], OutboundEvent::SendKeepaliveProbe));
+    }
+
+    #[test]
+    fn subject_persistence_order_is_unchanged_without_archive() {
+        let events = vec![persist_subject_event(None), OutboundEvent::CloseTransport];
+
+        let reordered = order_subject_persistence_after_archive(events);
+
+        assert!(matches!(
+            reordered[0],
+            OutboundEvent::PersistRoomSubject { .. }
+        ));
+        assert!(matches!(reordered[1], OutboundEvent::CloseTransport));
+    }
+
+    #[test]
+    fn archive_order_is_unchanged_without_subject_persistence() {
+        let events = vec![OutboundEvent::CloseTransport, archive_event()];
+
+        let reordered = order_subject_persistence_after_archive(events);
+
+        assert!(matches!(reordered[0], OutboundEvent::CloseTransport));
+        assert!(matches!(
+            reordered[1],
+            OutboundEvent::ArchiveGroupchat { .. }
+        ));
     }
 }
