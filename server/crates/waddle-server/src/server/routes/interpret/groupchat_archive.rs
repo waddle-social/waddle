@@ -24,6 +24,8 @@ pub(super) enum RoomArchiveFence {
 /// actual write.
 pub(super) enum ArchiveGroupchatOutcome {
     Stored(ArchiveStoreResult),
+    Deduplicated(ArchiveStoreResult),
+    TombstoneHit,
     /// Not an error: a chain-bug guard or a non-fencing storage failure
     /// declined the write. The reflection still goes out (today's
     /// pre-existing behavior, unchanged).
@@ -234,8 +236,18 @@ pub(super) async fn finish_archive_groupchat_message(
         RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
     };
     match store_result {
-        Ok(StoreOutcome::Stored(stored_id) | StoreOutcome::Deduplicated(stored_id)) => {
+        Ok(StoreOutcome::Stored(stored_id)) => {
             ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
+                rewrite: ArchiveIdRewrite::from_store_result(
+                    jid::Jid::from(room.clone()),
+                    archive_id,
+                    stored_id.clone(),
+                ),
+                stored_id,
+            })
+        }
+        Ok(StoreOutcome::Deduplicated(stored_id)) => {
+            ArchiveGroupchatOutcome::Deduplicated(ArchiveStoreResult {
                 rewrite: ArchiveIdRewrite::from_store_result(
                     jid::Jid::from(room.clone()),
                     archive_id,
@@ -248,9 +260,9 @@ pub(super) async fn finish_archive_groupchat_message(
             debug!(
                 room = %room,
                 archive_id = %existing_id,
-                "ArchiveGroupchat: origin-id retry matched a tombstone; skipping archive write"
+                "ArchiveGroupchat: origin-id retry matched a tombstone"
             );
-            ArchiveGroupchatOutcome::Skipped
+            ArchiveGroupchatOutcome::TombstoneHit
         }
         Err(MamStorageError::NotOwner { entity }) => {
             warn!(

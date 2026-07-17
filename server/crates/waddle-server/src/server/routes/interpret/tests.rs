@@ -683,6 +683,416 @@ async fn origin_id_collision_with_distinct_content_keeps_fresh_archive_refs() {
     assert!(!outcome.frames[0].contains("existing-archive-id"));
 }
 
+fn groupchat_retry_message(
+    room: &jid::BareJid,
+    occupant: &jid::FullJid,
+    archive_id: &str,
+    origin_id: &str,
+) -> xmpp_parsers::message::Message {
+    use waddle_xmpp_core::xep0359::{build_origin_id_element, build_stanza_id_element};
+
+    let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    message.from = Some(jid::Jid::from(occupant.clone()));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "retry me".to_string());
+    message.payloads.push(build_origin_id_element(origin_id));
+    message.payloads.push(build_stanza_id_element(
+        archive_id,
+        &jid::Jid::from(room.clone()),
+    ));
+    message
+}
+
+fn groupchat_retry_sender_item(
+    real_jid: &jid::FullJid,
+) -> waddle_xmpp_core::mam::ArchivedMucSender {
+    waddle_xmpp_core::mam::ArchivedMucSender {
+        jid: jid::Jid::from(real_jid.clone()),
+        affiliation: waddle_xmpp_core::types::Affiliation::Member,
+        role: waddle_xmpp_core::types::Role::Participant,
+    }
+}
+
+fn archived_groupchat_retry_fixture(
+    room: &jid::BareJid,
+    occupant: &jid::FullJid,
+    real_jid: &jid::FullJid,
+    archive_id: &str,
+    origin_id: &str,
+) -> waddle_xmpp::mam::ArchivedMessage {
+    use waddle_xmpp_core::mam::ArchivedRichMessage;
+    use waddle_xmpp_core::xep0359::OriginId;
+
+    waddle_xmpp::mam::ArchivedMessage {
+        id: archive_id.to_string(),
+        body: Some("retry me".to_string()),
+        origin_id: Some(OriginId::new(origin_id)),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        nickname_generation: Some(7),
+        rich: Some(ArchivedRichMessage {
+            muc_sender: Some(groupchat_retry_sender_item(real_jid)),
+            ..ArchivedRichMessage::default()
+        }),
+        ..waddle_xmpp::mam::ArchivedMessage::for_test(
+            jid::Jid::from(occupant.clone()),
+            jid::Jid::from(room.clone()),
+        )
+    }
+}
+
+fn groupchat_retry_batch(
+    room: &jid::BareJid,
+    sender: &jid::FullJid,
+    other: &jid::FullJid,
+    message: &xmpp_parsers::message::Message,
+) -> Vec<OutboundEvent> {
+    let mut sender_reflection = message.clone();
+    sender_reflection.to = Some(jid::Jid::from(sender.clone()));
+    let mut other_reflection = message.clone();
+    other_reflection.to = Some(jid::Jid::from(other.clone()));
+
+    vec![
+        OutboundEvent::ArchiveGroupchat {
+            room: room.clone(),
+            sender: sender.clone(),
+            message: Box::new(message.clone()),
+            sender_nickname_generation: 8,
+            sender_item: Some(groupchat_retry_sender_item(sender)),
+        },
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(sender.clone()),
+            stanza: Box::new(Stanza::Message(sender_reflection)),
+        },
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(other.clone()),
+            stanza: Box::new(Stanza::Message(other_reflection)),
+        },
+        OutboundEvent::ProjectGroupchatInbox {
+            owner: sender.to_bare(),
+            room: room.clone(),
+            message: Box::new(message.clone()),
+            is_recipient: false,
+            is_durable_recipient: false,
+            is_live_occupant: true,
+            room_members_only: true,
+            sender_can_broadcast_channel_mention: false,
+            thread: None,
+            dispatch_timestamp: 1_752_768_000,
+        },
+        OutboundEvent::ProjectGroupchatInbox {
+            owner: other.to_bare(),
+            room: room.clone(),
+            message: Box::new(message.clone()),
+            is_recipient: true,
+            is_durable_recipient: true,
+            is_live_occupant: true,
+            room_members_only: true,
+            sender_can_broadcast_channel_mention: false,
+            thread: None,
+            dispatch_timestamp: 1_752_768_000,
+        },
+        OutboundEvent::SendStanza(Box::new(Stanza::Message(message.clone()))),
+    ]
+}
+
+#[test]
+fn archive_id_rewrite_updates_groupchat_inbox_projection_message() {
+    use waddle_xmpp_core::xep0359::extract_stanza_id_by;
+
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room JID");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant JID");
+    let owner: jid::BareJid = "alice@example.com".parse().expect("owner JID");
+    let mut event = OutboundEvent::ProjectGroupchatInbox {
+        owner,
+        room: room.clone(),
+        message: Box::new(groupchat_retry_message(
+            &room,
+            &occupant,
+            "fresh-retry-id",
+            "stable-origin",
+        )),
+        is_recipient: false,
+        is_durable_recipient: false,
+        is_live_occupant: true,
+        room_members_only: true,
+        sender_can_broadcast_channel_mention: false,
+        thread: None,
+        dispatch_timestamp: 1_752_768_000,
+    };
+    let rewrite = ArchiveIdRewrite::from_store_result(
+        jid::Jid::from(room.clone()),
+        "fresh-retry-id".to_string(),
+        "original-archive-id".to_string(),
+    )
+    .expect("different archive ids produce a rewrite");
+
+    apply_archive_id_rewrites(&mut event, &[rewrite]);
+
+    let OutboundEvent::ProjectGroupchatInbox { message, .. } = event else {
+        panic!("expected groupchat inbox projection");
+    };
+    assert_eq!(
+        extract_stanza_id_by(&message, &jid::Jid::from(room)).as_deref(),
+        Some("original-archive-id")
+    );
+}
+
+#[tokio::test]
+async fn groupchat_origin_retry_suppresses_non_sender_fanout_and_rewrites_sender_copy() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::{InMemoryMamStorage, StoreOutcome};
+    use waddle_xmpp::registry::{DeliveryKind, UserRegistryActor};
+    use waddle_xmpp_core::xep0359::extract_stanza_id_by;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let sender: jid::FullJid = "alice@example.com/new-session".parse().expect("sender JID");
+    let sender_second: jid::FullJid = "alice@example.com/second-session"
+        .parse()
+        .expect("sender JID");
+    let old_sender: jid::FullJid = "alice@example.com/old-session".parse().expect("sender JID");
+    let other: jid::FullJid = "bob@example.com/phone".parse().expect("other JID");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant JID");
+    let room = occupant.to_bare();
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    let (sender_second_tx, mut sender_second_rx) = tokio::sync::mpsc::channel(8);
+    let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &sender, sender_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &sender_second, sender_second_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &other, other_tx).await;
+
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+    let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    deps.user_registry = Some(&user_registry);
+    let original_id = "original-room-archive-id";
+    let origin_id = "stable-groupchat-origin";
+    assert_eq!(
+        mam_concrete
+            .store_message(
+                &room,
+                &archived_groupchat_retry_fixture(
+                    &room,
+                    &occupant,
+                    &old_sender,
+                    original_id,
+                    origin_id,
+                ),
+            )
+            .await
+            .expect("seed original row"),
+        StoreOutcome::Stored(original_id.to_string())
+    );
+    let retry = groupchat_retry_message(&room, &occupant, "fresh-retry-id", origin_id);
+    let mut second_reflection = retry.clone();
+    second_reflection.to = Some(jid::Jid::from(sender_second.clone()));
+    let mut batch = groupchat_retry_batch(&room, &sender, &other, &retry);
+    batch.insert(
+        2,
+        OutboundEvent::RouteToConnection {
+            jid: jid::Jid::from(sender_second),
+            stanza: Box::new(Stanza::Message(second_reflection)),
+        },
+    );
+
+    let outcome = interpret(batch, &deps).await;
+
+    assert!(outcome.frames.is_empty(), "dedupe emits no error frame");
+    assert_eq!(
+        mam_concrete.count_messages(&room).await.expect("count"),
+        1,
+        "dedupe must not create a second room archive row"
+    );
+    assert!(
+        drain_inbound(&mut other_rx).is_empty(),
+        "non-sender reflection and inbox push must both be suppressed"
+    );
+    let sender_deliveries = drain_inbound(&mut sender_rx);
+    assert_eq!(sender_deliveries.len(), 1, "sender reflection survives");
+    assert_eq!(sender_deliveries[0].kind, DeliveryKind::PeerStanza);
+    let Stanza::Message(sender_copy) = &sender_deliveries[0].stanza else {
+        panic!("expected sender message reflection");
+    };
+    assert_eq!(
+        extract_stanza_id_by(sender_copy, &jid::Jid::from(room.clone())).as_deref(),
+        Some(original_id),
+        "sender reflection must use the retained archive stanza-id"
+    );
+    let second_sender_deliveries = drain_inbound(&mut sender_second_rx);
+    assert_eq!(
+        second_sender_deliveries.len(),
+        1,
+        "every session of the sender's bare JID receives the reflection"
+    );
+    let Stanza::Message(second_sender_copy) = &second_sender_deliveries[0].stanza else {
+        panic!("expected second sender message reflection");
+    };
+    assert_eq!(
+        extract_stanza_id_by(second_sender_copy, &jid::Jid::from(room.clone())).as_deref(),
+        Some(original_id)
+    );
+    let sender_inbox = inbox_concrete
+        .list(&sender.to_bare())
+        .await
+        .expect("sender inbox");
+    assert_eq!(sender_inbox.len(), 1, "sender inbox projection survives");
+    assert_eq!(sender_inbox[0].preview.as_deref(), Some("retry me"));
+    assert!(
+        inbox_concrete
+            .list(&other.to_bare())
+            .await
+            .expect("other inbox")
+            .is_empty(),
+        "non-sender inbox projection must be suppressed"
+    );
+}
+
+#[tokio::test]
+async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::{ArchivedTombstone, InMemoryMamStorage};
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let sender: jid::FullJid = "alice@example.com/new-session".parse().expect("sender JID");
+    let old_sender: jid::FullJid = "alice@example.com/old-session".parse().expect("sender JID");
+    let other: jid::FullJid = "bob@example.com/phone".parse().expect("other JID");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant JID");
+    let room = occupant.to_bare();
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &sender, sender_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &other, other_tx).await;
+
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+    let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    deps.user_registry = Some(&user_registry);
+    let original_id = "retracted-room-archive-id";
+    let origin_id = "retracted-groupchat-origin";
+    mam_concrete
+        .store_message(
+            &room,
+            &archived_groupchat_retry_fixture(
+                &room,
+                &occupant,
+                &old_sender,
+                original_id,
+                origin_id,
+            ),
+        )
+        .await
+        .expect("seed original row");
+    assert!(mam_concrete
+        .replace_with_tombstone(
+            original_id,
+            ArchivedTombstone {
+                retraction_id: None,
+                stamp: chrono::Utc::now(),
+                moderation: None,
+            },
+        )
+        .await
+        .expect("replace with tombstone"));
+    let retry = groupchat_retry_message(&room, &occupant, "fresh-retry-id", origin_id);
+
+    let outcome = interpret(groupchat_retry_batch(&room, &sender, &other, &retry), &deps).await;
+
+    assert!(
+        outcome.frames.is_empty(),
+        "tombstone hit is a silent swallow"
+    );
+    assert_eq!(
+        mam_concrete.count_messages(&room).await.expect("count"),
+        1,
+        "tombstone retry must not create a new archive row"
+    );
+    assert!(drain_inbound(&mut sender_rx).is_empty());
+    assert!(drain_inbound(&mut other_rx).is_empty());
+    assert!(inbox_concrete
+        .list(&sender.to_bare())
+        .await
+        .expect("sender inbox")
+        .is_empty());
+    assert!(inbox_concrete
+        .list(&other.to_bare())
+        .await
+        .expect("other inbox")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn fresh_groupchat_origin_fans_out_to_every_recipient() {
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::InMemoryMamStorage;
+    use waddle_xmpp::registry::UserRegistryActor;
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let sender: jid::FullJid = "alice@example.com/session".parse().expect("sender JID");
+    let other: jid::FullJid = "bob@example.com/phone".parse().expect("other JID");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant JID");
+    let room = occupant.to_bare();
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &sender, sender_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &other, other_tx).await;
+
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox_concrete = Arc::new(InMemoryInboxStorage::new());
+    let inbox: Arc<dyn InboxStorage> = inbox_concrete.clone();
+    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    deps.user_registry = Some(&user_registry);
+    let fresh_id = "fresh-room-archive-id";
+    let message = groupchat_retry_message(&room, &occupant, fresh_id, "fresh-origin");
+
+    let outcome = interpret(
+        groupchat_retry_batch(&room, &sender, &other, &message),
+        &deps,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "fresh canary event is not suppressed"
+    );
+    assert_eq!(mam_concrete.count_messages(&room).await.expect("count"), 1);
+    assert_eq!(drain_inbound(&mut sender_rx).len(), 1);
+    assert!(
+        drain_inbound(&mut other_rx)
+            .iter()
+            .any(|delivery| matches!(delivery.stanza, Stanza::Message(ref message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)),
+        "non-sender receives the groupchat reflection"
+    );
+    let sender_inbox = inbox_concrete
+        .list(&sender.to_bare())
+        .await
+        .expect("sender inbox");
+    let other_inbox = inbox_concrete
+        .list(&other.to_bare())
+        .await
+        .expect("other inbox");
+    assert_eq!(sender_inbox.len(), 1);
+    assert_eq!(other_inbox.len(), 1);
+}
+
 #[tokio::test]
 async fn xep_0313_archive_direct_writes_one_entry_per_event() {
     // Sender pass + recipient pass on the same dispatch (true

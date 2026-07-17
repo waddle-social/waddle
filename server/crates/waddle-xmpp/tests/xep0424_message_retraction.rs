@@ -272,3 +272,91 @@ fn xep0424_extract_returns_none_for_payloads_with_empty_id() {
         "empty-id retraction/retracted payloads MUST be ignored"
     );
 }
+
+#[tokio::test]
+async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
+    use jid::{BareJid, Jid};
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+        InMemoryMamStorage, MamStorage, StoreOutcome,
+    };
+    use waddle_xmpp_core::mam::ArchivedMucSender;
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+    use xmpp_parsers::message::MessageType;
+
+    fn archived(id: &str, real_jid: &str, generation: u64) -> ArchivedMessage {
+        ArchivedMessage {
+            id: id.to_string(),
+            body: Some("retract me".to_string()),
+            origin_id: Some(OriginId::new("retracted-origin")),
+            message_type: MessageType::Groupchat,
+            nickname_generation: Some(generation),
+            rich: Some(ArchivedRichMessage {
+                muc_sender: Some(ArchivedMucSender {
+                    jid: real_jid.parse::<Jid>().expect("real sender JID"),
+                    affiliation: Affiliation::Member,
+                    role: Role::Participant,
+                }),
+                ..ArchivedRichMessage::default()
+            }),
+            ..ArchivedMessage::for_test(
+                "room@conference.example.com/alice"
+                    .parse::<Jid>()
+                    .expect("occupant JID"),
+                "room@conference.example.com"
+                    .parse::<Jid>()
+                    .expect("room JID"),
+            )
+        }
+    }
+
+    // XEP-0424 §Business Rules says a MUC service SHOULD prevent further
+    // distribution of a retracted message; the retained tombstone must win
+    // over a later retry carrying the original stable origin-id.
+    let storage = InMemoryMamStorage::new();
+    let room = "room@conference.example.com"
+        .parse::<BareJid>()
+        .expect("room bare JID");
+    let original_id = "retracted-archive-id";
+    let original = archived(original_id, "alice@example.com/session-a", 7);
+    assert_eq!(
+        storage
+            .store_message(&room, &original)
+            .await
+            .expect("store original"),
+        StoreOutcome::Stored(original_id.to_string())
+    );
+    assert!(storage
+        .replace_with_tombstone(
+            original_id,
+            ArchivedTombstone {
+                retraction_id: None,
+                stamp: chrono::Utc::now(),
+                moderation: None,
+            },
+        )
+        .await
+        .expect("replace with tombstone"));
+
+    let retry = archived("retry-archive-id", "alice@example.com/session-b", 8);
+    assert_eq!(
+        storage
+            .store_message(&room, &retry)
+            .await
+            .expect("store retry"),
+        StoreOutcome::TombstoneHit(original_id.to_string()),
+        "XEP-0424 tombstone retry must not create a new live archive row"
+    );
+    assert_eq!(storage.count_messages(&room).await.expect("count"), 1);
+    let retained = storage
+        .get_message_by_archive_or_stanza_id(&room, original_id)
+        .await
+        .expect("lookup tombstone")
+        .expect("tombstone retained");
+    assert!(retained.body.is_none());
+    assert!(matches!(
+        retained.rich.and_then(|rich| rich.payload),
+        Some(ArchivedRichPayload::Tombstone(_))
+    ));
+}

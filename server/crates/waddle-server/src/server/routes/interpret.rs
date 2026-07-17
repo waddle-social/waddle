@@ -322,6 +322,26 @@ fn apply_archive_id_rewrites(event: &mut OutboundEvent, rewrites: &[ArchiveIdRew
     }
 }
 
+enum BatchSuppression {
+    None,
+    All,
+    NonSender { sender: BareJid },
+}
+
+impl BatchSuppression {
+    fn allows(&self, event: &OutboundEvent) -> bool {
+        match self {
+            Self::None => true,
+            Self::All => false,
+            Self::NonSender { sender } => match event {
+                OutboundEvent::RouteToConnection { jid, .. } => &jid.to_bare() == sender,
+                OutboundEvent::ProjectGroupchatInbox { owner, .. } => owner == sender,
+                _ => false,
+            },
+        }
+    }
+}
+
 fn rewrite_stanza_archive_ids(stanza: &mut Stanza, rewrites: &[ArchiveIdRewrite]) {
     if let Stanza::Message(message) = stanza {
         rewrite_message_archive_ids(message, rewrites);
@@ -373,15 +393,10 @@ async fn interpret_with_depth(
     let registry = deps.connection_registry;
     let mut outcome = InterpretOutcome::default();
     let mut archive_id_rewrites: Vec<ArchiveIdRewrite> = Vec::new();
-    // Once a write-adjacent room effect rejects this batch, suppress every
-    // later effect from the same frozen chain. `ArchiveGroupchat` retains its
-    // legacy ownership backstop until #1283; subject persistence binds the
-    // exact actor fence in this PR. Both must halt later inbox/fan-out work
-    // after returning a retryable bounce.
-    let mut suppress_remaining_events = false;
+    let mut batch_suppression = BatchSuppression::None;
 
     for mut event in events {
-        if suppress_remaining_events {
+        if !batch_suppression.allows(&event) {
             continue;
         }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
@@ -550,10 +565,23 @@ async fn interpret_with_depth(
                 )
                 .await
                 {
-                    ArchiveGroupchatEventOutcome::Rewrite(Some(rewrite)) => {
+                    ArchiveGroupchatEventOutcome::Stored(Some(rewrite)) => {
                         archive_id_rewrites.push(rewrite);
                     }
-                    ArchiveGroupchatEventOutcome::Rewrite(None) => {}
+                    ArchiveGroupchatEventOutcome::Stored(None)
+                    | ArchiveGroupchatEventOutcome::Skipped => {}
+                    ArchiveGroupchatEventOutcome::Deduplicated { rewrite, sender } => {
+                        if let Some(rewrite) = rewrite {
+                            archive_id_rewrites.push(rewrite);
+                        }
+                        batch_suppression = BatchSuppression::NonSender { sender };
+                    }
+                    ArchiveGroupchatEventOutcome::TombstoneHit => {
+                        debug!(
+                            "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"
+                        );
+                        batch_suppression = BatchSuppression::All;
+                    }
                     ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {
                         // FIX 1: not archived, not fanned out — suppress
                         // every remaining event in this batch (the
@@ -570,7 +598,7 @@ async fn interpret_with_depth(
                                 );
                             }
                         }
-                        suppress_remaining_events = true;
+                        batch_suppression = BatchSuppression::All;
                     }
                 }
             }
@@ -656,7 +684,7 @@ async fn interpret_with_depth(
                                 "PersistRoomSubject: failed to serialize retryable bounce reply"
                             ),
                         }
-                        suppress_remaining_events = true;
+                        batch_suppression = BatchSuppression::All;
                     }
                 }
             }
