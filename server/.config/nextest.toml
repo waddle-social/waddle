@@ -32,6 +32,14 @@ package(waddle-server) & (
 '''
 test-group = 'postgres'
 
+# Full-server e2e scenarios spin up a complete server and wait on wire
+# frames with real-time timeouts. Under cargo test their binary ran alone;
+# under nextest they'd share the machine with arbitrary tests and can
+# starve past their frame timeouts. Reserve the whole machine for them.
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & binary(xmpp_e2e_cue)'
+threads-required = 'num-cpus'
+
 [profile.ci]
 # Show every failure in one run instead of cancelling on the first one,
 # matching the old `cargo test` per-binary behavior.
