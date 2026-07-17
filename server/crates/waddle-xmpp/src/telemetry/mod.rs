@@ -20,11 +20,26 @@
 //! # Cardinality budget
 //!
 //! Every attribute is a closed enum defined in [`attributes`]; adding
-//! an attribute value means editing that allowlist in review. Worst
-//! case today: ~70 instruments × ≤22 attribute values × 2 pods stays
-//! well under 5k active series. Never implement
+//! an attribute value means editing that allowlist in review. An
+//! instrument takes **at most two attribute dimensions** (review
+//! enforces this; the janitor heartbeat's `janitor` × `outcome` = 18
+//! series is the intended ceiling). Budget: ~70 instruments × ≤22
+//! series each × 2 pods stays well under 5k active series — never
+//! stack the larger enums (`condition` × `janitor` would be 198
+//! series per instrument). Never implement
 //! [`attributes::MetricAttribute`] for a type whose value space is
 //! unbounded (user input, JIDs, ids of any kind).
+//!
+//! # Initialization order
+//!
+//! Instruments bind to the **global meter provider live at their
+//! first increment** and are then cached for the process lifetime.
+//! `waddle-server` installs the OTLP provider in `telemetry::init()`
+//! as the first act of `main`, before any increment can run; keep it
+//! that way — an increment that races ahead of `init()` binds to the
+//! noop provider and is silently lost. In tests, acquire the
+//! [`test_support`] guard before the first increment (under
+//! `cargo nextest`, one process per test, this is automatic).
 //!
 //! # Testing
 //!

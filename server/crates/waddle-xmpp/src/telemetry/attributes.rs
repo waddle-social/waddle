@@ -120,34 +120,11 @@ impl MetricAttribute for SweepOutcome {
     }
 }
 
-/// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions.
-/// This is the complete allowlist; there is deliberately no
-/// catch-all-with-string variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StanzaErrorCondition {
-    BadRequest,
-    Conflict,
-    FeatureNotImplemented,
-    Forbidden,
-    Gone,
-    InternalServerError,
-    ItemNotFound,
-    JidMalformed,
-    NotAcceptable,
-    NotAllowed,
-    NotAuthorized,
-    PolicyViolation,
-    RecipientUnavailable,
-    Redirect,
-    RegistrationRequired,
-    RemoteServerNotFound,
-    RemoteServerTimeout,
-    ResourceConstraint,
-    ServiceUnavailable,
-    SubscriptionRequired,
-    UndefinedCondition,
-    UnexpectedRequest,
-}
+/// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions,
+/// reusing the crate's existing typed enum (its `as_str()` already
+/// yields the hyphenated wire names). Re-exported here so metric call
+/// sites can name it through the allowlist module.
+pub use crate::error::StanzaErrorCondition;
 
 impl sealed::Sealed for StanzaErrorCondition {}
 impl MetricAttribute for StanzaErrorCondition {
@@ -155,29 +132,6 @@ impl MetricAttribute for StanzaErrorCondition {
         "condition"
     }
     fn value(&self) -> &'static str {
-        match self {
-            Self::BadRequest => "bad-request",
-            Self::Conflict => "conflict",
-            Self::FeatureNotImplemented => "feature-not-implemented",
-            Self::Forbidden => "forbidden",
-            Self::Gone => "gone",
-            Self::InternalServerError => "internal-server-error",
-            Self::ItemNotFound => "item-not-found",
-            Self::JidMalformed => "jid-malformed",
-            Self::NotAcceptable => "not-acceptable",
-            Self::NotAllowed => "not-allowed",
-            Self::NotAuthorized => "not-authorized",
-            Self::PolicyViolation => "policy-violation",
-            Self::RecipientUnavailable => "recipient-unavailable",
-            Self::Redirect => "redirect",
-            Self::RegistrationRequired => "registration-required",
-            Self::RemoteServerNotFound => "remote-server-not-found",
-            Self::RemoteServerTimeout => "remote-server-timeout",
-            Self::ResourceConstraint => "resource-constraint",
-            Self::ServiceUnavailable => "service-unavailable",
-            Self::SubscriptionRequired => "subscription-required",
-            Self::UndefinedCondition => "undefined-condition",
-            Self::UnexpectedRequest => "unexpected-request",
-        }
+        self.as_str()
     }
 }

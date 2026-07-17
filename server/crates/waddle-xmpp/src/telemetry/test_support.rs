@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, Metric, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{
     InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
     Temporality,
@@ -94,66 +94,61 @@ impl MetricsTestGuard {
 
     /// The UCUM unit of the named metric, if it was exported.
     pub fn metric_unit(&self, name: &str) -> Option<String> {
-        self.exported()
-            .iter()
-            .flat_map(|resource| resource.scope_metrics())
-            .flat_map(|scope| scope.metrics())
-            .find(|metric| metric.name() == name)
-            .map(|metric| metric.unit().to_string())
+        let mut unit = None;
+        self.each_metric(name, |metric| {
+            unit.get_or_insert_with(|| metric.unit().to_string());
+        });
+        unit
     }
 
     /// Sum of every `u64` counter data point for `name` whose
     /// attributes contain all `required` pairs. `None` when the
     /// instrument never exported (i.e. was never incremented).
     pub fn counter_sum(&self, name: &str, required: &[(&str, &str)]) -> Option<u64> {
-        let mut found = false;
-        let mut total: u64 = 0;
-        for resource in self.exported() {
-            for scope in resource.scope_metrics() {
-                for metric in scope.metrics() {
-                    if metric.name() != name {
-                        continue;
-                    }
-                    let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
-                        continue;
-                    };
-                    found = true;
-                    for point in sum.data_points() {
-                        if attributes_contain(point.attributes(), required) {
-                            total += point.value();
-                        }
-                    }
+        let mut total = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                return;
+            };
+            let entry = total.get_or_insert(0);
+            for point in sum.data_points() {
+                if attributes_contain(point.attributes(), required) {
+                    *entry += point.value();
                 }
             }
-        }
-        found.then_some(total)
+        });
+        total
     }
 
     /// Total sample count of every `f64` histogram data point for
     /// `name` whose attributes contain all `required` pairs.
     pub fn histogram_count(&self, name: &str, required: &[(&str, &str)]) -> Option<u64> {
-        let mut found = false;
-        let mut total: u64 = 0;
+        let mut total = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                return;
+            };
+            let entry = total.get_or_insert(0);
+            for point in histogram.data_points() {
+                if attributes_contain(point.attributes(), required) {
+                    *entry += point.count();
+                }
+            }
+        });
+        total
+    }
+
+    /// Visit every exported batch of the named metric.
+    fn each_metric(&self, name: &str, mut visit: impl FnMut(&Metric)) {
         for resource in self.exported() {
             for scope in resource.scope_metrics() {
                 for metric in scope.metrics() {
-                    if metric.name() != name {
-                        continue;
-                    }
-                    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data()
-                    else {
-                        continue;
-                    };
-                    found = true;
-                    for point in histogram.data_points() {
-                        if attributes_contain(point.attributes(), required) {
-                            total += point.count();
-                        }
+                    if metric.name() == name {
+                        visit(metric);
                     }
                 }
             }
         }
-        found.then_some(total)
     }
 }
 

@@ -146,6 +146,26 @@ async fn histogram_records_samples_with_attributes() {
     );
 }
 
+#[tokio::test]
+async fn consecutive_guards_observe_only_their_own_increments() {
+    {
+        let _first = test_support::acquire().await;
+        crate::counter_add!(
+            "waddle.telemetry.selftest.isolation",
+            "{event}",
+            "Telemetry self-test counter: guard isolation.",
+            7,
+        );
+    }
+    let second = test_support::acquire().await;
+    // Delta temporality plus the acquire-time drain: increments made
+    // under the first guard must be invisible to the second.
+    assert_eq!(
+        second.counter_sum("waddle.telemetry.selftest.isolation", &[]),
+        None
+    );
+}
+
 #[test]
 fn valid_metric_names_pass_validation() {
     assert_eq!(
