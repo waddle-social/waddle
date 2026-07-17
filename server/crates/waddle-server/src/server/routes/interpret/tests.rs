@@ -1007,6 +1007,7 @@ async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch
                 retraction_id: None,
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                sender_scope: None,
             },
         )
         .await
@@ -1164,6 +1165,146 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_deduplicati
     ));
     assert!(drain_inbound(&mut other_rx).is_empty());
     assert_eq!(drain_inbound(&mut sender_rx).len(), 1);
+}
+
+#[tokio::test]
+async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
+    // The pathological double-crash window (Greptile review on PR #1412):
+    // the retraction-request row was archived, the process died before the
+    // target tombstone applied, and the request row itself was later
+    // tombstoned. The retry then hits TombstoneSwallow — which must still
+    // let the terminal-guarded ApplyGroupchatRetractionTombstone heal the
+    // live target while delivering nothing to anyone.
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedRichPayload, ArchivedTombstone, InMemoryMamStorage, StoreOutcome,
+    };
+    use waddle_xmpp::registry::UserRegistryActor;
+    use waddle_xmpp_core::xep0359::{build_origin_id_element, build_stanza_id_element, OriginId};
+
+    let registry = ConnectionRegistry::new();
+    let user_registry = UserRegistryActor::spawn(UserRegistryActor::new());
+    let sender: jid::FullJid = "alice@example.com/new-session".parse().expect("sender JID");
+    let other: jid::FullJid = "bob@example.com/phone".parse().expect("other JID");
+    let occupant: jid::FullJid = "room@conference.example.com/alice"
+        .parse()
+        .expect("occupant JID");
+    let room = occupant.to_bare();
+    let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
+    let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(&registry, &user_registry, &sender, sender_tx).await;
+    register_into_both_tiers(&registry, &user_registry, &other, other_tx).await;
+
+    let mam_concrete = Arc::new(InMemoryMamStorage::new());
+    let mam: Arc<dyn MamStorage> = mam_concrete.clone();
+    let inbox: Arc<dyn InboxStorage> = Arc::new(InMemoryInboxStorage::new());
+    let mut deps = Deps::test_with_storage(&registry, &mam, &inbox);
+    deps.user_registry = Some(&user_registry);
+    let target_id = "swallow-target-stanza-id";
+    seed_groupchat_archive_row(&mam, &room, target_id, "swallow-target-wire-id").await;
+
+    let origin_id = "swallowed-retraction-origin";
+    let original_retraction_id = "swallowed-retraction-archive-id";
+    let mut retraction = Message::new(Some(jid::Jid::from(room.clone())));
+    retraction.from = Some(jid::Jid::from(occupant.clone()));
+    retraction.type_ = XmppMessageType::Groupchat;
+    retraction.id = Some(xmpp_parsers::message::Id(
+        "swallow-retraction-wire-id".to_string(),
+    ));
+    retraction
+        .payloads
+        .push(waddle_xmpp::xep::xep0424::build_retract_element(target_id));
+    retraction.payloads.push(build_origin_id_element(origin_id));
+    retraction.payloads.push(build_stanza_id_element(
+        "fresh-swallow-retraction-archive-id",
+        &jid::Jid::from(room.clone()),
+    ));
+    let sender_item = groupchat_retry_sender_item(&sender);
+    let archived_retraction = ArchivedMessage {
+        id: original_retraction_id.to_string(),
+        body: None,
+        origin_id: Some(OriginId::new(origin_id)),
+        message_type: XmppMessageType::Groupchat,
+        rich: groupchat_archive::rich_archive_payload(&retraction, Some(&sender_item)),
+        nickname_generation: Some(7),
+        ..ArchivedMessage::for_test(
+            jid::Jid::from(occupant.clone()),
+            jid::Jid::from(room.clone()),
+        )
+    };
+    assert_eq!(
+        mam_concrete
+            .store_message(&room, &archived_retraction)
+            .await
+            .expect("seed archived retraction request"),
+        StoreOutcome::Stored(original_retraction_id.to_string())
+    );
+    assert!(mam_concrete
+        .replace_with_tombstone(
+            original_retraction_id,
+            ArchivedTombstone {
+                retraction_id: None,
+                stamp: chrono::Utc::now(),
+                moderation: None,
+                sender_scope: Some(sender.to_bare()),
+            },
+        )
+        .await
+        .expect("tombstone the retraction-request row itself"));
+
+    let mut other_reflection = retraction.clone();
+    other_reflection.to = Some(jid::Jid::from(other.clone()));
+    let mut sender_reflection = retraction.clone();
+    sender_reflection.to = Some(jid::Jid::from(sender.clone()));
+    let outcome = interpret(
+        vec![
+            OutboundEvent::ArchiveGroupchat {
+                room: room.clone(),
+                sender: sender.clone(),
+                message: Box::new(retraction.clone()),
+                sender_nickname_generation: 8,
+                sender_item: Some(sender_item),
+            },
+            OutboundEvent::ApplyGroupchatRetractionTombstone {
+                room: room.clone(),
+                target_message_id: target_id.to_string(),
+                retraction_message: Box::new(retraction),
+            },
+            OutboundEvent::RouteToConnection {
+                jid: jid::Jid::from(other),
+                stanza: Box::new(Stanza::Message(other_reflection)),
+            },
+            OutboundEvent::RouteToConnection {
+                jid: jid::Jid::from(sender),
+                stanza: Box::new(Stanza::Message(sender_reflection)),
+            },
+        ],
+        &deps,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.retry_suppression,
+        Some(GroupchatRetrySuppression::TombstoneSwallowed)
+    );
+    assert!(outcome.frames.is_empty(), "swallow emits no error frame");
+    let target = mam_concrete
+        .get_message(target_id)
+        .await
+        .expect("target lookup")
+        .expect("target row exists");
+    assert!(
+        matches!(
+            target.rich.as_ref().and_then(|rich| rich.payload.as_ref()),
+            Some(ArchivedRichPayload::Tombstone(_))
+        ),
+        "the heal event must still tombstone the live target"
+    );
+    assert!(drain_inbound(&mut other_rx).is_empty());
+    assert!(
+        drain_inbound(&mut sender_rx).is_empty(),
+        "tombstone swallow delivers nothing, even to the sender"
+    );
 }
 
 #[tokio::test]
@@ -2266,6 +2407,7 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
                 retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                sender_scope: None,
             })),
             reply: None,
             references: Vec::new(),
@@ -4995,6 +5137,7 @@ async fn xep_0424_retraction_retry_preserves_existing_moderation_tombstone() {
             stamp: Some(chrono::Utc::now()),
             reason: RichText::new("room policy violation"),
         }),
+        sender_scope: None,
     };
     assert!(
         mam.replace_with_tombstone(archive_pk, moderation_tombstone.clone())

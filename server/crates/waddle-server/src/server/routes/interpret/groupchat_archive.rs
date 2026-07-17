@@ -406,6 +406,17 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             original_id = %original.id,
             "ApplyGroupchatRetractionTombstone: target is already tombstoned; preserving terminal tombstone"
         );
+        // A crash between the tombstone persist and the scrub leaves
+        // pre-tombstone reflections replayable from SM queues /
+        // pending_delivery. The scrub is idempotent, so re-running it
+        // on the heal path closes that window (Qodo review on PR #1412).
+        scrub_unacked_for_tombstone(
+            sm_session_registry,
+            pending_storage,
+            &scrub_target,
+            "ApplyGroupchatRetractionTombstone",
+        )
+        .await;
         return true;
     }
     let Some(retraction_id) = retraction_message
@@ -425,6 +436,13 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
+        // Retain the original sender's identity for the internal
+        // tombstone-retry match only; never emitted to the wire.
+        sender_scope: original
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.muc_sender.as_ref())
+            .map(|sender| sender.jid.to_bare()),
     };
     match mam_storage
         .replace_with_terminal_tombstone(&original.id, tombstone)
@@ -443,6 +461,16 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: concurrent tombstone won; preserving terminal tombstone"
             );
+            // Same crash-window heal as the pre-check exit: the winner
+            // may not have completed its scrub yet (Qodo review on
+            // PR #1412).
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                pending_storage,
+                &scrub_target,
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
             return true;
         }
         Ok(TerminalTombstoneOutcome::NotFound) => {

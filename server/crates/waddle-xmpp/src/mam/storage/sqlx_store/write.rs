@@ -33,6 +33,11 @@ pub(super) async fn store_message(
         .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
     let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
+    // Typed-payloads boundary: the scope stays a `BareJid` until this
+    // SQL bind site.
+    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
+        .as_ref()
+        .map(jid::BareJid::to_string);
 
     if let Some(outcome) = find_existing_origin_id_match(
         backend,
@@ -95,7 +100,7 @@ pub(super) async fn store_message(
                             .and_then(|t| t.parent.as_ref())
                             .map(|p| p.as_str()),
                     )
-                    .push_bind(origin_dedup_sender_scope.as_deref())
+                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
                     .push_bind(origin_dedup_fingerprint.as_deref());
             });
             if let Err(error) = query.build().execute(pool).await {
@@ -140,7 +145,7 @@ pub(super) async fn store_message(
                             .and_then(|t| t.parent.as_ref())
                             .map(|p| p.as_str()),
                     )
-                    .push_bind(origin_dedup_sender_scope.as_deref())
+                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
                     .push_bind(origin_dedup_fingerprint.as_deref());
             });
             if let Err(error) = query.build().execute(pool).await {
@@ -195,6 +200,11 @@ pub(super) async fn store_message_fenced(
         .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
     let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
+    // Typed-payloads boundary: the scope stays a `BareJid` until this
+    // SQL bind site.
+    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
+        .as_ref()
+        .map(jid::BareJid::to_string);
 
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
@@ -269,7 +279,7 @@ pub(super) async fn store_message_fenced(
                     .and_then(|t| t.parent.as_ref())
                     .map(|p| p.as_str()),
             )
-            .push_bind(origin_dedup_sender_scope.as_deref())
+            .push_bind(origin_dedup_sender_scope_bind.as_deref())
             .push_bind(origin_dedup_fingerprint.as_deref());
     });
     if let Err(error) = query.build().execute(&mut *tx).await {
@@ -539,7 +549,7 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     hex
 }
 
-fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<String> {
+fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<jid::BareJid> {
     if !matches!(message.message_type, MessageType::Groupchat) || message.origin_id.is_none() {
         return None;
     }
@@ -547,7 +557,7 @@ fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<String> {
         .rich
         .as_ref()
         .and_then(|rich| rich.muc_sender.as_ref())
-        .map(|sender| sender.jid.to_bare().to_string());
+        .map(|sender| sender.jid.to_bare());
     if scope.is_none() {
         // A groupchat row with an origin-id but no server-authored
         // `muc_sender` sits outside BOTH retry-dedup layers (the Rust

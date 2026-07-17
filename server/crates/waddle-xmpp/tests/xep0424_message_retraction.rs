@@ -72,6 +72,7 @@ where
             stamp: Some(chrono::Utc::now()),
             reason: RichText::new("room policy"),
         }),
+        sender_scope: None,
     };
     assert!(storage
         .replace_with_tombstone(archive_id, moderation.clone())
@@ -82,6 +83,7 @@ where
         retraction_id: RichMessageId::new("author-retraction-retry"),
         stamp: chrono::Utc::now(),
         moderation: None,
+        sender_scope: None,
     };
     assert_eq!(
         storage
@@ -116,6 +118,7 @@ where
         retraction_id: RichMessageId::new("live-author-retraction"),
         stamp: chrono::Utc::now(),
         moderation: None,
+        sender_scope: None,
     };
     assert_eq!(
         storage
@@ -459,6 +462,7 @@ async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
                 retraction_id: None,
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                sender_scope: None,
             },
         )
         .await

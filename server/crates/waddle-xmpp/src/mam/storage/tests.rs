@@ -545,6 +545,7 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
             retraction_id: None,
             stamp: Utc::now(),
             moderation: None,
+            sender_scope: None,
         }
     }
 
@@ -588,6 +589,46 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
         StoreOutcome::Deduplicated("ordering-live".to_string())
     );
     assert_eq!(storage.count_messages(&archive).await.unwrap(), 3);
+
+    // A tombstone that retained the internal `sender_scope` swallows only
+    // retries from the SAME real bare JID; a different account reusing the
+    // nick + origin-id archives distinctly (Codex review on PR #1412).
+    let scoped_original = message("scoped-original", "scoped-origin", "scoped secret", 6);
+    assert_eq!(
+        storage
+            .store_message(&archive, &scoped_original)
+            .await
+            .unwrap(),
+        StoreOutcome::Stored("scoped-original".to_string())
+    );
+    let scoped_tombstone = ArchivedTombstone {
+        sender_scope: Some("alice@example.com".parse().expect("valid bare JID")),
+        ..tombstone()
+    };
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone("scoped-original", scoped_tombstone)
+            .await
+            .unwrap(),
+        crate::mam::storage::TerminalTombstoneOutcome::Replaced
+    );
+    let same_user_retry = message("scoped-retry", "scoped-origin", "scoped secret", 7);
+    assert_eq!(
+        storage
+            .store_message(&archive, &same_user_retry)
+            .await
+            .unwrap(),
+        StoreOutcome::TombstoneHit("scoped-original".to_string())
+    );
+    let mut different_user = message("scoped-other", "scoped-origin", "fresh content", 1);
+    different_user.rich = Some(muc_rich("mallory@example.com/session"));
+    assert_eq!(
+        storage
+            .store_message(&archive, &different_user)
+            .await
+            .unwrap(),
+        StoreOutcome::Stored("scoped-other".to_string())
+    );
 }
 
 #[tokio::test]
@@ -2255,6 +2296,7 @@ async fn xep_0424_tombstone_scrubs_parent_thread_id() {
         retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
         stamp: Utc::now(),
         moderation: None,
+        sender_scope: None,
     };
     let replaced = storage
         .replace_with_tombstone(&archive_id, tombstone)
@@ -2336,6 +2378,7 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
             stamp: Some(Utc::now()),
             reason: None,
         }),
+        sender_scope: None,
     };
     storage
         .replace_with_tombstone(&archive_id, tombstone)

@@ -327,7 +327,18 @@ fn apply_archive_id_rewrites(event: &mut OutboundEvent, rewrites: &[ArchiveIdRew
 enum BatchSuppression {
     None,
     All,
-    NonSender { sender: BareJid },
+    /// Tombstone-hit swallow: everything is suppressed EXCEPT the
+    /// idempotent, terminal-guarded retraction-tombstone application.
+    /// A retry whose retraction-request row was itself tombstoned may
+    /// still be healing a crash between the request's archive commit
+    /// and the target tombstone apply — the CAS guard makes letting it
+    /// through safe in every other case (Greptile review on PR #1412).
+    /// `All` (ownership loss / subject-persist bounce) must NOT share
+    /// this escape: a deposed node may not touch the archive at all.
+    TombstoneSwallow,
+    NonSender {
+        sender: BareJid,
+    },
 }
 
 impl BatchSuppression {
@@ -335,6 +346,12 @@ impl BatchSuppression {
         match self {
             Self::None => true,
             Self::All => false,
+            Self::TombstoneSwallow => {
+                matches!(
+                    event,
+                    OutboundEvent::ApplyGroupchatRetractionTombstone { .. }
+                )
+            }
             Self::NonSender { sender } => match event {
                 // A crash can commit the retraction-request archive row before
                 // applying its target tombstone. A deduplicated retry must
@@ -593,7 +610,7 @@ async fn interpret_with_depth(
                         );
                         outcome.retry_suppression =
                             Some(GroupchatRetrySuppression::TombstoneSwallowed);
-                        batch_suppression = BatchSuppression::All;
+                        batch_suppression = BatchSuppression::TombstoneSwallow;
                     }
                     ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {
                         // FIX 1: not archived, not fanned out — suppress

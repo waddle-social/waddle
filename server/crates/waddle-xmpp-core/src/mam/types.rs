@@ -105,6 +105,18 @@ pub struct ArchivedTombstone {
     /// When set, this tombstone is the result of XEP-0425 moderation
     /// rather than a sender-initiated XEP-0424 retraction.
     pub moderation: Option<ArchivedModeration>,
+    /// Retained real bare JID of the tombstoned message's original
+    /// sender, for the groupchat origin-id tombstone-retry match ONLY.
+    ///
+    /// INTERNAL storage state: XEP-0424 §Tombstones wipes sender
+    /// identity from everything a client can observe, and the MAM
+    /// response builders never read this field — it exists so a
+    /// *different* real user reusing a departed occupant's nick and a
+    /// tombstoned origin-id is not spuriously swallowed by the retry
+    /// match. `None` on rows tombstoned before this field existed (and
+    /// on 1:1 tombstones, which never tombstone-match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_scope: Option<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
