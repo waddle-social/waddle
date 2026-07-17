@@ -124,7 +124,7 @@ class SessionBootstrapTest {
     @Test
     fun `a valid stored session restores and signs in`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.Json(200, sessionJson())
 
         harness.bootstrap.restore()
@@ -139,7 +139,7 @@ class SessionBootstrapTest {
     @Test
     fun `an expired session signs out locally`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.Json(200, sessionJson(isExpired = true))
 
         harness.bootstrap.restore()
@@ -153,7 +153,7 @@ class SessionBootstrapTest {
     @Test
     fun `a server-side dead session signs out locally`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-gone")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-gone")
         responses += Canned.Json(401, "")
 
         harness.bootstrap.restore()
@@ -180,7 +180,7 @@ class SessionBootstrapTest {
     @Test
     fun `a network failure surfaces the retryable error state`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.NetworkFailure
 
         harness.bootstrap.restore()
@@ -195,7 +195,7 @@ class SessionBootstrapTest {
     @Test
     fun `a failed restore re-runs when connectivity arrives`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.NetworkFailure
 
         harness.bootstrap.restore()
@@ -215,7 +215,7 @@ class SessionBootstrapTest {
     @Test
     fun `connectivity arrival without a failed restore does nothing`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
 
         harness.network.state.value = false
         runCurrent()
@@ -238,7 +238,7 @@ class SessionBootstrapTest {
             ): Preferences = inner.updateData(transform)
         }
         val harness = Harness(this, store = slowStore)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.Json(200, sessionJson())
         responses += Canned.Json(200, sessionJson())
 
@@ -258,7 +258,7 @@ class SessionBootstrapTest {
     @Test
     fun `splash hold releases after the local read even on failure`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.NetworkFailure
 
         assertTrue(harness.bootstrap.splashHold.value)
@@ -270,7 +270,7 @@ class SessionBootstrapTest {
     @Test
     fun `manager state passes through once past loading`() = runTest {
         val harness = Harness(this)
-        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.activateSession("icepuma@waddle.test", "sess-1")
         responses += Canned.NetworkFailure
 
         harness.bootstrap.restore()

@@ -12,25 +12,48 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
-import { BrowserXmppClient } from "../src/lib/xmpp/client";
-import { applyResumeStateToWasmConfig } from "../src/lib/xmpp/client-connection";
+import {
+  BrowserXmppClient,
+  isStaleOwnerDisposeError,
+  type BrowserXmppClientOptions,
+} from "../src/lib/xmpp/client";
+import {
+  ResumeStateTeardownError,
+  applyResumeStateToWasmConfig,
+} from "../src/lib/xmpp/client-connection";
 import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle";
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
   MemoryDurableOutboundStore,
+  MemoryDurableOutboundStore as MemoryDurableSmResumeStore,
+  OutboundPersistenceError,
   type DurableOutcome,
-} from "../src/lib/outbound-durable-store";
-import { MemoryDurableSmResumeStore } from "../src/lib/xmpp/sm-resume-durable-store";
+} from "../src/lib/xmpp-runtime-durable-store";
 import {
-  createLocalStorageResumePersistence,
+  createLocalStorageResumePersistence as createBrowserLocalStorageResumePersistence,
   nullResumePersistence,
+  XmppLifecycleId,
   type PersistedReconnectCatchup,
   type PersistedSmResumeState,
   type ResumePersistence,
   type XmppResumeEntry,
   type XmppResumeStanzaKind,
 } from "../src/lib/xmpp/resume-persistence";
+
+function createLocalStorageResumePersistence(
+  accountKey: string,
+  ownerId?: string,
+  durableRuntimeStore = new MemoryDurableOutboundStore(),
+  lifecycleId = XmppLifecycleId.create(),
+): ResumePersistence {
+  return createBrowserLocalStorageResumePersistence(
+    accountKey,
+    ownerId,
+    durableRuntimeStore,
+    lifecycleId,
+  );
+}
 
 // Bun's default test env is Node-like (no `window` / `localStorage`).
 // Install a minimal Map-backed Storage polyfill so the localStorage
@@ -99,11 +122,66 @@ afterAll(() => {
   }
 });
 
-afterEach(() => {
-  const g = globalThis as ShimmedGlobal;
-  if (g.window?.[WINDOW_SENTINEL]) {
-    g.window.localStorage.clear();
-    g.window.sessionStorage.clear();
+let createdClients: BrowserXmppClient[] = [];
+
+function expectStaleOwnerDisposeError(reason: unknown): void {
+  if (!isStaleOwnerDisposeError(reason)) {
+    throw new Error("expected an exact stale-owner disposal error");
+  }
+  expect(reason.transportDisposed).toBe(true);
+  expect(reason.failures.every(({ stage }) => (
+    stage === "sm-clear" || stage === "native-claim-release"
+  ))).toBe(true);
+  const smFailure = reason.failures.find(({ stage }) => stage === "sm-clear");
+  expect(smFailure?.cause).toBeInstanceOf(ResumeStateTeardownError);
+  const resumeFailure = smFailure!.cause as ResumeStateTeardownError;
+  expect(resumeFailure.failures).toHaveLength(1);
+  expect(resumeFailure.failures[0]?.stage).toBe("sm-clear");
+  const error = resumeFailure.failures[0]?.cause;
+  expect(error).toBeInstanceOf(OutboundPersistenceError);
+  const persistenceError = error as OutboundPersistenceError;
+  expect(persistenceError.operation).toBe("sm-clear-all");
+  expect(persistenceError.reason).toBe("aborted");
+  expect(persistenceError.cause).toBeInstanceOf(DOMException);
+  const cause = persistenceError.cause as DOMException;
+  expect(cause.name).toBe("AbortError");
+  expect([
+    "SM owner fenced during clear",
+    "SM snapshot changed during clear",
+  ]).toContain(cause.message);
+  for (const failure of reason.failures) {
+    if (failure.stage !== "native-claim-release") continue;
+    expect(failure.cause).toBeInstanceOf(DOMException);
+    expect((failure.cause as DOMException).name).toBe("AbortError");
+    expect((failure.cause as DOMException).message).toBe(
+      "Outbound owner fenced during native reconciliation",
+    );
+  }
+}
+
+afterEach(async () => {
+  try {
+    // These tests deliberately transfer SM ownership between simulated tabs.
+    // A predecessor's final disconnect may therefore be fenced while clearing
+    // its stale snapshot. Every other disposal failure remains a test failure.
+    const disposals = await Promise.allSettled(
+      createdClients.map((client) => {
+        (client as unknown as { xmpp: null }).xmpp = null;
+        return client.dispose();
+      }),
+    );
+    for (const disposal of disposals) {
+      if (disposal.status === "rejected") {
+        expectStaleOwnerDisposeError(disposal.reason);
+      }
+    }
+  } finally {
+    createdClients = [];
+    const g = globalThis as ShimmedGlobal;
+    if (g.window?.[WINDOW_SENTINEL]) {
+      g.window.localStorage.clear();
+      g.window.sessionStorage.clear();
+    }
   }
 });
 
@@ -119,7 +197,11 @@ function inMemoryPersistence(): ResumePersistence & {
   let sm: PersistedSmResumeState | null = null;
   let joinedRooms: string[] = [];
   let smClears = 0;
+  const lifecycleId = XmppLifecycleId.create();
+  const durableRuntimeStore = new MemoryDurableOutboundStore();
   return {
+    lifecycleId,
+    durableRuntimeStore,
     loadCatchup: () => catchup,
     saveCatchup: (snapshot) => { catchup = snapshot; },
     clearCatchup: () => { catchup = null; },
@@ -139,8 +221,32 @@ function inMemoryPersistence(): ResumePersistence & {
       sm = null;
       return { kind: "committed", value: removed };
     },
-    preparePagehideHandoff: () => undefined,
-    reclaimPagehideOwnership: () => undefined,
+    outboundOwnerHint: () => ({
+      ownerId: "memory-owner",
+      ownerInstanceId: lifecycleId.value,
+    }),
+    acceptOutboundOwner: () => undefined,
+    preparePagehideHandoff: async (state) => {
+      if (state === null) smClears += 1;
+      sm = state;
+      return {
+        kind: "committed",
+        value: {
+          handoff: {
+            token: "memory-handoff",
+            expiresAt: Date.now() + 30_000,
+            authorityEpoch: 1,
+            ownerGeneration: 1,
+          },
+          smVersion: 1,
+        },
+      };
+    },
+    publishPagehideHandoff: () => undefined,
+    reclaimPagehideOwnership: async () => ({
+      kind: "committed",
+      value: undefined,
+    }),
     loadJoinedRooms: () => [...joinedRooms],
     saveJoinedRooms: (rooms) => { joinedRooms = [...rooms]; },
     clearJoinedRooms: () => { joinedRooms = []; },
@@ -148,6 +254,43 @@ function inMemoryPersistence(): ResumePersistence & {
     smSnapshot: () => sm,
     joinedRoomsSnapshot: () => [...joinedRooms],
     clearSmCount: () => smClears,
+  };
+}
+
+function mockPersistenceOptions(
+  persistence: ResumePersistence,
+  durableRuntimeStore = persistence.durableRuntimeStore
+    ?? new MemoryDurableOutboundStore(),
+): BrowserXmppClientOptions {
+  return {
+    durableRuntimeStore,
+    createResumePersistence: (lifecycleId, sharedStore) => ({
+      ...persistence,
+      lifecycleId,
+      durableRuntimeStore: sharedStore,
+      outboundOwnerHint: () => ({
+        ...persistence.outboundOwnerHint(),
+        ownerInstanceId: lifecycleId.value,
+      }),
+    }),
+  };
+}
+
+function localPersistenceOptions(
+  accountKey: string,
+  ownerId: string | undefined,
+  durableRuntimeStore: MemoryDurableOutboundStore,
+): BrowserXmppClientOptions {
+  return {
+    durableRuntimeStore,
+    createResumePersistence: (lifecycleId, sharedStore) => (
+      createLocalStorageResumePersistence(
+        accountKey,
+        ownerId,
+        sharedStore,
+        lifecycleId,
+      )
+    ),
   };
 }
 
@@ -159,7 +302,44 @@ async function committed<T>(operation: Promise<DurableOutcome<T>>): Promise<T> {
 }
 
 async function waitForClientStartup(client: BrowserXmppClient): Promise<void> {
+  if (!createdClients.includes(client)) createdClients.push(client);
   await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+}
+
+async function seedRawSm(
+  store: MemoryDurableOutboundStore,
+  ownerId: string,
+  state: PersistedSmResumeState,
+  savedAt: number,
+): Promise<void> {
+  const activation = await committed(store.claimOwner("alice@example.com", {
+    ownerId,
+    ownerInstanceId: `explicit:${ownerId}`,
+  }));
+  const owner = activation.fence;
+  const loaded = await committed(store.loadSm(owner));
+  if (loaded.kind !== "loaded") throw new Error("owner fenced while seeding SM");
+  const saved = await committed(
+    store.saveSm(owner, loaded.version, state, savedAt),
+  );
+  if (saved.kind !== "applied") throw new Error("SM seed CAS failed");
+}
+
+async function expectRawSmRejected(
+  store: MemoryDurableOutboundStore,
+  ownerId: string,
+  state: PersistedSmResumeState,
+  savedAt: number,
+): Promise<void> {
+  const activation = await committed(store.claimOwner("alice@example.com", {
+    ownerId,
+    ownerInstanceId: `explicit:${ownerId}`,
+  }));
+  const owner = activation.fence;
+  const loaded = await committed(store.loadSm(owner));
+  if (loaded.kind !== "loaded") throw new Error("owner fenced while rejecting SM seed");
+  const saved = await store.saveSm(owner, loaded.version, state, savedAt);
+  expect(saved.kind).toBe("failed");
 }
 
 async function flushMicrotasks() {
@@ -328,22 +508,16 @@ describe("ReconnectCatchup persistence — writes back on advance", () => {
 });
 
 describe("applyResumeStateToWasmConfig", () => {
-  function configWith(methods: string[]) {
-    const calls: Array<{ method: string; args: unknown[] }> = [];
-    const config: Record<string, (...args: unknown[]) => void> = {};
-    for (const method of methods) {
-      config[method] = (...args: unknown[]) => calls.push({ method, args });
-    }
-    return { config, calls };
+  function recordingConfig() {
+    const calls: unknown[] = [];
+    return {
+      config: { with_resume_state: (state: unknown) => calls.push(state) },
+      calls,
+    };
   }
 
-  test("uses max-aware timestamped resume entries when unhandled work and max are available", async () => {
-    const { config, calls } = configWith([
-      "with_resume_state_entries_with_max",
-      "with_resume_state_entries",
-      "with_resume_state_with_max",
-      "with_resume_state",
-    ]);
+  test("passes one exact typed timestamped snapshot and keeps resource browser-only", () => {
+    const { config, calls } = recordingConfig();
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-1",
@@ -351,79 +525,49 @@ describe("applyResumeStateToWasmConfig", () => {
       outboundH: 11,
       maxResumeSeconds: 300,
       unhandledOutboundEntries: [resumeEntry("message")],
+      resource: "web-browser-only",
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_entries_with_max",
-        args: ["prev-1", 7, 11, [resumeEntry("message")], 300],
+        previd: "prev-1",
+        inboundH: 7,
+        outboundH: 11,
+        maxResumeSeconds: 300,
+        unhandledOutboundEntries: [resumeEntry("message")],
       },
     ]);
   });
 
-  test("uses max-aware resume when no unhandled stanzas need replay", async () => {
-    const { config, calls } = configWith(["with_resume_state_with_max", "with_resume_state"]);
+  test("passes an explicit empty ordered entry array", () => {
+    const { config, calls } = recordingConfig();
 
     applyResumeStateToWasmConfig(config, {
       previd: "prev-2",
       inboundH: 3,
       outboundH: 5,
       maxResumeSeconds: 120,
+      unhandledOutboundEntries: [],
     });
 
     expect(calls).toEqual([
       {
-        method: "with_resume_state_with_max",
-        args: ["prev-2", 3, 5, 120],
+        previd: "prev-2",
+        inboundH: 3,
+        outboundH: 5,
+        maxResumeSeconds: 120,
+        unhandledOutboundEntries: [],
       },
     ]);
   });
 
-  test("uses timestamped resume entries without a max-aware entry method", async () => {
-    const { config, calls } = configWith(["with_resume_state_entries", "with_resume_state"]);
-
-    applyResumeStateToWasmConfig(config, {
-      previd: "prev-3",
-      inboundH: 1,
-      outboundH: 2,
-      maxResumeSeconds: 300,
-      unhandledOutboundEntries: [resumeEntry("presence")],
-    });
-
-    expect(calls).toEqual([
-      {
-        method: "with_resume_state_entries",
-        args: ["prev-3", 1, 2, [resumeEntry("presence")]],
-      },
-    ]);
-  });
-
-  test("fails closed instead of dropping timestamped unhandled entries", async () => {
-    const { config } = configWith(["with_resume_state"]);
+  test("rejects a snapshot whose ordered entry array is absent", () => {
+    const { config } = recordingConfig();
     expect(() => applyResumeStateToWasmConfig(config, {
-      previd: "prev-missing-entry-api",
+      previd: "prev-missing-entries",
       inboundH: 1,
       outboundH: 2,
-      unhandledOutboundEntries: [resumeEntry("message")],
-    })).toThrow("cannot restore timestamped XEP-0198 resume entries");
-  });
-
-  test("falls back to old plain resume when generated WASM has only the legacy method", async () => {
-    const { config, calls } = configWith(["with_resume_state"]);
-
-    applyResumeStateToWasmConfig(config, {
-      previd: "prev-4",
-      inboundH: 13,
-      outboundH: 21,
-      maxResumeSeconds: 300,
-    });
-
-    expect(calls).toEqual([
-      {
-        method: "with_resume_state",
-        args: ["prev-4", 13, 21],
-      },
-    ]);
+    } as never)).toThrow("unhandledOutboundEntries must be an ordered array");
   });
 });
 
@@ -458,6 +602,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
     await committed(persistence.saveSm(state));
@@ -470,6 +615,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
     await committed(persistence.saveSm(state));
@@ -479,12 +625,14 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("consumeSm is scoped to the tab owner", async () => {
-    const tabA = createLocalStorageResumePersistence("alice@example.com", "tab-a");
-    const tabB = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    const store = new MemoryDurableOutboundStore();
+    const tabA = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const tabB = createLocalStorageResumePersistence("alice@example.com", "tab-b", store);
     const state = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
     await committed(tabA.saveSm(state));
@@ -496,14 +644,21 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("a duplicated tab rotates a copied live owner before it can claim SM state", async () => {
+    const store = new MemoryDurableOutboundStore();
     const copiedOwner = "copied-live-owner";
     const state = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
-    await committed(createLocalStorageResumePersistence("alice@example.com", copiedOwner).saveSm(state));
+    const originalTab = createLocalStorageResumePersistence(
+      "alice@example.com",
+      copiedOwner,
+      store,
+    );
+    await committed(originalTab.saveSm(state));
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", copiedOwner);
     window.localStorage.setItem(
       `waddle.chat.sm-resume.owner-lease.${copiedOwner}`,
@@ -514,51 +669,66 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       }),
     );
 
-    const duplicatedTab = createLocalStorageResumePersistence("alice@example.com");
+    const duplicatedTab = createLocalStorageResumePersistence("alice@example.com", undefined, store);
 
     expect(await committed(duplicatedTab.consumeSm())).toBeNull();
-    expect(await committed(createLocalStorageResumePersistence("alice@example.com", copiedOwner).consumeSm())).toEqual(state);
+    expect(await committed(originalTab.consumeSm())).toEqual(state);
   });
 
   test("a pagehide handoff keeps the copied owner for same-tab reload consumption", async () => {
+    const store = new MemoryDurableOutboundStore();
     const reloadOwner = "reload-owner";
     const state = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
-    const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
+    const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner, store);
     await committed(previousPage.saveSm(state));
-    previousPage.preparePagehideHandoff();
+    const receipt = await committed(previousPage.preparePagehideHandoff(state));
+    previousPage.publishPagehideHandoff(receipt);
+    const handoff = previousPage.outboundOwnerHint();
+    expect(handoff.handoffToken).toBeString();
     window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
-    window.localStorage.setItem(
-      `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
-      JSON.stringify({
-        ownerId: reloadOwner,
-        instanceId: "previous-page",
-        updatedAt: Date.now(),
-      }),
+    window.sessionStorage.setItem(
+      "waddle.chat.sm-resume.owner-handoff-token",
+      handoff.handoffToken!,
     );
 
-    const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
+    const reloadedPage = createLocalStorageResumePersistence("alice@example.com", undefined, store);
 
     expect(await committed(reloadedPage.consumeSm())).toEqual(state);
   });
 
   test("BFCache pagehide persists before eviction and pageshow reclaims owner handoff", async () => {
     const ownerId = "bfcache-owner";
-    const persistence = createLocalStorageResumePersistence("alice@example.com", ownerId);
+    const durableRuntimeStore = new MemoryDurableOutboundStore();
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerId);
+    let persistence: ResumePersistence | undefined;
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
+      {
+        durableRuntimeStore,
+        createResumePersistence: (lifecycleId, sharedStore) => {
+          persistence = createLocalStorageResumePersistence(
+            "alice@example.com",
+            undefined,
+            sharedStore,
+            lifecycleId,
+          );
+          return persistence;
+        },
+      },
     );
     await waitForClientStartup(client);
+    if (!persistence) throw new Error("BFCache persistence was not constructed");
     const activeResource = (client as unknown as { resource: string }).resource;
     (client as unknown as {
       xmpp: {
         request_stream_management_ack: () => Promise<void>;
-        get_resume_state: () => PersistedSmResumeState & { hasUnackedOutbound: boolean };
+        get_resume_state: () => PersistedSmResumeState;
       };
     }).xmpp = {
       request_stream_management_ack: async () => undefined,
@@ -568,7 +738,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         outboundH: 8,
         maxResumeSeconds: 300,
         resource: "web-bfcache",
-        hasUnackedOutbound: false,
+        unhandledOutboundEntries: [],
       }),
     };
 
@@ -587,32 +757,222 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const dispatch = (type: "pagehide" | "pageshow") => {
       listeners.get(type)?.({ persisted: true } as PageTransitionEvent);
     };
+    const waitForPageLifecycle = () => (
+      client as unknown as {
+        resume: { whenPageLifecycleQuiescent(): Promise<void> };
+      }
+    ).resume.whenPageLifecycleQuiescent();
 
     dispatch("pagehide");
-    await flushMicrotasks();
+    await waitForPageLifecycle();
     expect(await committed(persistence.loadSm())).toMatchObject({
       previd: "bfcache-stream",
       inboundH: 12,
       outboundH: 8,
     });
-    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
-      .not.toBeNull();
-
     dispatch("pageshow");
-    expect(window.localStorage.getItem(`waddle.chat.sm-resume.owner-handoff.${ownerId}`))
-      .toBeNull();
+    await waitForPageLifecycle();
 
     // A later BFCache eviction creates a fresh JS context. The synchronous
     // pagehide snapshot remains consumable and preserves the bound resource.
     dispatch("pagehide");
-    await flushMicrotasks();
+    await waitForPageLifecycle();
+    const secondHandoff = persistence.outboundOwnerHint();
+    expect(secondHandoff.handoffToken).toBeString();
+    expect(window.sessionStorage.getItem("waddle.chat.sm-resume.owner")).toBe(ownerId);
+    expect(window.sessionStorage.getItem("waddle.chat.sm-resume.owner-handoff-token"))
+      .toBe(secondHandoff.handoffToken!);
+    expect(await committed(persistence.loadSm())).toMatchObject({
+      resource: activeResource,
+    });
     const reloaded = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      createLocalStorageResumePersistence("alice@example.com", ownerId),
+      localPersistenceOptions(
+        "alice@example.com",
+        undefined,
+        durableRuntimeStore,
+      ),
     );
     await waitForClientStartup(reloaded);
     expect((reloaded as unknown as { resource: string }).resource).toBe(activeResource);
     remove();
+  });
+
+  test("final dispose by a fenced predecessor cannot mutate successor SM or outbound rows", async () => {
+    const account = "alice@example.com";
+    const ownerId = "dispose-handoff-owner";
+    const store = new MemoryDurableOutboundStore();
+    let predecessorPersistence: ResumePersistence | undefined;
+    const predecessor = new BrowserXmppClient(
+      { jid: account, username: "alice" } as WaddleSession,
+      {
+        durableRuntimeStore: store,
+        createResumePersistence: (lifecycleId, durableRuntimeStore) => {
+          expect(durableRuntimeStore).toBe(store);
+          predecessorPersistence = createLocalStorageResumePersistence(
+            account,
+            ownerId,
+            durableRuntimeStore,
+            lifecycleId,
+          );
+          return predecessorPersistence;
+        },
+      },
+    );
+    await waitForClientStartup(predecessor);
+    if (!predecessorPersistence) {
+      throw new Error("predecessor persistence was not constructed");
+    }
+
+    const row = {
+      kind: "dm" as const,
+      id: "successor-row",
+      createdAt: "2026-07-17T12:00:00.000Z",
+      peerJid: "bob@example.com",
+      body: "durable across predecessor disposal",
+    };
+    expect(await committed(store.persistReady(account, row))).toMatchObject({
+      kind: "inserted",
+    });
+
+    const predecessorState: PersistedSmResumeState = {
+      previd: "predecessor-stream",
+      inboundH: 3,
+      outboundH: 5,
+      unhandledOutboundEntries: [],
+      resource: "web-predecessor",
+    };
+    await committed(predecessorPersistence.saveSm(predecessorState));
+    const receipt = await committed(
+      predecessorPersistence.preparePagehideHandoff(predecessorState),
+    );
+    predecessorPersistence.publishPagehideHandoff(receipt);
+    const handoff = predecessorPersistence.outboundOwnerHint();
+    expect(handoff.handoffToken).toBeString();
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", ownerId);
+    window.sessionStorage.setItem(
+      "waddle.chat.sm-resume.owner-handoff-token",
+      handoff.handoffToken!,
+    );
+
+    let successorPersistence: ResumePersistence | undefined;
+    const successor = new BrowserXmppClient(
+      { jid: account, username: "alice" } as WaddleSession,
+      {
+        durableRuntimeStore: store,
+        createResumePersistence: (lifecycleId, durableRuntimeStore) => {
+          expect(durableRuntimeStore).toBe(store);
+          successorPersistence = createLocalStorageResumePersistence(
+            account,
+            undefined,
+            durableRuntimeStore,
+            lifecycleId,
+          );
+          return successorPersistence;
+        },
+      },
+    );
+    await waitForClientStartup(successor);
+    if (!successorPersistence) {
+      throw new Error("successor persistence was not constructed");
+    }
+    expect((successor as unknown as { resource: string }).resource).toBe(
+      predecessorState.resource!,
+    );
+    const successorState: PersistedSmResumeState = {
+      previd: "successor-stream",
+      inboundH: 8,
+      outboundH: 13,
+      unhandledOutboundEntries: [],
+      resource: "web-successor",
+    };
+    await committed(successorPersistence.saveSm(successorState));
+    const rowsBeforeDispose = await committed(store.list(account));
+
+    let disposeError: unknown;
+    try {
+      await predecessor.dispose();
+    } catch (error) {
+      disposeError = error;
+    }
+    expectStaleOwnerDisposeError(disposeError);
+    expect(isStaleOwnerDisposeError(new Error("unrelated disposal failure"))).toBe(false);
+
+    expect(await committed(successorPersistence.loadSm())).toEqual(
+      successorState,
+    );
+    expect(await committed(store.list(account))).toEqual(rowsBeforeDispose);
+    expect(rowsBeforeDispose).toEqual([row]);
+  });
+
+  test("predecessor local cleanup cannot erase successor catch-up or joined-room shards", async () => {
+    const account = "alice@example.com";
+    const ownerId = "generation-sharded-local-state";
+    const store = new MemoryDurableOutboundStore();
+    const predecessor = createLocalStorageResumePersistence(
+      account,
+      ownerId,
+      store,
+      XmppLifecycleId.explicitForTest("local-predecessor"),
+    );
+    await committed(predecessor.saveSm({
+      previd: "predecessor-stream",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [],
+    }));
+    predecessor.saveCatchup({
+      dmLastSeen: [["old@example.com", {
+        timestamp: "2026-07-17T10:00:00.000Z",
+      }]],
+      roomLastSeen: [],
+    });
+    predecessor.saveJoinedRooms(["old@muc.example.com"]);
+    const receipt = await committed(
+      predecessor.preparePagehideHandoff({
+        previd: "predecessor-stream",
+        inboundH: 1,
+        outboundH: 2,
+        unhandledOutboundEntries: [],
+      }),
+    );
+    predecessor.publishPagehideHandoff(receipt);
+
+    const successorLifecycle = XmppLifecycleId.explicitForTest(
+      "local-successor",
+    );
+    const successor = createLocalStorageResumePersistence(
+      account,
+      ownerId,
+      store,
+      successorLifecycle,
+    );
+    const activation = await committed(store.claimOwner(account, {
+      ownerId,
+      ownerInstanceId: successorLifecycle.value,
+      handoffToken: receipt.handoff.token,
+    }));
+    successor.acceptOutboundOwner(activation);
+    successor.saveCatchup({
+      dmLastSeen: [["new@example.com", {
+        timestamp: "2026-07-17T11:00:00.000Z",
+      }]],
+      roomLastSeen: [],
+    });
+    successor.saveJoinedRooms(["new@muc.example.com"]);
+
+    predecessor.clearCatchup();
+    predecessor.clearJoinedRooms();
+
+    expect(successor.loadCatchup()).toEqual({
+      dmLastSeen: [["new@example.com", {
+        timestamp: "2026-07-17T11:00:00.000Z",
+      }]],
+      roomLastSeen: [],
+    });
+    expect(successor.loadJoinedRooms()).toEqual([
+      "new@muc.example.com",
+    ]);
   });
 
   test("a slow same-tab reload keeps the owner until the prior lease expires", async () => {
@@ -621,29 +981,30 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     Date.now = () => now;
 
     try {
+      const store = new MemoryDurableOutboundStore();
       const reloadOwner = "slow-reload-owner";
       const state = {
         previd: "abc-123",
         inboundH: 42,
         outboundH: 7,
+        unhandledOutboundEntries: [],
         resource: "web-existing-resource",
       };
-      const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner);
+      const previousPage = createLocalStorageResumePersistence("alice@example.com", reloadOwner, store);
       await committed(previousPage.saveSm(state));
       previousPage.saveJoinedRooms(["general@conference.example.com"]);
-      previousPage.preparePagehideHandoff();
+      const receipt = await committed(previousPage.preparePagehideHandoff(state));
+      previousPage.publishPagehideHandoff(receipt);
+      const handoff = previousPage.outboundOwnerHint();
+      expect(handoff.handoffToken).toBeString();
       window.sessionStorage.setItem("waddle.chat.sm-resume.owner", reloadOwner);
-      window.localStorage.setItem(
-        `waddle.chat.sm-resume.owner-lease.${reloadOwner}`,
-        JSON.stringify({
-          ownerId: reloadOwner,
-          instanceId: "previous-page",
-          updatedAt: now,
-        }),
+      window.sessionStorage.setItem(
+        "waddle.chat.sm-resume.owner-handoff-token",
+        handoff.handoffToken!,
       );
 
       now += 15_000;
-      const reloadedPage = createLocalStorageResumePersistence("alice@example.com");
+      const reloadedPage = createLocalStorageResumePersistence("alice@example.com", undefined, store);
 
       expect(reloadedPage.loadJoinedRooms()).toEqual(["general@conference.example.com"]);
       expect(await committed(reloadedPage.consumeSm())).toEqual(state);
@@ -657,51 +1018,87 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
-    await committed(createLocalStorageResumePersistence("alice@example.com", "tab-a").saveSm(state));
+    const durableRuntimeStore = new MemoryDurableOutboundStore();
+    window.sessionStorage.setItem("waddle.chat.sm-resume.owner", "tab-a");
+    const previousTabA = createLocalStorageResumePersistence(
+      "alice@example.com",
+      undefined,
+      durableRuntimeStore,
+    );
+    await committed(previousTabA.saveSm(state));
+    const receipt = await committed(previousTabA.preparePagehideHandoff(state));
+    previousTabA.publishPagehideHandoff(receipt);
 
     const tabB = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      createLocalStorageResumePersistence("alice@example.com", "tab-b"),
+      localPersistenceOptions(
+        "alice@example.com",
+        "tab-b",
+        durableRuntimeStore,
+      ),
     );
     await waitForClientStartup(tabB);
     expect(tabB.fullJid).not.toBe("alice@example.com/web-existing-resource");
 
     const tabA = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      createLocalStorageResumePersistence("alice@example.com", "tab-a"),
+      localPersistenceOptions(
+        "alice@example.com",
+        undefined,
+        durableRuntimeStore,
+      ),
     );
     await waitForClientStartup(tabA);
     expect(tabA.fullJid).toBe("alice@example.com/web-existing-resource");
   });
 
-  test("BrowserXmppClient does not persist lossy SM state while outbound stanzas are unacked", async () => {
+  test("BrowserXmppClient rejects split resume and outbound durable stores", () => {
+    const persistenceStore = new MemoryDurableOutboundStore();
+    const outboundStore = new MemoryDurableOutboundStore();
+    expect(() => new BrowserXmppClient(
+      { jid: "alice@example.com", username: "alice" } as WaddleSession,
+      {
+        durableRuntimeStore: outboundStore,
+        createResumePersistence: (lifecycleId) => (
+          createLocalStorageResumePersistence(
+            "alice@example.com",
+            "tab-a",
+            persistenceStore,
+            lifecycleId,
+          )
+        ),
+      },
+    )).toThrow("must share one durable runtime store");
+  });
+
+  test("BrowserXmppClient rejects live SM state without the ordered entry array", async () => {
     const persistence = inMemoryPersistence();
     persistence.saveJoinedRooms(["general@conference.example.com"]);
     const consumedClearCount = persistence.clearSmCount();
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
+      mockPersistenceOptions(persistence),
     );
     await waitForClientStartup(client);
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
+      xmpp: { get_resume_state: () => unknown };
     }).xmpp = {
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
         maxResumeSeconds: 300,
-        hasUnackedOutbound: true,
       }),
     };
 
-    client.persistResumeStateForPageHide();
-    await flushMicrotasks();
+    expect(() => client.persistResumeStateForPageHide())
+      .toThrow("unhandledOutboundEntries must be an ordered array");
 
     expect(persistence.smSnapshot()).toBeNull();
-    expect(persistence.clearSmCount()).toBe(consumedClearCount + 1);
+    expect(persistence.clearSmCount()).toBe(consumedClearCount);
     expect(persistence.joinedRoomsSnapshot()).toEqual(["general@conference.example.com"]);
   });
 
@@ -709,7 +1106,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const persistence = inMemoryPersistence();
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
+      mockPersistenceOptions(persistence),
     );
     await waitForClientStartup(client);
     (client as unknown as {
@@ -719,7 +1116,6 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
           inboundH: number;
           outboundH: number;
           maxResumeSeconds: number;
-          hasUnackedOutbound: boolean;
           unhandledOutboundEntries: XmppResumeEntry[];
         };
       };
@@ -729,7 +1125,6 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         inboundH: 4,
         outboundH: 9,
         maxResumeSeconds: 300,
-        hasUnackedOutbound: true,
         unhandledOutboundEntries: [resumeEntry("message", "unacked")],
       }),
     };
@@ -767,12 +1162,29 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
-      durableOutboundStore,
+      mockPersistenceOptions(persistence, durableOutboundStore),
     );
     await waitForClientStartup(client);
 
-    (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-1");
+    const queue = (client as unknown as {
+      outboundQueue: {
+        beginConnectionGeneration(generation: number): number;
+        reconcileNativeSnapshot(
+          generation: number,
+          state: PersistedSmResumeState,
+        ): Promise<unknown>;
+      };
+    }).outboundQueue;
+    queue.beginConnectionGeneration(1);
+    (client as unknown as { connectEpoch: number }).connectEpoch = 1;
+    await queue.reconcileNativeSnapshot(1, {
+      previd: "live-sm-id",
+      inboundH: 4,
+      outboundH: 9,
+      unhandledOutboundEntries: [resumeEntry("message", "dm-live-1")],
+    });
+    (client as unknown as { handleMessageAck: (id: string, generation: number) => void })
+      .handleMessageAck("dm-live-1", 1);
     await flushMicrotasks();
 
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
@@ -799,8 +1211,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
-      durableOutboundStore,
+      mockPersistenceOptions(persistence, durableOutboundStore),
     );
     await waitForClientStartup(client);
 
@@ -815,18 +1226,18 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const persistence = inMemoryPersistence();
     const client = new BrowserXmppClient(
       { jid: "alice@example.com", username: "alice" } as WaddleSession,
-      persistence,
+      mockPersistenceOptions(persistence),
     );
     await waitForClientStartup(client);
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
+      xmpp: { get_resume_state: () => PersistedSmResumeState };
     }).xmpp = {
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
         maxResumeSeconds: 300,
-        hasUnackedOutbound: false,
+        unhandledOutboundEntries: [],
       }),
     };
 
@@ -842,8 +1253,9 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
   });
 
   test("round-trips retained joined rooms for refresh-time group call discovery", async () => {
-    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
-    const otherTab = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    const store = new MemoryDurableOutboundStore();
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const otherTab = createLocalStorageResumePersistence("alice@example.com", "tab-b", store);
     persistence.saveJoinedRooms([
       "General@Conference.Example.com/alice",
       "standup@conference.example.com",
@@ -862,23 +1274,36 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
 
   test("consumeSm rejects a delayed claimant that observed the same original resource", async () => {
     const store = new MemoryDurableSmResumeStore();
-    const first = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
-    const second = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const lifecycleId = XmppLifecycleId.explicitForTest("delayed-claimant");
+    const first = createLocalStorageResumePersistence(
+      "alice@example.com",
+      "tab-a",
+      store,
+      lifecycleId,
+    );
+    const second = createLocalStorageResumePersistence(
+      "alice@example.com",
+      "tab-a",
+      store,
+      lifecycleId,
+    );
     const state: PersistedSmResumeState = {
       previd: "abc-123",
       inboundH: 42,
       outboundH: 7,
       maxResumeSeconds: 300,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
     await committed(first.saveSm(state));
 
-    const [firstResult, secondResult] = await Promise.all([
-      committed(first.consumeSm()),
-      committed(second.consumeSm()),
-    ]);
-
-    expect([firstResult, secondResult].filter((result) => result !== null)).toEqual([state]);
+    const results = await Promise.all([first.consumeSm(), second.consumeSm()]);
+    const committedValues = results
+      .filter((result) => result.kind === "committed")
+      .map((result) => result.value)
+      .filter((result) => result !== null);
+    expect(committedValues).toEqual([state]);
+    expect(results.filter((result) => result.kind === "failed")).toHaveLength(1);
     expect(await committed(first.loadSm())).toBeNull();
     expect(await committed(first.consumeSm())).toBeNull();
   });
@@ -890,11 +1315,12 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "s0",
       inboundH: 7,
       outboundH: 9,
+      unhandledOutboundEntries: [],
     };
     await committed(persistence.saveSm(original));
     expect(await committed(persistence.consumeSm())).toEqual(original);
 
-    store.save = async () => ({
+    store.saveSm = async () => ({
       kind: "failed",
       reason: "aborted",
       cause: new DOMException("replacement aborted", "AbortError"),
@@ -903,6 +1329,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       previd: "s1",
       inboundH: 8,
       outboundH: 10,
+      unhandledOutboundEntries: [],
     });
 
     expect(replacement.kind).toBe("failed");
@@ -914,12 +1341,17 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const store = new MemoryDurableSmResumeStore();
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const justOverDefaultResumeWindow = Date.now() - 301_000;
-    await committed(store.save(
-      "alice@example.com",
+    await seedRawSm(
+      store,
       "tab-a",
-      { previd: "stale", inboundH: 1, outboundH: 1 },
+      {
+        previd: "stale",
+        inboundH: 1,
+        outboundH: 1,
+        unhandledOutboundEntries: [],
+      },
       justOverDefaultResumeWindow,
-    ));
+    );
     expect(await committed(persistence.loadSm())).toBeNull();
   });
 
@@ -927,17 +1359,18 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const store = new MemoryDurableSmResumeStore();
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const twoSecondsAgo = Date.now() - 2_000;
-    await committed(store.save(
-      "alice@example.com",
+    await seedRawSm(
+      store,
       "tab-a",
       {
         previd: "stale",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 1,
+        unhandledOutboundEntries: [],
       },
       twoSecondsAgo,
-    ));
+    );
 
     expect(await committed(persistence.consumeSm())).toBeNull();
   });
@@ -946,41 +1379,39 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     const store = new MemoryDurableSmResumeStore();
     const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const farFuture = Date.now() + 120_000;
-    await committed(store.save(
-      "alice@example.com",
+    await seedRawSm(
+      store,
       "tab-a",
       {
         previd: "from-the-future",
         inboundH: 1,
         outboundH: 1,
         maxResumeSeconds: 300,
+        unhandledOutboundEntries: [],
       },
       farFuture,
-    ));
+    );
 
     expect(await committed(persistence.loadSm())).toBeNull();
   });
 
   test("SM state rejects non-u32 stanza counters", async () => {
     const store = new MemoryDurableSmResumeStore();
-    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
-    await committed(store.save(
-      "alice@example.com",
+    await expectRawSmRejected(
+      store,
       "tab-a",
       {
         previd: "bad-counter",
         inboundH: 1.5,
         outboundH: 1,
+        unhandledOutboundEntries: [],
       } as PersistedSmResumeState,
       Date.now(),
-    ));
-
-    expect(await committed(persistence.loadSm())).toBeNull();
+    );
   });
 
   test("SM state rejects legacy raw XML entries and unknown structural fields", async () => {
     const store = new MemoryDurableSmResumeStore();
-    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const rawXml = {
       previd: "raw-xml",
       inboundH: 1,
@@ -990,23 +1421,20 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         sentAtEpochMs: RESUME_SENT_AT_EPOCH_MS,
       }],
     } as unknown as PersistedSmResumeState;
-    await committed(store.save("alice@example.com", "tab-a", rawXml, Date.now()));
-    expect(await committed(persistence.loadSm())).toBeNull();
+    await expectRawSmRejected(store, "tab-a", rawXml, Date.now());
 
     const unknown = resumeEntry("message", "unknown-field");
     (unknown.stanza.tokens[0] as unknown as Record<string, unknown>).stanzaXml = "<message/>";
-    await committed(store.save("alice@example.com", "tab-a", {
+    await expectRawSmRejected(store, "tab-a", {
       previd: "unknown-field",
       inboundH: 1,
       outboundH: 1,
       unhandledOutboundEntries: [unknown],
-    }, Date.now()));
-    expect(await committed(persistence.loadSm())).toBeNull();
+    }, Date.now());
   });
 
   test("SM state rejects unbalanced, over-depth, and oversized typed stanza tokens", async () => {
     const store = new MemoryDurableSmResumeStore();
-    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
     const candidates: PersistedSmResumeState[] = [];
 
     const unbalanced = resumeEntry("message", "unbalanced");
@@ -1037,7 +1465,16 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     });
 
     const oversized = resumeEntry("message", "oversized");
-    oversized.stanza.tokens = Array.from({ length: 16_385 }, () => ({ kind: "end" as const }));
+    const oversizedStart = oversized.stanza.tokens[0]!;
+    const oversizedEnd = oversized.stanza.tokens[1]!;
+    oversized.stanza.tokens = [
+      oversizedStart,
+      ...Array.from({ length: 16_383 }, () => ({
+        kind: "text" as const,
+        value: "",
+      })),
+      oversizedEnd,
+    ];
     candidates.push({
       previd: "oversized",
       inboundH: 1,
@@ -1046,8 +1483,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     });
 
     for (const candidate of candidates) {
-      await committed(store.save("alice@example.com", "tab-a", candidate, Date.now()));
-      expect(await committed(persistence.loadSm())).toBeNull();
+      await expectRawSmRejected(store, "tab-a", candidate, Date.now());
     }
   });
 
@@ -1088,8 +1524,9 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     // its own conversation; after both persist, BOTH conversations
     // are present in storage — the pre-fix behavior would have
     // overwritten one with the other.
-    const persistenceA = createLocalStorageResumePersistence("alice@example.com", "tab-a");
-    const persistenceB = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    const store = new MemoryDurableOutboundStore();
+    const persistenceA = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const persistenceB = createLocalStorageResumePersistence("alice@example.com", "tab-b", store);
     const tabA = new ReconnectCatchup(persistenceA);
     const tabB = new ReconnectCatchup(persistenceB);
     tabA.recordDmSeen("room@rooms.waddle.example/alice", "2026-05-20T10:00:00Z", "dm-arch-A", [], "muc-occupant");
@@ -1102,13 +1539,18 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       expect.objectContaining({ scope: "muc-occupant" }),
     ]);
     expect(final!.roomLastSeen.map((e) => e[0])).toContain("general@muc.example.com");
-    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-a"))).not.toBeNull();
-    expect(window.localStorage.getItem(catchupShardKey("alice@example.com", "tab-b"))).not.toBeNull();
+    const shardPrefix = "waddle.chat.resume-cursors.17:alice@example.com.";
+    const shardKeys = Array.from(
+      { length: window.localStorage.length },
+      (_, index) => window.localStorage.key(index),
+    ).filter((key): key is string => key?.startsWith(shardPrefix) === true);
+    expect(shardKeys).toHaveLength(2);
   });
 
   test("account shard prefixes cannot read or clear a longer JID", async () => {
-    const alice = createLocalStorageResumePersistence("alice@example.com", "tab-a");
-    const evil = createLocalStorageResumePersistence("alice@example.com.evil", "tab-b");
+    const store = new MemoryDurableOutboundStore();
+    const alice = createLocalStorageResumePersistence("alice@example.com", "tab-a", store);
+    const evil = createLocalStorageResumePersistence("alice@example.com.evil", "tab-b", store);
     alice.saveCatchup({
       dmLastSeen: [["bob@example.com", { timestamp: "2026-05-20T10:00:00.000Z" }]],
       roomLastSeen: [],

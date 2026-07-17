@@ -6,6 +6,7 @@
     "src/vue-app.ts",
     "src/service-worker/sw-template.js",
     "scripts/*.mjs",
+    "tests/browser/fixture/src/pages/provider.astro",
     "tests/**/*.test.ts"
   ],
   "project": [

@@ -1,5 +1,8 @@
 package social.waddle.android.client
 
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryRowIdentity
+import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
@@ -15,8 +18,11 @@ import social.waddle.client.ffi.WaddleSaslCondition
  * [XmppEventBridge] persistence callback instead.
  */
 sealed interface XmppEvent {
-    /** Session is bound and ready (FFI `Connected`). */
-    data object SessionReady : XmppEvent
+    /** Session is bound and ready with an explicit native lifecycle result. */
+    data class SessionReady(
+        val kind: SessionReadyKind,
+        val attempt: DeliveryAttemptRef,
+    ) : XmppEvent
 
     /** The event stream closed; no further events will fire. */
     data object Disconnected : XmppEvent
@@ -27,15 +33,32 @@ sealed interface XmppEvent {
 
     data class MamResult(val message: WaddleArchivedMessage) : XmppEvent
 
-    /** XEP-0198: the server acked the outbound message with this id. */
-    data class DeliveryAcked(val stanzaId: String) : XmppEvent
+    /**
+     * XEP-0198 acknowledgement after the exact terminal intent committed and
+     * applied. Stanza ID alone is never a delivery event identity.
+     */
+    data class DeliveryAcked(val delivery: DeliveryOutcomeRef) : XmppEvent
 
     /**
      * The message with this id will not be delivered: a XEP-0198
      * transport-level failure, or a dropped outbound-queue entry (cap
      * eviction / permanent replay rejection).
      */
-    data class DeliveryFailed(val stanzaId: String) : XmppEvent
+    data class DeliveryFailed(val delivery: DeliveryOutcomeRef) : XmppEvent
+
+    /**
+     * Raw FFI signals tagged by the bridge's exact attempt at callback time.
+     * ConnectionLoop consumes these; they are never routed to UI directly.
+     */
+    data class NativeDeliveryAcked(
+        val attempt: DeliveryAttemptRef,
+        val clientStanzaId: String,
+    ) : XmppEvent
+
+    data class NativeDeliveryFailed(
+        val attempt: DeliveryAttemptRef,
+        val clientStanzaId: String,
+    ) : XmppEvent
 
     data class Call(val event: WaddleCallEvent) : XmppEvent
 
@@ -80,3 +103,13 @@ sealed interface XmppEvent {
     /** Human-readable diagnostic; never carries protocol data. */
     data class Error(val description: String) : XmppEvent
 }
+
+enum class SessionReadyKind {
+    FRESH,
+    RESUMED,
+}
+
+data class DeliveryOutcomeRef(
+    val identity: DeliveryRowIdentity,
+    val source: DeliverySource,
+)

@@ -15,9 +15,11 @@ const ACK_RETRY_DELAYS_MS: [u64; 5] = [250, 500, 1_000, 2_000, 5_000];
 const ACK_RESPONSE_TIMEOUT_MS: u64 = 5_000;
 const ACK_PROGRESS_TIMEOUT_MS: u64 = 30_000;
 const NS_CLIENT: &str = "jabber:client";
+pub const MAX_SM_RESUME_ENTRIES: usize = 4_096;
 const MAX_RESUME_XML_TOKENS: usize = 16_384;
 const MAX_RESUME_XML_DEPTH: usize = 64;
 const MAX_RESUME_XML_ATTRIBUTES: usize = 16_384;
+const MAX_RESUME_XML_UTF8_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -131,6 +133,10 @@ pub struct ResumeStanza {
 impl ResumeStanza {
     pub fn try_from_element(element: Element) -> Result<Self, ResumeStanzaError> {
         let kind = ResumeStanzaKind::from_element(&element)?;
+        // Validate the live tree with exactly the same limits used for a
+        // persisted snapshot. Otherwise a stanza could enter SM memory but
+        // become impossible to persist at the next lifecycle boundary.
+        resume_tokens_from_element(&element)?;
         Ok(Self { kind, element })
     }
 
@@ -142,25 +148,47 @@ impl ResumeStanza {
         &self.element
     }
 
-    pub fn snapshot(&self) -> ResumeStanzaSnapshot {
-        let mut tokens = Vec::new();
-        push_resume_tokens(&self.element, &mut tokens);
-        ResumeStanzaSnapshot {
+    pub fn snapshot(&self) -> Result<ResumeStanzaSnapshot, ResumeStanzaError> {
+        Ok(ResumeStanzaSnapshot {
             stanza_kind: self.kind,
-            tokens,
-        }
+            tokens: resume_tokens_from_element(&self.element)?,
+        })
     }
 
     pub fn from_snapshot(snapshot: ResumeStanzaSnapshot) -> Result<Self, ResumeStanzaError> {
-        if snapshot.tokens.len() > MAX_RESUME_XML_TOKENS {
-            return Err(ResumeStanzaError::TokenLimit);
-        }
-        let element = element_from_resume_tokens(snapshot.tokens)?;
-        let stanza = Self::try_from_element(element)?;
-        if stanza.kind != snapshot.stanza_kind {
+        let mut budget = ResumeXmlBudget::default();
+        Self::from_snapshot_with_budget(snapshot, &mut budget)
+    }
+
+    fn from_snapshot_with_budget(
+        snapshot: ResumeStanzaSnapshot,
+        budget: &mut ResumeXmlBudget,
+    ) -> Result<Self, ResumeStanzaError> {
+        let element = element_from_resume_tokens_with_budget(snapshot.tokens, budget)?;
+        let kind = ResumeStanzaKind::from_element(&element)?;
+        if kind != snapshot.stanza_kind {
             return Err(ResumeStanzaError::KindMismatch);
         }
-        Ok(stanza)
+        Ok(Self { kind, element })
+    }
+
+    /// Rebuild an ordered replay batch while sharing one aggregate XML budget
+    /// across every entry. This is the canonical validator for durable browser
+    /// snapshots entering the native XEP-0198 queue.
+    pub fn from_snapshot_batch(
+        snapshots: impl IntoIterator<Item = ResumeStanzaSnapshot>,
+    ) -> Result<Vec<Self>, ResumeStanzaError> {
+        let mut budget = ResumeXmlBudget::default();
+        snapshots
+            .into_iter()
+            .enumerate()
+            .map(|(index, snapshot)| {
+                if index >= MAX_SM_RESUME_ENTRIES {
+                    return Err(ResumeStanzaError::EntryLimit);
+                }
+                Self::from_snapshot_with_budget(snapshot, &mut budget)
+            })
+            .collect()
     }
 }
 
@@ -170,6 +198,8 @@ pub enum ResumeStanzaError {
     UnsupportedRoot,
     #[error("resume stanza snapshot contains an invalid XML name")]
     InvalidName,
+    #[error("resume stanza snapshot batch exceeds the entry limit")]
+    EntryLimit,
     #[error("resume stanza snapshot token sequence is malformed")]
     InvalidTokenSequence,
     #[error("resume stanza snapshot exceeds the token limit")]
@@ -178,43 +208,141 @@ pub enum ResumeStanzaError {
     DepthLimit,
     #[error("resume stanza snapshot exceeds the attribute limit")]
     AttributeLimit,
+    #[error("resume stanza snapshot exceeds the aggregate UTF-8 byte limit")]
+    ByteLimit,
     #[error("resume stanza element contains a duplicate expanded attribute name")]
     DuplicateAttribute,
     #[error("resume stanza kind does not match its root element")]
     KindMismatch,
 }
 
-fn push_resume_tokens(element: &Element, tokens: &mut Vec<ResumeXmlToken>) {
-    let attributes = element
-        .attrs()
-        .iter()
-        .map(|((namespace, local_name), value)| ResumeXmlAttribute {
-            name: ResumeXmlName {
-                namespace: ResumeXmlNamespace::new(namespace.as_str()),
-                local_name: ResumeXmlLocalName(local_name.as_str().to_owned()),
-            },
-            value: ResumeXmlValue::new(value),
-        })
-        .collect();
-    tokens.push(ResumeXmlToken::Start {
-        name: ResumeXmlName {
-            namespace: ResumeXmlNamespace::new(element.ns()),
-            local_name: ResumeXmlLocalName(element.name().to_owned()),
-        },
-        attributes,
-    });
-    for node in element.nodes() {
-        match node {
-            Node::Element(child) => push_resume_tokens(child, tokens),
-            Node::Text(value) => tokens.push(ResumeXmlToken::Text {
-                value: ResumeXmlValue::new(value),
-            }),
-        }
-    }
-    tokens.push(ResumeXmlToken::End);
+#[derive(Default)]
+struct ResumeXmlBudget {
+    tokens: usize,
+    attributes: usize,
+    utf8_bytes: usize,
 }
 
-fn element_from_resume_tokens(tokens: Vec<ResumeXmlToken>) -> Result<Element, ResumeStanzaError> {
+impl ResumeXmlBudget {
+    fn add_token(&mut self) -> Result<(), ResumeStanzaError> {
+        self.tokens = self
+            .tokens
+            .checked_add(1)
+            .ok_or(ResumeStanzaError::TokenLimit)?;
+        if self.tokens > MAX_RESUME_XML_TOKENS {
+            return Err(ResumeStanzaError::TokenLimit);
+        }
+        Ok(())
+    }
+
+    fn add_attributes(&mut self, count: usize) -> Result<(), ResumeStanzaError> {
+        self.attributes = self
+            .attributes
+            .checked_add(count)
+            .ok_or(ResumeStanzaError::AttributeLimit)?;
+        if self.attributes > MAX_RESUME_XML_ATTRIBUTES {
+            return Err(ResumeStanzaError::AttributeLimit);
+        }
+        Ok(())
+    }
+
+    fn add_utf8(&mut self, value: &str) -> Result<(), ResumeStanzaError> {
+        self.utf8_bytes = self
+            .utf8_bytes
+            .checked_add(value.len())
+            .ok_or(ResumeStanzaError::ByteLimit)?;
+        if self.utf8_bytes > MAX_RESUME_XML_UTF8_BYTES {
+            return Err(ResumeStanzaError::ByteLimit);
+        }
+        Ok(())
+    }
+
+    fn add_name(&mut self, namespace: &str, local_name: &str) -> Result<(), ResumeStanzaError> {
+        self.add_utf8(namespace)?;
+        self.add_utf8(local_name)
+    }
+}
+
+fn resume_tokens_from_element(
+    root: &Element,
+) -> Result<Vec<ResumeXmlToken>, ResumeStanzaError> {
+    enum Work<'a> {
+        Element(&'a Element, usize),
+        Text(&'a str),
+        End,
+    }
+
+    let mut budget = ResumeXmlBudget::default();
+    let mut tokens = Vec::new();
+    let mut work = vec![Work::Element(root, 1)];
+
+    while let Some(next) = work.pop() {
+        match next {
+            Work::Element(element, depth) => {
+                if depth > MAX_RESUME_XML_DEPTH {
+                    return Err(ResumeStanzaError::DepthLimit);
+                }
+                let namespace = element.ns();
+                let local_name = element.name();
+                budget.add_token()?;
+                budget.add_name(namespace.as_str(), local_name)?;
+                budget.add_attributes(element.attrs().len())?;
+
+                let attributes = element
+                    .attrs()
+                    .iter()
+                    .map(|((namespace, local_name), value)| {
+                        budget.add_name(namespace.as_str(), local_name.as_str())?;
+                        budget.add_utf8(value)?;
+                        Ok(ResumeXmlAttribute {
+                            name: ResumeXmlName {
+                                namespace: ResumeXmlNamespace::new(namespace.as_str()),
+                                local_name: ResumeXmlLocalName(local_name.as_str().to_owned()),
+                            },
+                            value: ResumeXmlValue::new(value),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ResumeStanzaError>>()?;
+
+                tokens.push(ResumeXmlToken::Start {
+                    name: ResumeXmlName {
+                        namespace: ResumeXmlNamespace::new(namespace.as_str()),
+                        local_name: ResumeXmlLocalName(local_name.to_owned()),
+                    },
+                    attributes,
+                });
+
+                work.push(Work::End);
+                for node in element.nodes().rev() {
+                    match node {
+                        Node::Element(child) => {
+                            work.push(Work::Element(child, depth.saturating_add(1)));
+                        }
+                        Node::Text(value) => work.push(Work::Text(value)),
+                    }
+                }
+            }
+            Work::Text(value) => {
+                budget.add_token()?;
+                budget.add_utf8(value)?;
+                tokens.push(ResumeXmlToken::Text {
+                    value: ResumeXmlValue::new(value),
+                });
+            }
+            Work::End => {
+                budget.add_token()?;
+                tokens.push(ResumeXmlToken::End);
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+fn element_from_resume_tokens_with_budget(
+    tokens: Vec<ResumeXmlToken>,
+    budget: &mut ResumeXmlBudget,
+) -> Result<Element, ResumeStanzaError> {
     struct PendingElement {
         name: ResumeXmlName,
         attributes: Vec<ResumeXmlAttribute>,
@@ -223,8 +351,8 @@ fn element_from_resume_tokens(tokens: Vec<ResumeXmlToken>) -> Result<Element, Re
 
     let mut stack: Vec<PendingElement> = Vec::new();
     let mut root = None;
-    let mut attribute_count: usize = 0;
     for token in tokens {
+        budget.add_token()?;
         match token {
             ResumeXmlToken::Start { name, attributes } => {
                 if stack.len() >= MAX_RESUME_XML_DEPTH {
@@ -235,14 +363,21 @@ fn element_from_resume_tokens(tokens: Vec<ResumeXmlToken>) -> Result<Element, Re
                     .as_str()
                     .try_into()
                     .map_err(|_| ResumeStanzaError::InvalidName)?;
-                attribute_count = attribute_count
-                    .checked_add(attributes.len())
-                    .ok_or(ResumeStanzaError::AttributeLimit)?;
-                if attribute_count > MAX_RESUME_XML_ATTRIBUTES {
-                    return Err(ResumeStanzaError::AttributeLimit);
-                }
+                budget.add_name(name.namespace.as_str(), name.local_name.as_str())?;
+                budget.add_attributes(attributes.len())?;
                 let mut expanded_names = HashSet::new();
                 for attribute in &attributes {
+                    let _: minidom::rxml::NcName = attribute
+                        .name
+                        .local_name
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| ResumeStanzaError::InvalidName)?;
+                    budget.add_name(
+                        attribute.name.namespace.as_str(),
+                        attribute.name.local_name.as_str(),
+                    )?;
+                    budget.add_utf8(attribute.value.as_str())?;
                     let expanded_name = (
                         attribute.name.namespace.as_str(),
                         attribute.name.local_name.as_str(),
@@ -259,6 +394,7 @@ fn element_from_resume_tokens(tokens: Vec<ResumeXmlToken>) -> Result<Element, Re
                 });
             }
             ResumeXmlToken::Text { value } => {
+                budget.add_utf8(value.as_str())?;
                 let Some(parent) = stack.last_mut() else {
                     return Err(ResumeStanzaError::InvalidTokenSequence);
                 };
@@ -405,6 +541,20 @@ pub struct SmResumeState {
     outbound_queue: VecDeque<QueuedOutboundStanza>,
 }
 
+fn collect_bounded_resume_queue<T>(
+    items: impl IntoIterator<Item = T>,
+    mut convert: impl FnMut(T) -> ClientResult<QueuedOutboundStanza>,
+) -> ClientResult<VecDeque<QueuedOutboundStanza>> {
+    let mut queue = VecDeque::new();
+    for (index, item) in items.into_iter().enumerate() {
+        if index >= MAX_SM_RESUME_ENTRIES {
+            return Err(ResumeStanzaError::EntryLimit.into());
+        }
+        queue.push_back(convert(item)?);
+    }
+    Ok(queue)
+}
+
 impl SmResumeState {
     pub fn new(previd: impl Into<String>, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
         let previd = previd.into();
@@ -443,14 +593,12 @@ impl SmResumeState {
         outbound_h: u32,
         stanzas: impl IntoIterator<Item = Element>,
     ) -> ClientResult<Self> {
-        let outbound_queue = stanzas
-            .into_iter()
-            .map(|element| {
+        let outbound_queue = collect_bounded_resume_queue(stanzas, |element| {
                 let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
                 SmResumeEntry::try_from_element(element, sent_at)
                     .map(QueuedOutboundStanza::from_entry)
-            })
-            .collect::<Result<VecDeque<_>, _>>()?;
+                    .map_err(ClientError::from)
+            })?;
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
@@ -460,10 +608,9 @@ impl SmResumeState {
         outbound_h: u32,
         entries: impl IntoIterator<Item = SmResumeEntry>,
     ) -> ClientResult<Self> {
-        let outbound_queue = entries
-            .into_iter()
-            .map(QueuedOutboundStanza::from_entry)
-            .collect();
+        let outbound_queue = collect_bounded_resume_queue(entries, |entry| {
+            Ok(QueuedOutboundStanza::from_entry(entry))
+        })?;
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
@@ -575,8 +722,8 @@ impl SmState {
     }
 
     /// Record a newly sent outbound stanza unless it is a queued replay.
-    pub fn record_sent_stanza(&mut self, element: &Element) {
-        let _ = self.record_sent_stanza_at(element, 0);
+    pub fn record_sent_stanza(&mut self, element: &Element) -> Result<(), ResumeStanzaError> {
+        self.record_sent_stanza_at(element, 0).map(|_| ())
     }
 
     /// Record a transport-confirmed outbound element and update the
@@ -585,24 +732,27 @@ impl SmState {
     /// The caller supplies a monotonic millisecond timestamp. Keeping time
     /// numeric and injected makes this state identical on native and WASM and
     /// lets tests advance every timeout without sleeping.
-    pub fn record_sent_stanza_at(&mut self, element: &Element, now_ms: u64) -> SentStanzaResult {
+    pub fn record_sent_stanza_at(
+        &mut self,
+        element: &Element,
+        now_ms: u64,
+    ) -> Result<SentStanzaResult, ResumeStanzaError> {
         if !self.outbound_enabled
             || element.ns() != NS_CLIENT
             || !matches!(element.name(), "iq" | "message" | "presence")
         {
-            return SentStanzaResult {
+            return Ok(SentStanzaResult {
                 kind: SentStanzaKind::NotCountable,
                 request: None,
-            };
+            });
         }
 
         let kind = if self.suppress_replay_sent_record(element) {
             SentStanzaKind::Replay
         } else {
-            self.record_sent(1);
+            let stanza = ResumeStanza::try_from_element(element.clone())?;
             let sent_at = existing_delay_stamp(element).unwrap_or_else(Utc::now);
-            let stanza = ResumeStanza::try_from_element(element.clone())
-                .expect("countable jabber:client stanzas are valid resume stanzas");
+            self.record_sent(1);
             self.outbound_queue
                 .push_back(QueuedOutboundStanza::from_entry(SmResumeEntry::new(
                     stanza, sent_at,
@@ -611,7 +761,7 @@ impl SmState {
         };
 
         let request = self.arm_after_outbound_at(now_ms);
-        SentStanzaResult { kind, request }
+        Ok(SentStanzaResult { kind, request })
     }
 
     /// Start a fresh inbound SM sequence after receiving `<enabled/>`.
@@ -1223,7 +1373,8 @@ mod tests {
                     "last-before-wrap",
                 )
                 .build(),
-        );
+        )
+        .expect("countable stanza");
         state.record_sent_stanza(
             &Element::builder("message", "jabber:client")
                 .attr(
@@ -1231,7 +1382,8 @@ mod tests {
                     "first-after-wrap",
                 )
                 .build(),
-        );
+        )
+        .expect("countable stanza");
 
         assert!(!state.handled_count_too_high(0));
         let acked = state.process_ack(0);
@@ -1259,7 +1411,8 @@ mod tests {
                         format!("msg-{id}"),
                     )
                     .build(),
-            );
+            )
+            .expect("countable stanza");
         }
 
         let acked = state.process_ack(8);
@@ -1298,7 +1451,8 @@ mod tests {
             &Element::builder("message", "jabber:client")
                 .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
                 .build(),
-        );
+        )
+        .expect("countable stanza");
 
         let resume_state = state.resume_state().expect("resume state");
         assert!(resume_state.has_unhandled_outbound_stanzas());
@@ -1319,7 +1473,9 @@ mod tests {
                 "timed-out-message",
             )
             .build();
-        state.record_sent_stanza(&timed_out);
+        state
+            .record_sent_stanza(&timed_out)
+            .expect("countable stanza");
 
         // The server ended the transport without advancing h, so processing
         // its last acknowledgement must leave the stanza sender-owned.
@@ -1375,11 +1531,340 @@ mod tests {
             .parse()
             .expect("valid stanza");
         let stanza = ResumeStanza::try_from_element(element.clone()).expect("typed stanza");
-        let snapshot = stanza.snapshot();
+        let snapshot = stanza.snapshot().expect("snapshot");
 
         assert_eq!(snapshot.stanza_kind, ResumeStanzaKind::Message);
         let restored = ResumeStanza::from_snapshot(snapshot).expect("snapshot restores");
         assert_eq!(restored.element(), &element);
+    }
+
+    fn resume_message_snapshot(
+        attributes: Vec<ResumeXmlAttribute>,
+        text_values: impl IntoIterator<Item = String>,
+    ) -> ResumeStanzaSnapshot {
+        let mut tokens = vec![ResumeXmlToken::Start {
+            name: ResumeXmlName {
+                namespace: ResumeXmlNamespace::new(NS_CLIENT),
+                local_name: ResumeXmlLocalName::new("message").expect("valid root"),
+            },
+            attributes,
+        }];
+        tokens.extend(text_values.into_iter().map(|value| ResumeXmlToken::Text {
+            value: ResumeXmlValue::new(value),
+        }));
+        tokens.push(ResumeXmlToken::End);
+        ResumeStanzaSnapshot {
+            stanza_kind: ResumeStanzaKind::Message,
+            tokens,
+        }
+    }
+
+    fn resume_message_entry() -> SmResumeEntry {
+        SmResumeEntry::try_from_element(
+            Element::builder("message", NS_CLIENT).build(),
+            DateTime::<Utc>::UNIX_EPOCH,
+        )
+        .expect("typed resume entry")
+    }
+
+    #[test]
+    fn resume_snapshot_batch_accepts_exact_entry_limit_and_rejects_limit_plus_one() {
+        let snapshot = resume_message_snapshot(Vec::new(), [String::new()]);
+        let exact = ResumeStanza::from_snapshot_batch(
+            std::iter::repeat_n(snapshot.clone(), MAX_SM_RESUME_ENTRIES),
+        )
+        .expect("exact entry limit");
+        assert_eq!(exact.len(), MAX_SM_RESUME_ENTRIES);
+
+        assert_eq!(
+            ResumeStanza::from_snapshot_batch(std::iter::repeat_n(
+                snapshot,
+                MAX_SM_RESUME_ENTRIES + 1,
+            )),
+            Err(ResumeStanzaError::EntryLimit)
+        );
+    }
+
+    #[test]
+    fn resume_snapshot_batch_shares_exact_aggregate_xml_budgets() {
+        let first_token_count = MAX_RESUME_XML_TOKENS / 2;
+        let second_token_count = MAX_RESUME_XML_TOKENS - first_token_count;
+        let first = resume_message_snapshot(
+            Vec::new(),
+            std::iter::repeat_n(String::new(), first_token_count - 2),
+        );
+        let second = resume_message_snapshot(
+            Vec::new(),
+            std::iter::repeat_n(String::new(), second_token_count - 2),
+        );
+        ResumeStanza::from_snapshot_batch([first.clone(), second.clone()])
+            .expect("exact aggregate token budget");
+        let mut token_overflow = second;
+        token_overflow.tokens.insert(
+            1,
+            ResumeXmlToken::Text {
+                value: ResumeXmlValue::new(""),
+            },
+        );
+        assert_eq!(
+            ResumeStanza::from_snapshot_batch([first, token_overflow]),
+            Err(ResumeStanzaError::TokenLimit)
+        );
+
+        let half_attributes = MAX_RESUME_XML_ATTRIBUTES / 2;
+        let attributes = |count: usize| {
+            (0..count)
+                .map(|index| ResumeXmlAttribute {
+                    name: ResumeXmlName {
+                        namespace: ResumeXmlNamespace::new(""),
+                        local_name: ResumeXmlLocalName::new(format!("a{index}"))
+                            .expect("valid attribute name"),
+                    },
+                    value: ResumeXmlValue::new(""),
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = resume_message_snapshot(attributes(half_attributes), []);
+        let second = resume_message_snapshot(
+            attributes(MAX_RESUME_XML_ATTRIBUTES - half_attributes),
+            [],
+        );
+        ResumeStanza::from_snapshot_batch([first.clone(), second.clone()])
+            .expect("exact aggregate attribute budget");
+        let mut attribute_overflow = second;
+        let ResumeXmlToken::Start { attributes, .. } = &mut attribute_overflow.tokens[0] else {
+            panic!("message snapshot starts with root");
+        };
+        attributes.push(ResumeXmlAttribute {
+            name: ResumeXmlName {
+                namespace: ResumeXmlNamespace::new(""),
+                local_name: ResumeXmlLocalName::new("overflow").expect("valid attribute name"),
+            },
+            value: ResumeXmlValue::new(""),
+        });
+        assert_eq!(
+            ResumeStanza::from_snapshot_batch([first, attribute_overflow]),
+            Err(ResumeStanzaError::AttributeLimit)
+        );
+
+        let root_bytes = 2 * (NS_CLIENT.len() + "message".len());
+        let exact_text = "x".repeat(MAX_RESUME_XML_UTF8_BYTES - root_bytes);
+        let first = resume_message_snapshot(Vec::new(), [exact_text]);
+        let second = resume_message_snapshot(Vec::new(), []);
+        ResumeStanza::from_snapshot_batch([first.clone(), second.clone()])
+            .expect("exact aggregate UTF-8 budget");
+        let byte_overflow = resume_message_snapshot(Vec::new(), ["x".to_owned()]);
+        assert_eq!(
+            ResumeStanza::from_snapshot_batch([first, byte_overflow]),
+            Err(ResumeStanzaError::ByteLimit)
+        );
+    }
+
+    #[test]
+    fn bounded_resume_entry_constructor_stops_after_limit_plus_one() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let exact = SmResumeState::from_unhandled_outbound_entries(
+            "exact-entry-limit",
+            0,
+            0,
+            std::iter::repeat_n(resume_message_entry(), MAX_SM_RESUME_ENTRIES),
+        )
+        .expect("exact entry limit");
+        assert_eq!(
+            exact.unhandled_outbound_entries().count(),
+            MAX_SM_RESUME_ENTRIES
+        );
+
+        let consumed = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&consumed);
+        let entry = resume_message_entry();
+        let oversized = std::iter::repeat_with(move || {
+            observed.set(observed.get() + 1);
+            entry.clone()
+        })
+        .take(MAX_SM_RESUME_ENTRIES + 100);
+        assert!(matches!(
+            SmResumeState::from_unhandled_outbound_entries("too-many-entries", 0, 0, oversized),
+            Err(ClientError::InvalidResumeStanza(
+                ResumeStanzaError::EntryLimit
+            ))
+        ));
+        assert_eq!(consumed.get(), MAX_SM_RESUME_ENTRIES + 1);
+    }
+
+    #[test]
+    fn bounded_resume_element_constructor_stops_after_limit_plus_one() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let element = Element::builder("message", NS_CLIENT).build();
+        let exact = SmResumeState::from_unhandled_outbound_stanzas(
+            "exact-element-limit",
+            0,
+            0,
+            std::iter::repeat_n(element.clone(), MAX_SM_RESUME_ENTRIES),
+        )
+        .expect("exact element limit");
+        assert_eq!(
+            exact.unhandled_outbound_stanzas().count(),
+            MAX_SM_RESUME_ENTRIES
+        );
+
+        let consumed = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&consumed);
+        let oversized = std::iter::repeat_with(move || {
+            observed.set(observed.get() + 1);
+            element.clone()
+        })
+        .take(MAX_SM_RESUME_ENTRIES + 100);
+        assert!(matches!(
+            SmResumeState::from_unhandled_outbound_stanzas("too-many-elements", 0, 0, oversized),
+            Err(ClientError::InvalidResumeStanza(
+                ResumeStanzaError::EntryLimit
+            ))
+        ));
+        assert_eq!(consumed.get(), MAX_SM_RESUME_ENTRIES + 1);
+    }
+
+    #[test]
+    fn resume_snapshot_accepts_exact_utf8_budget_and_rejects_one_byte_over() {
+        let root_bytes = NS_CLIENT.len() + "message".len();
+        let exact_text = "x".repeat(MAX_RESUME_XML_UTF8_BYTES - root_bytes);
+        let exact = Element::builder("message", NS_CLIENT)
+            .append(exact_text)
+            .build();
+        let stanza = ResumeStanza::try_from_element(exact).expect("exact byte budget");
+        let snapshot = stanza.snapshot().expect("exact snapshot budget");
+        ResumeStanza::from_snapshot(snapshot).expect("exact snapshot restores");
+
+        let oversized = Element::builder("message", NS_CLIENT)
+            .append("x".repeat(MAX_RESUME_XML_UTF8_BYTES - root_bytes + 1))
+            .build();
+        assert_eq!(
+            ResumeStanza::try_from_element(oversized),
+            Err(ResumeStanzaError::ByteLimit)
+        );
+    }
+
+    #[test]
+    fn resume_snapshot_counts_multibyte_text_as_utf8_bytes() {
+        let root_bytes = NS_CLIENT.len() + "message".len();
+        let remaining = MAX_RESUME_XML_UTF8_BYTES - root_bytes;
+        assert_eq!(remaining % "é".len(), 0);
+        let exact = Element::builder("message", NS_CLIENT)
+            .append("é".repeat(remaining / "é".len()))
+            .build();
+        ResumeStanza::try_from_element(exact).expect("exact multibyte byte budget");
+
+        let oversized = Element::builder("message", NS_CLIENT)
+            .append("é".repeat(remaining / "é".len() + 1))
+            .build();
+        assert_eq!(
+            ResumeStanza::try_from_element(oversized),
+            Err(ResumeStanzaError::ByteLimit)
+        );
+    }
+
+    #[test]
+    fn resume_snapshot_enforces_root_inclusive_depth_symmetrically() {
+        fn nested_stanza(depth: usize) -> Element {
+            assert!(depth >= 1);
+            let mut child = Element::builder("leaf", "urn:waddle:test:resume").build();
+            for _ in 1..depth.saturating_sub(1) {
+                child = Element::builder("nested", "urn:waddle:test:resume")
+                    .append(child)
+                    .build();
+            }
+            Element::builder("message", NS_CLIENT).append(child).build()
+        }
+
+        let exact = ResumeStanza::try_from_element(nested_stanza(MAX_RESUME_XML_DEPTH))
+            .expect("root-inclusive depth limit");
+        let snapshot = exact.snapshot().expect("exact depth snapshot");
+        ResumeStanza::from_snapshot(snapshot).expect("exact depth restores");
+
+        assert_eq!(
+            ResumeStanza::try_from_element(nested_stanza(MAX_RESUME_XML_DEPTH + 1)),
+            Err(ResumeStanzaError::DepthLimit)
+        );
+    }
+
+    #[test]
+    fn resume_snapshot_enforces_aggregate_attribute_limit_symmetrically() {
+        fn stanza_with_attributes(count: usize) -> Element {
+            let mut builder = Element::builder("message", NS_CLIENT);
+            for index in 0..count {
+                let name: minidom::rxml::NcName =
+                    format!("a{index}").as_str().try_into().expect("valid name");
+                builder = builder.attr(name, "v");
+            }
+            builder.build()
+        }
+
+        let exact =
+            ResumeStanza::try_from_element(stanza_with_attributes(MAX_RESUME_XML_ATTRIBUTES))
+                .expect("exact attribute budget");
+        let snapshot = exact.snapshot().expect("exact attribute snapshot");
+        ResumeStanza::from_snapshot(snapshot).expect("exact attributes restore");
+
+        assert_eq!(
+            ResumeStanza::try_from_element(stanza_with_attributes(
+                MAX_RESUME_XML_ATTRIBUTES + 1
+            )),
+            Err(ResumeStanzaError::AttributeLimit)
+        );
+    }
+
+    #[test]
+    fn resume_snapshot_enforces_token_limit_before_tree_construction() {
+        let root_name = ResumeXmlName {
+            namespace: ResumeXmlNamespace::new(NS_CLIENT),
+            local_name: ResumeXmlLocalName::new("message").expect("valid name"),
+        };
+        let mut exact_tokens = Vec::with_capacity(MAX_RESUME_XML_TOKENS);
+        exact_tokens.push(ResumeXmlToken::Start {
+            name: root_name.clone(),
+            attributes: Vec::new(),
+        });
+        exact_tokens.extend(
+            (0..MAX_RESUME_XML_TOKENS - 2).map(|_| ResumeXmlToken::Text {
+                value: ResumeXmlValue::new(""),
+            }),
+        );
+        exact_tokens.push(ResumeXmlToken::End);
+        ResumeStanza::from_snapshot(ResumeStanzaSnapshot {
+            stanza_kind: ResumeStanzaKind::Message,
+            tokens: exact_tokens.clone(),
+        })
+        .expect("exact token budget");
+
+        exact_tokens.push(ResumeXmlToken::End);
+        assert_eq!(
+            ResumeStanza::from_snapshot(ResumeStanzaSnapshot {
+                stanza_kind: ResumeStanzaKind::Message,
+                tokens: exact_tokens,
+            }),
+            Err(ResumeStanzaError::TokenLimit)
+        );
+    }
+
+    #[test]
+    fn oversized_sent_stanza_does_not_partially_advance_sm_state() {
+        let mut state = enabled_state();
+        let root_bytes = NS_CLIENT.len() + "message".len();
+        let oversized = Element::builder("message", NS_CLIENT)
+            .append("x".repeat(MAX_RESUME_XML_UTF8_BYTES - root_bytes + 1))
+            .build();
+
+        assert_eq!(
+            state.record_sent_stanza_at(&oversized, 100),
+            Err(ResumeStanzaError::ByteLimit)
+        );
+        assert_eq!(state.outbound_count, 0);
+        assert!(state.outbound_queue.is_empty());
+        assert_eq!(state.next_ack_wakeup_in_ms(100), None);
     }
 
     #[test]
@@ -1461,7 +1946,9 @@ mod tests {
             )
             .build();
 
-        state.record_sent_stanza(&message);
+        state
+            .record_sent_stanza(&message)
+            .expect("countable stanza");
         let retry = state
             .unhandled_stanzas_for_fallback_retry()
             .into_iter()
@@ -1500,8 +1987,12 @@ mod tests {
     fn first_countable_stanza_requests_ack_and_burst_coalesces() {
         let mut state = enabled_state();
 
-        let first = state.record_sent_stanza_at(&message("one"), 100);
-        let second = state.record_sent_stanza_at(&message("two"), 101);
+        let first = state
+            .record_sent_stanza_at(&message("one"), 100)
+            .expect("countable stanza");
+        let second = state
+            .record_sent_stanza_at(&message("two"), 101)
+            .expect("countable stanza");
 
         assert_eq!(first.kind, SentStanzaKind::New);
         assert_eq!(
@@ -1519,7 +2010,9 @@ mod tests {
     #[test]
     fn valid_non_progress_ack_releases_request_and_schedules_retry() {
         let mut state = enabled_state();
-        state.record_sent_stanza_at(&message("one"), 100);
+        state
+            .record_sent_stanza_at(&message("one"), 100)
+            .expect("countable stanza");
         confirm_generated_request(&mut state, 100);
 
         let processed = state.process_ack_at(0, 120);
@@ -1540,8 +2033,12 @@ mod tests {
     #[test]
     fn progress_resets_retry_backoff_while_work_remains() {
         let mut state = enabled_state();
-        state.record_sent_stanza_at(&message("one"), 0);
-        state.record_sent_stanza_at(&message("two"), 1);
+        state
+            .record_sent_stanza_at(&message("one"), 0)
+            .expect("countable stanza");
+        state
+            .record_sent_stanza_at(&message("two"), 1)
+            .expect("countable stanza");
         confirm_generated_request(&mut state, 1);
         state.process_ack_at(0, 10);
         let retry = state.poll_ack_timer_at(260);
@@ -1565,7 +2062,9 @@ mod tests {
     #[test]
     fn non_progress_retry_schedule_reaches_and_repeats_five_second_cap() {
         let mut state = enabled_state();
-        state.record_sent_stanza_at(&message("one"), 0);
+        state
+            .record_sent_stanza_at(&message("one"), 0)
+            .expect("countable stanza");
         confirm_generated_request(&mut state, 0);
         let mut now_ms = 0;
 
@@ -1599,7 +2098,9 @@ mod tests {
     #[test]
     fn missing_ack_response_times_out_and_reissues_request() {
         let mut state = enabled_state();
-        state.record_sent_stanza_at(&message("one"), 1_000);
+        state
+            .record_sent_stanza_at(&message("one"), 1_000)
+            .expect("countable stanza");
         confirm_generated_request(&mut state, 1_000);
 
         assert_eq!(state.next_ack_wakeup_in_ms(1_000), Some(5_000));
@@ -1618,7 +2119,9 @@ mod tests {
     #[test]
     fn ack_response_clock_starts_only_after_transport_confirmation() {
         let mut state = enabled_state();
-        let generated = state.record_sent_stanza_at(&message("one"), 100);
+        let generated = state
+            .record_sent_stanza_at(&message("one"), 100)
+            .expect("countable stanza");
         assert_eq!(generated.request.map(|request| request.attempt), Some(1));
 
         assert_eq!(
@@ -1641,7 +2144,9 @@ mod tests {
     #[test]
     fn thirty_seconds_without_h_progress_requests_unclean_reconnect() {
         let mut state = enabled_state();
-        state.record_sent_stanza_at(&message("one"), 5_000);
+        state
+            .record_sent_stanza_at(&message("one"), 5_000)
+            .expect("countable stanza");
 
         let poll = state.poll_ack_timer_at(35_000);
 
@@ -1660,7 +2165,9 @@ mod tests {
         state.outbound_enabled = true;
         assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
 
-        let sent = state.record_sent_stanza_at(&replay, 50);
+        let sent = state
+            .record_sent_stanza_at(&replay, 50)
+            .expect("replay stanza");
 
         assert_eq!(sent.kind, SentStanzaKind::Replay);
         assert_eq!(sent.request.map(|request| request.unacked), Some(1));
@@ -1682,7 +2189,9 @@ mod tests {
 
         state.begin_replay_transition_at(10_000);
         assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
-        let sent = state.record_sent_stanza_at(&replay, 10_001);
+        let sent = state
+            .record_sent_stanza_at(&replay, 10_001)
+            .expect("replay stanza");
 
         assert_eq!(sent.kind, SentStanzaKind::Replay);
         assert_eq!(
@@ -1732,7 +2241,9 @@ mod tests {
 
         state.begin_replay_transition_at(11_000);
         assert_eq!(state.mark_unhandled_for_replay(), vec![replay.clone()]);
-        let replay_sent = state.record_sent_stanza_at(&replay, 11_001);
+        let replay_sent = state
+            .record_sent_stanza_at(&replay, 11_001)
+            .expect("replay stanza");
         assert_eq!(replay_sent.kind, SentStanzaKind::Replay);
         assert_eq!(
             replay_sent.request,
@@ -1797,13 +2308,17 @@ mod tests {
     fn sm_disabled_and_ack_request_elements_never_request_recursively() {
         let mut state = SmState::new();
         state.start_outbound();
-        let disabled = state.record_sent_stanza_at(&message("one"), 0);
+        let disabled = state
+            .record_sent_stanza_at(&message("one"), 0)
+            .expect("countable stanza");
         assert_eq!(disabled.kind, SentStanzaKind::New);
         assert_eq!(disabled.request, None);
 
         state.enabled = true;
         let before = state.outbound_count;
-        let request = state.record_sent_stanza_at(&SmState::build_request_ack(), 1);
+        let request = state
+            .record_sent_stanza_at(&SmState::build_request_ack(), 1)
+            .expect("non-countable stanza");
         assert_eq!(request.kind, SentStanzaKind::NotCountable);
         assert_eq!(request.request, None);
         assert_eq!(state.outbound_count, before);

@@ -33,7 +33,7 @@ pub enum WaddleError {
 /// errors keep their condition/text; every other failure folds into
 /// the coarse `NotConnected` / `Timeout` / `Transport` buckets — the
 /// Swift caller retries or surfaces a generic failure either way, and
-/// the detailed diagnostic still reaches the listener via `emit_error`
+/// the detailed diagnostic still reaches the ordered stream via `emit_error`
 /// on the paths that report it.
 pub(crate) fn client_error_to_waddle(error: &ClientError) -> WaddleError {
     match error {

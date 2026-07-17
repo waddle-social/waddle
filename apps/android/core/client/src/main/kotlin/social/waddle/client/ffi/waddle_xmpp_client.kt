@@ -622,28 +622,6 @@ internal open class UniffiForeignFutureResultVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
-internal interface UniffiCallbackInterfaceWaddleEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onEvent")
-internal open class UniffiVTableCallbackInterfaceWaddleEventListener(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `onEvent`: UniffiCallbackInterfaceWaddleEventListenerMethod0? = null,
-) : Structure() {
-    class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `onEvent`: UniffiCallbackInterfaceWaddleEventListenerMethod0? = null,
-    ): UniffiVTableCallbackInterfaceWaddleEventListener(`uniffiFree`,`uniffiClone`,`onEvent`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceWaddleEventListener) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
-        `onEvent` = other.`onEvent`
-    }
-
-}
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
@@ -672,6 +650,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_next_event(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
     ): Int
@@ -769,8 +749,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
     ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
-    ): Int
     external fun ffi_waddle_xmpp_client_ffi_uniffi_contract_version(
     ): Int
 
@@ -787,18 +765,19 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "waddle_xmpp_client"))
-        uniffiCallbackInterfaceWaddleEventListener.register(this)
 
     }
     external fun uniffi_waddle_xmpp_client_ffi_fn_clone_waddleclient(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_free_waddleclient(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-external fun uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(`config`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_next_event(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
@@ -894,8 +873,6 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_no
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`appId`: RustBuffer.ByValue,`environment`: RustBuffer.ByValue,`credentials`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
-): Unit
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun ffi_waddle_xmpp_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1026,6 +1003,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_next_event() != 10590) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1077,7 +1057,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 37065) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -1164,13 +1144,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 61395) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 24436) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event() != 13709) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 6984) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1304,38 +1281,7 @@ object UniffiWithHandle
  *
  * @suppress
  * */
-object NoHandle// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-internal const val IDX_CALLBACK_FREE = 0
-// Callback return codes
-internal const val UNIFFI_CALLBACK_SUCCESS = 0
-internal const val UNIFFI_CALLBACK_ERROR = 1
-internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
-
-/**
- * @suppress
- */
-public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
-    internal val handleMap = UniffiHandleMap<CallbackInterface>()
-
-    internal fun drop(handle: Long) {
-        handleMap.remove(handle)
-    }
-
-    override fun lift(value: Long): CallbackInterface {
-        return handleMap.get(value)
-    }
-
-    override fun read(buf: ByteBuffer) = lift(buf.getLong())
-
-    override fun lower(value: CallbackInterface) = handleMap.insert(value)
-
-    override fun allocationSize(value: CallbackInterface) = 8UL
-
-    override fun write(value: CallbackInterface, buf: ByteBuffer) {
-        buf.putLong(lower(value))
-    }
-}
+object NoHandle
 /**
  * The cleaner interface for Object finalization code to run.
  * This is the entry point to any implementation that we're using.
@@ -1742,6 +1688,14 @@ public interface WaddleClientInterface {
     suspend fun `disconnect`()
 
     /**
+     * Pull exactly one ordered native event. The client never reads a
+     * subsequent core event until the app asks again, so a
+     * `ResumeFailed` journal CAS is an actual durability barrier rather
+     * than an advisory callback ordering assumption.
+     */
+    suspend fun `nextEvent`(): WaddleClientEvent
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -1825,7 +1779,7 @@ public interface WaddleClientInterface {
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
      * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
+     * reported on the ordered event stream so the caller can treat `None` as
      * "fall back to initials".
      */
     suspend fun `requestAvatar`(`jid`: kotlin.String): WaddleAvatar?
@@ -2037,7 +1991,7 @@ public interface WaddleClientInterface {
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
      * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
+     * event stream. The caller MUST persist both fields — node feeds
      * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
      * per-device `disable_push_device` opt-out.
      */
@@ -2070,12 +2024,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         this.handle = 0
         this.cleanable = null
     }
-    constructor(`config`: WaddleConfig, `listener`: WaddleEventListener) :
+    constructor(`config`: WaddleConfig) :
         this(UniffiWithHandle,
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(
 
-        FfiConverterTypeWaddleConfig.lower(`config`),FfiConverterTypeWaddleEventListener.lower(`listener`),_status)
+        FfiConverterTypeWaddleConfig.lower(`config`),_status)
 }
     )
 
@@ -2187,6 +2141,32 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         // lift function
         { Unit },
 
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Pull exactly one ordered native event. The client never reads a
+     * subsequent core event until the app asks again, so a
+     * `ResumeFailed` journal CAS is an actual durability barrier rather
+     * than an advisory callback ordering assumption.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `nextEvent`() : WaddleClientEvent {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_next_event(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleClientEvent.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -2585,7 +2565,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
      * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
+     * reported on the ordered event stream so the caller can treat `None` as
      * "fall back to initials".
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3326,7 +3306,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
      * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
+     * event stream. The caller MUST persist both fields — node feeds
      * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
      * per-device `disable_push_device` opt-out.
      */
@@ -4120,6 +4100,12 @@ data class WaddleConfig (
     var `resource`: kotlin.String
     ,
     /**
+     * Immutable identity of this native connection attempt. Delivery
+     * callbacks and resume transitions are fenced to this exact value.
+     */
+    var `deliveryAttempt`: WaddleDeliveryAttemptRef
+    ,
+    /**
      * XEP-0198 resume snapshot from a previous session. When present
      * the runtime attempts `<resume/>` before resource binding and
      * replays the queued outbound stanzas the server never acked.
@@ -4145,6 +4131,7 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
             FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
         )
     }
@@ -4154,6 +4141,7 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.allocationSize(value.`jid`) +
             FfiConverterString.allocationSize(value.`accessToken`) +
             FfiConverterString.allocationSize(value.`resource`) +
+            FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`deliveryAttempt`) +
             FfiConverterOptionalTypeWaddleSmResumeState.allocationSize(value.`resumeState`)
     )
 
@@ -4162,7 +4150,200 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.write(value.`jid`, buf)
             FfiConverterString.write(value.`accessToken`, buf)
             FfiConverterString.write(value.`resource`, buf)
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`deliveryAttempt`, buf)
             FfiConverterOptionalTypeWaddleSmResumeState.write(value.`resumeState`, buf)
+    }
+}
+
+
+
+/**
+ * Monotonic generation inside a delivery attempt lineage.
+ */
+data class WaddleConnectionGeneration (
+    var `value`: kotlin.ULong
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleConnectionGeneration: FfiConverterRustBuffer<WaddleConnectionGeneration> {
+    override fun read(buf: ByteBuffer): WaddleConnectionGeneration {
+        return WaddleConnectionGeneration(
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleConnectionGeneration) = (
+            FfiConverterULong.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleConnectionGeneration, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
+ * UUID identity minted once for one native connection incarnation.
+ */
+data class WaddleDeliveryAttemptId (
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleDeliveryAttemptId: FfiConverterRustBuffer<WaddleDeliveryAttemptId> {
+    override fun read(buf: ByteBuffer): WaddleDeliveryAttemptId {
+        return WaddleDeliveryAttemptId(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleDeliveryAttemptId) = (
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleDeliveryAttemptId, buf: ByteBuffer) {
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
+ * Exact fence carried by every native delivery lifecycle signal.
+ */
+data class WaddleDeliveryAttemptRef (
+    var `attemptId`: WaddleDeliveryAttemptId
+    ,
+    var `connectionGeneration`: WaddleConnectionGeneration
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleDeliveryAttemptRef: FfiConverterRustBuffer<WaddleDeliveryAttemptRef> {
+    override fun read(buf: ByteBuffer): WaddleDeliveryAttemptRef {
+        return WaddleDeliveryAttemptRef(
+            FfiConverterTypeWaddleDeliveryAttemptId.read(buf),
+            FfiConverterTypeWaddleConnectionGeneration.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleDeliveryAttemptRef) = (
+            FfiConverterTypeWaddleDeliveryAttemptId.allocationSize(value.`attemptId`) +
+            FfiConverterTypeWaddleConnectionGeneration.allocationSize(value.`connectionGeneration`)
+    )
+
+    override fun write(value: WaddleDeliveryAttemptRef, buf: ByteBuffer) {
+            FfiConverterTypeWaddleDeliveryAttemptId.write(value.`attemptId`, buf)
+            FfiConverterTypeWaddleConnectionGeneration.write(value.`connectionGeneration`, buf)
+    }
+}
+
+
+
+/**
+ * Single Rust-minted handoff from a failed resume stream to its fresh
+ * fallback stream. The app commits this exact transition before polling
+ * another native event.
+ */
+data class WaddleDeliveryAttemptTransition (
+    var `old`: WaddleDeliveryAttemptRef
+    ,
+    var `fresh`: WaddleDeliveryAttemptRef
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleDeliveryAttemptTransition: FfiConverterRustBuffer<WaddleDeliveryAttemptTransition> {
+    override fun read(buf: ByteBuffer): WaddleDeliveryAttemptTransition {
+        return WaddleDeliveryAttemptTransition(
+            FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
+            FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleDeliveryAttemptTransition) = (
+            FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`old`) +
+            FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`fresh`)
+    )
+
+    override fun write(value: WaddleDeliveryAttemptTransition, buf: ByteBuffer) {
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`old`, buf)
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`fresh`, buf)
+    }
+}
+
+
+
+/**
+ * Typed client stanza identity at the native boundary.
+ */
+data class WaddleDeliveryStanzaId (
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleDeliveryStanzaId: FfiConverterRustBuffer<WaddleDeliveryStanzaId> {
+    override fun read(buf: ByteBuffer): WaddleDeliveryStanzaId {
+        return WaddleDeliveryStanzaId(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleDeliveryStanzaId) = (
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleDeliveryStanzaId, buf: ByteBuffer) {
+            FfiConverterString.write(value.`value`, buf)
     }
 }
 
@@ -5285,6 +5466,47 @@ public object FfiConverterTypeWaddleMujiPresence: FfiConverterRustBuffer<WaddleM
             FfiConverterBoolean.write(value.`active`, buf)
             FfiConverterBoolean.write(value.`audio`, buf)
             FfiConverterBoolean.write(value.`video`, buf)
+    }
+}
+
+
+
+/**
+ * One exact native delivery callback.
+ */
+data class WaddleNativeDeliverySignal (
+    var `attempt`: WaddleDeliveryAttemptRef
+    ,
+    var `stanzaId`: WaddleDeliveryStanzaId
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleNativeDeliverySignal: FfiConverterRustBuffer<WaddleNativeDeliverySignal> {
+    override fun read(buf: ByteBuffer): WaddleNativeDeliverySignal {
+        return WaddleNativeDeliverySignal(
+            FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
+            FfiConverterTypeWaddleDeliveryStanzaId.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleNativeDeliverySignal) = (
+            FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`attempt`) +
+            FfiConverterTypeWaddleDeliveryStanzaId.allocationSize(value.`stanzaId`)
+    )
+
+    override fun write(value: WaddleNativeDeliverySignal, buf: ByteBuffer) {
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`attempt`, buf)
+            FfiConverterTypeWaddleDeliveryStanzaId.write(value.`stanzaId`, buf)
     }
 }
 
@@ -6987,10 +7209,31 @@ public object FfiConverterTypeWaddleChatState: FfiConverterRustBuffer<WaddleChat
 sealed class WaddleClientEvent {
 
     /**
-     * Session is bound and ready (fires on `SessionReady`).
+     * Session is bound and ready under this exact native attempt.
      */
-    object Connected : WaddleClientEvent()
+    data class SessionReady(
+        val `kind`: social.waddle.client.ffi.WaddleSessionReadyKind,
+        val `attempt`: social.waddle.client.ffi.WaddleDeliveryAttemptRef) : WaddleClientEvent()
 
+    {
+
+
+        companion object
+    }
+
+    /**
+     * XEP-0198 resume failed. `affected` is the exact set of unhandled
+     * message rows subsumed by the old-to-fresh journal transition.
+     */
+    data class ResumeFailed(
+        val `transition`: social.waddle.client.ffi.WaddleDeliveryAttemptTransition,
+        val `affected`: List<social.waddle.client.ffi.WaddleDeliveryStanzaId>) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
 
     /**
      * The event stream closed; no further events will fire.
@@ -7038,7 +7281,7 @@ sealed class WaddleClientEvent {
      * XEP-0198: the server acked the outbound message with this id.
      */
     data class DeliveryAcked(
-        val `stanzaId`: kotlin.String) : WaddleClientEvent()
+        val `signal`: social.waddle.client.ffi.WaddleNativeDeliverySignal) : WaddleClientEvent()
 
     {
 
@@ -7050,7 +7293,7 @@ sealed class WaddleClientEvent {
      * XEP-0198: transport-level delivery failure for this id.
      */
     data class DeliveryFailed(
-        val `stanzaId`: kotlin.String) : WaddleClientEvent()
+        val `signal`: social.waddle.client.ffi.WaddleNativeDeliverySignal) : WaddleClientEvent()
 
     {
 
@@ -7080,6 +7323,7 @@ sealed class WaddleClientEvent {
      * `WaddleConfig.resume_state` on the next connect.
      */
     data class ResumeStateChanged(
+        val `attempt`: social.waddle.client.ffi.WaddleDeliveryAttemptRef,
         val `state`: social.waddle.client.ffi.WaddleSmResumeState?) : WaddleClientEvent()
 
     {
@@ -7131,33 +7375,41 @@ sealed class WaddleClientEvent {
 public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleClientEvent>{
     override fun read(buf: ByteBuffer): WaddleClientEvent {
         return when(buf.getInt()) {
-            1 -> WaddleClientEvent.Connected
-            2 -> WaddleClientEvent.Disconnected
-            3 -> WaddleClientEvent.Message(
+            1 -> WaddleClientEvent.SessionReady(
+                FfiConverterTypeWaddleSessionReadyKind.read(buf),
+                FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
+                )
+            2 -> WaddleClientEvent.ResumeFailed(
+                FfiConverterTypeWaddleDeliveryAttemptTransition.read(buf),
+                FfiConverterSequenceTypeWaddleDeliveryStanzaId.read(buf),
+                )
+            3 -> WaddleClientEvent.Disconnected
+            4 -> WaddleClientEvent.Message(
                 FfiConverterTypeWaddleMessage.read(buf),
                 )
-            4 -> WaddleClientEvent.Presence(
+            5 -> WaddleClientEvent.Presence(
                 FfiConverterTypeWaddlePresence.read(buf),
                 )
-            5 -> WaddleClientEvent.MamResult(
+            6 -> WaddleClientEvent.MamResult(
                 FfiConverterTypeWaddleArchivedMessage.read(buf),
                 )
-            6 -> WaddleClientEvent.DeliveryAcked(
-                FfiConverterString.read(buf),
+            7 -> WaddleClientEvent.DeliveryAcked(
+                FfiConverterTypeWaddleNativeDeliverySignal.read(buf),
                 )
-            7 -> WaddleClientEvent.DeliveryFailed(
-                FfiConverterString.read(buf),
+            8 -> WaddleClientEvent.DeliveryFailed(
+                FfiConverterTypeWaddleNativeDeliverySignal.read(buf),
                 )
-            8 -> WaddleClientEvent.Call(
+            9 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            9 -> WaddleClientEvent.ResumeStateChanged(
+            10 -> WaddleClientEvent.ResumeStateChanged(
+                FfiConverterTypeWaddleDeliveryAttemptRef.read(buf),
                 FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
                 )
-            10 -> WaddleClientEvent.AuthenticationFailed(
+            11 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            11 -> WaddleClientEvent.Error(
+            12 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -7165,10 +7417,20 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
     }
 
     override fun allocationSize(value: WaddleClientEvent) = when(value) {
-        is WaddleClientEvent.Connected -> {
+        is WaddleClientEvent.SessionReady -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeWaddleSessionReadyKind.allocationSize(value.`kind`)
+                + FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`attempt`)
+            )
+        }
+        is WaddleClientEvent.ResumeFailed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleDeliveryAttemptTransition.allocationSize(value.`transition`)
+                + FfiConverterSequenceTypeWaddleDeliveryStanzaId.allocationSize(value.`affected`)
             )
         }
         is WaddleClientEvent.Disconnected -> {
@@ -7202,14 +7464,14 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.`stanzaId`)
+                + FfiConverterTypeWaddleNativeDeliverySignal.allocationSize(value.`signal`)
             )
         }
         is WaddleClientEvent.DeliveryFailed -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterString.allocationSize(value.`stanzaId`)
+                + FfiConverterTypeWaddleNativeDeliverySignal.allocationSize(value.`signal`)
             )
         }
         is WaddleClientEvent.Call -> {
@@ -7223,6 +7485,7 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeWaddleDeliveryAttemptRef.allocationSize(value.`attempt`)
                 + FfiConverterOptionalTypeWaddleSmResumeState.allocationSize(value.`state`)
             )
         }
@@ -7244,56 +7507,65 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
 
     override fun write(value: WaddleClientEvent, buf: ByteBuffer) {
         when(value) {
-            is WaddleClientEvent.Connected -> {
+            is WaddleClientEvent.SessionReady -> {
                 buf.putInt(1)
+                FfiConverterTypeWaddleSessionReadyKind.write(value.`kind`, buf)
+                FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`attempt`, buf)
+                Unit
+            }
+            is WaddleClientEvent.ResumeFailed -> {
+                buf.putInt(2)
+                FfiConverterTypeWaddleDeliveryAttemptTransition.write(value.`transition`, buf)
+                FfiConverterSequenceTypeWaddleDeliveryStanzaId.write(value.`affected`, buf)
                 Unit
             }
             is WaddleClientEvent.Disconnected -> {
-                buf.putInt(2)
+                buf.putInt(3)
                 Unit
             }
             is WaddleClientEvent.Message -> {
-                buf.putInt(3)
+                buf.putInt(4)
                 FfiConverterTypeWaddleMessage.write(value.`message`, buf)
                 Unit
             }
             is WaddleClientEvent.Presence -> {
-                buf.putInt(4)
+                buf.putInt(5)
                 FfiConverterTypeWaddlePresence.write(value.`presence`, buf)
                 Unit
             }
             is WaddleClientEvent.MamResult -> {
-                buf.putInt(5)
+                buf.putInt(6)
                 FfiConverterTypeWaddleArchivedMessage.write(value.`message`, buf)
                 Unit
             }
             is WaddleClientEvent.DeliveryAcked -> {
-                buf.putInt(6)
-                FfiConverterString.write(value.`stanzaId`, buf)
+                buf.putInt(7)
+                FfiConverterTypeWaddleNativeDeliverySignal.write(value.`signal`, buf)
                 Unit
             }
             is WaddleClientEvent.DeliveryFailed -> {
-                buf.putInt(7)
-                FfiConverterString.write(value.`stanzaId`, buf)
+                buf.putInt(8)
+                FfiConverterTypeWaddleNativeDeliverySignal.write(value.`signal`, buf)
                 Unit
             }
             is WaddleClientEvent.Call -> {
-                buf.putInt(8)
+                buf.putInt(9)
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
             is WaddleClientEvent.ResumeStateChanged -> {
-                buf.putInt(9)
+                buf.putInt(10)
+                FfiConverterTypeWaddleDeliveryAttemptRef.write(value.`attempt`, buf)
                 FfiConverterOptionalTypeWaddleSmResumeState.write(value.`state`, buf)
                 Unit
             }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(10)
+                buf.putInt(11)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -8338,6 +8610,40 @@ public object FfiConverterTypeWaddleSendMessageOutcome : FfiConverterRustBuffer<
 
 
 
+
+enum class WaddleSessionReadyKind {
+
+    FRESH,
+    RESUMED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSessionReadyKind: FfiConverterRustBuffer<WaddleSessionReadyKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleSessionReadyKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleSessionReadyKind) = 4UL
+
+    override fun write(value: WaddleSessionReadyKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * Typed outcome of [`WaddleClient::set_dm_notification_mode`] (issue
  * #720). Mirrors [`WaddleSetRoomNotificationModeOutcome`] with one
@@ -8615,66 +8921,6 @@ public object FfiConverterTypeWaddleStanzaErrorType: FfiConverterRustBuffer<Wadd
 }
 
 
-
-
-
-
-
-public interface WaddleEventListener {
-
-    fun `onEvent`(`event`: WaddleClientEvent)
-
-    companion object
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceWaddleEventListener {
-    internal object `onEvent`: UniffiCallbackInterfaceWaddleEventListenerMethod0 {
-        override fun callback(`uniffiHandle`: Long,`event`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeWaddleEventListener.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`onEvent`(
-                    FfiConverterTypeWaddleClientEvent.lift(`event`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypeWaddleEventListener.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeWaddleEventListener.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfaceWaddleEventListener.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `onEvent`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(vtable)
-    }
-}
-
-/**
- * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
- *
- * @suppress
- */
-public object FfiConverterTypeWaddleEventListener: FfiConverterCallbackInterface<WaddleEventListener>()
 
 
 
@@ -9804,6 +10050,34 @@ public object FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleChannel.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleDeliveryStanzaId: FfiConverterRustBuffer<List<WaddleDeliveryStanzaId>> {
+    override fun read(buf: ByteBuffer): List<WaddleDeliveryStanzaId> {
+        val len = buf.getInt()
+        return List<WaddleDeliveryStanzaId>(len) {
+            FfiConverterTypeWaddleDeliveryStanzaId.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleDeliveryStanzaId>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleDeliveryStanzaId.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleDeliveryStanzaId>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleDeliveryStanzaId.write(it, buf)
         }
     }
 }

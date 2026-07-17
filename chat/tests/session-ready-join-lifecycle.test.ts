@@ -18,10 +18,12 @@
  * These tests poke private state on `BrowserXmppClient` directly — see
  * the comment block in `resume-ordering.test.ts` for the rationale.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { SessionLifecycleEvent } from "../src/lib/xmpp/types";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(): WaddleSession {
   return {
@@ -40,11 +42,28 @@ type PresenceCb = (presence: {
 
 type PrivateState = {
   xmpp: unknown;
+  connectEpoch: number;
   connected: boolean;
   destroying: boolean;
-  wireEvents: (xmpp: unknown) => void;
-  runSessionReady: (xmpp: unknown, lifecycle: { type: "fresh" | "resumed" }) => Promise<void>;
-  handleDisconnected: (xmpp: unknown, error?: Error) => void;
+  wireEvents: (xmpp: unknown, generation?: number) => void;
+  runSessionReady: (
+    xmpp: unknown,
+    lifecycle: { type: "fresh" | "resumed" },
+    generation?: number,
+  ) => Promise<void>;
+  handleDisconnected: (
+    xmpp: unknown,
+    generation?: number,
+    error?: Error,
+  ) => void;
+  outboundQueue: {
+    beginConnectionGeneration: (generation: number) => number;
+    reconcileFreshSession: (
+      generation: number,
+      state: unknown,
+    ) => Promise<unknown>;
+  };
+  outboundQueueHydration: Promise<void>;
   joinedMucReady: Set<string>;
   joinedMucs: Map<string, Promise<void>>;
   retainedJoinedRoomJids: Set<string>;
@@ -53,12 +72,38 @@ type PrivateState = {
   fullJid: string;
 };
 
-function connectedClient() {
-  const client = new BrowserXmppClient(session());
+const createdClients: BrowserXmppClient[] = [];
+
+function createTestClient(): BrowserXmppClient {
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
+  return client;
+}
+
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as {
+      xmpp: null;
+      connected: boolean;
+    };
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients.length = 0;
+});
+
+async function connectedClient() {
+  const client = createTestClient();
   const state = client as unknown as PrivateState;
+  await state.outboundQueueHydration;
+  state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
   let onPresence: PresenceCb | null = null;
   const joinRoom = mock(async () => undefined);
   const xmpp = {
+    ...noopWasmClientCallbacks(),
     join_room: joinRoom,
     set_on_presence(cb: PresenceCb) {
       onPresence = cb;
@@ -79,16 +124,71 @@ function connectedClient() {
   return { client, state, xmpp, joinRoom, received, deliverSelfPresence };
 }
 
-async function waitForJoinAttempt(joinRoom: ReturnType<typeof mock>): Promise<void> {
-  for (let turn = 0; turn < 10 && joinRoom.mock.calls.length === 0; turn += 1) {
-    await Promise.resolve();
-  }
+async function waitForJoinAttempt(
+  client: BrowserXmppClient,
+  roomJid: string,
+  joinRoom: ReturnType<typeof mock>,
+): Promise<void> {
+  await client.whenRoomJoinScheduled(roomJid);
   expect(joinRoom).toHaveBeenCalledTimes(1);
 }
 
 describe("#1221 resumed session-ready does not rejoin", () => {
+  test("a delayed generation A reconciliation cannot publish readiness after B takes over", async () => {
+    const client = createTestClient();
+    const state = client as unknown as PrivateState;
+    await state.outboundQueueHydration;
+    let releaseA!: () => void;
+    const generationA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const reconcileFreshSession = mock(async (generation: number) => {
+      if (generation === 0) await generationA;
+      return { terminalIds: [], missingIds: [] };
+    });
+    state.outboundQueue.reconcileFreshSession = reconcileFreshSession;
+    const enableA = mock(async () => undefined);
+    const enableB = mock(async () => undefined);
+    const xmppA = {
+      ...noopWasmClientCallbacks(),
+      enableCarbons: enableA,
+      get_resume_state: () => null,
+    };
+    const xmppB = {
+      ...noopWasmClientCallbacks(),
+      enableCarbons: enableB,
+      get_resume_state: () => null,
+    };
+    const received: SessionLifecycleEvent[] = [];
+    client.setSessionLifecycleHandler((event) => received.push(event));
+
+    state.connectEpoch = 0;
+    state.outboundQueue.beginConnectionGeneration(0);
+    state.xmpp = xmppA;
+    state.wireEvents(xmppA, 0);
+    const readyA = state.runSessionReady(xmppA, { type: "fresh" }, 0);
+    await Promise.resolve();
+
+    state.connectEpoch = 1;
+    state.outboundQueue.beginConnectionGeneration(1);
+    state.xmpp = xmppB;
+    state.wireEvents(xmppB, 1);
+    const readyB = state.runSessionReady(xmppB, { type: "fresh" }, 1);
+    await readyB;
+    releaseA();
+    await readyA;
+    await client.whenLifecycleQuiescent();
+
+    expect(reconcileFreshSession).toHaveBeenCalledTimes(2);
+    expect(enableA).not.toHaveBeenCalled();
+    expect(enableB).toHaveBeenCalledTimes(1);
+    expect(received.map(({ type }) => type)).toEqual(["fresh"]);
+    expect(state.xmpp).toBe(xmppB);
+    expect(state.connected).toBe(true);
+  });
+
   test("restores readiness from the snapshot and sends no join presence", async () => {
-    const { state, xmpp, joinRoom } = connectedClient();
+    const { state, xmpp, joinRoom } = await connectedClient();
     const room = "c1@conference.example.com";
     // Retained rooms would normally be fanned out — prove they are NOT
     // on resumed. The snapshot is the only re-seed source.
@@ -102,8 +202,8 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     expect(state.joinedMucs.has(room)).toBe(true);
   });
 
-  test("disconnect snapshots the self-presence-confirmed rooms", () => {
-    const { state, xmpp } = connectedClient();
+  test("disconnect snapshots the self-presence-confirmed rooms", async () => {
+    const { state, xmpp } = await connectedClient();
     const room = "c1@conference.example.com";
     state.joinedMucReady.add(room);
     state.joinedMucs.set(room, Promise.resolve());
@@ -114,10 +214,12 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     state.handleDisconnected(xmpp);
 
     expect([...state.resumedSessionRoomKeys]).toEqual([room]);
+    await state.outboundQueueHydration;
+    state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
   });
 
   test("a resume after a real join sends no new join presence (full path)", async () => {
-    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const { client, state, xmpp, joinRoom, deliverSelfPresence } = await connectedClient();
     const room = "c3@conference.example.com";
     // Real join populates joinedMucReady via self-presence.
     const joined = state.ensureJoined(room);
@@ -129,10 +231,15 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     state.destroying = true;
     state.handleDisconnected(xmpp);
     state.destroying = false;
+    await state.outboundQueueHydration;
+    state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
 
     // Reconnect with a fresh handle and resume.
     const joinRoom2 = mock(async () => undefined);
-    const xmpp2 = { join_room: joinRoom2, set_on_presence() {} };
+    const xmpp2 = {
+      ...noopWasmClientCallbacks(),
+      join_room: joinRoom2,
+    };
     state.xmpp = xmpp2;
     state.connected = true;
     state.wireEvents(xmpp2);
@@ -148,15 +255,16 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     // in-memory readiness snapshot, so a reloaded client resumes with an
     // empty resumedSessionRoomKeys. It must fall back to rejoining the
     // retained set (single-flight) rather than leaving rooms un-ready.
-    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const { client, state, xmpp, joinRoom, deliverSelfPresence } = await connectedClient();
     const room = "c7@conference.example.com";
     state.retainedJoinedRoomJids = new Set([room]);
     // resumedSessionRoomKeys intentionally left empty (snapshot lost).
 
     const ready = state.runSessionReady(xmpp, { type: "resumed" });
+    await waitForJoinAttempt(client, room, joinRoom);
     deliverSelfPresence(room);
     await ready;
-    await Promise.resolve();
+    await client.whenLifecycleQuiescent();
 
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(joinRoom).toHaveBeenCalledWith(room, "alice");
@@ -168,16 +276,17 @@ describe("#1221 resumed session-ready does not rejoin", () => {
     // resume the confirmed room must be re-seeded WITHOUT a join, while
     // the unconfirmed retained room is rejoined (single-flight skips the
     // reseeded one).
-    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const { client, state, xmpp, joinRoom, deliverSelfPresence } = await connectedClient();
     const confirmed = "confirmed@conference.example.com";
     const pending = "pending@conference.example.com";
     state.retainedJoinedRoomJids = new Set([confirmed, pending]);
     state.resumedSessionRoomKeys = new Set([confirmed]); // only `confirmed` got its 110
 
     const ready = state.runSessionReady(xmpp, { type: "resumed" });
+    await waitForJoinAttempt(client, pending, joinRoom);
     deliverSelfPresence(pending);
     await ready;
-    await Promise.resolve();
+    await client.whenLifecycleQuiescent();
 
     expect(state.joinedMucReady.has(confirmed)).toBe(true);
     expect(joinRoom).toHaveBeenCalledTimes(1);
@@ -191,16 +300,18 @@ describe("#1221 session-ready runs once per handle", () => {
     // resumeBarrier gate only covered the catch-up path; the no-catch-up
     // branch returned without opening a barrier, so a second callback
     // re-admitted and double-emitted the lifecycle + double-ran setup.
-    const { state, xmpp, joinRoom, received, deliverSelfPresence } = connectedClient();
+    const { client, state, xmpp, joinRoom, received, deliverSelfPresence } = await connectedClient();
     const room = "c5@conference.example.com";
     state.retainedJoinedRoomJids = new Set([room]);
 
     const first = state.runSessionReady(xmpp, { type: "fresh" });
-    await waitForJoinAttempt(joinRoom);
+    await waitForJoinAttempt(client, room, joinRoom);
     deliverSelfPresence(room);
     await first;
+    await client.whenLifecycleQuiescent();
 
     await state.runSessionReady(xmpp, { type: "fresh" }); // duplicate hook
+    await client.whenLifecycleQuiescent();
 
     expect(received.filter((event) => event.type === "fresh")).toHaveLength(1);
     expect(joinRoom).toHaveBeenCalledTimes(1);
@@ -209,15 +320,15 @@ describe("#1221 session-ready runs once per handle", () => {
 
 describe("#1221 fresh session-ready still rejoins", () => {
   test("rejoins each retained room exactly once", async () => {
-    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const { client, state, xmpp, joinRoom, deliverSelfPresence } = await connectedClient();
     const room = "c2@conference.example.com";
     state.retainedJoinedRoomJids = new Set([room]);
 
     const ready = state.runSessionReady(xmpp, { type: "fresh" });
-    await waitForJoinAttempt(joinRoom);
+    await waitForJoinAttempt(client, room, joinRoom);
     deliverSelfPresence(room);
     await ready;
-    await Promise.resolve();
+    await client.whenLifecycleQuiescent();
 
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(joinRoom).toHaveBeenCalledWith(room, "alice");

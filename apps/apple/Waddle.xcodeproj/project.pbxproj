@@ -11,141 +11,161 @@
 		0469E84F6E0DECD046AB0D5C /* ChatUtilityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C80129E5804AACAFEF21770 /* ChatUtilityViews.swift */; };
 		04F797384909DA793EB0168D /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E26750225CD9947058913ED2 /* ChatComposerView.swift */; };
 		0751796EA011BE3F6C03EF8B /* ChatTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E15A49153C661694F01E637E /* ChatTimelineView.swift */; };
-		08A450A916BDC7BA6DCDD066 /* AppModel+Members.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B2C76523BD172C107EC3E4 /* AppModel+Members.swift */; };
 		09AFCA9C6EDB270C3AE99AC2 /* ChatMessageRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA67EE9573142F678C48033C /* ChatMessageRowView.swift */; };
-		0A700228353B2111D98C8CD6 /* AppModel+Avatars.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14881457B1DDBDD0938C7EFF /* AppModel+Avatars.swift */; };
-		0EA286CE4707BE30AF0CB06E /* AppModel+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = E72EE2985A44CB93ED0906F6 /* AppModel+Upload.swift */; };
-		0FC3ED06AA97E4741E5E2AA3 /* AppModel+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = E72EE2985A44CB93ED0906F6 /* AppModel+Upload.swift */; };
+		0CFD4E133AFE5DB97B03A448 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
+		11DD33BEB40152741EC544E5 /* AppModel+Avatars.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D16EDD45D6DD935D6639DE /* AppModel+Avatars.swift */; };
 		1362CD6ECF68745FF93E2C93 /* ChatTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E15A49153C661694F01E637E /* ChatTimelineView.swift */; };
 		14E929E4DEDCDCBE81012D3C /* GlassEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C4757B3879EE7930D703759 /* GlassEffect.swift */; };
 		156766508455DE8302A6530D /* ChatThreadPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10A958D21BF761F21A2DB67 /* ChatThreadPanelView.swift */; };
+		18641090E42AA0195F9F6A5E /* AppModel+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3145ED182AEC92ACBC29C3A /* AppModel+Upload.swift */; };
 		18B2CC29EA7CEDAB928B5A8B /* DesktopAuthenticatedShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */; };
+		1903FD534D126810888E6D77 /* ChatWorkspace+DesktopRails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80895ECBA806DF0F9BC473E5 /* ChatWorkspace+DesktopRails.swift */; };
 		1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
-		219D49F1C48BCED5209E0B34 /* AppModel+Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3D954E80CB9B7C5596B76F /* AppModel+Auth.swift */; };
+		25CA7F0E4494D5A6155100F6 /* AppModel+Dms.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1A578611C138B726273A8C /* AppModel+Dms.swift */; };
 		26F5DA2B79CCD77041D0F74E /* ChatMemberListSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F44FC6C9E8413C24C98EB1C /* ChatMemberListSection.swift */; };
 		271EE65F526E62C618FF2ED5 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
-		2B1901C0FADCBEAB64D1F4BF /* AppModel+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E1BD962A4AB05751E5EE9C /* AppModel+Push.swift */; };
-		2BF46D239FDF0F9C620EC0BA /* AppModel+Forums.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED576A52D4C4429D07C9846B /* AppModel+Forums.swift */; };
+		295332FF4FB3639237459B2B /* AppModel+Rooms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C0E4F4865306CD28D5FEAD1 /* AppModel+Rooms.swift */; };
 		2F64280C875CC5C7CEDC99C3 /* ChatMemberListSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F44FC6C9E8413C24C98EB1C /* ChatMemberListSection.swift */; };
 		2FA957722EABFCD946B974DE /* ChatUtilityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C80129E5804AACAFEF21770 /* ChatUtilityViews.swift */; };
-		30DC24DBCA821A51AA186968 /* AppModel+Xmpp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18BEDB1891015CB14609C8BC /* AppModel+Xmpp.swift */; };
 		314AE99E95625820FB23FD38 /* RustXmppClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */; };
-		32C63333F7918F87622A4421 /* AppModel+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E1BD962A4AB05751E5EE9C /* AppModel+Push.swift */; };
+		32474E3188A701E6E63AB6E1 /* AppModel+Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FE8546E72B5DAA1431FC060 /* AppModel+Auth.swift */; };
+		385DAA78D6EC4829B3CD92C8 /* ChatWorkspace+Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 740E8A5B3120CA378693962A /* ChatWorkspace+Sidebar.swift */; };
 		387638FC89838B367585D750 /* ChatGifPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B932B485C4F2422B596281A /* ChatGifPickerView.swift */; };
+		3A1585ADB7323AB1A8F8DBEB /* AppModel+Xmpp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6172918FD90E800835635621 /* AppModel+Xmpp.swift */; };
 		406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
-		4194E0697B03161E6D66F254 /* AppModel+Pep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8CA088244BA2A0AEFBB9780 /* AppModel+Pep.swift */; };
 		4230F4641D894E48468B1D19 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
-		43988838A68913B2D421D129 /* AppModel+Presence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B86E6CAB470B7E63863CF1 /* AppModel+Presence.swift */; };
+		4447CD49621CD4961103A9F6 /* AppModel+Spaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB48C7D584C8CE12DDAFD831 /* AppModel+Spaces.swift */; };
 		45AC51B21194DC6C805BF2A3 /* XMPPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C171856D11E83233F15879 /* XMPPTypes.swift */; };
 		4AFEFEC9DE1E167EFF8C34A8 /* ChatDirectMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F130C1A9F074177FBCE9C0A /* ChatDirectMessagesView.swift */; };
-		4B76190E6084E840C409EDB1 /* AppModel+Presence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B86E6CAB470B7E63863CF1 /* AppModel+Presence.swift */; };
+		4B3060866EE9413578867446 /* AppModel+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = F459AC24E2951C3AC7DD8453 /* AppModel+Messaging.swift */; };
+		4C79F203C082D378A65912CF /* AppModel+Upload.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3145ED182AEC92ACBC29C3A /* AppModel+Upload.swift */; };
 		50EBF674E71CCF0BC2EFF0B2 /* ChatDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FD8BBA9FE130679024113ED /* ChatDomain.swift */; };
-		51637CF87CB2FB9CD7118BC9 /* AppModel+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = F956BBA6FC46C19A2E8E65C1 /* AppModel+Messaging.swift */; };
 		525DC03E58327171AF3149D1 /* GlassEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C4757B3879EE7930D703759 /* GlassEffect.swift */; };
 		56B226137C61FE10D9995E7A /* ChatConversationHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB966AF4D24740E8DBE7B496 /* ChatConversationHeaderView.swift */; };
 		56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
 		5816F22A74C5FC18BA998025 /* ChatGifPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B932B485C4F2422B596281A /* ChatGifPickerView.swift */; };
+		595B48AC6EFC9BF26C12537F /* XMPPClientLifecycleController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85CC502AD9FFBE6369BF0B1 /* XMPPClientLifecycleController.swift */; };
+		5AE3BA8F5AF4EB2CD7963F50 /* AppModel+Members.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A3B4A301C1DEEA91EA5B1B1 /* AppModel+Members.swift */; };
 		5B1EF019D18ACB8C36BDD1E5 /* MobileSlackShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */; };
 		5DCE4BD65CC3BF5AFA77E092 /* DesktopAuthenticatedShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */; };
 		5E7473B79C41B61E4FAF1EBE /* ChatMessageAttachmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D343E94B968E6D50B60DCCB /* ChatMessageAttachmentsView.swift */; };
-		6754D10606DD92F60C2DEB76 /* AppModel+Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3D954E80CB9B7C5596B76F /* AppModel+Auth.swift */; };
+		5F27BC7E17559722DF2D679A /* AppModel+Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB9196F1FD32A777519966E /* AppModel+Timeline.swift */; };
 		6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
-		69855735E2332E085CBFDF1C /* ChatWorkspace+MemberPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39EF22B7B3152D8B40046055 /* ChatWorkspace+MemberPanes.swift */; };
-		6B8CD87CEA3D13E470B99C37 /* ChatWorkspace+Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6138EAE8FF405FAF6FDF9FD4 /* ChatWorkspace+Conversation.swift */; };
+		6B4574B3C30BBBF6E8CADE4D /* XMPPClientLifecycleController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85CC502AD9FFBE6369BF0B1 /* XMPPClientLifecycleController.swift */; };
+		6B8FCD7364DA83CD263BED87 /* AppModel+Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB9196F1FD32A777519966E /* AppModel+Timeline.swift */; };
+		6E5054F56D3D09E015A158E0 /* AppModel+Rooms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C0E4F4865306CD28D5FEAD1 /* AppModel+Rooms.swift */; };
 		6FEFC8D15DBFC79CCE4E551F /* ChatDirectMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F130C1A9F074177FBCE9C0A /* ChatDirectMessagesView.swift */; };
-		709A7129CF04C890B9ADC2AC /* ChatWorkspace+DesktopRails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1132043955ADB592097530 /* ChatWorkspace+DesktopRails.swift */; };
-		7313115A451873A9653A0E1D /* AppModel+Rooms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E6F448DE87043FA6BECA4AC /* AppModel+Rooms.swift */; };
-		736AE8883DFDD064AD0B899D /* AppModel+Pep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8CA088244BA2A0AEFBB9780 /* AppModel+Pep.swift */; };
-		741F6C8BF2E5B60D50BEE21C /* AppModel+Forums.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED576A52D4C4429D07C9846B /* AppModel+Forums.swift */; };
-		7BD27BE4A96A675303D70D83 /* AppModel+Dms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0762ED10BF042DAFE3122902 /* AppModel+Dms.swift */; };
+		79944C2CF3AF50531B141E28 /* AppModel+Avatars.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09D16EDD45D6DD935D6639DE /* AppModel+Avatars.swift */; };
+		79C051241DED49B9EC525540 /* NativeXMPPEventPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB20638C10E8F1855EE08 /* NativeXMPPEventPump.swift */; };
 		7C10D162D5E9069717486492 /* waddle_xmpp_client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908AA7A66AF0FE4F0F8A2956 /* waddle_xmpp_client.swift */; };
-		7E994EA862A05381A6B165AE /* AppModel+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = F956BBA6FC46C19A2E8E65C1 /* AppModel+Messaging.swift */; };
-		85D89E2CF7FAD18D5C1AA5E0 /* AppModel+Avatars.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14881457B1DDBDD0938C7EFF /* AppModel+Avatars.swift */; };
+		7D1FB7A4F813DC1B97F4C3BB /* ChatWorkspace+Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC49BF06ACD87810BA9C307 /* ChatWorkspace+Conversation.swift */; };
+		7DF3394440E7265F922934B1 /* ChatWorkspace+Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 740E8A5B3120CA378693962A /* ChatWorkspace+Sidebar.swift */; };
+		8225E330864B5099FE950400 /* AppModel+Forums.swift in Sources */ = {isa = PBXBuildFile; fileRef = A465F5171FF94C2733D17B2B /* AppModel+Forums.swift */; };
+		86264EE2175DAEC76F3EEC03 /* AppModel+Presence.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C1C48F1C64950197D9CA57 /* AppModel+Presence.swift */; };
 		86FEC0F3C6D52A33C217F0BF /* WaddleBrandMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CF073AF9151BD0F0DC15F2 /* WaddleBrandMark.swift */; };
-		907FB51F14C7A7A7109AD5ED /* ChatWorkspace+Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6138EAE8FF405FAF6FDF9FD4 /* ChatWorkspace+Conversation.swift */; };
+		8CF950EE6C9B8C9D1D6E8F11 /* AppModel+Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FE8546E72B5DAA1431FC060 /* AppModel+Auth.swift */; };
 		908D61E5D7DB47674BDBB209 /* waddle_xmpp_client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908AA7A66AF0FE4F0F8A2956 /* waddle_xmpp_client.swift */; };
+		90C4104724CFB9AA68C7E747 /* ChatWorkspace+MemberPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29683F4FA496C6EB0C2991DB /* ChatWorkspace+MemberPanes.swift */; };
 		91797CB69942F5789EA7861B /* ChatMessageRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA67EE9573142F678C48033C /* ChatMessageRowView.swift */; };
+		91C72034EEAAA37B6AA30879 /* ChatWorkspace+DesktopRails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80895ECBA806DF0F9BC473E5 /* ChatWorkspace+DesktopRails.swift */; };
+		94A40CAAF331DBF7BA7477A7 /* AppModel+Pep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A65D76F019E05DC18EC55F62 /* AppModel+Pep.swift */; };
 		952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
 		95779CB37B6FD94B047ECD8E /* WaddleBrandMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CF073AF9151BD0F0DC15F2 /* WaddleBrandMark.swift */; };
 		95CE93BC36F8321BEBCF160F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3F58BCC39D30A86E52EFE92E /* Assets.xcassets */; };
-		96E0C239002734D322E88155 /* ChatWorkspace+DesktopRails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1132043955ADB592097530 /* ChatWorkspace+DesktopRails.swift */; };
 		98E59D225AE733A3D68BF8A2 /* ChatMessageAttachmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D343E94B968E6D50B60DCCB /* ChatMessageAttachmentsView.swift */; };
 		9D3D28185ABDF74CD4813145 /* WaddleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6469BF26A54A374566C70E /* WaddleTheme.swift */; };
-		A0130FB63053C32658495B1B /* AppModel+Members.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B2C76523BD172C107EC3E4 /* AppModel+Members.swift */; };
-		A26921B4C71A8ECAAD2ED99A /* AppModel+Spaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C32A01CE1A43CC787514CC /* AppModel+Spaces.swift */; };
+		9D6BF1870B5854DF83DE376E /* AppModel+Presence.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C1C48F1C64950197D9CA57 /* AppModel+Presence.swift */; };
+		A049F00AD3BBEF118F5E2B24 /* AppModel+Spaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB48C7D584C8CE12DDAFD831 /* AppModel+Spaces.swift */; };
+		A6046C51E05F5B6CBDA0BF8C /* AppModel+Xmpp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6172918FD90E800835635621 /* AppModel+Xmpp.swift */; };
+		A74276D58335D1F48A6167BB /* AppModelXMPPLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7AE57C41B0341418489060F /* AppModelXMPPLifecycleTests.swift */; };
 		A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B926355CB1B32289C011C9C4 /* APIModels.swift */; };
 		AADDD318B323C17E9A30572E /* RustXmppClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */; };
 		AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1D7F0578FED187C1011D0F /* AppConfig.swift */; };
+		AF5BC1D0C56DA320AE18775B /* AppModel+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C118621CE674C479A11F77B /* AppModel+Push.swift */; };
 		B118A694DCAA315268DB511C /* ChatDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FD8BBA9FE130679024113ED /* ChatDomain.swift */; };
 		B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C551551F6E346F2CF6447 /* WaddleApp.swift */; };
-		B3680EDFEA033EE86577AB5F /* ChatWorkspace+Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CEF6E9A2BF6346A3E6162F /* ChatWorkspace+Sidebar.swift */; };
+		B39459AFA4863CDFCBC3AF6C /* NativeXMPPEventPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB20638C10E8F1855EE08 /* NativeXMPPEventPump.swift */; };
+		B485DE4BE2F3DD403D6910A8 /* AppModel+Pep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A65D76F019E05DC18EC55F62 /* AppModel+Pep.swift */; };
 		B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
 		BA278173B3139E461E19A93D /* ChatThreadPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10A958D21BF761F21A2DB67 /* ChatThreadPanelView.swift */; };
 		BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA49C7EBB1F4B7819123A37B /* ContentView.swift */; };
 		BC01A7DBB6D2A8044D0D0742 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F6B3902108DE9EA61D159F /* ChatStore.swift */; };
-		BF1837B84C0E275B595315FF /* ChatWorkspace+Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63CEF6E9A2BF6346A3E6162F /* ChatWorkspace+Sidebar.swift */; };
+		BF2934882A4FFEA4EC3D4812 /* AppModel+Forums.swift in Sources */ = {isa = PBXBuildFile; fileRef = A465F5171FF94C2733D17B2B /* AppModel+Forums.swift */; };
 		C4EE6490B6F28BB10F21F518 /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E26750225CD9947058913ED2 /* ChatComposerView.swift */; };
-		C8175C748AF63F4EA7601F62 /* AppModel+Dms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0762ED10BF042DAFE3122902 /* AppModel+Dms.swift */; };
-		C997928D9D85C85F9E02FEDF /* AppModel+Rooms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E6F448DE87043FA6BECA4AC /* AppModel+Rooms.swift */; };
+		C9D5E37CEBC17FB691E9719F /* AppModel+Push.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C118621CE674C479A11F77B /* AppModel+Push.swift */; };
 		CACEFE58E7C01719B44E423F /* ChatWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */; };
-		CDAF28646CEBD8FC0E931AB5 /* AppModel+Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765B2594E8C5C2AD215A8B79 /* AppModel+Timeline.swift */; };
+		CC666D160188EA2E63E1F97F /* AppModel+Members.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A3B4A301C1DEEA91EA5B1B1 /* AppModel+Members.swift */; };
 		CEEC3D09EF4B485C76B73465 /* WaddleXmppClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */; };
-		D002FAF3E5F3CDC360BD91B6 /* AppModel+Timeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765B2594E8C5C2AD215A8B79 /* AppModel+Timeline.swift */; };
 		D0706A2C0B43E8AF1A39C2E3 /* ChatAttachmentImporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64947445E7D21E40639C25F /* ChatAttachmentImporting.swift */; };
+		D1A3DA9C01F71A625D7EC843 /* ChatWorkspace+Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC49BF06ACD87810BA9C307 /* ChatWorkspace+Conversation.swift */; };
 		D3CE790EDCA7135890F6973F /* ChatForumViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D253DC246FAF7D565B2B2FF1 /* ChatForumViews.swift */; };
-		D8F861FD32715D8BFA0C29CC /* AppModel+Xmpp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18BEDB1891015CB14609C8BC /* AppModel+Xmpp.swift */; };
+		D5481FD6F8F0B0626E0D58B5 /* RustXmppClientMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8FDA660689CBBFBE3DDBAF3 /* RustXmppClientMappingTests.swift */; };
 		DA4184900FE04346FB2C7848 /* ChatConversationHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB966AF4D24740E8DBE7B496 /* ChatConversationHeaderView.swift */; };
-		DC2C1D179C0E1A9D50486242 /* ChatWorkspace+MemberPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39EF22B7B3152D8B40046055 /* ChatWorkspace+MemberPanes.swift */; };
+		DC0E6A32D2CBA9EC4BB1DF54 /* RustXmppClientLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B42083732F5C0A7E3774974 /* RustXmppClientLifecycleTests.swift */; };
 		E847755860C0F686D15CBF73 /* ChatWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */; };
 		E91E30BBD7BB3A0E659C9063 /* ChatForumViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D253DC246FAF7D565B2B2FF1 /* ChatForumViews.swift */; };
-		E97D115A39644DEB22851515 /* AppModel+Spaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C32A01CE1A43CC787514CC /* AppModel+Spaces.swift */; };
+		EC2555D3A5F60F9D7D685D90 /* ChatWorkspace+MemberPanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29683F4FA496C6EB0C2991DB /* ChatWorkspace+MemberPanes.swift */; };
 		EE90E70CC694E196712418C8 /* MobileSlackShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */; };
+		F067035B8568267EF4DF38CD /* AppModel+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = F459AC24E2951C3AC7DD8453 /* AppModel+Messaging.swift */; };
 		F3E86D2AEC397F10085A9328 /* ChatAttachmentImporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64947445E7D21E40639C25F /* ChatAttachmentImporting.swift */; };
 		F788531E1F749089F4FA2EA4 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F6B3902108DE9EA61D159F /* ChatStore.swift */; };
 		FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0991F6A051C48636FE46B67 /* WaddleAPIClient.swift */; };
 		FE47DA6119A74A2C3C9DE282 /* WaddleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A6469BF26A54A374566C70E /* WaddleTheme.swift */; };
 		FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */; };
 		FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C171856D11E83233F15879 /* XMPPTypes.swift */; };
+		FF79CAA72D48D5758CD5C76D /* AppModel+Dms.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1A578611C138B726273A8C /* AppModel+Dms.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		C408A31579A34F4127DFDED2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FE980CAE39C06CFDF0A4F81F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D1537FCAB55E21CDA0F3F836;
+			remoteInfo = "Waddle-macOS";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
-		00B86E6CAB470B7E63863CF1 /* AppModel+Presence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Presence.swift"; sourceTree = "<group>"; };
 		04CF073AF9151BD0F0DC15F2 /* WaddleBrandMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleBrandMark.swift; sourceTree = "<group>"; };
-		0762ED10BF042DAFE3122902 /* AppModel+Dms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Dms.swift"; sourceTree = "<group>"; };
 		07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaddleXmppClientFFI.xcframework; path = "$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework"; sourceTree = "<group>"; };
 		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
+		09D16EDD45D6DD935D6639DE /* AppModel+Avatars.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Avatars.swift"; sourceTree = "<group>"; };
 		0D343E94B968E6D50B60DCCB /* ChatMessageAttachmentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessageAttachmentsView.swift; sourceTree = "<group>"; };
-		14881457B1DDBDD0938C7EFF /* AppModel+Avatars.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Avatars.swift"; sourceTree = "<group>"; };
-		18BEDB1891015CB14609C8BC /* AppModel+Xmpp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Xmpp.swift"; sourceTree = "<group>"; };
+		0FB384D1B89B4DBA9F23E1B1 /* Waddle-macOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Waddle-macOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A6469BF26A54A374566C70E /* WaddleTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleTheme.swift; sourceTree = "<group>"; };
 		1C4757B3879EE7930D703759 /* GlassEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassEffect.swift; sourceTree = "<group>"; };
 		22F6B3902108DE9EA61D159F /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
-		39EF22B7B3152D8B40046055 /* ChatWorkspace+MemberPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+MemberPanes.swift"; sourceTree = "<group>"; };
+		29683F4FA496C6EB0C2991DB /* ChatWorkspace+MemberPanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+MemberPanes.swift"; sourceTree = "<group>"; };
+		2C118621CE674C479A11F77B /* AppModel+Push.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Push.swift"; sourceTree = "<group>"; };
+		3CC49BF06ACD87810BA9C307 /* ChatWorkspace+Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+Conversation.swift"; sourceTree = "<group>"; };
 		3F130C1A9F074177FBCE9C0A /* ChatDirectMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDirectMessagesView.swift; sourceTree = "<group>"; };
 		3F58BCC39D30A86E52EFE92E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		3FE8546E72B5DAA1431FC060 /* AppModel+Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Auth.swift"; sourceTree = "<group>"; };
 		46C171856D11E83233F15879 /* XMPPTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPTypes.swift; sourceTree = "<group>"; };
-		4E1132043955ADB592097530 /* ChatWorkspace+DesktopRails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+DesktopRails.swift"; sourceTree = "<group>"; };
-		4F3D954E80CB9B7C5596B76F /* AppModel+Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Auth.swift"; sourceTree = "<group>"; };
-		52B2C76523BD172C107EC3E4 /* AppModel+Members.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Members.swift"; sourceTree = "<group>"; };
 		52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatWorkspaceView.swift; sourceTree = "<group>"; };
-		5E6F448DE87043FA6BECA4AC /* AppModel+Rooms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Rooms.swift"; sourceTree = "<group>"; };
-		6138EAE8FF405FAF6FDF9FD4 /* ChatWorkspace+Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+Conversation.swift"; sourceTree = "<group>"; };
-		63CEF6E9A2BF6346A3E6162F /* ChatWorkspace+Sidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+Sidebar.swift"; sourceTree = "<group>"; };
+		6172918FD90E800835635621 /* AppModel+Xmpp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Xmpp.swift"; sourceTree = "<group>"; };
+		6B42083732F5C0A7E3774974 /* RustXmppClientLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustXmppClientLifecycleTests.swift; sourceTree = "<group>"; };
 		6C1D7F0578FED187C1011D0F /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		740E8A5B3120CA378693962A /* ChatWorkspace+Sidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+Sidebar.swift"; sourceTree = "<group>"; };
 		759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopAuthenticatedShell.swift; sourceTree = "<group>"; };
-		765B2594E8C5C2AD215A8B79 /* AppModel+Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Timeline.swift"; sourceTree = "<group>"; };
 		7F37048A8D96C01F7111FED0 /* Waddle-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Waddle-Bridging-Header.h"; sourceTree = "<group>"; };
 		7F44FC6C9E8413C24C98EB1C /* ChatMemberListSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMemberListSection.swift; sourceTree = "<group>"; };
 		7FD8BBA9FE130679024113ED /* ChatDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDomain.swift; sourceTree = "<group>"; };
-		82E1BD962A4AB05751E5EE9C /* AppModel+Push.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Push.swift"; sourceTree = "<group>"; };
+		80895ECBA806DF0F9BC473E5 /* ChatWorkspace+DesktopRails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatWorkspace+DesktopRails.swift"; sourceTree = "<group>"; };
+		8A3B4A301C1DEEA91EA5B1B1 /* AppModel+Members.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Members.swift"; sourceTree = "<group>"; };
 		8AB1A681F60A49913FEC6A38 /* waddle_xmpp_clientFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = waddle_xmpp_clientFFI.modulemap; sourceTree = "<group>"; };
+		8C0E4F4865306CD28D5FEAD1 /* AppModel+Rooms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Rooms.swift"; sourceTree = "<group>"; };
 		908AA7A66AF0FE4F0F8A2956 /* waddle_xmpp_client.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = waddle_xmpp_client.swift; sourceTree = "<group>"; };
 		9B932B485C4F2422B596281A /* ChatGifPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGifPickerView.swift; sourceTree = "<group>"; };
 		9C80129E5804AACAFEF21770 /* ChatUtilityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatUtilityViews.swift; sourceTree = "<group>"; };
-		A8CA088244BA2A0AEFBB9780 /* AppModel+Pep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Pep.swift"; sourceTree = "<group>"; };
-		A9C32A01CE1A43CC787514CC /* AppModel+Spaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Spaces.swift"; sourceTree = "<group>"; };
+		A465F5171FF94C2733D17B2B /* AppModel+Forums.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Forums.swift"; sourceTree = "<group>"; };
+		A65D76F019E05DC18EC55F62 /* AppModel+Pep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Pep.swift"; sourceTree = "<group>"; };
+		A7AE57C41B0341418489060F /* AppModelXMPPLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelXMPPLifecycleTests.swift; sourceTree = "<group>"; };
+		AA1A578611C138B726273A8C /* AppModel+Dms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Dms.swift"; sourceTree = "<group>"; };
 		B0F0DAABE98F2E7FF1796DEB /* MobileSlackShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSlackShellView.swift; sourceTree = "<group>"; };
 		B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		B85CC502AD9FFBE6369BF0B1 /* XMPPClientLifecycleController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XMPPClientLifecycleController.swift; sourceTree = "<group>"; };
 		B8EFDBE554A7520A804F94EF /* waddle_xmpp_clientFFI.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = waddle_xmpp_clientFFI.h; sourceTree = "<group>"; };
 		B926355CB1B32289C011C9C4 /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
 		BB8C551551F6E346F2CF6447 /* WaddleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaddleApp.swift; sourceTree = "<group>"; };
@@ -153,16 +173,20 @@
 		C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Waddle-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Waddle-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D253DC246FAF7D565B2B2FF1 /* ChatForumViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatForumViews.swift; sourceTree = "<group>"; };
+		D3C1C48F1C64950197D9CA57 /* AppModel+Presence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Presence.swift"; sourceTree = "<group>"; };
 		D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustXmppClient.swift; sourceTree = "<group>"; };
+		D8FDA660689CBBFBE3DDBAF3 /* RustXmppClientMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustXmppClientMappingTests.swift; sourceTree = "<group>"; };
 		DB966AF4D24740E8DBE7B496 /* ChatConversationHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatConversationHeaderView.swift; sourceTree = "<group>"; };
+		DDB9196F1FD32A777519966E /* AppModel+Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Timeline.swift"; sourceTree = "<group>"; };
 		E15A49153C661694F01E637E /* ChatTimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTimelineView.swift; sourceTree = "<group>"; };
 		E26750225CD9947058913ED2 /* ChatComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerView.swift; sourceTree = "<group>"; };
 		E64947445E7D21E40639C25F /* ChatAttachmentImporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAttachmentImporting.swift; sourceTree = "<group>"; };
-		E72EE2985A44CB93ED0906F6 /* AppModel+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Upload.swift"; sourceTree = "<group>"; };
-		ED576A52D4C4429D07C9846B /* AppModel+Forums.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Forums.swift"; sourceTree = "<group>"; };
+		EB48C7D584C8CE12DDAFD831 /* AppModel+Spaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Spaces.swift"; sourceTree = "<group>"; };
+		ECEBB20638C10E8F1855EE08 /* NativeXMPPEventPump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeXMPPEventPump.swift; sourceTree = "<group>"; };
 		F10A958D21BF761F21A2DB67 /* ChatThreadPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatThreadPanelView.swift; sourceTree = "<group>"; };
+		F3145ED182AEC92ACBC29C3A /* AppModel+Upload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Upload.swift"; sourceTree = "<group>"; };
+		F459AC24E2951C3AC7DD8453 /* AppModel+Messaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Messaging.swift"; sourceTree = "<group>"; };
 		F81C25EB811EDFB67DAF0188 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
-		F956BBA6FC46C19A2E8E65C1 /* AppModel+Messaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Messaging.swift"; sourceTree = "<group>"; };
 		FA49C7EBB1F4B7819123A37B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		FA67EE9573142F678C48033C /* ChatMessageRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessageRowView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -173,6 +197,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				271EE65F526E62C618FF2ED5 /* WaddleXmppClientFFI.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8E627D66878CF4027704BC75 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0CFD4E133AFE5DB97B03A448 /* WaddleXmppClientFFI.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -201,6 +233,7 @@
 			isa = PBXGroup;
 			children = (
 				93D0F97B0F84D4D2BD82FEAB /* Waddle */,
+				51C5F65E4C0CB96418D0AB10 /* WaddleTests */,
 				A545FD699738D349B252F4AF /* Frameworks */,
 				4FAB2C42DF256B6DC1D6F0F2 /* Products */,
 			);
@@ -210,21 +243,21 @@
 			isa = PBXGroup;
 			children = (
 				6C1D7F0578FED187C1011D0F /* AppConfig.swift */,
-				4F3D954E80CB9B7C5596B76F /* AppModel+Auth.swift */,
-				14881457B1DDBDD0938C7EFF /* AppModel+Avatars.swift */,
-				0762ED10BF042DAFE3122902 /* AppModel+Dms.swift */,
-				ED576A52D4C4429D07C9846B /* AppModel+Forums.swift */,
-				52B2C76523BD172C107EC3E4 /* AppModel+Members.swift */,
-				F956BBA6FC46C19A2E8E65C1 /* AppModel+Messaging.swift */,
-				A8CA088244BA2A0AEFBB9780 /* AppModel+Pep.swift */,
-				00B86E6CAB470B7E63863CF1 /* AppModel+Presence.swift */,
-				82E1BD962A4AB05751E5EE9C /* AppModel+Push.swift */,
-				5E6F448DE87043FA6BECA4AC /* AppModel+Rooms.swift */,
-				A9C32A01CE1A43CC787514CC /* AppModel+Spaces.swift */,
-				765B2594E8C5C2AD215A8B79 /* AppModel+Timeline.swift */,
-				E72EE2985A44CB93ED0906F6 /* AppModel+Upload.swift */,
-				18BEDB1891015CB14609C8BC /* AppModel+Xmpp.swift */,
 				B14BE1CDDD0A4E0446A0D58D /* AppModel.swift */,
+				3FE8546E72B5DAA1431FC060 /* AppModel+Auth.swift */,
+				09D16EDD45D6DD935D6639DE /* AppModel+Avatars.swift */,
+				AA1A578611C138B726273A8C /* AppModel+Dms.swift */,
+				A465F5171FF94C2733D17B2B /* AppModel+Forums.swift */,
+				8A3B4A301C1DEEA91EA5B1B1 /* AppModel+Members.swift */,
+				F459AC24E2951C3AC7DD8453 /* AppModel+Messaging.swift */,
+				A65D76F019E05DC18EC55F62 /* AppModel+Pep.swift */,
+				D3C1C48F1C64950197D9CA57 /* AppModel+Presence.swift */,
+				2C118621CE674C479A11F77B /* AppModel+Push.swift */,
+				8C0E4F4865306CD28D5FEAD1 /* AppModel+Rooms.swift */,
+				EB48C7D584C8CE12DDAFD831 /* AppModel+Spaces.swift */,
+				DDB9196F1FD32A777519966E /* AppModel+Timeline.swift */,
+				F3145ED182AEC92ACBC29C3A /* AppModel+Upload.swift */,
+				6172918FD90E800835635621 /* AppModel+Xmpp.swift */,
 				FA49C7EBB1F4B7819123A37B /* ContentView.swift */,
 				759562CCEFAFFE58FE58FE57 /* DesktopAuthenticatedShell.swift */,
 				1C4757B3879EE7930D703759 /* GlassEffect.swift */,
@@ -240,8 +273,19 @@
 			children = (
 				CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */,
 				C94C2AEC9BB46D8AB65F1CD6 /* Waddle-macOS.app */,
+				0FB384D1B89B4DBA9F23E1B1 /* Waddle-macOSTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		51C5F65E4C0CB96418D0AB10 /* WaddleTests */ = {
+			isa = PBXGroup;
+			children = (
+				A7AE57C41B0341418489060F /* AppModelXMPPLifecycleTests.swift */,
+				6B42083732F5C0A7E3774974 /* RustXmppClientLifecycleTests.swift */,
+				D8FDA660689CBBFBE3DDBAF3 /* RustXmppClientMappingTests.swift */,
+			);
+			path = WaddleTests;
 			sourceTree = "<group>";
 		};
 		5280D8F4821B4B5C061850EB /* Network */ = {
@@ -255,6 +299,7 @@
 		7825BCE26150B6DECD94AC65 /* XMPP */ = {
 			isa = PBXGroup;
 			children = (
+				B85CC502AD9FFBE6369BF0B1 /* XMPPClientLifecycleController.swift */,
 				46C171856D11E83233F15879 /* XMPPTypes.swift */,
 			);
 			path = XMPP;
@@ -301,10 +346,10 @@
 				F10A958D21BF761F21A2DB67 /* ChatThreadPanelView.swift */,
 				E15A49153C661694F01E637E /* ChatTimelineView.swift */,
 				9C80129E5804AACAFEF21770 /* ChatUtilityViews.swift */,
-				6138EAE8FF405FAF6FDF9FD4 /* ChatWorkspace+Conversation.swift */,
-				4E1132043955ADB592097530 /* ChatWorkspace+DesktopRails.swift */,
-				39EF22B7B3152D8B40046055 /* ChatWorkspace+MemberPanes.swift */,
-				63CEF6E9A2BF6346A3E6162F /* ChatWorkspace+Sidebar.swift */,
+				3CC49BF06ACD87810BA9C307 /* ChatWorkspace+Conversation.swift */,
+				80895ECBA806DF0F9BC473E5 /* ChatWorkspace+DesktopRails.swift */,
+				29683F4FA496C6EB0C2991DB /* ChatWorkspace+MemberPanes.swift */,
+				740E8A5B3120CA378693962A /* ChatWorkspace+Sidebar.swift */,
 				52C6274C7DC0B87C611DABD3 /* ChatWorkspaceView.swift */,
 				1A6469BF26A54A374566C70E /* WaddleTheme.swift */,
 			);
@@ -315,6 +360,7 @@
 			isa = PBXGroup;
 			children = (
 				097A7976BC4F84384A7159AB /* module.modulemap */,
+				ECEBB20638C10E8F1855EE08 /* NativeXMPPEventPump.swift */,
 				D8F4568A880738E76CC5AEDE /* RustXmppClient.swift */,
 				1E07B9D645D31DD942C15D3D /* Generated */,
 			);
@@ -351,6 +397,25 @@
 			productName = "Waddle-iOS";
 			productReference = CF3A01434FBAD0F850F5C623 /* Waddle-iOS.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B857F511718D20FDCA6A04E2 /* Waddle-macOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3F5B1046ABBDA3ACA92609CD /* Build configuration list for PBXNativeTarget "Waddle-macOSTests" */;
+			buildPhases = (
+				13154F389AEAFEAF950CBD7D /* Sources */,
+				8E627D66878CF4027704BC75 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				804AA203099A923570455463 /* PBXTargetDependency */,
+			);
+			name = "Waddle-macOSTests";
+			packageProductDependencies = (
+			);
+			productName = "Waddle-macOSTests";
+			productReference = 0FB384D1B89B4DBA9F23E1B1 /* Waddle-macOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */ = {
 			isa = PBXNativeTarget;
@@ -399,6 +464,7 @@
 			targets = (
 				559E3F574767EB98D57EF138 /* Waddle-iOS */,
 				D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */,
+				B857F511718D20FDCA6A04E2 /* Waddle-macOSTests */,
 			);
 		};
 /* End PBXProject section */
@@ -469,20 +535,20 @@
 			files = (
 				A9217F14ABF56184314B9FC2 /* APIModels.swift in Sources */,
 				AD2508D306961CE0B0556E6F /* AppConfig.swift in Sources */,
-				219D49F1C48BCED5209E0B34 /* AppModel+Auth.swift in Sources */,
-				0A700228353B2111D98C8CD6 /* AppModel+Avatars.swift in Sources */,
-				7BD27BE4A96A675303D70D83 /* AppModel+Dms.swift in Sources */,
-				2BF46D239FDF0F9C620EC0BA /* AppModel+Forums.swift in Sources */,
-				A0130FB63053C32658495B1B /* AppModel+Members.swift in Sources */,
-				7E994EA862A05381A6B165AE /* AppModel+Messaging.swift in Sources */,
-				4194E0697B03161E6D66F254 /* AppModel+Pep.swift in Sources */,
-				4B76190E6084E840C409EDB1 /* AppModel+Presence.swift in Sources */,
-				2B1901C0FADCBEAB64D1F4BF /* AppModel+Push.swift in Sources */,
-				7313115A451873A9653A0E1D /* AppModel+Rooms.swift in Sources */,
-				A26921B4C71A8ECAAD2ED99A /* AppModel+Spaces.swift in Sources */,
-				CDAF28646CEBD8FC0E931AB5 /* AppModel+Timeline.swift in Sources */,
-				0FC3ED06AA97E4741E5E2AA3 /* AppModel+Upload.swift in Sources */,
-				30DC24DBCA821A51AA186968 /* AppModel+Xmpp.swift in Sources */,
+				32474E3188A701E6E63AB6E1 /* AppModel+Auth.swift in Sources */,
+				79944C2CF3AF50531B141E28 /* AppModel+Avatars.swift in Sources */,
+				25CA7F0E4494D5A6155100F6 /* AppModel+Dms.swift in Sources */,
+				BF2934882A4FFEA4EC3D4812 /* AppModel+Forums.swift in Sources */,
+				CC666D160188EA2E63E1F97F /* AppModel+Members.swift in Sources */,
+				F067035B8568267EF4DF38CD /* AppModel+Messaging.swift in Sources */,
+				94A40CAAF331DBF7BA7477A7 /* AppModel+Pep.swift in Sources */,
+				86264EE2175DAEC76F3EEC03 /* AppModel+Presence.swift in Sources */,
+				C9D5E37CEBC17FB691E9719F /* AppModel+Push.swift in Sources */,
+				295332FF4FB3639237459B2B /* AppModel+Rooms.swift in Sources */,
+				A049F00AD3BBEF118F5E2B24 /* AppModel+Spaces.swift in Sources */,
+				5F27BC7E17559722DF2D679A /* AppModel+Timeline.swift in Sources */,
+				4C79F203C082D378A65912CF /* AppModel+Upload.swift in Sources */,
+				A6046C51E05F5B6CBDA0BF8C /* AppModel+Xmpp.swift in Sources */,
 				FE6C92072DD8137C309A13E4 /* AppModel.swift in Sources */,
 				F3E86D2AEC397F10085A9328 /* ChatAttachmentImporting.swift in Sources */,
 				04F797384909DA793EB0168D /* ChatComposerView.swift in Sources */,
@@ -498,22 +564,34 @@
 				BA278173B3139E461E19A93D /* ChatThreadPanelView.swift in Sources */,
 				0751796EA011BE3F6C03EF8B /* ChatTimelineView.swift in Sources */,
 				0469E84F6E0DECD046AB0D5C /* ChatUtilityViews.swift in Sources */,
-				907FB51F14C7A7A7109AD5ED /* ChatWorkspace+Conversation.swift in Sources */,
-				709A7129CF04C890B9ADC2AC /* ChatWorkspace+DesktopRails.swift in Sources */,
-				69855735E2332E085CBFDF1C /* ChatWorkspace+MemberPanes.swift in Sources */,
-				B3680EDFEA033EE86577AB5F /* ChatWorkspace+Sidebar.swift in Sources */,
+				D1A3DA9C01F71A625D7EC843 /* ChatWorkspace+Conversation.swift in Sources */,
+				91C72034EEAAA37B6AA30879 /* ChatWorkspace+DesktopRails.swift in Sources */,
+				EC2555D3A5F60F9D7D685D90 /* ChatWorkspace+MemberPanes.swift in Sources */,
+				7DF3394440E7265F922934B1 /* ChatWorkspace+Sidebar.swift in Sources */,
 				E847755860C0F686D15CBF73 /* ChatWorkspaceView.swift in Sources */,
 				BB7C898C97CF2C3B2940D9E6 /* ContentView.swift in Sources */,
 				5DCE4BD65CC3BF5AFA77E092 /* DesktopAuthenticatedShell.swift in Sources */,
 				14E929E4DEDCDCBE81012D3C /* GlassEffect.swift in Sources */,
 				5B1EF019D18ACB8C36BDD1E5 /* MobileSlackShellView.swift in Sources */,
+				79C051241DED49B9EC525540 /* NativeXMPPEventPump.swift in Sources */,
 				AADDD318B323C17E9A30572E /* RustXmppClient.swift in Sources */,
 				952A36D97F57B0631BDEEF1D /* WaddleAPIClient.swift in Sources */,
 				B34BDF3EFBEB5E5A683BA4A6 /* WaddleApp.swift in Sources */,
 				86FEC0F3C6D52A33C217F0BF /* WaddleBrandMark.swift in Sources */,
 				9D3D28185ABDF74CD4813145 /* WaddleTheme.swift in Sources */,
+				6B4574B3C30BBBF6E8CADE4D /* XMPPClientLifecycleController.swift in Sources */,
 				FEDC185BF46637465D5E47AD /* XMPPTypes.swift in Sources */,
 				7C10D162D5E9069717486492 /* waddle_xmpp_client.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		13154F389AEAFEAF950CBD7D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A74276D58335D1F48A6167BB /* AppModelXMPPLifecycleTests.swift in Sources */,
+				DC0E6A32D2CBA9EC4BB1DF54 /* RustXmppClientLifecycleTests.swift in Sources */,
+				D5481FD6F8F0B0626E0D58B5 /* RustXmppClientMappingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,20 +601,20 @@
 			files = (
 				56D9D4EA89E6E42D38741A6D /* APIModels.swift in Sources */,
 				1AD217140D76B9EA2F9293BC /* AppConfig.swift in Sources */,
-				6754D10606DD92F60C2DEB76 /* AppModel+Auth.swift in Sources */,
-				85D89E2CF7FAD18D5C1AA5E0 /* AppModel+Avatars.swift in Sources */,
-				C8175C748AF63F4EA7601F62 /* AppModel+Dms.swift in Sources */,
-				741F6C8BF2E5B60D50BEE21C /* AppModel+Forums.swift in Sources */,
-				08A450A916BDC7BA6DCDD066 /* AppModel+Members.swift in Sources */,
-				51637CF87CB2FB9CD7118BC9 /* AppModel+Messaging.swift in Sources */,
-				736AE8883DFDD064AD0B899D /* AppModel+Pep.swift in Sources */,
-				43988838A68913B2D421D129 /* AppModel+Presence.swift in Sources */,
-				32C63333F7918F87622A4421 /* AppModel+Push.swift in Sources */,
-				C997928D9D85C85F9E02FEDF /* AppModel+Rooms.swift in Sources */,
-				E97D115A39644DEB22851515 /* AppModel+Spaces.swift in Sources */,
-				D002FAF3E5F3CDC360BD91B6 /* AppModel+Timeline.swift in Sources */,
-				0EA286CE4707BE30AF0CB06E /* AppModel+Upload.swift in Sources */,
-				D8F861FD32715D8BFA0C29CC /* AppModel+Xmpp.swift in Sources */,
+				8CF950EE6C9B8C9D1D6E8F11 /* AppModel+Auth.swift in Sources */,
+				11DD33BEB40152741EC544E5 /* AppModel+Avatars.swift in Sources */,
+				FF79CAA72D48D5758CD5C76D /* AppModel+Dms.swift in Sources */,
+				8225E330864B5099FE950400 /* AppModel+Forums.swift in Sources */,
+				5AE3BA8F5AF4EB2CD7963F50 /* AppModel+Members.swift in Sources */,
+				4B3060866EE9413578867446 /* AppModel+Messaging.swift in Sources */,
+				B485DE4BE2F3DD403D6910A8 /* AppModel+Pep.swift in Sources */,
+				9D6BF1870B5854DF83DE376E /* AppModel+Presence.swift in Sources */,
+				AF5BC1D0C56DA320AE18775B /* AppModel+Push.swift in Sources */,
+				6E5054F56D3D09E015A158E0 /* AppModel+Rooms.swift in Sources */,
+				4447CD49621CD4961103A9F6 /* AppModel+Spaces.swift in Sources */,
+				6B8FCD7364DA83CD263BED87 /* AppModel+Timeline.swift in Sources */,
+				18641090E42AA0195F9F6A5E /* AppModel+Upload.swift in Sources */,
+				3A1585ADB7323AB1A8F8DBEB /* AppModel+Xmpp.swift in Sources */,
 				B60E8C9E29FA9849CE370118 /* AppModel.swift in Sources */,
 				D0706A2C0B43E8AF1A39C2E3 /* ChatAttachmentImporting.swift in Sources */,
 				C4EE6490B6F28BB10F21F518 /* ChatComposerView.swift in Sources */,
@@ -552,26 +630,36 @@
 				156766508455DE8302A6530D /* ChatThreadPanelView.swift in Sources */,
 				1362CD6ECF68745FF93E2C93 /* ChatTimelineView.swift in Sources */,
 				2FA957722EABFCD946B974DE /* ChatUtilityViews.swift in Sources */,
-				6B8CD87CEA3D13E470B99C37 /* ChatWorkspace+Conversation.swift in Sources */,
-				96E0C239002734D322E88155 /* ChatWorkspace+DesktopRails.swift in Sources */,
-				DC2C1D179C0E1A9D50486242 /* ChatWorkspace+MemberPanes.swift in Sources */,
-				BF1837B84C0E275B595315FF /* ChatWorkspace+Sidebar.swift in Sources */,
+				7D1FB7A4F813DC1B97F4C3BB /* ChatWorkspace+Conversation.swift in Sources */,
+				1903FD534D126810888E6D77 /* ChatWorkspace+DesktopRails.swift in Sources */,
+				90C4104724CFB9AA68C7E747 /* ChatWorkspace+MemberPanes.swift in Sources */,
+				385DAA78D6EC4829B3CD92C8 /* ChatWorkspace+Sidebar.swift in Sources */,
 				CACEFE58E7C01719B44E423F /* ChatWorkspaceView.swift in Sources */,
 				406DC4AC6FF7302FACDF1AF2 /* ContentView.swift in Sources */,
 				18B2CC29EA7CEDAB928B5A8B /* DesktopAuthenticatedShell.swift in Sources */,
 				525DC03E58327171AF3149D1 /* GlassEffect.swift in Sources */,
 				EE90E70CC694E196712418C8 /* MobileSlackShellView.swift in Sources */,
+				B39459AFA4863CDFCBC3AF6C /* NativeXMPPEventPump.swift in Sources */,
 				314AE99E95625820FB23FD38 /* RustXmppClient.swift in Sources */,
 				FB00F726863003F701E75D9B /* WaddleAPIClient.swift in Sources */,
 				6788BA30B6D638AA1394B525 /* WaddleApp.swift in Sources */,
 				95779CB37B6FD94B047ECD8E /* WaddleBrandMark.swift in Sources */,
 				FE47DA6119A74A2C3C9DE282 /* WaddleTheme.swift in Sources */,
+				595B48AC6EFC9BF26C12537F /* XMPPClientLifecycleController.swift in Sources */,
 				45AC51B21194DC6C805BF2A3 /* XMPPTypes.swift in Sources */,
 				908D61E5D7DB47674BDBB209 /* waddle_xmpp_client.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		804AA203099A923570455463 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D1537FCAB55E21CDA0F3F836 /* Waddle-macOS */;
+			targetProxy = C408A31579A34F4127DFDED2 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		04A956434388CD9EEBF37097 /* Debug */ = {
@@ -643,6 +731,30 @@
 			};
 			name = Debug;
 		};
+		289B308EC7D638C972951B9D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Generated\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MODULEMAP_FILE = "$(SRCROOT)/Waddle/RustClient/module.modulemap";
+				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Waddle-macOS.app/Contents/MacOS/Waddle-macOS";
+			};
+			name = Release;
+		};
 		341A1DA1BDAD631FA9685222 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -696,6 +808,30 @@
 				PRODUCT_NAME = "Waddle-macOS";
 				SDKROOT = macosx;
 				SWIFT_OBJC_BRIDGING_HEADER = "Waddle/Waddle-Bridging-Header.h";
+			};
+			name = Debug;
+		};
+		8ED1E82C954F31A35DD2F63F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Generated\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MODULEMAP_FILE = "$(SRCROOT)/Waddle/RustClient/module.modulemap";
+				PRODUCT_BUNDLE_IDENTIFIER = p4x.waddle.social.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Waddle-macOS.app/Contents/MacOS/Waddle-macOS";
 			};
 			name = Debug;
 		};
@@ -820,6 +956,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3F5B1046ABBDA3ACA92609CD /* Build configuration list for PBXNativeTarget "Waddle-macOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8ED1E82C954F31A35DD2F63F /* Debug */,
+				289B308EC7D638C972951B9D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		73CE5296D52B52FD3964813C /* Build configuration list for PBXProject "Waddle" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -1,17 +1,40 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { EventEmitter } from "events";
 import { ref } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
-import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
+import { BrowserXmppClient as BrowserXmppClientBase, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
-import { committedOrThrow, MemoryDurableOutboundStore } from "../src/lib/outbound-durable-store";
+import { committedOrThrow, MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
-import type { ResumePersistence, XmppResumeEntry } from "../src/lib/xmpp/resume-persistence";
+import {
+  nullResumePersistence,
+  type XmppResumeEntry,
+} from "../src/lib/xmpp/resume-persistence";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
+import {
+  noopWasmClientCallbacks,
+  WasmClientCallbackDouble,
+} from "./helpers/wasm-client-callbacks";
+
+const createdClients = new Set<BrowserXmppClientBase>();
+
+class BrowserXmppClient extends BrowserXmppClientBase {
+  constructor(...args: ConstructorParameters<typeof BrowserXmppClientBase>) {
+    const [clientSession, options] = args;
+    super(clientSession, {
+      ...options,
+      durableRuntimeStore: options?.durableRuntimeStore
+        ?? new MemoryDurableOutboundStore(),
+    });
+    (this as unknown as {
+      outboundQueue: { beginConnectionGeneration(generation: number): number };
+    }).outboundQueue.beginConnectionGeneration(0);
+    createdClients.add(this);
+  }
+}
 
 function messageResumeEntry(id: string): XmppResumeEntry {
   return {
@@ -42,6 +65,11 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function wasmSent(stanzaId: string | undefined) {
+  if (!stanzaId) throw new Error("test send is missing stanza_id");
+  return { kind: "sent" as const, stanza_id: stanzaId };
 }
 
 function createStorageMock() {
@@ -120,6 +148,12 @@ async function settleReconnectCatchup(turns = 6): Promise<void> {
   for (let i = 0; i < turns; i += 1) await Promise.resolve();
 }
 
+async function settleClientLifecycle(): Promise<void> {
+  await Promise.all(
+    [...createdClients].map((client) => client.whenLifecycleQuiescent()),
+  );
+}
+
 async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void> {
   await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
 }
@@ -147,7 +181,23 @@ beforeEach(() => {
   $dmCallOutcomeAnchor.set(null);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all([...createdClients].map(async (client) => {
+    const internal = client as unknown as {
+      clearReconnectTimer?: () => void;
+      stopSelfPing?: () => void;
+      disarmOnlineRecovery?: () => void;
+      xmpp: null;
+      connectEpoch: number;
+    };
+    internal.clearReconnectTimer?.();
+    internal.stopSelfPing?.();
+    internal.disarmOnlineRecovery?.();
+    internal.xmpp = null;
+    internal.connectEpoch = 0;
+    await client.dispose();
+  }));
+  createdClients.clear();
   clearDmCallActivities();
   $dmCallOutcomeAnchor.set(null);
   localStorage.clear();
@@ -343,7 +393,7 @@ describe("client send readiness", () => {
   });
 
   test("room sends immediately when the room is ready", async () => {
-    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
+    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)) };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     // Pre-set the ready state: sendGroupMessage takes the fast path
@@ -391,7 +441,7 @@ describe("client send readiness", () => {
       send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => {
         (client as unknown as { handleMessageAck: (id: string) => void })
           .handleMessageAck(opts.stanza_id!);
-        return opts.stanza_id;
+        return wasmSent(opts.stanza_id);
       }),
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
@@ -418,8 +468,8 @@ describe("client send readiness", () => {
         attempt += 1;
         if (attempt === 1) throw new Error("room socket unavailable");
         if (attempt === 2) return null;
-        if (attempt === 3) return "wrong-live-room-id";
-        return opts.stanza_id;
+        if (attempt === 3) return wasmSent("wrong-live-room-id");
+        return wasmSent(opts.stanza_id);
       }),
     };
     const client = new BrowserXmppClient(session());
@@ -494,7 +544,7 @@ describe("client send readiness", () => {
     // XEP-0201 thread create / thread reply payloads are bodyless. The
     // browser client wrapper must not short-circuit them; otherwise standard
     // MUC threads can never leave the browser through the regular send path.
-    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
+    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)) };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     (client as unknown as {
@@ -555,7 +605,9 @@ describe("client send readiness", () => {
       "test-seed-room-replay",
       await durableStore.persistReady("alice@example.com", queued),
     );
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
     await waitForOutboundHydration(client);
     const statuses: Array<[string, "queued" | "sending"]> = [];
     client.setQueuedMessageStatusHandler((id, status) => statuses.push([id, status]));
@@ -581,6 +633,7 @@ describe("client send readiness", () => {
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -618,6 +671,7 @@ describe("client send readiness", () => {
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -689,6 +743,7 @@ describe("client send readiness", () => {
       error_type?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -715,9 +770,12 @@ describe("client send readiness", () => {
     expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
     expect(errors).toHaveLength(1);
     expect(errors[0].kind).toBe("muc-join");
-    expect(errors[0].condition).toBe("registration-required");
-    expect(errors[0].errorType).toBe("auth");
-    expect(errors[0].roomLocalpart).toBe("c1");
+    expect(errors[0]?.kind === "muc-join" ? errors[0].condition : undefined)
+      .toBe("registration-required");
+    expect(errors[0]?.kind === "muc-join" ? errors[0].errorType : undefined)
+      .toBe("auth");
+    expect(errors[0]?.kind === "muc-join" ? errors[0].roomLocalpart : undefined)
+      .toBe("c1");
     expect(staleJoinVisibleAtEmit).toEqual([false]);
   });
 
@@ -730,6 +788,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -768,6 +827,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -803,7 +863,6 @@ describe("client send readiness", () => {
         rejectOldJoin = reject;
       })),
       get_resume_state: () => null,
-      get_resume_state_handle: () => null,
     };
     (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
     (client as unknown as { connected: boolean }).connected = true;
@@ -823,6 +882,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const newXmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -858,7 +918,6 @@ describe("client send readiness", () => {
         resolveOldJoin = resolve;
       })),
       get_resume_state: () => null,
-      get_resume_state_handle: () => null,
     };
     (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
     (client as unknown as { connected: boolean }).connected = true;
@@ -891,6 +950,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -925,6 +985,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -955,8 +1016,9 @@ describe("client send readiness", () => {
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
-      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
       },
@@ -984,7 +1046,7 @@ describe("client send readiness", () => {
     const sent = await client.sendGroupMessage("w1", "c1", "after unavailable");
     expect(sent?.state).toBe("queued");
     expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
-    await settleReconnectCatchup();
+    await client.whenRoomJoinScheduled(roomJid);
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
 
     onPresence?.({
@@ -992,7 +1054,7 @@ describe("client send readiness", () => {
       presence_type: "available",
       muc_jid: (client as unknown as { fullJid: string }).fullJid,
     });
-    await settleReconnectCatchup();
+    await settleClientLifecycle();
     expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
       roomJid,
       "after unavailable",
@@ -1012,6 +1074,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -1046,6 +1109,7 @@ describe("client send readiness", () => {
       muc_status_codes?: number[];
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -1081,7 +1145,9 @@ describe("client send readiness", () => {
       body: "queued while reconnecting",
       }),
     );
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
     await waitForOutboundHydration(client);
     let onPresence: ((presence: {
       from?: string;
@@ -1089,8 +1155,9 @@ describe("client send readiness", () => {
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
-      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
       },
@@ -1106,7 +1173,7 @@ describe("client send readiness", () => {
     (client as unknown as {
       handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
     }).handleSessionReady(xmpp, { type: "fresh" });
-    await settleReconnectCatchup();
+    await client.whenRoomJoinScheduled(roomJid);
     expect(xmpp.send_groupchat_message).toHaveBeenCalledTimes(0);
 
     onPresence?.({
@@ -1114,7 +1181,7 @@ describe("client send readiness", () => {
       presence_type: "available",
       muc_jid: (client as unknown as { fullJid: string }).fullJid,
     });
-    await settleReconnectCatchup();
+    await settleClientLifecycle();
 
     expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
       roomJid,
@@ -1132,6 +1199,7 @@ describe("client send readiness", () => {
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -1151,7 +1219,7 @@ describe("client send readiness", () => {
     (client as unknown as {
       handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
     }).handleSessionReady(xmpp, { type: "fresh" });
-    await settleReconnectCatchup();
+    await client.whenRoomJoinScheduled(roomJid);
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
     onPresence?.({
@@ -1159,33 +1227,33 @@ describe("client send readiness", () => {
       presence_type: "available",
       muc_jid: (client as unknown as { fullJid: string }).fullJid,
     });
-    await settleReconnectCatchup();
+    await settleClientLifecycle();
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
   test("session-ready rejoins retained rooms restored from refresh persistence", async () => {
     const roomJid = "muted@muc.example.com";
-    const persistence: ResumePersistence = {
-      loadCatchup: () => null,
-      saveCatchup: () => undefined,
-      clearCatchup: () => undefined,
-      loadSm: async () => ({ kind: "committed", value: null }),
-      consumeSm: async () => ({ kind: "committed", value: null }),
-      saveSm: async () => ({ kind: "committed", value: undefined }),
-      clearSm: async () => ({ kind: "committed", value: false }),
-      preparePagehideHandoff: () => undefined,
-      reclaimPagehideOwnership: () => undefined,
-      loadJoinedRooms: () => [roomJid],
-      saveJoinedRooms: () => undefined,
-      clearJoinedRooms: () => undefined,
-    };
-    const client = new BrowserXmppClient(session(), persistence);
+    const durableRuntimeStore = new MemoryDurableOutboundStore();
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore,
+      createResumePersistence: (lifecycleId, sharedStore) => ({
+        ...nullResumePersistence,
+        lifecycleId,
+        durableRuntimeStore: sharedStore,
+        outboundOwnerHint: () => ({
+          ownerId: "retained-room-owner",
+          ownerInstanceId: lifecycleId.value,
+        }),
+        loadJoinedRooms: () => [roomJid],
+      }),
+    });
     let onPresence: ((presence: {
       from?: string;
       presence_type?: string;
       muc_jid?: string;
     }) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       join_room: mock(async () => undefined),
       set_on_presence(cb: NonNullable<typeof onPresence>) {
         onPresence = cb;
@@ -1201,7 +1269,7 @@ describe("client send readiness", () => {
     (client as unknown as {
       handleSessionReady: (xmpp: typeof xmpp, lifecycle: { type: "fresh" }) => void;
     }).handleSessionReady(xmpp, { type: "fresh" });
-    await settleReconnectCatchup();
+    await client.whenRoomJoinScheduled(roomJid);
 
     expect(xmpp.join_room).toHaveBeenCalledWith(roomJid, "alice");
     onPresence?.({
@@ -1209,7 +1277,7 @@ describe("client send readiness", () => {
       presence_type: "available",
       muc_jid: (client as unknown as { fullJid: string }).fullJid,
     });
-    await settleReconnectCatchup();
+    await settleClientLifecycle();
     expect((client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.has(roomJid)).toBe(true);
   });
 
@@ -1245,7 +1313,7 @@ describe("client send readiness", () => {
   });
 
   test("DM sends are durable until XEP-0198 ack confirms server handling", async () => {
-    const xmpp = { send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
+    const xmpp = { send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)) };
     const client = new BrowserXmppClient(session());
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { connected: boolean }).connected = true;
@@ -1269,7 +1337,7 @@ describe("client send readiness", () => {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => {
         (client as unknown as { handleMessageAck: (id: string) => void })
           .handleMessageAck(opts.stanza_id!);
-        return opts.stanza_id;
+        return wasmSent(opts.stanza_id);
       }),
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
@@ -1290,8 +1358,8 @@ describe("client send readiness", () => {
         attempt += 1;
         if (attempt === 1) throw new Error("socket unavailable");
         if (attempt === 2) return null;
-        if (attempt === 3) return "wrong-live-id";
-        return opts.stanza_id;
+        if (attempt === 3) return wasmSent("wrong-live-id");
+        return wasmSent(opts.stanza_id);
       }),
     };
     const client = new BrowserXmppClient(session());
@@ -1339,7 +1407,7 @@ describe("client send readiness", () => {
     const sentTargets: string[] = [];
     const captureTarget = async (target: string) => { sentTargets.push(target); };
     const xmpp = {
-      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-send"; }),
+      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return wasmSent("muc-pm-send"); }),
       send_chat_state: mock(captureTarget),
       send_displayed: mock(captureTarget),
       send_retraction: mock(captureTarget),
@@ -1382,7 +1450,7 @@ describe("client send readiness", () => {
     const sentTargets: string[] = [];
     const captureTarget = async (target: string) => { sentTargets.push(target); };
     const xmpp = {
-      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return "muc-pm-send"; }),
+      send_chat_message: mock(async (target: string) => { sentTargets.push(target); return wasmSent("muc-pm-send"); }),
       send_chat_state: mock(captureTarget),
       send_displayed: mock(captureTarget),
       send_retraction: mock(captureTarget),
@@ -1456,12 +1524,11 @@ describe("client send readiness", () => {
 
   test("native failed-resume fallback owns resend for live unacked DM sends", async () => {
     const xmpp = {
-      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
       get_resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
-        hasUnackedOutbound: true,
         unhandledOutboundEntries: [messageResumeEntry("dm-live-1")],
       }),
     };
@@ -1482,35 +1549,7 @@ describe("client send readiness", () => {
   });
 });
 
-describe("client keepalive lifecycle", () => {
-  test("uses stanza keepalive and disables it when the transport disconnects", () => {
-    const originalConsoleError = console.error;
-    console.error = mock(() => undefined) as typeof console.error;
-    try {
-      const client = new BrowserXmppClient(session());
-      const xmpp = Object.assign(new EventEmitter(), {
-        enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
-        disableKeepAlive: mock(() => undefined),
-        getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
-        enableCarbons: mock(async () => undefined),
-        getRoster: mock(async () => ({ items: [] })),
-      }) as unknown as Agent;
-      (client as unknown as { xmpp: Agent }).xmpp = xmpp;
-      (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
-
-      xmpp.emit("session:started");
-
-      expect(xmpp.disableKeepAlive).toHaveBeenCalledTimes(1);
-      expect(xmpp.enableKeepAlive).toHaveBeenCalledWith({ interval: 30, timeout: 15 });
-
-      xmpp.emit("disconnected");
-
-      expect(xmpp.disableKeepAlive).toHaveBeenCalledTimes(2);
-    } finally {
-      console.error = originalConsoleError;
-    }
-  });
-
+describe("client generated lifecycle callbacks", () => {
   test("does not call removed history helper on stream-management resume", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
@@ -1519,7 +1558,7 @@ describe("client keepalive lifecycle", () => {
     catchup.onSessionStarted();
     const removedHistoryHelper = mock(async () => ({ results: [] }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
       disableKeepAlive: mock(() => undefined),
       getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
@@ -1528,9 +1567,8 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await Promise.resolve();
-    await Promise.resolve();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(removedHistoryHelper).not.toHaveBeenCalled();
   });
@@ -1557,15 +1595,14 @@ describe("client keepalive lifecycle", () => {
       complete: true,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await Promise.resolve();
-    await Promise.resolve();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, { type: "latest" });
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
@@ -1602,24 +1639,24 @@ describe("client keepalive lifecycle", () => {
     // fresh session uses a NEW handle (a reconnect constructs a fresh
     // XmppClientInstance). The catch-up cursor store is client-level, so
     // the first session arms it (nothing to fetch) and the second pages.
-    const session1 = Object.assign(new EventEmitter(), {
+    const session1 = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = session1;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session1);
 
-    session1.emit("session:started");
-    await settleReconnectCatchup();
+    session1.emitSessionLifecycle("fresh");
+    await settleClientLifecycle();
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(0);
 
-    const session2 = Object.assign(new EventEmitter(), {
+    const session2 = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = session2;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(session2);
 
-    session2.emit("session:started");
-    await settleReconnectCatchup();
+    session2.emitSessionLifecycle("fresh");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
     expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, { type: "latest" });
@@ -1666,14 +1703,14 @@ describe("client keepalive lifecycle", () => {
       is_complete: true,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
@@ -1779,14 +1816,14 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, { type: "latest" });
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(2, "bob@example.com", 100, {
@@ -1864,14 +1901,14 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(2, "bob@example.com", 100, {
       type: "before",
@@ -1898,22 +1935,26 @@ describe("client keepalive lifecycle", () => {
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
     let resolvePage: ((page: unknown) => void) | null = null;
+    let markRequestStarted!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
     const fetchDmHistoryPage = mock(async () => new Promise((resolve) => {
       resolvePage = resolve;
+      markRequestStarted();
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await Promise.resolve();
-    await Promise.resolve();
+    xmpp.emitSessionLifecycle("resumed");
+    await requestStarted;
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
 
-    xmpp.emit("disconnected");
+    xmpp.emitDisconnected();
     resolvePage?.({
       messages: [{
         mam_id: "mam-stale",
@@ -1936,7 +1977,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-stale",
       is_complete: true,
     });
-    await settleReconnectCatchup();
+    await settleClientLifecycle();
 
     expect(dmHandler).toHaveBeenCalledTimes(0);
     expect(readDmCallActivity("bob@example.com")).toBeNull();
@@ -1974,14 +2015,14 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup(newestIndex + 20);
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     // #1221: capped at 5 pages instead of walking the whole 52-page
     // archive. The backward loop applies the 5 pages it fetched before
@@ -2045,14 +2086,14 @@ describe("client keepalive lifecycle", () => {
       is_complete: true,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, {
       type: "after",
@@ -2122,13 +2163,13 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emitSessionLifecycle("resumed");
     await secondCatchupHandled;
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, {
@@ -2178,14 +2219,14 @@ describe("client keepalive lifecycle", () => {
       is_complete: false,
     }));
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
     expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, {
@@ -2252,14 +2293,14 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, {
       type: "after",
@@ -2301,14 +2342,14 @@ describe("client keepalive lifecycle", () => {
       };
     });
 
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup(finalPage + 20);
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     // #1221: capped at 5 forward pages; the forward loop applies each
     // page as it goes, so 5 messages arrive before the budget throw.
@@ -2341,7 +2382,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-loaded-1",
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
 
@@ -2398,7 +2439,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-retract-video",
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
 
@@ -2477,7 +2518,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-before-retract-video",
       is_complete: false,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_page: fetchDmHistoryPage,
     }) as unknown as Agent;
 
@@ -2544,7 +2585,7 @@ describe("client keepalive lifecycle", () => {
       ],
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       search_dm_history: searchDmHistory,
     }) as unknown as Agent;
 
@@ -2583,7 +2624,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-thread-1",
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_by_thread: fetchRoomHistoryByThread,
     }) as unknown as Agent;
 
@@ -2639,7 +2680,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-thread-call",
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_dm_history_by_thread: fetchDmHistoryByThread,
     }) as unknown as Agent;
 
@@ -2670,7 +2711,7 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-thread-list-1",
       is_complete: true,
     }));
-    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new EventEmitter(), {
+    (client as unknown as { xmpp: Agent }).xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_by_thread: fetchRoomHistoryByThread,
     }) as unknown as Agent;
 
@@ -2715,14 +2756,14 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-room-newer",
       is_complete: true,
     }));
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(activityHandler).toHaveBeenCalledTimes(1);
     expect(activityHandler).toHaveBeenCalledWith(expect.objectContaining({
@@ -2737,7 +2778,12 @@ describe("client keepalive lifecycle", () => {
   test("room timestamp fallback pages backward until it crosses the last seen timestamp", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
-    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as {
+      currentRoom: string | null;
+      resumedSessionRoomKeys: Set<string>;
+    }).currentRoom = roomJid;
+    (client as unknown as { resumedSessionRoomKeys: Set<string> })
+      .resumedSessionRoomKeys.add(roomJid);
     const catchup = (client as unknown as {
       catchup: {
         recordRoomSeen: (room: string, ts: string, archiveId?: string, seenIds?: string[]) => void;
@@ -2807,14 +2853,14 @@ describe("client keepalive lifecycle", () => {
         is_complete: false,
       };
     });
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(1, roomJid, 100, { type: "latest" });
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(2, roomJid, 100, {
@@ -2877,12 +2923,12 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-room-3",
       is_complete: true,
     }));
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
-    xmpp.emit("message", roomWasmMessage({
+    xmpp.emitMessage(roomWasmMessage({
       id: undefined,
       mam_id: "live-fallback-only",
       from: `${roomJid}/bob`,
@@ -2897,8 +2943,8 @@ describe("client keepalive lifecycle", () => {
     }));
     client.setActivityHandler(activityHandler);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenCalledWith(roomJid, 100, {
       type: "after",
@@ -2964,7 +3010,7 @@ describe("client keepalive lifecycle", () => {
         is_complete: true,
       };
     });
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
@@ -2974,10 +3020,15 @@ describe("client keepalive lifecycle", () => {
       { kind: "room", key: roomJid, after: "mam-room-1", since: "2024-01-01T00:00:00.000Z", seenIds: ["mam-room-1", "room-1"] },
     ]);
 
-    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as {
+      currentRoom: string | null;
+      resumedSessionRoomKeys: Set<string>;
+    }).currentRoom = roomJid;
+    (client as unknown as { resumedSessionRoomKeys: Set<string> })
+      .resumedSessionRoomKeys.add(roomJid);
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(2, roomJid, 100, {
       type: "after",
@@ -3026,14 +3077,14 @@ describe("client keepalive lifecycle", () => {
       last_id: "mam-room-1",
       is_complete: false,
     }));
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenCalledTimes(1);
     expect(fetchRoomHistoryPage).toHaveBeenCalledWith(roomJid, 100, {
@@ -3104,14 +3155,14 @@ describe("client keepalive lifecycle", () => {
         is_complete: true,
       };
     });
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await settleReconnectCatchup();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(1, roomJid, 100, {
       type: "after",
@@ -3134,22 +3185,22 @@ describe("room activity adapter", () => {
     const roomMessages: unknown[] = [];
     client.setActivityHandler((event) => activity.push(event));
     client.setMessageHandler((message) => roomMessages.push(message));
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", roomWasmMessage({
+    xmpp.emitMessage(roomWasmMessage({
       id: "normal-message",
       body: "hello alice",
       mention_uris: ["xmpp:alice@example.com"],
     }));
-    xmpp.emit("message", roomWasmMessage({
+    xmpp.emitMessage(roomWasmMessage({
       id: "edited-message",
       body: "edited hello alice",
       replaces_id: "normal-message",
       mention_uris: ["xmpp:alice@example.com"],
     }));
-    xmpp.emit("message", roomWasmMessage({
+    xmpp.emitMessage(roomWasmMessage({
       id: "retracted-message",
       from: "room@conference.example.com",
       body: "removed hello alice",
@@ -3206,15 +3257,14 @@ describe("room activity adapter", () => {
       ],
       is_complete: true,
     }));
-    const xmpp = Object.assign(new EventEmitter(), {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       fetch_room_history_page: fetchRoomHistoryPage,
     }) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
-    await Promise.resolve();
-    await Promise.resolve();
+    xmpp.emitSessionLifecycle("resumed");
+    await settleClientLifecycle();
 
     expect(fetchRoomHistoryPage).toHaveBeenCalledWith("room@conference.example.com", 100, { type: "latest" });
     expect(activity).toEqual([
@@ -3240,11 +3290,11 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "c-recv-render",
       type: "chat",
       from: "bob@example.com/phone",
@@ -3262,11 +3312,11 @@ describe("carbon forwarding", () => {
 
   test("applies carbon-wrapped call activity on generic message events", () => {
     const client = new BrowserXmppClient(session());
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "call-carbon-1",
       type: "chat",
       from: "alice@example.com/phone",
@@ -3291,13 +3341,13 @@ describe("carbon forwarding", () => {
 
   test("applies call activity from carbon-marked sent messages", () => {
     const client = new BrowserXmppClient(session());
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
     // #1243: the WASM core unwraps the carbon envelope and delivers the
     // inner message on the normal path with a `carbon` direction marker.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "call-carbon-sent",
       type: "chat",
       from: "alice@example.com/phone",
@@ -3322,7 +3372,7 @@ describe("carbon forwarding", () => {
 
   test("deduplicates carbon-marked call activity against a duplicate direct delivery", () => {
     const client = new BrowserXmppClient(session());
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3339,8 +3389,8 @@ describe("carbon forwarding", () => {
         media: { audio: true, video: false },
       },
     };
-    xmpp.emit("message", { ...forwarded, carbon: { sent: false, received: true } });
-    xmpp.emit("message", {
+    xmpp.emitMessage({ ...forwarded, carbon: { sent: false, received: true } });
+    xmpp.emitMessage({
       ...forwarded,
       call_event: {
         kind: "finish",
@@ -3361,11 +3411,11 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "c-sent-1",
       type: "chat",
       from: "alice@example.com/phone",
@@ -3386,7 +3436,7 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3398,9 +3448,9 @@ describe("carbon forwarding", () => {
       body: "replayed after resume",
       carbon: { sent: false, received: true },
     };
-    xmpp.emit("message", carbonCopy);
+    xmpp.emitMessage(carbonCopy);
     // XEP-0198 resume replays the unacked carbon verbatim.
-    xmpp.emit("message", carbonCopy);
+    xmpp.emitMessage(carbonCopy);
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
   });
@@ -3409,11 +3459,11 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "1",
       type: "chat",
       from: "bob@example.com/phone",
@@ -3423,7 +3473,7 @@ describe("carbon forwarding", () => {
     });
     // Stanza ids are only unique per sender — Carol's unrelated message
     // sharing the id must NOT be swallowed by Bob's carbon entry.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "1",
       type: "chat",
       from: "carol@example.com/desktop",
@@ -3438,7 +3488,7 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3449,8 +3499,8 @@ describe("carbon forwarding", () => {
       to: "alice@example.com/tablet",
       body: "direct beats carbon",
     };
-    xmpp.emit("message", direct);
-    xmpp.emit("message", { ...direct, carbon: { sent: false, received: true } });
+    xmpp.emitMessage(direct);
+    xmpp.emitMessage({ ...direct, carbon: { sent: false, received: true } });
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
   });
@@ -3463,7 +3513,7 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const received: Array<{ createdAtSource?: string }> = [];
     client.setDirectMessageHandler((msg) => received.push(msg));
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3474,14 +3524,14 @@ describe("carbon forwarding", () => {
       to: "alice@example.com/tablet",
       body: "needs a real stamp",
     };
-    xmpp.emit("message", direct);
-    xmpp.emit("message", {
+    xmpp.emitMessage(direct);
+    xmpp.emitMessage({
       ...direct,
       timestamp: "2026-07-01T10:00:00.000Z",
       carbon: { sent: false, received: true },
     });
     // A replayed copy of that carbon still drops.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       ...direct,
       timestamp: "2026-07-01T10:00:00.000Z",
       carbon: { sent: false, received: true },
@@ -3502,20 +3552,20 @@ describe("carbon forwarding", () => {
     client.setDirectMessageHandler(dmHandler);
     (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids =
       new Set(["room@muc.example.com"]);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
     // Two occupants of the SAME room pick the same sender-chosen stanza
     // id; a bare-folded dedupe key would let juliet's PM swallow iago's.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "pm-id",
       type: "chat",
       from: "room@muc.example.com/juliet",
       to: "alice@example.com/desktop",
       body: "from juliet",
     });
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "pm-id",
       type: "chat",
       from: "room@muc.example.com/iago",
@@ -3532,7 +3582,7 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3544,9 +3594,9 @@ describe("carbon forwarding", () => {
       body: "carbon → direct dup → carbon replay",
       carbon: { sent: false, received: true },
     };
-    xmpp.emit("message", carbonCopy);
-    xmpp.emit("message", { ...carbonCopy, carbon: undefined }); // duplicate direct delivery
-    xmpp.emit("message", carbonCopy); // XEP-0198 replay of the carbon
+    xmpp.emitMessage(carbonCopy);
+    xmpp.emitMessage({ ...carbonCopy, carbon: undefined }); // duplicate direct delivery
+    xmpp.emitMessage(carbonCopy); // XEP-0198 replay of the carbon
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
   });
@@ -3557,20 +3607,20 @@ describe("carbon forwarding", () => {
     const displayedHandler = mock(() => undefined);
     client.setDmChatStateHandler(chatStateHandler);
     client.setDmDisplayedHandler(displayedHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
     // Our own typing indicator on another device must not surface as
     // peer state.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       type: "chat",
       from: "alice@example.com/phone",
       to: "bob@example.com",
       chat_state: "composing",
       carbon: { sent: true, received: false },
     });
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "marker-1",
       type: "chat",
       from: "alice@example.com/phone",
@@ -3583,7 +3633,7 @@ describe("carbon forwarding", () => {
 
     // A carbon-RECEIVED chat state is the peer typing to another of our
     // devices — same conversation, so it does surface.
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       type: "chat",
       from: "bob@example.com/desktop",
       to: "alice@example.com/phone",
@@ -3602,11 +3652,11 @@ describe("carbon forwarding", () => {
     client.setDirectMessageHandler(dmHandler);
     (client as unknown as { retainedJoinedRoomJids: Set<string> }).retainedJoinedRoomJids =
       new Set(["room@muc.example.com"]);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       id: "muc-pm-1",
       type: "chat",
       from: "room@muc.example.com/juliet",
@@ -3629,7 +3679,7 @@ describe("carbon forwarding", () => {
     const client = new BrowserXmppClient(session());
     const dmHandler = mock(() => undefined);
     client.setDirectMessageHandler(dmHandler);
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
@@ -3642,8 +3692,8 @@ describe("carbon forwarding", () => {
     };
     // The unwrapped carbon copy and a direct delivery of the same
     // stanza (bare-JID fan-out race) must collapse to one dispatch.
-    xmpp.emit("message", { ...forwarded, carbon: { sent: false, received: true } });
-    xmpp.emit("message", forwarded);
+    xmpp.emitMessage({ ...forwarded, carbon: { sent: false, received: true } });
+    xmpp.emitMessage(forwarded);
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
     expect(dmHandler).toHaveBeenCalledWith(expect.objectContaining({
@@ -3661,11 +3711,11 @@ describe("inbox push adapter", () => {
     client.setInboxPushHandler((entry) => {
       inboxEntries.push(entry);
     });
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       type: "headline",
       from: "example.com",
       to: "alice@example.com/desktop",
@@ -3705,11 +3755,11 @@ describe("inbox push adapter", () => {
     client.setInboxPushHandler((entry) => {
       inboxEntries.push(entry);
     });
-    const xmpp = Object.assign(new EventEmitter(), {}) as unknown as Agent;
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {}) as unknown as Agent;
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("message", {
+    xmpp.emitMessage({
       type: "headline",
       from: "example.com",
       to: "alice@example.com/desktop",

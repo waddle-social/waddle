@@ -33,6 +33,8 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting } from "../src/lib/telemetry";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -44,6 +46,8 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   } as WaddleSession;
 }
 
+const createdClients: BrowserXmppClient[] = [];
+
 function wireClientEvents(sender: Partial<CallWireSender> = {}) {
   let onPresence: ((presence: {
     from?: string;
@@ -53,8 +57,15 @@ function wireClientEvents(sender: Partial<CallWireSender> = {}) {
   }) => void) | null = null;
   let onCall: ((event: CallEvent) => void) | null = null;
   let onDisconnected: (() => void) | null = null;
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
   const xmpp = {
+    ...noopWasmClientCallbacks(),
+    get_resume_state: () => null,
+    disconnect: async () => undefined,
+    dispose: () => undefined,
     set_on_presence: (cb: NonNullable<typeof onPresence>) => {
       onPresence = cb;
     },
@@ -66,10 +77,28 @@ function wireClientEvents(sender: Partial<CallWireSender> = {}) {
     },
     ...sender,
   };
+  (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+  (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
   (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
+  const state = client as unknown as {
+    connectEpoch: number;
+    outboundQueueHydration: Promise<void>;
+    outboundQueue: {
+      beginConnectionGeneration: (generation: number) => number;
+      whenQuiescent: () => Promise<void>;
+    };
+  };
+  const bindCurrentGeneration = async () => {
+    await state.outboundQueueHydration;
+    await state.outboundQueue.whenQuiescent();
+    state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
+  };
+  const ready = bindCurrentGeneration();
   return {
     client,
     xmpp,
+    ready,
+    bindCurrentGeneration,
     emitPresence(presence: Parameters<NonNullable<typeof onPresence>>[0]) {
       onPresence?.(presence);
     },
@@ -92,18 +121,27 @@ function firstMockCallArg(fn: unknown, index: number): unknown {
   return (fn as { mock: { calls: unknown[][] } }).mock.calls[0]?.[index];
 }
 
-function wireEmitterPresenceEvents() {
+function wireGeneratedPresenceEvents() {
   let onPresence: ((presence: {
     from?: string;
     presence_type?: string;
     muji?: { preparing: boolean; active: boolean };
   }) => void) | null = null;
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
   const xmpp = {
-    on: (event: string, cb: typeof onPresence) => {
-      if (event === "presence") onPresence = cb;
+    ...noopWasmClientCallbacks(),
+    get_resume_state: () => null,
+    disconnect: async () => undefined,
+    dispose: () => undefined,
+    set_on_presence: (callback: NonNullable<typeof onPresence>) => {
+      onPresence = callback;
     },
   };
+  (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+  (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
   (client as unknown as { wireEvents: (xmpp: typeof xmpp) => void }).wireEvents(xmpp);
   return {
     emitPresence(presence: Parameters<NonNullable<typeof onPresence>>[0]) {
@@ -231,7 +269,26 @@ afterAll(() => {
   }
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as {
+      xmpp: null;
+      connected: boolean;
+      connectEpoch: number;
+      outboundQueueHydration: Promise<void>;
+      outboundQueue: {
+        beginConnectionGeneration: (generation: number) => number;
+        whenQuiescent: () => Promise<void>;
+      };
+    };
+    await state.outboundQueueHydration;
+    await state.outboundQueue.whenQuiescent();
+    state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients.length = 0;
   clearCallState();
   clearDmCallActivities();
   $dmCallOutcomeAnchor.set(null);
@@ -1773,7 +1830,7 @@ describe("1:1 call event wiring", () => {
 
 describe("MUC group call", () => {
   test("legacy presence event path updates the room call indicator from real presence events", () => {
-    const events = wireEmitterPresenceEvents();
+    const events = wireGeneratedPresenceEvents();
 
     events.emitPresence({
       from: "Chan@MUC.Test/alice",
@@ -1799,6 +1856,7 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       disconnect: () => Promise<void>;
     };
+    await events.ready;
 
     events.emitPresence({
       from: "chan@muc.test/alice",
@@ -1821,6 +1879,7 @@ describe("MUC group call", () => {
     const client = events.client as unknown as {
       disconnect: () => Promise<void>;
     };
+    await events.ready;
 
     await client.disconnect();
 
@@ -2211,6 +2270,7 @@ describe("MUC group call", () => {
 
   test("BrowserXmppClient.disconnect rejects a pending MUC preparing wait", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const update_muji_presence = mock(async () => undefined);
     const send_muji_session_terminate = mock(async () => undefined);
     const disconnect = mock(async () => undefined);
@@ -2222,11 +2282,11 @@ describe("MUC group call", () => {
       };
       disconnect: () => Promise<void>;
     };
-    client.xmpp = {
+    Object.assign(client.xmpp, {
       update_muji_presence,
       send_muji_session_terminate,
       disconnect,
-    };
+    });
     const { beginMucCall } = await import("../src/lib/calls/call-store");
     const pending = beginMucCall(
       client.xmpp,
@@ -2247,6 +2307,7 @@ describe("MUC group call", () => {
 
   test("BrowserXmppClient.disconnect rejects a pending MUC session-accept wait", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     const send_muji_session_initiate = mock(async () => undefined);
     const send_muji_session_terminate = mock(async () => undefined);
@@ -2301,6 +2362,7 @@ describe("MUC group call", () => {
 
   test("real disconnected event rejects pending MUC session-accept wait without SFU teardown", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     const send_muji_session_initiate = mock(async () => undefined);
     const send_muji_session_terminate = mock(async () => undefined);
@@ -2333,12 +2395,14 @@ describe("MUC group call", () => {
     await expect(pending).rejects.toThrow("cancelled");
     expect(send_muji_session_terminate).not.toHaveBeenCalled();
     expect($callState.get()).toEqual({ phase: "idle" });
+    await events.bindCurrentGeneration();
     await client.disconnect();
   });
 
   test("replacement MUC start is not rolled back by a stale disconnected attempt", async () => {
     const firstEvents = wireClientEvents();
     const secondEvents = wireClientEvents();
+    await Promise.all([firstEvents.ready, secondEvents.ready]);
     const expectedJoin: LiveKitJoin = {
       url: "wss://livekit.test",
       room: "chan@muc.test",
@@ -2622,6 +2686,7 @@ describe("MUC group call", () => {
 
   test("room switch preserves the old room's active MUC call and keeps MUC membership", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const send_muji_session_terminate = mock(async () => undefined);
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
     const leave_room = mock(async () => undefined);
@@ -2680,6 +2745,7 @@ describe("MUC group call", () => {
 
   test("room switch bails out cleanly when a concurrent disconnect races the join", async () => {
     const events = wireClientEvents();
+    await events.ready;
     let releaseJoin: (() => void) | null = null;
     let joinStarted: (() => void) | null = null;
     const joinGate = new Promise<void>((resolve) => {
@@ -2722,6 +2788,7 @@ describe("MUC group call", () => {
 
   test("room switch preserves the old room's pending MUC call without leaving the MUC", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const send_muji_session_initiate = mock(async () => undefined);
     const send_muji_session_terminate = mock(async () => undefined);
     const update_muji_presence = mockUpdateMujiPresenceWithEcho(events.emitPresence);
@@ -2797,6 +2864,7 @@ describe("MUC group call", () => {
 
   test("room switch preserves a MUC start waiting for the old room's preparing echo", async () => {
     const events = wireClientEvents();
+    await events.ready;
     const send_muji_session_initiate = mock(async () => undefined);
     const update_muji_presence = mock(async () => undefined);
     const leave_room = mock(async () => undefined);

@@ -42,7 +42,7 @@ class XmppSessionManagerVerbsTest {
         suspend fun loginReady(scope: TestScope) {
             manager.login(testSessionInfo())
             scope.runCurrent()
-            factory.emit(WaddleClientEvent.Connected)
+            factory.emitReady()
             scope.runCurrent()
         }
 
@@ -263,7 +263,7 @@ class XmppSessionManagerVerbsTest {
         )
         assertTrue(result.queued)
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val replayedOptions = harness.factory.clients.last().sendOptions.last()

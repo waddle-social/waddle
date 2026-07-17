@@ -10,11 +10,15 @@
  * These tests poke private state on `BrowserXmppClient` directly — see
  * the comment block in `resume-ordering.test.ts` for the rationale.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { SessionLifecycleEvent } from "../src/lib/xmpp/types";
 import type { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+
+const createdClients = new Set<BrowserXmppClient>();
 
 function session(): WaddleSession {
   return {
@@ -27,6 +31,8 @@ function session(): WaddleSession {
 
 type PrivateState = {
   xmpp: unknown;
+  connectEpoch: number;
+  outboundQueue: { beginConnectionGeneration(generation: number): number };
   catchup: ReconnectCatchup;
   runSessionReady: (
     xmpp: unknown,
@@ -35,14 +41,29 @@ type PrivateState = {
 };
 
 function makeClient() {
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.add(client);
   const state = client as unknown as PrivateState;
+  state.outboundQueue.beginConnectionGeneration(0);
   const xmpp = {};
   state.xmpp = xmpp;
   const received: SessionLifecycleEvent[] = [];
   client.setSessionLifecycleHandler((event) => received.push(event));
   return { client, state, xmpp, received };
 }
+
+afterEach(async () => {
+  const clients = [...createdClients];
+  createdClients.clear();
+  await Promise.all(clients.map((client) => {
+    const state = client as unknown as PrivateState;
+    state.xmpp = null;
+    state.connectEpoch = 0;
+    return client.dispose();
+  }));
+});
 
 describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
   test("fresh session-ready reports the conversations the catch-up will page", async () => {
@@ -162,14 +183,17 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     client.setCatchupFailureHandler(() => {
       throw new Error("handler broke");
     });
-    const errors: Array<{ detail?: string }> = [];
+    const errors: XmppErrorEvent[] = [];
     client.onError((event) => errors.push(event));
 
     // Must resolve — a throwing handler must not reject the barrier.
     await state.runSessionReady(xmpp, { type: "fresh" });
 
     expect(
-      errors.some((e) => e.detail?.includes("catch-up fallback handler failed")),
+      errors.some((event) => (
+        event.kind === "history"
+        && event.detail.includes("catch-up fallback handler failed")
+      )),
     ).toBe(true);
   });
 

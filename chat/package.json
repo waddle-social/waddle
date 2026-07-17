@@ -15,6 +15,8 @@
     "preview": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro preview",
     "astro": "astro",
     "test": "bun test",
+    "test:browser:durability": "playwright test --config tests/browser/playwright.config.ts",
+    "check:startup-build": "bun run scripts/check-startup-build.ts",
     "generate-types": "wrangler types",
     "sourcemaps:strip": "bun run scripts/strip-sourcemaps.mjs",
     "deploy": "bun run wasm:build && bun run generate-service-worker && bun run sourcemaps:strip && wrangler deploy",
@@ -63,7 +65,9 @@
     "@astrojs/check": "^0.9.9",
     "@cloudflare/workers-types": "^4.20260603.1",
     "@grafana/faro-rollup-plugin": "^0.11.0",
+    "@playwright/test": "1.61.1",
     "@types/node": "^25.9.1",
+    "fake-indexeddb": "6.2.5",
     "knip": "^6.15.0",
     "typescript": "^6.0.3"
   }

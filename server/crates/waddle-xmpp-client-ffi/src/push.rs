@@ -51,7 +51,7 @@ impl WaddleClient {
     /// Drives the multi-step dance and returns the assigned
     /// [`WaddleRegisterDeviceResult`] (node id + device id) on
     /// success. Returns `None` on failure with the diagnostic on the
-    /// listener. The caller MUST persist both fields — node feeds
+    /// event stream. The caller MUST persist both fields — node feeds
     /// the user-server XEP-0357 `<enable/>` IQ, device id scopes the
     /// per-device `disable_push_device` opt-out.
     pub async fn register_push_device(

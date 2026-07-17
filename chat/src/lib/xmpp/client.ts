@@ -3,7 +3,11 @@ import {
   websocketUrlWithTraceparent,
   withSpan,
 } from "@/lib/telemetry";
-import type { DurableOutboundStore } from "@/lib/outbound-durable-store";
+import {
+  IndexedDbDurableOutboundStore,
+  OutboundPersistenceError,
+  type DurableOutboundStore,
+} from "@/lib/xmpp-runtime-durable-store";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
@@ -47,15 +51,20 @@ import type {
 } from "./client-events";
 import {
   OfflineSendQueue,
+  NativeResumeAuthorityBlockedError,
+  NativeResumeSnapshotRejectedError,
+  type OutboundAuthorityChangedError,
   ReconnectScheduler,
+  ResumeStateTeardownError,
   ResumeStateStore,
   applyResumeStateToWasmConfig,
   browserOffline,
-  compatWasmSendResult,
+  wasmSendMessageId,
   isNonRetryableWasmSendFailure,
+  systemTimeoutScheduler,
   type OutboundSendResult,
+  type TimeoutScheduler,
   type XmppResumeState,
-  type XmppResumeStateHandle,
 } from "./client-connection";
 import {
   MamPager,
@@ -64,6 +73,7 @@ import {
   roomActivityEventFromMessage,
   type DmCallActivityHydrationOptions,
 } from "./client-mam";
+import { CommunityProvisioning } from "./client-community-provisioning";
 import { MucAdmin, type AdminUsersPage } from "./client-muc-admin";
 import { PresenceManager } from "./client-presence";
 import { VCardManager } from "./client-vcard";
@@ -100,9 +110,7 @@ import type {
   XmppErrorEvent,
   XmppStatusSnapshot,
 } from "./types";
-import { XMPP_STREAM_ERROR_CONDITIONS } from "./types";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
-
 import { discoverChannels, discoverTopology } from "./discovery";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
@@ -118,6 +126,7 @@ import {
 } from "./push-register-result";
 import {
   createLocalStorageResumePersistence,
+  XmppLifecycleId,
   type ResumePersistence,
 } from "./resume-persistence";
 import { clearDmCallJoinCacheForAccount } from "@/lib/calls/dm-call-join-cache";
@@ -172,6 +181,8 @@ import type {
   WasmAdminSpacesMembersResult,
   WasmAdminSpacesSetRoleResult,
   WasmArchivedMessage,
+  WasmAuthenticationCondition,
+  WasmControlErrorPayload,
   WasmFetchThreadsOptions,
   WasmInboxConversation,
   WasmInboxResult,
@@ -183,19 +194,174 @@ import type {
   WasmPubsubEvent,
   WasmRoomMember,
   WasmRosterContact,
-  WasmSendMessageOutcome,
   WasmServerVersion,
+  WasmStreamErrorCondition,
   WasmStreamManagementTelemetry,
   WasmThreadsPage,
   WasmUserSearchResult,
 } from "./wasm-types";
+import { wasmControlErrorCondition } from "./wasm-control-errors";
+import {
+  validatedWasmConfigBinding,
+  validatedWasmClientBinding,
+  type WasmClientBinding,
+} from "./wasm-client-adapter";
 import type { VCard4Profile } from "./vcard4-types";
 // Type-only: the status-preference wire shape (`{ mode, status? }`). The
 // PresenceMode <-> wire mapping lives in the presence layer; this wrapper just
 // carries the wire shape across the wasm boundary.
 import type { StatusPreferenceWire } from "@/presence/status-preference";
 
+const STALE_OWNER_CLEAR_MESSAGES = new Set([
+  "SM owner fenced during clear",
+  "SM snapshot changed during clear",
+]);
+
+export type XmppClientLifecycleState = "active" | "disposing" | "disposed";
+
+type XmppClientTeardownStage =
+  | "sm-page-lifecycle"
+  | "sm-clear"
+  | "native-claim-release"
+  | "active-call"
+  | "room-leave"
+  | "transport-fence"
+  | "transport-disconnect"
+  | "transport-dispose"
+  | "lifecycle-quiescence"
+  | "outbound-authority-dispose";
+
+export type XmppClientTeardownFailure = {
+  readonly stage: XmppClientTeardownStage;
+  readonly cause: unknown;
+};
+
+/** Every teardown failure observed only after the captured transport is dead. */
+export class XmppClientTeardownError extends Error {
+  readonly failures: readonly XmppClientTeardownFailure[];
+
+  constructor(
+    failures: readonly XmppClientTeardownFailure[],
+    readonly transportDisposed: boolean,
+  ) {
+    super(`XMPP client teardown failed at ${failures.map(({ stage }) => stage).join(", ")}`, {
+      cause: new AggregateError(
+        failures.map(({ cause }) => cause),
+        "XMPP client teardown failures",
+      ),
+    });
+    this.name = "XmppClientTeardownError";
+    this.failures = failures.map((failure) => ({ ...failure }));
+  }
+}
+
+class XmppClientDisposedError extends DOMException {
+  constructor() {
+    super("XMPP client disposal has begun", "InvalidStateError");
+  }
+}
+
+const EXPECTED_LIFECYCLE_CANCELLATIONS = new Set([
+  "A predecessor native snapshot is still reconciling",
+  "Native snapshot belongs to a stale connection generation",
+]);
+
+function isExpectedLifecycleCancellation(error: unknown): boolean {
+  return error instanceof XmppClientDisposedError
+    || (
+      error instanceof DOMException
+      && error.name === "AbortError"
+      && EXPECTED_LIFECYCLE_CANCELLATIONS.has(error.message)
+    );
+}
+
+function collectUnexpectedLifecycleFailures(
+  failures: Set<unknown>,
+  settled: readonly PromiseSettledResult<unknown>[],
+  allow: (error: unknown) => boolean = () => false,
+): void {
+  for (const result of settled) {
+    if (result.status === "rejected" && !allow(result.reason)) {
+      collectLifecycleFailure(failures, result.reason, allow);
+    }
+  }
+}
+
+function throwUnexpectedLifecycleFailures(
+  message: string,
+  settled: readonly PromiseSettledResult<unknown>[],
+): void {
+  const failures = new Set<unknown>();
+  collectUnexpectedLifecycleFailures(failures, settled);
+  if (failures.size > 0) throw new AggregateError([...failures], message);
+}
+
+function collectLifecycleFailure(
+  failures: Set<unknown>,
+  error: unknown,
+  allow: (error: unknown) => boolean = () => false,
+): void {
+  if (allow(error)) return;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      collectLifecycleFailure(failures, nested, allow);
+    }
+    return;
+  }
+  failures.add(error);
+}
+
+function isExactStaleOwnerFailure(
+  failure: XmppClientTeardownFailure,
+): boolean {
+  if (
+    failure.stage === "native-claim-release"
+    && failure.cause instanceof DOMException
+  ) {
+    return failure.cause.name === "AbortError"
+      && failure.cause.message === "Outbound owner fenced during native reconciliation";
+  }
+  const exactSmClearFailure = (error: unknown): boolean => (
+    error instanceof OutboundPersistenceError
+    && error.operation === "sm-clear-all"
+    && error.reason === "aborted"
+    && error.cause instanceof DOMException
+    && error.cause.name === "AbortError"
+    && STALE_OWNER_CLEAR_MESSAGES.has(error.cause.message)
+  );
+  const error = failure.cause;
+  return failure.stage === "sm-clear"
+    && (
+      exactSmClearFailure(error)
+      || (
+        error instanceof ResumeStateTeardownError
+        && error.failures.length === 1
+        && error.failures[0]?.stage === "sm-clear"
+        && exactSmClearFailure(error.failures[0].cause)
+      )
+    );
+}
+
+/** Exact typed aggregate produced when final disposal races an SM successor. */
+export function isStaleOwnerDisposeError(
+  error: unknown,
+): error is XmppClientTeardownError {
+  return error instanceof XmppClientTeardownError
+    && error.transportDisposed
+    && error.failures.length > 0
+    && error.failures.every(isExactStaleOwnerFailure);
+}
+
 export { dmMessageFromArchived, roomMessageFromArchived } from "./wasm-message-codecs";
+
+export type BrowserXmppClientOptions = {
+  readonly durableRuntimeStore?: DurableOutboundStore;
+  readonly timeoutScheduler?: TimeoutScheduler;
+  readonly createResumePersistence?: (
+    lifecycleId: XmppLifecycleId,
+    durableRuntimeStore: DurableOutboundStore,
+  ) => ResumePersistence;
+};
 
 type InboundWasmMessage = WasmMessage & {
   inboxPush?: InboxEntry;
@@ -212,12 +378,6 @@ type InboundWasmMessage = WasmMessage & {
 // take several seconds to deliver the roster. 110 is the definitive
 // resolve signal; this timeout only bounds genuinely stuck joins.
 const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
-
-type XmppStreamErrorPayload = string | {
-  detail?: string | null;
-  condition?: string | null;
-  streamManagementError?: XmppErrorEvent["streamManagementError"] | null;
-};
 
 /**
  * #1164: stream-error conditions that no amount of retrying can fix —
@@ -236,147 +396,38 @@ const TERMINAL_STREAM_CONDITION_DETAILS = {
 } as const;
 
 function isTerminalStreamCondition(
-  condition: string,
+  condition: WasmStreamErrorCondition | WasmAuthenticationCondition,
 ): condition is keyof typeof TERMINAL_STREAM_CONDITION_DETAILS {
   return condition in TERMINAL_STREAM_CONDITION_DETAILS;
 }
 
-function terminalDisconnectDetail(condition: string | undefined): string | null {
+function terminalDisconnectDetail(
+  condition: WasmStreamErrorCondition | WasmAuthenticationCondition | undefined,
+): string | null {
   if (!condition || !isTerminalStreamCondition(condition)) return null;
   return TERMINAL_STREAM_CONDITION_DETAILS[condition];
 }
 
-/**
- * The condition allowed to drive TERMINAL classification. Real stream
- * errors always arrive structured (`JsStreamError.condition` from the
- * WASM core); the only free-text payload that legitimately names a
- * terminal condition is waddle-xmpp-client's SASL ClientError display,
- * which backtick-quotes it ("… with condition `not-authorized`").
- * Loose word-matching (`streamErrorConditionFromText`) stays for the
- * emitted event's diagnostic `condition` field only — a benign error
- * whose text merely contains "conflict" must never latch terminal
- * state.
- */
-function terminalConditionFromPayload(payload: XmppStreamErrorPayload): string | undefined {
-  if (typeof payload !== "string") return payload.condition?.trim() || undefined;
-  return /\bcondition `([a-z0-9-]+)`/.exec(payload)?.[1];
-}
-
-function streamErrorConditionFromText(text: string | null | undefined): string | undefined {
-  const normalized = text?.trim().toLowerCase();
-  if (!normalized) return undefined;
-  if (XMPP_STREAM_ERROR_CONDITIONS.has(normalized)) return normalized;
-  for (const condition of XMPP_STREAM_ERROR_CONDITIONS) {
-    const escaped = condition.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(normalized)) {
-      return condition;
-    }
-  }
-  return undefined;
-}
-
-function normalizeXmppStreamErrorPayload(payload: XmppStreamErrorPayload): {
-  detail: string;
-  condition?: string;
-  streamManagementError?: XmppErrorEvent["streamManagementError"];
-} {
-  if (typeof payload === "string") {
-    const condition = streamErrorConditionFromText(payload);
-    return {
-      detail: payload,
-      ...(condition ? { condition } : {}),
-    };
-  }
-  const detail = payload.detail?.trim() || payload.condition?.trim() || "stream error";
-  const condition = payload.condition?.trim() || streamErrorConditionFromText(detail);
-  return {
-    detail,
-    ...(condition ? { condition } : {}),
-    ...(payload.streamManagementError
-      ? { streamManagementError: payload.streamManagementError }
-      : {}),
-  };
-}
-
 type WasmModule = typeof import("@waddle/xmpp-client-wasm");
-type WasmClient = import("@waddle/xmpp-client-wasm").WaddleClient & {
-  fetch_personal_history_page?: (max: number, pageParam: MamPageParam) => Promise<WasmMamPage>;
-  discover_extension_routes?: () => Promise<unknown>;
-  fetch_extension_route_items?: (route: unknown, roomJid: string) => Promise<unknown>;
+type XmppClientInstance = WasmClientBinding;
+
+type TransportSlot = {
+  readonly handle: XmppClientInstance;
+  readonly connectionGeneration: number;
+  readonly lifecycleId: XmppLifecycleId;
+  retirement: Promise<TransportRetirementReport> | null;
 };
 
+type TransportRetirementReason =
+  | "client-disconnect"
+  | "replacement"
+  | "connect-timeout"
+  | "peer-disconnected"
+  | "authority-fenced";
 
-/** Per-event handler signatures for the legacy emitter surface some
- * wasm builds expose alongside the `set_on_*` registration methods.
- * XEP-0280 carbons are NOT a separate event: the WASM core unwraps the
- * envelope and delivers the inner message through the normal `message`
- * path with a `carbon` direction marker (#1243). */
-type CompatEmitterEvents = {
-  "session:started": () => void;
-  "stream:management:resumed": () => void;
-  disconnected: (error?: Error) => void;
-  "message:acked": (msg: { id?: string }) => void;
-  "message:failed": (msg: { id?: string }) => void;
-  message: (message: WasmMessage) => void;
-  presence: (presence: WasmPresence) => void;
-};
-
-type CompatEmitter = {
-  on?: <E extends keyof CompatEmitterEvents>(event: E, handler: CompatEmitterEvents[E]) => void;
-};
-
-type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
-  joinRoom?: (roomJid: string, nick: string) => Promise<void>;
-  leaveRoom?: (roomJid: string, nick: string) => Promise<void>;
-  set_on_connected?: (cb: () => void) => void;
-  set_on_disconnected?: (cb: () => void) => void;
-  set_on_error?: (cb: (error: XmppStreamErrorPayload) => void) => void;
-  set_on_message?: (cb: (message: WasmMessage) => void) => void;
-  set_on_presence?: (cb: (presence: WasmPresence) => void) => void;
-  set_on_message_delivery_acked?: (cb: (id: string) => void) => void;
-  set_on_message_delivery_failed?: (cb: (id: string) => void) => void;
-  set_on_call?: (cb: (event: CallEvent) => void) => void;
-  set_on_session_lifecycle?: (cb: (event: string) => void) => void;
-  set_on_stream_management?: (cb: (event: WasmStreamManagementTelemetry) => void) => void;
-  set_on_mds_displayed?: (cb: (entry: WasmMdsDisplayedEntry) => void) => void;
-  set_on_pubsub_event?: (cb: (event: WasmPubsubEvent) => void) => void;
-  send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
-  get_resume_state?: () => XmppResumeState | null;
-  get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
-  request_stream_management_ack?: () => Promise<void>;
-  dispose?: () => void;
-  publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
-  supports_mds_publish_options?: () => Promise<boolean>;
-  fetch_mds_displayed?: () => Promise<ReadonlyArray<WasmMdsDisplayedEntry>>;
-  subscribe_mds_displayed?: () => Promise<void>;
-  ensure_push_node?: (
-    serviceJid: string,
-    appId: string,
-  ) => Promise<{ id: string; jid: string; appId: string }>;
-  register_web_push_device?: (options: {
-    serviceJid: string;
-    node: string;
-    deviceId: string;
-    environment: string;
-    providerEndpoint: string;
-    providerToken: string;
-    providerKeyMaterial: string;
-  }) => Promise<{ id: string; node: string; status: "active" | "disabled" }>;
-  disable_push_device?: (
-    serviceJid: string,
-    node: string,
-    deviceId: string,
-  ) => Promise<{ id: string; node: string; status: "active" | "disabled" }>;
-  pin_direct_message?: (peerJid: string, targetStanzaId: string) => Promise<void>;
-  unpin_direct_message?: (peerJid: string, targetStanzaId: string) => Promise<void>;
-  fetch_room_messages_by_stanza_ids?: (
-    targetJid: string,
-    stanzaIds: string[],
-  ) => Promise<import("./wasm-types").WasmMamPage | null>;
-  fetch_direct_messages_by_stanza_ids?: (
-    peerJid: string,
-    stanzaIds: string[],
-  ) => Promise<import("./wasm-types").WasmMamPage | null>;
+type TransportRetirementReport = {
+  readonly failures: readonly XmppClientTeardownFailure[];
+  readonly transportDisposed: boolean;
 };
 
 let wasmModulePromise: Promise<WasmModule> | null = null;
@@ -433,11 +484,23 @@ export class BrowserXmppClient {
   private get queueScope() { return barePeerJid(this.session.jid); }
   private resource: string;
   private readonly events = new TypedEventBus<ClientEvents>();
-  private xmpp: XmppClientInstance | null = null;
+  private transportSlot: TransportSlot | null = null;
+  private get xmpp(): XmppClientInstance | null {
+    return this.transportSlot?.handle ?? null;
+  }
+  private set xmpp(handle: XmppClientInstance | null) {
+    this.transportSlot = handle
+      ? this.createTransportSlot(handle, this.connectEpoch)
+      : null;
+  }
   private mdsPublishOptionsSupport: Promise<boolean> | null = null;
   private connectPromise: Promise<void> | null = null;
+  private connectAdmissionPromise: Promise<void> | null = null;
+  private connectAttemptWork: Promise<void> | null = null;
   private connected = false;
   private destroying = false;
+  private lifecycleState: XmppClientLifecycleState = "active";
+  private disconnectPromise: Promise<void> | null = null;
   private currentRoom: string | null = null;
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
@@ -462,9 +525,11 @@ export class BrowserXmppClient {
   private mucServiceJid = "";
   private discoveredRoomJids = new Map<string, string>();
   private readonly reconnect: ReconnectScheduler;
+  private readonly timeoutScheduler: TimeoutScheduler;
   private readonly resume: ResumeStateStore;
   private readonly outboundQueue: OfflineSendQueue;
   private outboundQueueHydration: Promise<void>;
+  private finalDisposePromise: Promise<void> | null = null;
   private readonly mam: MamPager;
   private readonly mucAdmin: MucAdmin;
   private readonly presence: PresenceManager;
@@ -474,13 +539,19 @@ export class BrowserXmppClient {
     string,
     { promise: Promise<void>; requestedNick: string; resolve: () => void; reject: (error: Error) => void }
   >();
+  private readonly roomJoinScheduling = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void; scheduled: boolean }
+  >();
   // XEP-0280 dedupe memory: key → which representation was seen first
   // ("carbon" or "direct"). The source disambiguates a replayed carbon
   // (drop) from a carbon completing a direct-first pair (pass through
   // for its authoritative forwarded <delay/>).
   private readonly carbonDedupIds = new Map<string, "carbon" | "direct">();
   readonly catchup: ReconnectCatchup;
+  readonly communityProvisioning: CommunityProvisioning;
   private readonly resumePersistence: ResumePersistence;
+  private readonly lifecycleId: XmppLifecycleId;
   // Per-resume gate: non-zero while `handleSessionReady` is draining
   // MAM catch-up. Live body messages received during that window are
   // buffered in `pendingDuringResume` and replayed after catch-up
@@ -500,12 +571,12 @@ export class BrowserXmppClient {
   //
   // `resumeBarrier` coalesces redundant resume triggers. Three event
   // sources can fire `handleSessionReady` for the same xmpp handle:
-  // `set_on_session_lifecycle`, `on("session:started")`, and
-  // `on("stream:management:resumed")`. Without coalescing, the second
-  // trigger reset the live buffer mid-flight and the first's drain
-  // silently skipped — losing every message that arrived during the
-  // first catch-up. Now: the first trigger owns the barrier, the
-  // others bail out at the gate.
+  // The generated `set_on_session_lifecycle` callback can be followed by
+  // another lifecycle notification for the same transport. Without
+  // coalescing, the second trigger reset the live buffer mid-flight and the
+  // first's drain silently skipped — losing every message that arrived during
+  // the first catch-up. Now: the first trigger owns the barrier and redundant
+  // notifications bail out at the gate.
   //
   // The barrier is keyed to the xmpp handle that owns it. A full
   // reconnect produces a new handle, and the new handle must be
@@ -520,12 +591,19 @@ export class BrowserXmppClient {
   // resolves." Both fields are written atomically together so a
   // re-entrant `handleSessionReady` (synchronous WASM callback re-
   // entry) cannot observe one set without the other.
-  private resumeBarrier: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
+  private resumeBarrier: {
+    xmpp: XmppClientInstance;
+    generation: number;
+    promise: Promise<void>;
+  } | null = null;
   // The handle whose `runSessionReady` has already run this session
   // (#1221). Latches per-handle so the three duplicate session-ready
   // hooks coalesce even on the no-catch-up path (which opens no barrier).
   // Reset on disconnect so the next handle runs its own setup.
   private sessionReadyHandledXmpp: XmppClientInstance | null = null;
+  private sessionReadyWork: { xmpp: XmppClientInstance; promise: Promise<void> } | null = null;
+  private readonly lifecycleWork = new Set<Promise<unknown>>();
+  private readonly lifecycleFailures: unknown[] = [];
   private pendingDuringResume: InboundWasmMessage[] | null = null;
   // F2: buffer entries stranded by a barrier that failed mid-catch-up
   // (the connection died, so `completeResumeBarrier` could not drain
@@ -550,16 +628,38 @@ export class BrowserXmppClient {
 
   constructor(
     session: WaddleSession,
-    persistence?: ResumePersistence,
-    durableOutboundStore?: DurableOutboundStore,
+    options: BrowserXmppClientOptions = {},
   ) {
     this.session = session;
+    this.timeoutScheduler = options.timeoutScheduler ?? systemTimeoutScheduler;
     this.mucServiceJid = `muc.${jidDomain(session.jid)}`;
     // Per-account so a logout/login on the same browser doesn't mix
     // cursors. `session.jid` is the bare JID — already unique per
     // identity — and matches the `accountKey` used by the outbound
     // queue store.
-    this.resumePersistence = persistence ?? createLocalStorageResumePersistence(session.jid);
+    this.lifecycleId = XmppLifecycleId.create();
+    const durableRuntimeStore = options.durableRuntimeStore
+      ?? new IndexedDbDurableOutboundStore();
+    this.resumePersistence = options.createResumePersistence?.(
+      this.lifecycleId,
+      durableRuntimeStore,
+    )
+      ?? createLocalStorageResumePersistence(
+        session.jid,
+        undefined,
+        durableRuntimeStore,
+        this.lifecycleId,
+      );
+    if (this.resumePersistence.lifecycleId.value !== this.lifecycleId.value) {
+      throw new Error(
+        "Resume persistence and browser client must share one lifecycle identity",
+      );
+    }
+    if (this.resumePersistence.durableRuntimeStore !== durableRuntimeStore) {
+      throw new Error(
+        "Resume persistence and outbound queue must share one durable runtime store",
+      );
+    }
     this.catchup = new ReconnectCatchup(this.resumePersistence);
     this.resume = new ResumeStateStore(this.resumePersistence);
     // Restore any XEP-0198 resume state persisted by a prior tab
@@ -578,11 +678,15 @@ export class BrowserXmppClient {
       roomMemberJids: (roomJid) => this.memberJidsFor(roomJid),
       sendDirect: (peerJid, body, opts) => this.sendQueuedDirectMessage(peerJid, body, opts),
       sendRoom: (roomJid, body, opts) => this.sendQueuedRoomMessage(roomJid, body, opts),
-      ...(durableOutboundStore ? { durableStore: durableOutboundStore } : {}),
+      durableStore: durableRuntimeStore,
+      lifecycleId: this.lifecycleId,
+      outboundOwnerHint: () => this.resumePersistence.outboundOwnerHint(),
+      acceptOutboundOwner: (owner) => this.resumePersistence.acceptOutboundOwner(owner),
+      onAuthorityLost: (error) => this.handleOutboundAuthorityLost(error),
     });
-    this.outboundQueueHydration = this.resume.consumePersisted().then(async (restored) => {
+    this.outboundQueueHydration = this.outboundQueue.ready().then(async () => {
+      const restored = await this.resume.consumePersisted();
       if (restored?.resource) this.resource = restored.resource;
-      await this.outboundQueue.seedFromResumeState(restored);
     });
     this.mam = new MamPager({
       sessionJid: () => this.session.jid,
@@ -610,6 +714,10 @@ export class BrowserXmppClient {
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
       roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
       emitError: (event) => this.emitError(event),
+    });
+    this.communityProvisioning = new CommunityProvisioning({
+      requireConnectedXmpp: () => this.requireConnectedXmpp(),
+      nick: () => this.session.username,
     });
     this.pubsub = new PubsubManager({
       sessionJid: () => this.session.jid,
@@ -661,6 +769,7 @@ export class BrowserXmppClient {
           detail: "We couldn't reconnect after several attempts. Check your connection, then reload to try again.",
         });
       },
+      timeoutScheduler: this.timeoutScheduler,
     });
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
   }
@@ -679,8 +788,68 @@ export class BrowserXmppClient {
   /** Bare JID for this session. */
   get bareJid(): string { return this.session.jid; }
 
+  private installTransport(
+    handle: XmppClientInstance,
+    connectionGeneration: number,
+  ): void {
+    this.installTransportSlot(
+      this.createTransportSlot(handle, connectionGeneration),
+    );
+  }
+
+  private installTransportSlot(slot: TransportSlot): void {
+    this.assertActiveLifecycle();
+    if (slot.lifecycleId.value !== this.lifecycleId.value) {
+      throw new DOMException(
+        "Cannot install a transport from another lifecycle",
+        "AbortError",
+      );
+    }
+    this.transportSlot = slot;
+  }
+
+  private createTransportSlot(
+    handle: XmppClientInstance,
+    connectionGeneration: number,
+  ): TransportSlot {
+    return {
+      handle,
+      connectionGeneration,
+      lifecycleId: this.lifecycleId,
+      retirement: null,
+    };
+  }
+
   private isCurrentXmpp(xmpp: XmppClientInstance): boolean {
-    return this.xmpp === xmpp && !this.destroying;
+    return this.lifecycleState === "active"
+      && this.transportSlot?.handle === xmpp
+      && this.transportSlot.lifecycleId.value === this.lifecycleId.value
+      && !this.destroying;
+  }
+
+  private isCurrentTransport(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): boolean {
+    const slot = this.transportSlot;
+    return this.lifecycleState === "active"
+      && !this.destroying
+      && !!slot
+      && slot.handle === xmpp
+      && slot.connectionGeneration === generation
+      && slot.lifecycleId.value === this.lifecycleId.value;
+  }
+
+  private isCurrentConnectAttempt(generation: number): boolean {
+    return this.lifecycleState === "active"
+      && !this.destroying
+      && generation === this.connectEpoch;
+  }
+
+  private assertActiveLifecycle(): void {
+    if (this.lifecycleState !== "active") {
+      throw new XmppClientDisposedError();
+    }
   }
 
   private rejectRoomJoinWaiters(error: Error): void {
@@ -724,7 +893,11 @@ export class BrowserXmppClient {
    * and record it as attempted so a concurrent `discoverTopology`
    * fan-out does not re-send a join either.
    */
-  private reseedResumedRooms(): void {
+  private reseedResumedRooms(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): void {
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     for (const key of this.resumedSessionRoomKeys) {
       if (!key) continue;
       if (!this.joinedMucs.has(key)) this.joinedMucs.set(key, Promise.resolve());
@@ -742,10 +915,15 @@ export class BrowserXmppClient {
    * room (#1221). Used on a fresh bind and on a resume whose readiness
    * snapshot was lost. Single-flight per epoch via `fanOutAutoJoin`.
    */
-  private fanOutJoinableRooms(): void {
+  private fanOutJoinableRooms(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): Promise<void> {
+    if (!this.isCurrentTransport(xmpp, generation)) return Promise.resolve();
     const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
     if (this.currentRoom) roomsToJoin.add(this.currentRoom);
-    if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin]);
+    if (roomsToJoin.size === 0) return Promise.resolve();
+    return this.trackLifecycleWork(this.fanOutAutoJoin([...roomsToJoin]));
   }
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
@@ -790,44 +968,44 @@ export class BrowserXmppClient {
     this.joinedMucReady.delete(key);
   }
 
-  setMessageHandler(h: (message: LiveRoomMessage) => void) { this.events.set("message", h); }
+  setMessageHandler(h: (message: LiveRoomMessage) => void) { this.assertActiveLifecycle(); this.events.set("message", h); }
   /** #414: receive `<pin-event/>` system messages from a room. */
-  setPinEventHandler(h: (event: { roomJid: string; event: WasmPinEvent }) => void) { this.events.set("pinEvent", h); }
-  setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.events.set("directMessage", h); }
-  setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.events.set("status", h); }
-  setChatStateHandler(h: (event: ChatStateEvent) => void) { this.events.set("chatState", h); }
-  setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.events.set("dmChatState", h); }
-  setReactionHandler(h: (event: ReactionEvent) => void) { this.events.set("reaction", h); }
-  setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.events.set("dmReaction", h); }
-  setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.events.set("displayed", h); }
-  setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.events.set("dmDisplayed", h); }
-  setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.events.set("presenceUpdate", h); }
-  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.events.set("memberJid", h); }
-  setHatsHandler(h: (hats: RoomHats) => void) { this.events.set("hats", h); }
-  setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.events.set("authority", h); }
-  setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
-  setInboxPushHandler(h: (entry: InboxEntry) => void) { this.events.set("inboxPush", h); }
-  setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.events.set("roomAvatar", h); }
-  setRoomDisconnectHandler(h: () => void) { this.events.set("roomDisconnect", h); }
-  setPresenceHandler(h: (presence: RoomPresence) => void) { this.events.set("presence", h); }
-  setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.events.set("lastSeen", h); }
-  setMessageAckHandler(h: (messageId: string) => void) { this.events.set("messageAck", h); }
-  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.events.set("messageDeliveryFailure", h); }
-  setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.events.set("queuedMessageStatus", h); }
-  setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.events.set("sessionLifecycle", h); }
-  setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.events.set("catchupFailure", h); }
+  setPinEventHandler(h: (event: { roomJid: string; event: WasmPinEvent }) => void) { this.assertActiveLifecycle(); this.events.set("pinEvent", h); }
+  setDirectMessageHandler(h: (message: LiveDmMessage) => void) { this.assertActiveLifecycle(); this.events.set("directMessage", h); }
+  setStatusHandler(h: (status: XmppStatusSnapshot) => void) { this.assertActiveLifecycle(); this.events.set("status", h); }
+  setChatStateHandler(h: (event: ChatStateEvent) => void) { this.assertActiveLifecycle(); this.events.set("chatState", h); }
+  setDmChatStateHandler(h: (event: DmChatStateEvent) => void) { this.assertActiveLifecycle(); this.events.set("dmChatState", h); }
+  setReactionHandler(h: (event: ReactionEvent) => void) { this.assertActiveLifecycle(); this.events.set("reaction", h); }
+  setDmReactionHandler(h: (event: DmReactionEvent) => void) { this.assertActiveLifecycle(); this.events.set("dmReaction", h); }
+  setDisplayedHandler(h: (event: { roomJid: string; nick: string; messageId: string }) => void) { this.assertActiveLifecycle(); this.events.set("displayed", h); }
+  setDmDisplayedHandler(h: (event: DmDisplayedEvent) => void) { this.assertActiveLifecycle(); this.events.set("dmDisplayed", h); }
+  setPresenceUpdateHandler(h: (event: PresenceUpdateEvent) => void) { this.assertActiveLifecycle(); this.events.set("presenceUpdate", h); }
+  setMemberJidHandler(h: (nick: string, bareJid: string) => void) { this.assertActiveLifecycle(); this.events.set("memberJid", h); }
+  setHatsHandler(h: (hats: RoomHats) => void) { this.assertActiveLifecycle(); this.events.set("hats", h); }
+  setAuthorityHandler(h: (authority: RoomAuthority) => void) { this.assertActiveLifecycle(); this.events.set("authority", h); }
+  setActivityHandler(h: (event: RoomActivityEvent) => void) { this.assertActiveLifecycle(); this.events.set("activity", h); }
+  setInboxPushHandler(h: (entry: InboxEntry) => void) { this.assertActiveLifecycle(); this.events.set("inboxPush", h); }
+  setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.assertActiveLifecycle(); this.events.set("roomAvatar", h); }
+  setRoomDisconnectHandler(h: () => void) { this.assertActiveLifecycle(); this.events.set("roomDisconnect", h); }
+  setPresenceHandler(h: (presence: RoomPresence) => void) { this.assertActiveLifecycle(); this.events.set("presence", h); }
+  setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.assertActiveLifecycle(); this.events.set("lastSeen", h); }
+  setMessageAckHandler(h: (messageId: string) => void) { this.assertActiveLifecycle(); this.events.set("messageAck", h); }
+  setMessageDeliveryFailureHandler(h: (messageId: string) => void) { this.assertActiveLifecycle(); this.events.set("messageDeliveryFailure", h); }
+  setQueuedMessageStatusHandler(h: (messageId: string, status: "queued" | "sending") => void) { this.assertActiveLifecycle(); this.events.set("queuedMessageStatus", h); }
+  setSessionLifecycleHandler(h: (event: SessionLifecycleEvent) => void) { this.assertActiveLifecycle(); this.events.set("sessionLifecycle", h); }
+  setCatchupFailureHandler(h: (failure: CatchupConversationFailure) => void) { this.assertActiveLifecycle(); this.events.set("catchupFailure", h); }
 
-  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.events.on("messageAcked", hook); }
-  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.events.on("messageDeliveryFailed", hook); }
-  onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
-  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
-  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
-  onQueueDepthChange(hook: (depth: QueueDepthTelemetry) => void) { this.events.on("queueDepthChange", hook); }
-  onStreamManagement(hook: (event: WasmStreamManagementTelemetry) => void) { this.events.on("streamManagement", hook); }
-  onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
-  onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
-  onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
-  onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.events.on("resumeDrain", hook); }
+  onMessageAcked(hook: (id: string, meta: { kind: "room" | "dm"; latencyMs: number }) => void) { this.assertActiveLifecycle(); this.events.on("messageAcked", hook); }
+  onMessageDeliveryFailed(hook: (id: string, meta: { kind: "room" | "dm" }) => void) { this.assertActiveLifecycle(); this.events.on("messageDeliveryFailed", hook); }
+  onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.assertActiveLifecycle(); this.events.on("sessionLifecycleHook", hook); }
+  onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.assertActiveLifecycle(); this.events.on("statusHook", hook); }
+  onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.assertActiveLifecycle(); this.events.on("sendEnqueued", hook); }
+  onQueueDepthChange(hook: (depth: QueueDepthTelemetry) => void) { this.assertActiveLifecycle(); this.events.on("queueDepthChange", hook); }
+  onStreamManagement(hook: (event: WasmStreamManagementTelemetry) => void) { this.assertActiveLifecycle(); this.events.on("streamManagement", hook); }
+  onError(hook: (event: XmppErrorEvent) => void) { this.assertActiveLifecycle(); this.events.on("error", hook); }
+  onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.assertActiveLifecycle(); this.events.on("reconnectScheduled", hook); }
+  onCatchup(hook: (info: CatchupHookInfo) => void) { this.assertActiveLifecycle(); this.events.on("catchup", hook); }
+  onResumeDrain(hook: (info: { buffered: number; durationMs: number }) => void) { this.assertActiveLifecycle(); this.events.on("resumeDrain", hook); }
 
   private emitError(event: XmppErrorEvent) { this.events.emitSafe("error", event); }
 
@@ -856,6 +1034,7 @@ export class BrowserXmppClient {
     if (typeof window === "undefined" || this.onlineRecoveryListener) return;
     const listener = () => {
       this.disarmOnlineRecovery();
+      if (this.lifecycleState !== "active") return;
       // The network coming back is a user-environment recovery signal —
       // one of the two fresh-budget entry points (the other being a
       // page load, which constructs a new client).
@@ -872,40 +1051,51 @@ export class BrowserXmppClient {
   }
 
   private async clearResumeState(): Promise<void> {
-    await this.resume.clearAll();
-    // Only called from the `destroying` path — i.e. intentional
-    // logout / shutdown. Drop the catch-up cursors too so a future
-    // login on the same account (same browser) doesn't replay
-    // ancient MAM history. (Transient disconnects do NOT go through
-    // this method; they intentionally keep cursors so the next
-    // resume can fill the gap.)
-    this.catchup.reset();
+    try {
+      await this.resume.clearAll();
+    } finally {
+      // Only called from the `destroying` path — i.e. intentional
+      // logout / shutdown. Drop the catch-up cursors too so a future
+      // login on the same account (same browser) doesn't replay
+      // ancient MAM history. (Transient disconnects do NOT go through
+      // this method; they intentionally keep cursors so the next
+      // resume can fill the gap.)
+      this.catchup.reset();
+    }
   }
 
   persistResumeStateForPageHide(): void {
+    this.assertActiveLifecycle();
     this.resume.persistForPageHide(
-      this.xmpp?.get_resume_state?.() ?? null,
+      this.xmpp?.get_resume_state() ?? null,
       this.resource,
       () => this.persistRetainedJoinedRooms(),
     );
   }
 
   prepareForPageHide(): void {
+    this.assertActiveLifecycle();
     try {
-      void this.xmpp?.request_stream_management_ack?.().catch(() => undefined);
+      void this.xmpp?.request_stream_management_ack().catch(() => undefined);
     } catch {}
     this.persistResumeStateForPageHide();
   }
 
   resumeAfterPageShow(): void {
+    this.assertActiveLifecycle();
     this.resume.reclaimAfterPageShow();
   }
 
-  private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
+  private async enableCarbons(
+    xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> },
+    generation: number,
+  ) {
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}
       return;
     }
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     if (!xmpp.send_raw_iq) return;
     try { await xmpp.send_raw_iq(`<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:carbons:2"/></iq>`); } catch {}
   }
@@ -923,37 +1113,96 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const epoch = ++this.connectEpoch;
-    this.outboundQueue.beginConnectionGeneration(epoch);
+    const predecessorSessionReady = this.sessionReadyWork?.promise;
+    if (predecessorSessionReady) await predecessorSessionReady;
     await this.outboundQueueHydration;
+    await this.outboundQueue.whenQuiescent();
+    if (!this.isCurrentConnectAttempt(epoch)) return;
+    this.outboundQueue.beginConnectionGeneration(epoch);
+    try {
+      await this.outboundQueue.reconcileNativeSnapshot(epoch, this.resume.state);
+    } catch (error) {
+      if (!this.isCurrentConnectAttempt(epoch)) return;
+      if (!(error instanceof NativeResumeSnapshotRejectedError)) throw error;
+      // A persisted SM buffer that references an already-terminal or absent
+      // durable row cannot be installed unchanged: doing so would replay work
+      // that this browser no longer owns. Drop the entire candidate and bind a
+      // fresh stream; transport certainty is intentionally limited to rows
+      // whose exact durable identity still exists.
+      await this.resume.discardCandidate();
+      if (!this.isCurrentConnectAttempt(epoch)) return;
+      await this.outboundQueue.reconcileNativeSnapshot(epoch, null);
+    }
+    if (!this.isCurrentConnectAttempt(epoch)) return;
     const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
     // timeout tore this one down) while the module load was pending.
     // Abort before creating a handle — the current attempt owns the
     // connection now.
-    if (epoch !== this.connectEpoch || this.destroying) return;
-    const config = new mod.WaddleConfig(
+    if (!this.isCurrentConnectAttempt(epoch)) return;
+    const config = validatedWasmConfigBinding(new mod.WaddleConfig(
       websocketUrl,
       this.session.jid,
       this.session.session_id,
       this.resource,
-    );
-    if (this.resume.handle && typeof config.with_resume_state_handle === "function") {
-      config.with_resume_state_handle(this.resume.handle);
-      await this.clearResumeState();
-    } else if (this.resume.state) {
+    ));
+    if (this.resume.state) {
       applyResumeStateToWasmConfig(config, this.resume.state);
       await this.resume.discardState();
+      if (!this.isCurrentConnectAttempt(epoch)) return;
     }
-    const xmpp = new mod.WaddleClient(config) as unknown as XmppClientInstance;
-    this.xmpp?.dispose?.();
-    this.xmpp = xmpp;
-    this.wireEvents(xmpp);
+    const xmpp = validatedWasmClientBinding(new mod.WaddleClient(config));
+    const candidateSlot = this.createTransportSlot(xmpp, epoch);
+    const predecessor = this.transportSlot;
+    this.transportSlot = null;
+    const predecessorRetirement = await this.retireExactTransport(
+      predecessor,
+      "replacement",
+    );
+    if (predecessorRetirement.failures.length > 0) {
+      const candidateRetirement = await this.retireExactTransport(
+        candidateSlot,
+        "replacement",
+      );
+      throw new XmppClientTeardownError(
+        [
+          ...predecessorRetirement.failures,
+          ...candidateRetirement.failures,
+        ],
+        predecessorRetirement.transportDisposed
+          && candidateRetirement.transportDisposed,
+      );
+    }
     try {
-      await xmpp.connect?.();
+      if (
+        epoch !== this.connectEpoch
+        || this.destroying
+        || this.lifecycleState !== "active"
+      ) {
+        throw new XmppClientDisposedError();
+      }
+      this.installTransportSlot(candidateSlot);
+      this.wireEvents(xmpp, epoch);
+      await xmpp.connect();
+      if (!this.isCurrentTransport(xmpp, epoch)) {
+        throw new XmppClientDisposedError();
+      }
     } catch (error) {
-      if (this.xmpp === xmpp) this.xmpp = null;
-      xmpp.dispose?.();
+      if (this.transportSlot === candidateSlot) this.transportSlot = null;
+      const retirement = await this.retireExactTransport(
+        candidateSlot,
+        "replacement",
+      );
+      if (retirement.failures.length > 0) {
+        throw new XmppClientTeardownError(
+          [
+            { stage: "transport-fence", cause: error },
+            ...retirement.failures,
+          ],
+          retirement.transportDisposed,
+        );
+      }
       throw error;
     }
   }
@@ -967,7 +1216,7 @@ export class BrowserXmppClient {
    * `disconnect()` can cancel it — an orphaned timer surviving a
    * disconnect would later tear down a NEWER connect's half-open handle
    * (spurious "reconnecting" + a stray teardown). */
-  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: unknown | null = null;
 
   /**
    * Internal/background connect path. Nearly every call site routes
@@ -989,6 +1238,7 @@ export class BrowserXmppClient {
    * implicitly by constructing a new client.
    */
   async connect(): Promise<void> {
+    this.assertActiveLifecycle();
     if (this.xmpp && this.connected) return;
     // Join an in-flight attempt BEFORE the terminal/exhausted gate:
     // during the scheduler's FINAL attempt the timer is already null
@@ -1034,8 +1284,30 @@ export class BrowserXmppClient {
     return this.connectInternal();
   }
 
-  private async connectInternal(): Promise<void> {
-    if (this.xmpp && this.connected) return;
+  private connectInternal(): Promise<void> {
+    if (this.connectAdmissionPromise) return this.connectAdmissionPromise;
+    const operation = (async () => {
+      const disconnect = this.disconnectPromise;
+      if (disconnect) await disconnect;
+      const predecessorAttempt = this.connectAttemptWork;
+      if (predecessorAttempt) {
+        await predecessorAttempt.catch(() => undefined);
+      }
+      this.assertActiveLifecycle();
+      return this.startConnectAttempt();
+    })();
+    const tracked = operation.finally(() => {
+      if (this.connectAdmissionPromise === tracked) {
+        this.connectAdmissionPromise = null;
+      }
+    });
+    this.connectAdmissionPromise = tracked;
+    return tracked;
+  }
+
+  private startConnectAttempt(): Promise<void> {
+    this.assertActiveLifecycle();
+    if (this.xmpp && this.connected) return Promise.resolve();
     if (this.connectPromise) return this.connectPromise;
     this.destroying = false;
     this.disarmOnlineRecovery();
@@ -1044,7 +1316,7 @@ export class BrowserXmppClient {
       "xmpp.connect",
       { "waddle.xmpp.transport": "websocket" },
       () => new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
+        const timeout = this.timeoutScheduler.setTimeout(() => {
           // C1: the connect budget measures to session-ready, not to
           // catch-up completion. `connect()`'s promise still resolves
           // only after the resume barrier (callers rely on "connected
@@ -1062,17 +1334,54 @@ export class BrowserXmppClient {
           // C3: invalidate any continuation of this attempt still
           // stalled on an `await` (module load) so it can't race a
           // newer attempt into a second live handle.
+          const stalledSlot = this.transportSlot;
+          const stalledGeneration = stalledSlot?.connectionGeneration
+            ?? this.connectEpoch;
+          const stalled = stalledSlot?.handle ?? null;
+          let stalledResumeState: XmppResumeState | null = null;
+          if (stalled) {
+            try {
+              stalledResumeState = stalled.get_resume_state() ?? null;
+            } catch (snapshotError) {
+              reportError("storage.read", snapshotError, {
+                recoverable: true,
+                detail: "timed-out SM snapshot could not be captured",
+                storage_area: "sm-resume",
+              });
+            }
+          }
+          this.outboundQueueHydration = this.outboundQueueHydration.then(async () => {
+            await this.outboundQueue.reconcileNativeSnapshot(
+              stalledGeneration,
+              stalledResumeState,
+            );
+          });
           this.connectEpoch += 1;
           this.connectTimer = null;
           this.connectPromise = null;
           this.onceConnected = null;
           this.onceConnectFailed = null;
-          const stalled = this.xmpp;
-          if (stalled) {
-            this.xmpp = null;
-            void Promise.resolve(stalled.disconnect?.())
-              .catch(() => undefined)
-              .finally(() => stalled.dispose?.());
+          if (stalledSlot) {
+            if (this.transportSlot === stalledSlot) this.transportSlot = null;
+            void this.trackLifecycleWork(
+              this.retireExactTransport(
+                stalledSlot,
+                "connect-timeout",
+              ).then((retirement) => {
+                if (retirement.failures.length === 0) return;
+                reportError(
+                  "xmpp.stream",
+                  new XmppClientTeardownError(
+                    retirement.failures,
+                    retirement.transportDisposed,
+                  ),
+                  {
+                    recoverable: false,
+                    detail: "timed-out XMPP transport retirement failed",
+                  },
+                );
+              }),
+            );
           }
           // An armed terminal detail is stale by construction here: it
           // belongs to the handle we just destroyed, whose disconnect
@@ -1090,18 +1399,27 @@ export class BrowserXmppClient {
         }, this.connectTimeoutMs);
         this.connectTimer = timeout;
         const done = (fn: () => void) => {
-          clearTimeout(timeout);
+          this.timeoutScheduler.clearTimeout(timeout);
           if (this.connectTimer === timeout) this.connectTimer = null;
           this.connectPromise = null;
           fn();
         };
         this.onceConnected = () => done(resolve);
         this.onceConnectFailed = (error) => done(() => reject(error));
-        void this.doConnect().catch((error) => {
+        const attempt = this.doConnect();
+        const trackedAttempt = attempt.finally(() => {
+          if (this.connectAttemptWork === trackedAttempt) {
+            this.connectAttemptWork = null;
+          }
+        });
+        this.connectAttemptWork = trackedAttempt;
+        void trackedAttempt.catch((error) => {
           if (this.onceConnectFailed) {
             const fail = this.onceConnectFailed;
             this.onceConnectFailed = null;
             fail(error instanceof Error ? error : new Error(String(error)));
+          } else {
+            this.lifecycleFailures.push(error);
           }
         });
       }),
@@ -1109,7 +1427,221 @@ export class BrowserXmppClient {
     return this.connectPromise;
   }
 
-  async disconnect() {
+  private retireExactTransport(
+    slot: TransportSlot | null,
+    reason: TransportRetirementReason,
+    joinedRooms: readonly string[] = [],
+  ): Promise<TransportRetirementReport> {
+    if (!slot) {
+      return Promise.resolve({ failures: [], transportDisposed: true });
+    }
+    if (slot.retirement) return slot.retirement;
+
+    let resolveRetirement!: (report: TransportRetirementReport) => void;
+    let rejectRetirement!: (error: unknown) => void;
+    const retirement = new Promise<TransportRetirementReport>((resolve, reject) => {
+      resolveRetirement = resolve;
+      rejectRetirement = reject;
+    });
+    // Install the memo before invoking user/native callbacks. `dispose()` may
+    // synchronously re-enter a disconnect callback; every concurrent path
+    // must join this exact promise instead of disposing the handle twice.
+    slot.retirement = retirement;
+    void this.performExactTransportRetirement(slot, reason, joinedRooms).then(
+      resolveRetirement,
+      rejectRetirement,
+    );
+    return retirement;
+  }
+
+  private async performExactTransportRetirement(
+    slot: TransportSlot,
+    reason: TransportRetirementReason,
+    joinedRooms: readonly string[],
+  ): Promise<TransportRetirementReport> {
+    const failures: XmppClientTeardownFailure[] = [];
+    const record = (stage: XmppClientTeardownStage, cause: unknown): void => {
+      failures.push({ stage, cause });
+    };
+    if (slot.lifecycleId.value !== this.lifecycleId.value) {
+      record(
+        "transport-fence",
+        new DOMException(
+          "Captured XMPP transport belongs to another lifecycle",
+          "AbortError",
+        ),
+      );
+    }
+
+    const handle = slot.handle;
+    const wireSettlements: Array<{
+      stage: XmppClientTeardownStage;
+      operation: Promise<unknown>;
+    }> = [];
+    const captureWireOperation = (
+      stage: XmppClientTeardownStage,
+      invoke: () => unknown,
+    ): void => {
+      try {
+        wireSettlements.push({
+          stage,
+          operation: Promise.resolve(invoke()),
+        });
+      } catch (error) {
+        record(stage, error);
+      }
+    };
+    if (reason === "client-disconnect") {
+      captureWireOperation("active-call", () => tearDownActiveCall(
+        handle as unknown as CallWireSender,
+        "success",
+      ));
+      for (const roomJid of joinedRooms) {
+        captureWireOperation("room-leave", () => handle.leave_room(
+          roomJid,
+          this.session.username,
+        ));
+      }
+    }
+
+    if (reason !== "peer-disconnected") {
+      captureWireOperation("transport-disconnect", () => handle.disconnect?.());
+    }
+
+    // Disposal is synchronous and unconditional. It happens before awaiting
+    // any best-effort wire operation or durable cleanup, so an uncertain
+    // disconnect/leave promise can never keep this exact generation alive.
+    let transportDisposed = false;
+    try {
+      if (!handle.dispose) {
+        throw new DOMException(
+          "Captured XMPP transport has no dispose capability",
+          "NotSupportedError",
+        );
+      }
+      handle.dispose();
+      transportDisposed = true;
+    } catch (error) {
+      record("transport-dispose", error);
+    }
+
+    const settled = await Promise.allSettled(
+      wireSettlements.map(({ operation }) => operation),
+    );
+    settled.forEach((result, index) => {
+      if (result.status === "rejected") {
+        record(wireSettlements[index]!.stage, result.reason);
+      }
+    });
+    return { failures, transportDisposed };
+  }
+
+  /**
+   * Durable owner revalidation proved that this generation no longer owns
+   * outbound effects. Detach the exact socket synchronously so no callback or
+   * public send can observe it as live; physical close/dispose and reconnect
+   * scheduling continue outside the queue's authority serialization.
+   */
+  private handleOutboundAuthorityLost(
+    error: OutboundAuthorityChangedError,
+  ): void {
+    const fencedSlot = this.transportSlot;
+    if (!fencedSlot) return;
+    this.transportSlot = null;
+    this.connected = false;
+    this.stopSelfPing();
+    this.connectEpoch += 1;
+    const fencedGeneration = this.connectEpoch;
+    if (this.connectTimer !== null) {
+      this.timeoutScheduler.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    const failPendingConnect = this.onceConnectFailed;
+    this.onceConnected = null;
+    this.onceConnectFailed = null;
+    this.connectPromise = null;
+    failPendingConnect?.(error);
+    void this.trackLifecycleWork(
+      this.retireExactTransport(
+        fencedSlot,
+        "authority-fenced",
+      ).then((retirement) => {
+        if (retirement.failures.length > 0) {
+          reportError(
+            "xmpp.stream",
+            new XmppClientTeardownError(
+              retirement.failures,
+              retirement.transportDisposed,
+            ),
+            {
+              recoverable: false,
+              detail: "authority-fenced XMPP transport retirement failed",
+            },
+          );
+        }
+        if (
+          this.lifecycleState === "active"
+          && !this.destroying
+          && this.connectEpoch === fencedGeneration
+          && !this.transportSlot
+        ) {
+          this.emitStatus({
+            state: "reconnecting",
+            detail: "Outbound authority changed — reconnecting",
+          });
+          this.reconnect.schedule();
+        }
+      }).catch((retirementError) => {
+        reportError("xmpp.stream", retirementError, {
+          recoverable: false,
+          detail: "authority-fenced XMPP transport retirement rejected",
+        });
+      }),
+    );
+  }
+
+  disconnect(): Promise<void> {
+    if (this.lifecycleState !== "active") {
+      return Promise.reject(new XmppClientDisposedError());
+    }
+    return this.disconnectForLifecycle();
+  }
+
+  private disconnectForLifecycle(): Promise<void> {
+    if (this.disconnectPromise) return this.disconnectPromise;
+    const operation = this.performDisconnect();
+    const tracked = operation.finally(() => {
+      if (
+        this.lifecycleState === "active"
+        && this.disconnectPromise === tracked
+      ) {
+        this.disconnectPromise = null;
+      }
+    });
+    this.disconnectPromise = tracked;
+    return tracked;
+  }
+
+  private async performDisconnect(): Promise<void> {
+    const failures: XmppClientTeardownFailure[] = [];
+    const recordFailure = (
+      stage: XmppClientTeardownStage,
+      cause: unknown,
+    ): void => {
+      if (cause instanceof XmppClientTeardownError) {
+        failures.push(...cause.failures);
+      } else {
+        failures.push({ stage, cause });
+      }
+    };
+    const retiringSessionReady = this.sessionReadyWork?.promise ?? null;
+    const retiringConnectAttempt = this.connectAttemptWork;
+
+    // Capture and detach the exact transport synchronously. Every callback
+    // from this point fails the current-handle guard, and no failing durable
+    // cleanup can leave the physical WebSocket reachable as the active one.
+    const retiringSlot = this.transportSlot;
+    this.transportSlot = null;
     this.destroying = true;
     this.disarmOnlineRecovery();
     this.clearReconnectTimer();
@@ -1119,9 +1651,11 @@ export class BrowserXmppClient {
     // half-open handle, and settle the pending `connect()` promise so
     // its awaiter isn't left dangling (or spuriously rejected by the
     // orphaned timer long after this disconnect).
+    const retiringGeneration = retiringSlot?.connectionGeneration
+      ?? this.connectEpoch;
     this.connectEpoch += 1;
-    if (this.connectTimer) {
-      clearTimeout(this.connectTimer);
+    if (this.connectTimer !== null) {
+      this.timeoutScheduler.clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
     const failPendingConnect = this.onceConnectFailed;
@@ -1136,12 +1670,10 @@ export class BrowserXmppClient {
     // disconnect flip to a false terminal "sign in again".
     this.inTerminalErrorState = false;
     this.terminalDisconnectDetail = null;
-    await this.clearResumeState();
     // A user-explicit teardown drops the carried resume buffer too — a
     // later session on this instance must not replay another session's
     // stanzas.
     this.carriedPendingDuringResume = [];
-    const xmpp = this.xmpp;
     const joinedRooms = [...this.joinedMucs.keys()];
     this.stopSelfPing();
     this.connected = false;
@@ -1157,6 +1689,7 @@ export class BrowserXmppClient {
     this.joinedMucJoinTokens.clear();
     this.joinedMucReady.clear();
     this.autoJoinAttemptedRoomKeys.clear();
+    this.roomJoinScheduling.clear();
     this.resumedSessionRoomKeys.clear();
     this.sessionReadyHandledXmpp = null;
     clearDmCallJoinCacheForAccount(this.session.jid);
@@ -1165,25 +1698,120 @@ export class BrowserXmppClient {
     clearAllRaisedHands();
     clearAllMuted();
     clearAllLiveCallParticipants();
-    // Best-effort hangup: if we're in a call when the user logs out
-    // we want the peer to see session-terminate before the stream
-    // closes. `tearDownActiveCall` handles every phase and clears
-    // `$callState`.
-    await tearDownActiveCall(xmpp as unknown as CallWireSender | null, "success");
-    this.xmpp = null;
-    if (xmpp?.leave_room) {
-      for (const roomJid of joinedRooms) {
-        try {
-          await xmpp.leave_room(roomJid, this.session.username);
-        } catch {}
+
+    // Invoke retirement before any durable operation can reject or stall.
+    // `retireExactTransport` synchronously disposes the captured generation
+    // before its returned promise waits for best-effort wire settlements.
+    const retirementPromise = this.retireExactTransport(
+      retiringSlot,
+      "client-disconnect",
+      joinedRooms,
+    );
+
+    const retiringWork = await Promise.allSettled([
+      ...(retiringSessionReady ? [retiringSessionReady] : []),
+      ...(retiringConnectAttempt ? [retiringConnectAttempt] : []),
+    ]);
+    for (const result of retiringWork) {
+      if (
+        result.status === "rejected"
+        && !isExpectedLifecycleCancellation(result.reason)
+      ) {
+        recordFailure("lifecycle-quiescence", result.reason);
       }
     }
+
+    const preservePagehideHandoff = this.resume.pagehideHandoffActive;
     try {
-      await xmpp?.disconnect?.();
-    } finally {
-      xmpp?.dispose?.();
+      await this.resume.whenPageLifecycleQuiescent();
+    } catch (error) {
+      recordFailure("sm-page-lifecycle", error);
     }
+    if (!preservePagehideHandoff) {
+      try {
+        await this.clearResumeState();
+      } catch (error) {
+        recordFailure("sm-clear", error);
+      }
+      try {
+        await this.outboundQueueHydration;
+        if (this.lifecycleState === "active") {
+          await this.outboundQueue.reconcileNativeSnapshot(
+            retiringGeneration,
+            null,
+          );
+        } else {
+          await this.outboundQueue.reconcileFinalNativeSnapshot(
+            retiringGeneration,
+            null,
+          );
+        }
+      } catch (error) {
+        recordFailure("native-claim-release", error);
+      }
+    }
+
+    const retirement = await retirementPromise;
+    failures.push(...retirement.failures);
     this.emitStatus({ state: "offline", detail: "Disconnected" });
+    if (failures.length > 0) {
+      throw new XmppClientTeardownError(
+        failures,
+        retirement.transportDisposed,
+      );
+    }
+  }
+
+  /**
+   * Permanently release this client's durable outbound authority and browser
+   * observers. `disconnect()` intentionally remains reusable: callers may
+   * establish a later socket on the same client after retiring the exact
+   * connection generation. Component teardown and logout own this final,
+   * idempotent lifecycle boundary instead. If SM ownership has already moved
+   * to a successor, the promise rejects with the typed
+   * `XmppClientTeardownError` whose exact fenced failures can be classified by
+   * `isStaleOwnerDisposeError`; the successor's durable snapshot and outbound
+   * rows remain untouched.
+   */
+  dispose(): Promise<void> {
+    if (this.finalDisposePromise) return this.finalDisposePromise;
+    this.lifecycleState = "disposing";
+    // Stop queue observers and authority acquisition synchronously, before
+    // the physical transport is detached. Final snapshot reconciliation is
+    // restricted to the exact fence captured at this boundary.
+    this.outboundQueue.beginFinalDisposal();
+    const operation = (async () => {
+      const failures: XmppClientTeardownFailure[] = [];
+      let transportDisposed = true;
+      try {
+        await this.disconnectForLifecycle();
+      } catch (error) {
+        if (error instanceof XmppClientTeardownError) {
+          failures.push(...error.failures);
+          transportDisposed = error.transportDisposed;
+        } else {
+          failures.push({ stage: "transport-disconnect", cause: error });
+          transportDisposed = false;
+        }
+      }
+      try {
+        await this.whenLifecycleQuiescent();
+      } catch (error) {
+        failures.push({ stage: "lifecycle-quiescence", cause: error });
+      }
+      try {
+        await this.outboundQueue.dispose();
+      } catch (error) {
+        failures.push({ stage: "outbound-authority-dispose", cause: error });
+      } finally {
+        this.lifecycleState = "disposed";
+      }
+      if (failures.length > 0) {
+        throw new XmppClientTeardownError(failures, transportDisposed);
+      }
+    })();
+    this.finalDisposePromise = operation;
+    return operation;
   }
 
   private roomJidForChannel(channelId: string): string {
@@ -1191,9 +1819,36 @@ export class BrowserXmppClient {
   }
 
   rememberRoomJidForChannel(channelId: string, roomJid: string): void {
+    this.assertActiveLifecycle();
     const normalizedRoomJid = barePeerJid(roomJid);
     if (!channelId || !normalizedRoomJid) return;
     this.discoveredRoomJids.set(channelId, normalizedRoomJid);
+  }
+
+  private roomJoinSchedulingSignal(roomKey: string): {
+    promise: Promise<void>;
+    resolve: () => void;
+    scheduled: boolean;
+  } {
+    const existing = this.roomJoinScheduling.get(roomKey);
+    if (existing) return existing;
+    let resolve!: () => void;
+    const signal = {
+      promise: new Promise<void>((done) => {
+        resolve = done;
+      }),
+      resolve: () => resolve(),
+      scheduled: false,
+    };
+    this.roomJoinScheduling.set(roomKey, signal);
+    return signal;
+  }
+
+  private markRoomJoinScheduled(roomKey: string): void {
+    const signal = this.roomJoinSchedulingSignal(roomKey);
+    if (signal.scheduled) return;
+    signal.scheduled = true;
+    signal.resolve();
   }
 
   private waitForRoomSelfPresence(roomJid: string, requestedNick: string): Promise<void> {
@@ -1212,8 +1867,11 @@ export class BrowserXmppClient {
     });
     const timeout = setTimeout(() => {
       this.roomJoinWaiters.delete(key);
-      const detail = `Timed out waiting for self-presence in ${roomJid}`;
-      this.emitError({ kind: "connect-timeout", recoverable: true, detail });
+      this.emitError({
+        kind: "connect-timeout",
+        recoverable: true,
+        reason: "room-self-presence",
+      });
       rejectJoin(new Error("Channel presence did not finish syncing. Try again in a moment."));
     }, ROOM_SELF_PRESENCE_TIMEOUT_MS);
     this.roomJoinWaiters.set(key, {
@@ -1246,6 +1904,7 @@ export class BrowserXmppClient {
   }
 
   async ensureJoined(roomJid: string): Promise<void> {
+    this.assertActiveLifecycle();
     // Every join tracker keys on the canonical `roomJoinKey` (lowercased
     // bare JID) so case variants from topology vs. retained-room replay
     // resolve to a single entry (#1221). The raw `roomJid` still goes on
@@ -1299,18 +1958,15 @@ export class BrowserXmppClient {
   private async performMucJoin(roomJid: string): Promise<void> {
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
-    if (!xmpp.join_room && !xmpp.joinRoom) {
-      throw new Error("XMPP client missing join_room binding");
-    }
     const ready = this.waitForRoomSelfPresence(roomJid, this.session.username);
     const joinKey = this.roomJoinKey(roomJid);
     const joinWaiter = this.roomJoinWaiters.get(joinKey);
     try {
-      if (xmpp.join_room) {
-        await xmpp.join_room(roomJid, this.session.username);
-      } else if (xmpp.joinRoom) {
-        await xmpp.joinRoom(roomJid, this.session.username);
-      }
+      // The self-presence waiter exists before this signal resolves, so a
+      // caller may safely inject/observe the resulting presence without a
+      // race against join setup.
+      this.markRoomJoinScheduled(joinKey);
+      await xmpp.join_room(roomJid, this.session.username);
     } catch (error) {
       const joinError = error instanceof Error
         ? error
@@ -1329,6 +1985,7 @@ export class BrowserXmppClient {
   }
 
   async fanOutAutoJoin(roomJids: ReadonlyArray<string>, concurrency = 6): Promise<void> {
+    this.assertActiveLifecycle();
     if (!this.xmpp) return;
     // Dedup the input by canonical key and skip rooms already attempted
     // this epoch; the raw JID enters the queue for the wire (#1221).
@@ -1343,13 +2000,15 @@ export class BrowserXmppClient {
       this.autoJoinAttemptedRoomKeys.add(key);
       queue.push(roomJid);
     }
+    const joinFailures: unknown[] = [];
     const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
       while (queue.length > 0) {
         const roomJid = queue.shift();
         if (!roomJid) continue;
         try {
           await this.ensureJoined(roomJid);
-        } catch {
+        } catch (error) {
+          joinFailures.push(error);
           // Failed joins drop their tracker entry inside ensureJoined,
           // but the key stays in `autoJoinAttemptedRoomKeys`, so a
           // same-epoch fan-out (e.g. a topology refresh) will NOT retry
@@ -1359,10 +2018,15 @@ export class BrowserXmppClient {
         }
       }
     });
-    await Promise.allSettled(workers);
+    const settled = await Promise.allSettled(workers);
+    throwUnexpectedLifecycleFailures("MUC auto-join workers failed", settled);
+    if (joinFailures.length > 0) {
+      throw new AggregateError(joinFailures, "One or more MUC auto-joins failed");
+    }
   }
 
   async switchRoom(_spaceId: string, channelId: string) {
+    this.assertActiveLifecycle();
     await this.connect();
     const nextRoom = this.roomJidForChannel(channelId);
     if (this.roomSwitchPromise) {
@@ -1410,7 +2074,11 @@ export class BrowserXmppClient {
   }
 
   private canUseConnectedSession(): boolean {
-    return !!this.xmpp && this.connected && !this.destroying && !browserOffline();
+    return this.lifecycleState === "active"
+      && !!this.xmpp
+      && this.connected
+      && !this.destroying
+      && !browserOffline();
   }
 
   private roomIsReady(roomJid: string): boolean {
@@ -1425,67 +2093,66 @@ export class BrowserXmppClient {
     return "not-ready";
   }
 
-  private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
+  private async sendGroupMessageThroughBinding(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_groupchat_message) {
-      return compatWasmSendResult(await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
-    }
-    throw new Error("XMPP session is not ready");
+    return wasmSendMessageId(
+      await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts),
+    );
   }
 
-  private async compatSendDirectMessage(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
+  private async sendDirectMessageThroughBinding(xmpp: XmppClientInstance, peerJid: string, body: string, opts: SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
-    if (xmpp.send_chat_message) {
-      return compatWasmSendResult(await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
-    }
-    throw new Error("XMPP session is not ready");
+    return wasmSendMessageId(
+      await xmpp.send_chat_message(peerJid, effectiveBody, wasmOpts),
+    );
   }
 
   // XEP-0201 §3: chat-states, displayed markers, reactions, retractions, and
   // corrections that relate to a threaded message SHOULD repeat the original
   // `<thread/>`. The wasm bindings accept thread id + optional parent so the
   // related stanzas route to the same conversation context on receivers.
-  private async compatSendChatState(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", state: ChatStateType, thread?: { id: string; parent?: string }) {
-    if (xmpp.send_chat_state) return xmpp.send_chat_state(to, type, state, thread?.id, thread?.parent);
-    throw new Error("XMPP session is not ready");
+  private async sendChatStateThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", state: ChatStateType, thread?: { id: string; parent?: string }) {
+    return xmpp.send_chat_state(to, type, state, thread?.id, thread?.parent);
   }
 
-  private async compatSendDisplayed(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
-    if (xmpp.send_displayed) return xmpp.send_displayed(to, type, id, thread?.id, thread?.parent);
-    throw new Error("XMPP session is not ready");
+  private async sendDisplayedThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
+    return xmpp.send_displayed(to, type, id, thread?.id, thread?.parent);
   }
 
-  private async compatSendReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, emojis: string[], thread?: { id: string; parent?: string }) {
-    if (xmpp.send_reaction) return xmpp.send_reaction(to, type, id, emojis, thread?.id, thread?.parent);
-    throw new Error("XMPP session is not ready");
+  private async sendReactionThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, emojis: string[], thread?: { id: string; parent?: string }) {
+    return xmpp.send_reaction(to, type, id, emojis, thread?.id, thread?.parent);
   }
 
-  private async compatSendInCallReaction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", sid: string, emoji: string) {
-    if (xmpp.send_in_call_reaction) return xmpp.send_in_call_reaction(to, type, sid, emoji);
-    throw new Error("XMPP session is not ready");
+  private async sendInCallReactionThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", sid: string, emoji: string) {
+    return xmpp.send_in_call_reaction(to, type, sid, emoji);
   }
 
-  private async compatSendRetraction(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
-    if (xmpp.send_retraction) return xmpp.send_retraction(to, type, id, thread?.id, thread?.parent);
-    throw new Error("XMPP session is not ready");
+  private async sendRetractionThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", id: string, thread?: { id: string; parent?: string }) {
+    return xmpp.send_retraction(to, type, id, thread?.id, thread?.parent);
   }
 
-  private async compatSendModeration(xmpp: XmppClientInstance, roomJid: string, id: string, reason?: string) {
-    if (xmpp.send_moderation) return xmpp.send_moderation(roomJid, "groupchat", id, reason);
-    throw new Error("XMPP session is not ready");
+  private async sendModerationThroughBinding(xmpp: XmppClientInstance, roomJid: string, id: string, reason?: string) {
+    return xmpp.send_moderation(roomJid, "groupchat", id, reason);
   }
 
-  private async compatSendCorrection(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
+  private async sendCorrectionThroughBinding(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts?.replyTo, opts?.markup, opts?.references);
     const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
-    if (xmpp.send_correction) return await xmpp.send_correction(to, type, effectiveBody, replacesId, wasmOpts) as string;
-    throw new Error("XMPP session is not ready");
+    return await xmpp.send_correction(
+      to,
+      type,
+      effectiveBody,
+      replacesId,
+      wasmOpts,
+    ) as string;
   }
 
   private async requireConnectedXmpp(): Promise<XmppClientInstance> {
+    this.assertActiveLifecycle();
     await this.connect();
+    this.assertActiveLifecycle();
     if (!this.xmpp || !this.connected || this.destroying) throw new Error("XMPP session is not ready");
     return this.xmpp;
   }
@@ -1499,16 +2166,18 @@ export class BrowserXmppClient {
 
   /** Send a queued DM through the current session (OfflineSendQueue drain callback). */
   private sendQueuedDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): Promise<string | null> {
+    this.assertActiveLifecycle();
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
-    return this.compatSendDirectMessage(xmpp, peerJid, body, opts);
+    return this.sendDirectMessageThroughBinding(xmpp, peerJid, body, opts);
   }
 
   /** Send a queued room message through the current session (OfflineSendQueue drain callback). */
   private sendQueuedRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): Promise<string | null> {
+    this.assertActiveLifecycle();
     const xmpp = this.xmpp;
     if (!xmpp) throw new Error("XMPP session is not ready");
-    return this.compatSendGroupMessage(xmpp, roomJid, body, opts);
+    return this.sendGroupMessageThroughBinding(xmpp, roomJid, body, opts);
   }
 
   private flushQueuedDirectMessages(): Promise<void | undefined> {
@@ -1520,6 +2189,7 @@ export class BrowserXmppClient {
   }
 
   async sendGroupMessage(spaceId: string, channelId: string, body: string, opts: SendGroupMessageOptions = {}): Promise<OutboundSendResult | null> {
+    this.assertActiveLifecycle();
     const hasFiles = !!opts.files?.length;
     const hasThreadMetadata = !!opts.threadId?.trim();
     const hasForumMetadata = !!opts.threadCreate?.title?.trim() || !!opts.threadReply?.threadId?.trim();
@@ -1533,10 +2203,13 @@ export class BrowserXmppClient {
       this.outboundQueue.beginAttempt(outboundId, "room", claim);
       let id: string | null;
       try {
-        id = await this.compatSendGroupMessage(this.xmpp, roomJid, body, sendOpts);
+        id = await this.sendGroupMessageThroughBinding(this.xmpp, roomJid, body, sendOpts);
       } catch (error) {
-        await this.outboundQueue.rollbackAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) await this.outboundQueue.discardNonRetryable(outboundId);
+        if (isNonRetryableWasmSendFailure(error)) {
+          await this.outboundQueue.discardNonRetryable(outboundId);
+        } else {
+          await this.outboundQueue.rollbackAttempt(outboundId);
+        }
         throw error;
       }
       if (!id) {
@@ -1550,11 +2223,16 @@ export class BrowserXmppClient {
       return { id, state: "sending" };
     }
     const queued = await this.outboundQueue.queueRoomMessage(roomJid, body, opts);
-    void this.connect().then(() => this.switchRoom(spaceId, channelId)).then(() => this.flushQueuedRoomMessages(roomJid)).catch(() => undefined);
+    const replay = this.connect()
+      .then(() => this.switchRoom(spaceId, channelId))
+      .then(() => this.flushQueuedRoomMessages(roomJid))
+      .catch(() => undefined);
+    void this.trackLifecycleWork(replay);
     return queued;
   }
 
   async lookupLinkPreview(body: string, scopeJid: string): Promise<LinkPreviewLookupResult | null> {
+    this.assertActiveLifecycle();
     return requestPlaintextLinkPreviewLookup(
       this.xmpp,
       body,
@@ -1573,6 +2251,7 @@ export class BrowserXmppClient {
   }
 
   async sendDirectMessage(peerJid: string, body: string, opts: SendDirectMessageOptions = {}): Promise<OutboundSendResult | null> {
+    this.assertActiveLifecycle();
     if (!body.trim() && !opts.files?.length) return null;
     const explicitScope = typeof opts.mucPm === "boolean"
       ? opts.mucPm ? "muc-occupant" : "account"
@@ -1589,10 +2268,13 @@ export class BrowserXmppClient {
       this.outboundQueue.beginAttempt(outboundId, "dm", claim);
       let id: string | null;
       try {
-        id = await this.compatSendDirectMessage(this.xmpp, normalizedPeerJid, body, sendOpts);
+        id = await this.sendDirectMessageThroughBinding(this.xmpp, normalizedPeerJid, body, sendOpts);
       } catch (error) {
-        await this.outboundQueue.rollbackAttempt(outboundId);
-        if (isNonRetryableWasmSendFailure(error)) await this.outboundQueue.discardNonRetryable(outboundId);
+        if (isNonRetryableWasmSendFailure(error)) {
+          await this.outboundQueue.discardNonRetryable(outboundId);
+        } else {
+          await this.outboundQueue.rollbackAttempt(outboundId);
+        }
         throw error;
       }
       if (!id) {
@@ -1608,10 +2290,10 @@ export class BrowserXmppClient {
     return await this.outboundQueue.queueDirectMessage(normalizedPeerJid, body, mucPm ? { ...opts, mucPm: true } : opts);
   }
 
-  async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendChatState(xmpp, roomJid, "groupchat", state, thread); }
-  async sendDisplayed(spaceId: string, channelId: string, messageId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendDisplayed(xmpp, roomJid, "groupchat", messageId, thread); }
-  async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendReaction(xmpp, roomJid, "groupchat", messageId, emojis, thread); }
-  async sendInCallReaction(spaceId: string, channelId: string, sid: string, emoji: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendInCallReaction(xmpp, roomJid, "groupchat", sid, emoji); }
+  async sendChatState(spaceId: string, channelId: string, state: ChatStateType, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendChatStateThroughBinding(xmpp, roomJid, "groupchat", state, thread); }
+  async sendDisplayed(spaceId: string, channelId: string, messageId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendDisplayedThroughBinding(xmpp, roomJid, "groupchat", messageId, thread); }
+  async sendReaction(spaceId: string, channelId: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendReactionThroughBinding(xmpp, roomJid, "groupchat", messageId, emojis, thread); }
+  async sendInCallReaction(spaceId: string, channelId: string, sid: string, emoji: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendInCallReactionThroughBinding(xmpp, roomJid, "groupchat", sid, emoji); }
   /**
    * #1029: raise or lower this client's hand in the active MUC call. The
    * raised-hand state is a presence extension carried alongside `<muji/>`,
@@ -1689,9 +2371,9 @@ export class BrowserXmppClient {
     const page = await xmpp.fetch_direct_messages_by_stanza_ids(normalizedPeerJid, stanzaIds);
     return Array.isArray(page?.messages) ? page.messages : [];
   }
-  async sendRetraction(spaceId: string, channelId: string, retractsId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendRetraction(xmpp, roomJid, "groupchat", retractsId, thread); }
-  async sendModeration(spaceId: string, channelId: string, targetId: string, reason?: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.compatSendModeration(xmpp, roomJid, targetId, reason); }
-  // Corrections (XEP-0308) flow through compatSendCorrection's options dict,
+  async sendRetraction(spaceId: string, channelId: string, retractsId: string, thread?: { id: string; parent?: string }) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendRetractionThroughBinding(xmpp, roomJid, "groupchat", retractsId, thread); }
+  async sendModeration(spaceId: string, channelId: string, targetId: string, reason?: string) { const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId); await this.sendModerationThroughBinding(xmpp, roomJid, targetId, reason); }
+  // Corrections (XEP-0308) flow through the generated binding's options dict,
   // which already serializes thread/parent into the wasm send options used by
   // build_outbound_message — so passing { threadId, parentThreadId } here is
   // all the wire-level conformance needs.
@@ -1700,21 +2382,21 @@ export class BrowserXmppClient {
     const opts: SendGroupMessageOptions = { markup, references, ...preview };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
-    return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
+    return await this.sendCorrectionThroughBinding(xmpp, roomJid, "groupchat", body, replacesId, opts);
   }
-  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendChatState(xmpp, this.directMessageAddress(peerJid, scope), "chat", state, thread); }
-  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendDisplayed(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
-  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendRetraction(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
+  async sendDmChatState(peerJid: string, state: ChatStateType, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.sendChatStateThroughBinding(xmpp, this.directMessageAddress(peerJid, scope), "chat", state, thread); }
+  async sendDmDisplayed(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.sendDisplayedThroughBinding(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
+  async sendDmRetraction(peerJid: string, messageId: string, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.sendRetractionThroughBinding(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, thread); }
   async sendDmCorrection(peerJid: string, body: string, replacesId: string, markup?: SendDirectMessageOptions["markup"], references?: SendDirectMessageOptions["references"], preview?: Pick<SendDirectMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<string | null> {
     const xmpp = await this.requireConnectedXmpp();
     const address = this.directMessageAddress(peerJid, scope);
     const opts: SendDirectMessageOptions = { markup, references, ...preview, ...(address.includes("/") ? { mucPm: true } : {}) };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
-    return await this.compatSendCorrection(xmpp, address, "chat", body, replacesId, opts);
+    return await this.sendCorrectionThroughBinding(xmpp, address, "chat", body, replacesId, opts);
   }
-  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendReaction(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, emojis, thread); }
-  async sendDmInCallReaction(peerJid: string, sid: string, emoji: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.compatSendInCallReaction(xmpp, peerJid, "chat", sid, emoji); }
+  async sendDmReaction(peerJid: string, messageId: string, emojis: string[], thread?: { id: string; parent?: string }, scope?: DmConversationScope): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.sendReactionThroughBinding(xmpp, this.directMessageAddress(peerJid, scope), "chat", messageId, emojis, thread); }
+  async sendDmInCallReaction(peerJid: string, sid: string, emoji: string): Promise<void> { const xmpp = await this.requireConnectedXmpp(); await this.sendInCallReactionThroughBinding(xmpp, peerJid, "chat", sid, emoji); }
 
   /**
    * XEP-0490 §3 multi-device "read up to here" publish. `chatId` is
@@ -1772,17 +2454,19 @@ export class BrowserXmppClient {
     try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
   }
 
-  setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.events.set("mdsDisplayed", handler); }
+  setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.assertActiveLifecycle(); this.events.set("mdsDisplayed", handler); }
 
   async subscribeStoryReactionSummaries(communityJid: string): Promise<void> { return this.pubsub.subscribeStoryReactionSummaries(communityJid); }
 
   async subscribeStories(communityJid: string): Promise<void> { return this.pubsub.subscribeStories(communityJid); }
 
   addPubsubEventHandler(handler: (event: PubsubEvent) => void): () => void {
+    this.assertActiveLifecycle();
     return this.events.on("pubsubEvent", handler);
   }
 
   setPubsubEventHandler(handler: ((event: PubsubEvent) => void) | null) {
+    this.assertActiveLifecycle();
     this.events.set("pubsubEvent", handler);
   }
 
@@ -1790,7 +2474,7 @@ export class BrowserXmppClient {
     if (this.uploadServiceJid) return this.uploadServiceJid;
     const xmpp = await this.requireConnectedXmpp();
     if (!xmpp.discover_upload_service) throw new Error("XMPP not connected");
-    const jid = await discoverUploadService(xmpp as WasmClient);
+    const jid = await discoverUploadService(xmpp);
     if (!jid) throw new Error(`File upload service not available (domain: ${jidDomain(this.session.jid)})`);
     this.uploadServiceJid = jid;
     return jid;
@@ -1822,7 +2506,7 @@ export class BrowserXmppClient {
         ? new File([blob], safeName, { type: contentType })
         : new File([blob], safeName, { type: contentType });
     const result = await uploadFile(
-      xmpp as WasmClient,
+      xmpp,
       sanitised,
       uploadDomain,
       onProgress,
@@ -1839,7 +2523,7 @@ export class BrowserXmppClient {
     const grandTotal = totals.reduce((a, b) => a + b, 0);
     const results: OutboundFileAttachment[] = [];
     for (const [index, prepared] of preparedUploads.entries()) {
-      const result = await uploadFile(xmpp as WasmClient, prepared.uploadFile, uploadDomain, (progress) => {
+      const result = await uploadFile(xmpp, prepared.uploadFile, uploadDomain, (progress) => {
         loaded[index] = progress.loaded;
         onProgress?.({ loaded: loaded.reduce((a, b) => a + b, 0), total: grandTotal }, index);
       });
@@ -1848,12 +2532,12 @@ export class BrowserXmppClient {
     return results;
   }
 
-  async invokeExtensionLaunch(launch: ExtensionLaunchDescriptor): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionLaunch(xmpp as WasmClient, this.session.jid, launch); }
-  async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionCommands(xmpp as WasmClient, this.session.jid); }
-  async discoverExtensionRoutes(): Promise<DiscoveredExtensionRoute[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionRoutes(xmpp as WasmClient, this.session.jid); }
-  async fetchExtensionRouteItems(route: DiscoveredExtensionRoute, roomJid: string): Promise<ExtensionRouteItem[]> { const xmpp = await this.requireConnectedXmpp(); return fetchExtensionRouteItems(xmpp as WasmClient, route, roomJid); }
-  async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionCommand(xmpp as WasmClient, this.session.jid, command, roomJid); }
-  async submitExtensionCommandForm(command: DiscoveredExtensionCommand, sessionId: string, fields: ExtensionCommandFormField[], action?: ExtensionCommandAction, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return submitExtensionCommandForm(xmpp as WasmClient, command, sessionId, fields, action, roomJid); }
+  async invokeExtensionLaunch(launch: ExtensionLaunchDescriptor): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionLaunch(xmpp, this.session.jid, launch); }
+  async discoverExtensionCommands(): Promise<DiscoveredExtensionCommand[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionCommands(xmpp, this.session.jid); }
+  async discoverExtensionRoutes(): Promise<DiscoveredExtensionRoute[]> { const xmpp = await this.requireConnectedXmpp(); return discoverExtensionRoutes(xmpp, this.session.jid); }
+  async fetchExtensionRouteItems(route: DiscoveredExtensionRoute, roomJid: string): Promise<ExtensionRouteItem[]> { const xmpp = await this.requireConnectedXmpp(); return fetchExtensionRouteItems(xmpp, route, roomJid); }
+  async invokeExtensionCommand(command: DiscoveredExtensionCommand, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return invokeExtensionCommand(xmpp, this.session.jid, command, roomJid); }
+  async submitExtensionCommandForm(command: DiscoveredExtensionCommand, sessionId: string, fields: ExtensionCommandFormField[], action?: ExtensionCommandAction, roomJid?: string): Promise<ExtensionCommandResult> { const xmpp = await this.requireConnectedXmpp(); return submitExtensionCommandForm(xmpp, command, sessionId, fields, action, roomJid); }
 
   async enablePushNotifications(opts: { serviceJid: string; node: string }): Promise<boolean> {
     const xmpp = await this.requireConnectedXmpp();
@@ -2282,10 +2966,10 @@ export class BrowserXmppClient {
   async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { return this.presence.setPresence(show, idleSince); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jidLocalpart(jid) || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
-  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
+  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp, this.session.jid); }
   async createGroupDm(name: string, memberJids: string[]): Promise<CreateGroupDmResult> {
     const xmpp = await this.requireConnectedXmpp();
-    return createGroupDm(xmpp as WasmClient, {
+    return createGroupDm(xmpp, {
       userJid: this.session.jid,
       name,
       memberJids,
@@ -2293,7 +2977,7 @@ export class BrowserXmppClient {
   }
   async discoverTopology(): Promise<DiscoveredTopology> {
     const xmpp = await this.requireConnectedXmpp();
-    const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    const topology = await discoverTopology(xmpp, this.session.jid);
     if (topology.services?.muc) this.mucServiceJid = barePeerJid(topology.services.muc);
     this.discoveredRoomJids = new Map(topology.rooms.flatMap((room) => room.jid ? [[room.id, room.jid] as const] : []));
     const autoJoinRoomJids = topology.rooms
@@ -2323,21 +3007,108 @@ export class BrowserXmppClient {
   async adminChannelsKick(opts: { channelJid: string; occupantJid: string; reason?: string | null }): Promise<WasmAdminChannelsKickResult> { return this.mucAdmin.adminChannelsKick(opts); }
   async searchUsers(query: string): Promise<UserSearchResult[]> { if (!query.trim()) return []; const xmpp = await this.requireConnectedXmpp(); const users = await xmpp.search_users?.(query) as WasmUserSearchResult[]; return (users ?? []).map((user) => ({ id: user.jid, jid: user.jid, username: user.username ?? user.nick ?? jidLocalpart(user.jid), display_name: user.display_name ?? user.name ?? null, avatar_url: null })); }
   async fetchUserAvatar(jid: string): Promise<string | null> { return this.vcard.fetchUserAvatar(jid); }
-  get agent(): XmppClientInstance | null { return this.xmpp; }
+
+  private trackLifecycleWork<T>(work: Promise<T>): Promise<T> {
+    const observed = work.catch((error) => {
+      this.lifecycleFailures.push(error);
+      throw error;
+    });
+    const tracked = observed.finally(() => {
+      this.lifecycleWork.delete(tracked);
+    });
+    this.lifecycleWork.add(tracked);
+    // Background callers may intentionally ignore the returned handle; the
+    // rejection is still retained in `lifecycleFailures` and surfaced by the
+    // deterministic quiescence barrier.
+    void tracked.catch(() => undefined);
+    return tracked;
+  }
+
+  /**
+   * Wait until session-ready, durable terminal/reconciliation, and tracked
+   * outbound replay work have reached a fixed point. Lifecycle owners and
+   * tests use this instead of guessing at promise completion with arbitrary
+   * microtask counts.
+   */
+  async whenLifecycleQuiescent(): Promise<void> {
+    const failures = new Set<unknown>();
+    const observedWork = new Set<Promise<unknown>>();
+    const allow = (error: unknown) => (
+      this.lifecycleState !== "active"
+      && isExpectedLifecycleCancellation(error)
+    );
+    for (;;) {
+      const outboundHydration = this.outboundQueueHydration;
+      const sessionReady = this.sessionReadyWork?.promise;
+      const connectAttempt = this.connectAttemptWork;
+      const connectAdmission = this.connectAdmissionPromise;
+      const lifecycle = [...this.lifecycleWork];
+      const work: Promise<unknown>[] = [
+        outboundHydration,
+        ...(sessionReady ? [sessionReady] : []),
+        ...(connectAttempt ? [connectAttempt] : []),
+        ...(connectAdmission ? [connectAdmission] : []),
+        ...lifecycle,
+      ];
+      const settled = await Promise.allSettled(work);
+      const newlyObserved = settled.filter((_, index) => {
+        const promise = work[index]!;
+        if (observedWork.has(promise)) return false;
+        observedWork.add(promise);
+        return true;
+      });
+      collectUnexpectedLifecycleFailures(failures, newlyObserved, allow);
+      try {
+        await this.outboundQueue.whenQuiescent();
+      } catch (error) {
+        collectLifecycleFailure(failures, error, allow);
+      }
+      try {
+        await this.resume.whenPageLifecycleQuiescent();
+      } catch (error) {
+        collectLifecycleFailure(failures, error, allow);
+      }
+      for (const error of this.lifecycleFailures.splice(0)) {
+        collectLifecycleFailure(failures, error, allow);
+      }
+      await Promise.resolve();
+      if (
+        outboundHydration === this.outboundQueueHydration
+        && sessionReady === this.sessionReadyWork?.promise
+        && connectAttempt === this.connectAttemptWork
+        && connectAdmission === this.connectAdmissionPromise
+        && lifecycle.length === this.lifecycleWork.size
+        && lifecycle.every((work) => this.lifecycleWork.has(work))
+      ) {
+        if (failures.size > 0) {
+          throw new AggregateError(
+            [...failures],
+            "XMPP lifecycle quiescence failed",
+          );
+        }
+        return;
+      }
+    }
+  }
+
+  /** Resolve once the requested room's join presence has been scheduled. */
+  whenRoomJoinScheduled(roomJid: string): Promise<void> {
+    return this.roomJoinSchedulingSignal(this.roomJoinKey(roomJid)).promise;
+  }
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
   private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
-  private handleMessageAck(id: string) {
-    void this.outboundQueue.handleAck(id).catch((error) => reportError("storage.write", error, {
+  private handleMessageAck(id: string, generation = this.connectEpoch) {
+    void this.outboundQueue.handleAck(id, generation).catch((error) => reportError("storage.write", error, {
       recoverable: false,
       detail: "outbound ack could not commit",
       storage_area: "outbound-queue",
       stanza_id: id,
     }));
   }
-  private handleMessageFailed(id: string) {
-    void this.outboundQueue.handleFailed(id).catch((error) => reportError("storage.write", error, {
+  private handleMessageFailed(id: string, generation = this.connectEpoch) {
+    void this.outboundQueue.handleFailed(id, generation).catch((error) => reportError("storage.write", error, {
       recoverable: false,
       detail: "outbound failure reconciliation could not commit",
       storage_area: "outbound-queue",
@@ -2347,19 +3118,109 @@ export class BrowserXmppClient {
   // `lifecycle` is the bare kind here — the emitted
   // `SessionLifecycleEvent` is built inside `runSessionReady`, where
   // the fresh variant gains its reconnect catch-up coverage (#1180).
-  private handleSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
-    void this.runSessionReady(xmpp, lifecycle);
+  private handleSessionReady(
+    xmpp: XmppClientInstance,
+    lifecycle: { type: SessionLifecycleEvent["type"] },
+    generation = this.connectEpoch,
+  ): Promise<void> {
+    if (this.sessionReadyWork?.xmpp === xmpp) {
+      return this.sessionReadyWork.promise;
+    }
+    const operation = this.runSessionReady(xmpp, lifecycle, generation).catch((error) => {
+      reportError("storage.write", error, {
+        recoverable: error instanceof NativeResumeAuthorityBlockedError,
+        detail: "session-ready outbound authority reconciliation failed",
+        storage_area: "outbound-queue",
+      });
+      this.lifecycleFailures.push(error);
+      if (
+        error instanceof NativeResumeAuthorityBlockedError
+        || error instanceof NativeResumeSnapshotRejectedError
+      ) {
+        this.fenceSessionReadyTransport(xmpp, generation, error);
+      }
+      throw error;
+    });
+    const tracked = operation.finally(() => {
+      if (this.sessionReadyWork?.promise === tracked) this.sessionReadyWork = null;
+    });
+    this.sessionReadyWork = { xmpp, promise: tracked };
+    // The native callback does not await its return value. Preserve rejection
+    // on `tracked` for explicit callers/quiescence while preventing an
+    // unhandled-rejection side channel.
+    void tracked.catch(() => undefined);
+    return tracked;
   }
 
-  private async runSessionReady(xmpp: XmppClientInstance, lifecycle: { type: SessionLifecycleEvent["type"] }) {
-    if (this.xmpp !== xmpp) return;
-    this.connected = true; this.reconnect.resetAttempts();
-    this.emitStatus({ state: "online", detail: this.outboundQueue.persistedCount() > 0 ? lifecycle.type === "fresh" ? "Reconnected — replaying queued messages" : "Connection resumed — replaying queued messages" : lifecycle.type === "fresh" ? "Connection ready" : "Connection resumed" });
-    // Coalesce duplicate triggers. Three event hooks call
-    // `handleSessionReady` on the same xmpp handle; only the first
-    // gets past this latch to run the per-session setup, lifecycle
-    // emit, and catch-up. Subsequent triggers for the *same* handle
-    // bail out silently.
+  private fenceSessionReadyTransport(
+    xmpp: XmppClientInstance,
+    generation: number,
+    error: NativeResumeAuthorityBlockedError | NativeResumeSnapshotRejectedError,
+  ): void {
+    const slot = this.transportSlot;
+    if (
+      !slot
+      || slot.handle !== xmpp
+      || slot.connectionGeneration !== generation
+      || slot.lifecycleId.value !== this.lifecycleId.value
+    ) return;
+    this.transportSlot = null;
+    this.connected = false;
+    this.connectEpoch += 1;
+    const fencedGeneration = this.connectEpoch;
+    if (this.connectTimer !== null) {
+      this.timeoutScheduler.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    const failPendingConnect = this.onceConnectFailed;
+    this.onceConnected = null;
+    this.onceConnectFailed = null;
+    this.connectPromise = null;
+    failPendingConnect?.(error);
+    void this.trackLifecycleWork(
+      this.retireExactTransport(slot, "authority-fenced")
+        .then((retirement) => {
+          if (retirement.failures.length > 0) {
+            reportError(
+              "xmpp.stream",
+              new XmppClientTeardownError(
+                retirement.failures,
+                retirement.transportDisposed,
+              ),
+              {
+                recoverable: false,
+                detail: "session-ready fenced XMPP transport retirement failed",
+              },
+            );
+          }
+          if (
+            this.lifecycleState === "active"
+            && !this.destroying
+            && this.connectEpoch === fencedGeneration
+            && !this.transportSlot
+          ) {
+            this.reconnect.schedule();
+          }
+        })
+        .catch((retirementError) => {
+          reportError("xmpp.stream", retirementError, {
+            recoverable: false,
+            detail: "session-ready fenced XMPP transport retirement rejected",
+          });
+        }),
+    );
+  }
+
+  private async runSessionReady(
+    xmpp: XmppClientInstance,
+    lifecycle: { type: SessionLifecycleEvent["type"] },
+    generation: number = this.connectEpoch,
+  ) {
+    const isCurrent = () => this.isCurrentTransport(xmpp, generation);
+    if (!isCurrent()) return;
+    // Coalesce duplicate lifecycle notifications for the same generated
+    // binding. Only the first gets past this latch to run per-session setup,
+    // lifecycle emit, and catch-up.
     //
     // The latch is keyed on the handle, set once and synchronously
     // (before the first await), so it also closes the no-catch-up leak
@@ -2370,21 +3231,42 @@ export class BrowserXmppClient {
     // new handle gets its own session-setup + catch-up.
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
+    let liveResumeState: XmppResumeState | null = null;
+    try {
+      liveResumeState = xmpp.get_resume_state() ?? null;
+    } catch (error) {
+      reportError("storage.read", error, {
+        recoverable: true,
+        detail: "live SM snapshot could not be captured at session-ready",
+        storage_area: "sm-resume",
+      });
+    }
     if (lifecycle.type === "fresh") {
-      await this.outboundQueue.clearInflight();
-      void this.enableCarbons(xmpp);
+      await this.outboundQueue.reconcileFreshSession(generation, liveResumeState);
+      if (!isCurrent()) return;
+      void this.trackLifecycleWork(this.enableCarbons(xmpp, generation));
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
       // fail-silent (chat works without MDS). Bound to the specific
       // xmpp reference so the bootstrap aborts cleanly if the client
       // disconnects before the catch-up IQ resolves.
-      void this.bootstrapMdsDisplayed(xmpp);
+      if (!isCurrent()) return;
+      void this.trackLifecycleWork(
+        this.bootstrapMdsDisplayed(xmpp, generation),
+      );
       // A fresh bind lost server-side MUC occupancy, so re-send join
       // presence for every retained/autojoin room + the focused room.
       // Single-flight per epoch (`fanOutAutoJoin`) keeps this to one
       // join per room across the three fan-out triggers (#1221).
-      this.fanOutJoinableRooms();
+      if (!isCurrent()) return;
+      void this.fanOutJoinableRooms(xmpp, generation);
     } else {
+      await this.outboundQueue.reconcileNativeSnapshot(
+        generation,
+        liveResumeState,
+        "resume-replay",
+      );
+      if (!isCurrent()) return;
       // Resumed: occupancy survived the SM detach-for-resume server-side
       // (no MUC leave was broadcast). Re-seed readiness for the
       // self-presence-confirmed rooms WITHOUT sending presence (they mark
@@ -2396,16 +3278,36 @@ export class BrowserXmppClient {
       // handoff persists SM state, not the in-memory snapshot). One
       // client rejoining its own rooms is not the multi-client storm
       // #1221 fixes.
-      this.reseedResumedRooms();
-      this.fanOutJoinableRooms();
+      this.reseedResumedRooms(xmpp, generation);
+      if (!isCurrent()) return;
+      void this.fanOutJoinableRooms(xmpp, generation);
     }
+    // Readiness is observable only after terminal intents have drained and
+    // this connection generation has reconciled authoritative ownership.
+    if (!isCurrent()) return;
+    this.connected = true;
+    if (!isCurrent()) return;
+    this.reconnect.resetAttempts();
+    if (!isCurrent()) return;
+    this.emitStatus({
+      state: "online",
+      detail: this.outboundQueue.persistedCount() > 0
+        ? lifecycle.type === "fresh"
+          ? "Reconnected — replaying queued messages"
+          : "Connection resumed — replaying queued messages"
+        : lifecycle.type === "fresh"
+          ? "Connection ready"
+          : "Connection resumed",
+    });
     // #1180: consume the catch-up cursors BEFORE emitting the
     // lifecycle event so the fresh event can report which
     // conversations `runReconnectCatchup` is about to page. Timeline
     // consumers skip their own wholesale MAM reload for covered
     // conversations — otherwise two concurrent fetches race to write
     // the timeline and the rebuild clobbers the catch-up's merges.
+    if (!isCurrent()) return;
     const catchupEntries = this.catchup.onSessionStarted();
+    if (!isCurrent()) return;
     this.emitSessionLifecycle(
       lifecycle.type === "fresh"
         ? {
@@ -2420,27 +3322,30 @@ export class BrowserXmppClient {
         }
         : { type: "resumed" },
     );
+    if (!isCurrent()) return;
     if (catchupEntries.length === 0) {
       // No barrier this session: entries carried from a failed barrier
       // still owe their dispatch (same flush-then-drain order).
-      const carried = this.carriedPendingDuringResume.splice(0);
-      this.flushAfterSessionReady(xmpp);
-      if (carried.length > 0) this.drainResumeBuffer(carried);
+      if (!await this.flushThenDrainCarried(xmpp, generation)) return;
+      if (!isCurrent()) return;
       this.fulfillOnceConnected();
       return;
     }
+    if (!isCurrent()) return;
     const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, lifecycle.type);
-    const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
-    this.openResumeBarrier(xmpp, barrierPromise);
+    const barrierPromise = catchupPromise.finally(() => (
+      this.completeResumeBarrier(xmpp, generation)
+    ));
+    this.openResumeBarrier(xmpp, generation, barrierPromise);
     await barrierPromise;
-    if (this.xmpp !== xmpp) return;
+    if (!isCurrent()) return;
     this.fulfillOnceConnected();
   }
 
   /**
-   * Resume-barrier completion: snapshot the buffer, atomically reset
-   * `pendingDuringResume` + `resumeBarrier`, then flush the queue and
-   * drain the buffer (in that order — see Bug 4 in PR2 plan).
+   * Resume-barrier completion: hold the exact barrier and buffer while
+   * awaiting the queue flush, then atomically reset and drain only if the
+   * same transport slot still owns them (see Bug 4 in PR2 plan).
    *
    * Extracted as a named private method so it can be unit-tested in
    * isolation; the in-line `.finally` callback was a source-text
@@ -2460,29 +3365,38 @@ export class BrowserXmppClient {
    * mid-catch-up (F2) so they drain with this barrier, ahead of newer
    * arrivals.
    */
-  private openResumeBarrier(xmpp: XmppClientInstance, promise: Promise<void>) {
+  private openResumeBarrier(
+    xmpp: XmppClientInstance,
+    generation: number,
+    promise: Promise<void>,
+  ) {
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     this.pendingDuringResume = this.carriedPendingDuringResume.splice(0);
-    this.resumeBarrier = { xmpp, promise };
+    this.resumeBarrier = { xmpp, generation, promise };
   }
 
-  private completeResumeBarrier(xmpp: XmppClientInstance) {
-    const buffered = this.pendingDuringResume ?? [];
-    // Only clear the barrier if it is still ours — a newer handle
-    // may have replaced it after a full reconnect.
-    const ownBarrier = this.resumeBarrier?.xmpp === xmpp;
-    if (ownBarrier) {
-      this.resumeBarrier = null;
-      this.pendingDuringResume = null;
+  private async completeResumeBarrier(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): Promise<void> {
+    const barrier = this.resumeBarrier;
+    if (
+      !barrier
+      || barrier.xmpp !== xmpp
+      || barrier.generation !== generation
+    ) {
+      return;
     }
-    if (this.xmpp !== xmpp) {
-      // F2: our barrier failed (the connection died mid-catch-up). The
-      // buffered stanzas were SM-acked and will never be replayed —
-      // carry them into the next barrier instead of discarding them.
-      // (When the barrier was NOT ours, `buffered` is the newer
-      // barrier's live buffer — leave it alone.)
-      if (ownBarrier && buffered.length > 0) {
-        this.carriedPendingDuringResume.push(...buffered);
-      }
+    const buffered = this.pendingDuringResume;
+    if (!buffered) return;
+    const slot = this.transportSlot;
+    const ownsSlot = () => (
+      !!slot
+      && this.transportSlot === slot
+      && this.isCurrentTransport(xmpp, generation)
+    );
+    if (!ownsSlot()) {
+      this.restoreStaleResumeBuffer(barrier, buffered);
       return;
     }
     // Flush the locally-queued outbound *before* draining the live
@@ -2492,8 +3406,69 @@ export class BrowserXmppClient {
     // chronological order and `mergeLiveMessage` sees outbound
     // echoes alongside (or before) the inbound arrivals they belong
     // next to, instead of mis-ordering the tail (Bug 4).
-    this.flushAfterSessionReady(xmpp);
+    await this.flushAfterSessionReady(xmpp, generation).catch((error) => {
+      reportError("storage.write", error, {
+        recoverable: false,
+        detail: "session-ready outbound flush failed",
+        storage_area: "outbound-queue",
+      });
+    });
+    if (
+      !ownsSlot()
+      || this.resumeBarrier !== barrier
+      || this.pendingDuringResume !== buffered
+    ) {
+      this.restoreStaleResumeBuffer(barrier, buffered);
+      return;
+    }
+    this.resumeBarrier = null;
+    this.pendingDuringResume = null;
     this.drainResumeBuffer(buffered);
+  }
+
+  private restoreStaleResumeBuffer(
+    barrier: NonNullable<BrowserXmppClient["resumeBarrier"]>,
+    buffered: InboundWasmMessage[],
+  ): void {
+    if (this.resumeBarrier === barrier) {
+      this.resumeBarrier = null;
+      if (this.pendingDuringResume === buffered) {
+        this.pendingDuringResume = null;
+      }
+    }
+    if (buffered.length > 0) {
+      this.carriedPendingDuringResume.unshift(...buffered);
+    }
+  }
+
+  private async flushThenDrainCarried(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): Promise<boolean> {
+    const slot = this.transportSlot;
+    const carried = this.carriedPendingDuringResume.splice(0);
+    const ownsSlot = () => (
+      !!slot
+      && this.transportSlot === slot
+      && this.isCurrentTransport(xmpp, generation)
+    );
+    if (!ownsSlot()) {
+      this.carriedPendingDuringResume.unshift(...carried);
+      return false;
+    }
+    await this.flushAfterSessionReady(xmpp, generation).catch((error) => {
+      reportError("storage.write", error, {
+        recoverable: false,
+        detail: "session-ready outbound flush failed",
+        storage_area: "outbound-queue",
+      });
+    });
+    if (!ownsSlot()) {
+      this.carriedPendingDuringResume.unshift(...carried);
+      return false;
+    }
+    if (carried.length > 0) this.drainResumeBuffer(carried);
+    return true;
   }
 
   private drainResumeBuffer(buffered: InboundWasmMessage[]) {
@@ -2520,21 +3495,31 @@ export class BrowserXmppClient {
     });
   }
 
-  private flushAfterSessionReady(xmpp: XmppClientInstance) {
-    if (this.xmpp !== xmpp) return;
-    void this.flushQueuedDirectMessages();
+  private flushAfterSessionReady(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ): Promise<void> {
+    if (!this.isCurrentTransport(xmpp, generation)) return Promise.resolve();
+    const work: Array<Promise<unknown>> = [
+      Promise.resolve(this.flushQueuedDirectMessages()),
+    ];
     const roomJid = this.currentRoom;
-    if (roomJid) void this.flushQueuedRoomAfterJoin(xmpp, roomJid);
+    if (roomJid) {
+      work.push(this.flushQueuedRoomAfterJoin(xmpp, generation, roomJid));
+    }
+    return this.trackLifecycleWork(
+      Promise.all(work).then(() => undefined),
+    );
   }
 
-  private async flushQueuedRoomAfterJoin(xmpp: XmppClientInstance, roomJid: string): Promise<void> {
-    try {
-      await this.ensureJoined(roomJid);
-      if (this.xmpp !== xmpp) return;
-      await this.flushQueuedRoomMessages(roomJid);
-    } catch {
-      // Join retry is driven by reconnect/session-ready and explicit sends.
-    }
+  private async flushQueuedRoomAfterJoin(
+    xmpp: XmppClientInstance,
+    generation: number,
+    roomJid: string,
+  ): Promise<void> {
+    await this.ensureJoined(roomJid);
+    if (!this.isCurrentTransport(xmpp, generation)) return;
+    await this.flushQueuedRoomMessages(roomJid);
   }
 
   private fulfillOnceConnected() {
@@ -2545,34 +3530,89 @@ export class BrowserXmppClient {
     done();
   }
 
-  private async bootstrapMdsDisplayed(xmpp: XmppClientInstance) {
+  private async bootstrapMdsDisplayed(
+    xmpp: XmppClientInstance,
+    generation: number,
+  ) {
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     if (typeof xmpp.fetch_mds_displayed === "function") {
       try {
         const raw = await xmpp.fetch_mds_displayed();
-        if (this.xmpp !== xmpp) return;
+        if (!this.isCurrentTransport(xmpp, generation)) return;
         if (raw) {
           for (const entry of raw) {
+            if (!this.isCurrentTransport(xmpp, generation)) return;
             this.events.emit("mdsDisplayed", { chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
           }
         }
       } catch { /* best-effort */ }
     }
-    if (this.xmpp !== xmpp) return;
+    if (!this.isCurrentTransport(xmpp, generation)) return;
     // XEP-0060 explicit subscribe so future publishes from another
     // resource fan out as headline events to this one.
     if (typeof xmpp.subscribe_mds_displayed === "function") {
       try { await xmpp.subscribe_mds_displayed(); } catch { /* best-effort */ }
     }
   }
-  private handleDisconnected(xmpp: XmppClientInstance, error?: Error) {
-    if (this.xmpp !== xmpp) return;
+  private handleDisconnected(
+    xmpp: XmppClientInstance,
+    generation = this.connectEpoch,
+    error?: Error,
+  ) {
+    const disconnectedSlot = this.transportSlot;
+    if (
+      !disconnectedSlot
+      || disconnectedSlot.handle !== xmpp
+      || disconnectedSlot.connectionGeneration !== generation
+      || disconnectedSlot.lifecycleId.value !== this.lifecycleId.value
+    ) return;
+    this.transportSlot = null;
+    // Physical connection generations are immutable and never reused. Bump
+    // before any replacement can bind so delayed terminal work from this
+    // socket cannot schedule effects after a successor generation has run.
+    this.connectEpoch += 1;
+    const terminalAtDisconnect = this.terminalDisconnectDetail;
+    let resumeState: XmppResumeState | null = null;
+    if (!this.destroying && !terminalAtDisconnect) {
+      try {
+        resumeState = this.resume.captureFromDisconnect(xmpp, this.resource);
+      } catch (snapshotError) {
+        reportError("storage.read", snapshotError, {
+          recoverable: true,
+          detail: "disconnect SM snapshot could not be captured",
+          storage_area: "sm-resume",
+        });
+      }
+    }
+    this.outboundQueueHydration = this.outboundQueueHydration.then(async () => {
+      await this.outboundQueue.reconcileNativeSnapshot(generation, resumeState);
+    });
     const previouslyJoinedRooms = [...this.joinedMucs.keys()];
     // Snapshot the self-presence-confirmed (status 110) rooms before the
     // trackers clear so a subsequent `resumed` session-ready can restore
     // readiness without re-sending join presence (#1221).
     this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
-    this.connected = false; this.stopSelfPing(); this.xmpp = null;
-    xmpp.dispose?.();
+    this.connected = false;
+    this.stopSelfPing();
+    void this.trackLifecycleWork(
+      this.retireExactTransport(
+        disconnectedSlot,
+        "peer-disconnected",
+      ).then((retirement) => {
+        if (retirement.failures.length === 0) return;
+        reportError(
+          "xmpp.stream",
+          new XmppClientTeardownError(
+            retirement.failures,
+            retirement.transportDisposed,
+          ),
+          {
+            recoverable: false,
+            detail: "peer-disconnected XMPP transport retirement failed",
+          },
+        );
+      }),
+    );
     // The wire is gone — no point trying to send session-terminate.
     // Clear the local call slot so the UI doesn't strand on a stale
     // active overlay across reconnect; the reconnect path doesn't
@@ -2605,6 +3645,7 @@ export class BrowserXmppClient {
     // New epoch: a genuine fresh cycle must be free to rejoin (#1221),
     // and the next handle must run its own session-ready setup.
     this.autoJoinAttemptedRoomKeys.clear();
+    this.roomJoinScheduling.clear();
     this.sessionReadyHandledXmpp = null;
     this.clearRoomPresenceCaches();
     if (this.destroying) {
@@ -2627,7 +3668,7 @@ export class BrowserXmppClient {
     // word-scan the disconnect error's free-text message — a proxied
     // close reason like "409 Conflict" must not permanently kill
     // reconnection.
-    const terminalDetail = this.terminalDisconnectDetail;
+    const terminalDetail = terminalAtDisconnect;
     if (terminalDetail) {
       this.terminalDisconnectDetail = null;
       // F1: latch the terminal state so background `connect()` calls
@@ -2637,13 +3678,6 @@ export class BrowserXmppClient {
       if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error(terminalDetail)); }
       return;
     }
-    // Keep transient reconnect state in this JS context only — see
-    // `ResumeStateStore.captureFromDisconnect` for the pagehide-handoff
-    // rationale.
-    const resumeState = this.resume.captureFromDisconnect(xmpp, this.resource);
-    this.outboundQueueHydration = this.outboundQueueHydration.then(
-      () => this.outboundQueue.seedFromResumeState(resumeState),
-    );
     this.emitStatus({ state: "reconnecting", detail: this.outboundQueue.persistedCount() > 0 ? "Connection lost — queued messages will send when reconnected" : (error?.message ?? "Connection lost, reconnecting...") });
     if (this.onceConnectFailed) { const fail = this.onceConnectFailed; this.onceConnected = null; this.onceConnectFailed = null; fail(error ?? new Error("XMPP connection failed")); }
     this.reconnect.schedule();
@@ -2913,41 +3947,51 @@ export class BrowserXmppClient {
   ) {
     return this.mam.runReconnectCatchup(xmpp, entries, lifecycle);
   }
-  private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
-    if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
+  private wireEvents(
+    xmpp: XmppClientInstance,
+    generation = this.connectEpoch,
+  ) {
+    if (
+      this.lifecycleState === "active"
+      && !this.xmpp
+      && !this.destroying
+    ) {
+      this.installTransport(xmpp, generation);
+    }
     // #754: carbons enable lives in the fresh branch of `runSessionReady`
     // only — enabling from `on_connected` too doubled the IQ on every
     // fresh connect and re-enabled on XEP-0198 resume, where the server
     // already preserves carbon state for the resumed session.
-    xmpp.set_on_session_lifecycle?.((event: string) => {
+    xmpp.set_on_session_lifecycle((event) => {
       if (!this.isCurrentXmpp(xmpp)) return;
-      if (event === "resumed") this.handleSessionReady(xmpp, { type: "resumed" }); else this.handleSessionReady(xmpp, { type: "fresh" });
+      if (event === "resumed") {
+        this.handleSessionReady(xmpp, { type: "resumed" }, generation);
+      } else {
+        this.handleSessionReady(xmpp, { type: "fresh" }, generation);
+      }
     });
-    xmpp.set_on_stream_management?.((event: WasmStreamManagementTelemetry) => {
+    xmpp.set_on_stream_management((event) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emitSafe("streamManagement", event);
     });
-    xmpp.set_on_disconnected?.(() => this.handleDisconnected(xmpp));
-    xmpp.set_on_error?.((payload: XmppStreamErrorPayload) => {
+    xmpp.set_on_disconnected(() => this.handleDisconnected(xmpp, generation));
+    xmpp.set_on_error((payload) => {
       if (this.xmpp !== xmpp) return;
-      const streamError = normalizeXmppStreamErrorPayload(payload);
-      const terminalDetail = terminalDisconnectDetail(terminalConditionFromPayload(payload));
+      const terminalDetail = terminalDisconnectDetail(
+        wasmControlErrorCondition(payload),
+      );
       if (terminalDetail) this.terminalDisconnectDetail = terminalDetail;
       this.emitError({
         kind: "stream",
         recoverable: !this.destroying && !terminalDetail,
-        detail: streamError.detail,
-        ...(streamError.condition ? { condition: streamError.condition } : {}),
-        ...(streamError.streamManagementError
-          ? { streamManagementError: streamError.streamManagementError }
-          : {}),
+        controlError: payload,
       });
     });
-    xmpp.set_on_message?.((message: WasmMessage) => {
+    xmpp.set_on_message((message) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handleMessage(message);
     });
-    xmpp.set_on_presence?.((presence: WasmPresence) => {
+    xmpp.set_on_presence((presence) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.handlePresence(presence);
       // Side-effect track: MUC presence carrying the call extension
@@ -2961,23 +4005,23 @@ export class BrowserXmppClient {
       applyRaisedHandPresence(presence);
       applyMutePresence(presence);
     });
-    xmpp.set_on_message_delivery_acked?.((id: string) => {
+    xmpp.set_on_message_delivery_acked((id) => {
       if (!this.isCurrentXmpp(xmpp)) return;
-      this.handleMessageAck(id);
+      this.handleMessageAck(id, generation);
     });
-    xmpp.set_on_message_delivery_failed?.((id: string) => {
+    xmpp.set_on_message_delivery_failed((id) => {
       if (!this.isCurrentXmpp(xmpp)) return;
-      this.handleMessageFailed(id);
+      this.handleMessageFailed(id, generation);
     });
-    xmpp.set_on_mds_displayed?.((entry: WasmMdsDisplayedEntry) => {
+    xmpp.set_on_mds_displayed((entry) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emit("mdsDisplayed", { chatId: entry.chat_id, stanzaId: entry.stanza_id, stanzaIdBy: entry.stanza_id_by });
     });
-    xmpp.set_on_pubsub_event?.((event: WasmPubsubEvent) => {
+    xmpp.set_on_pubsub_event((event) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       this.events.emit("pubsubEvent", event);
     });
-    xmpp.set_on_call?.((event: CallEvent) => {
+    xmpp.set_on_call((event) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       const prev = $callState.get();
       const selfBare = barePeerJid(this.session.jid);
@@ -3039,30 +4083,6 @@ export class BrowserXmppClient {
       if (!isSelfOriginated) {
         void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
       }
-    });
-    xmpp.on?.("session:started", () => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      xmpp.disableKeepAlive?.();
-      xmpp.enableKeepAlive?.({ interval: 30, timeout: 15 });
-      this.handleSessionReady(xmpp, { type: "fresh" });
-    });
-    xmpp.on?.("stream:management:resumed", () => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      this.handleSessionReady(xmpp, { type: "resumed" });
-    });
-    xmpp.on?.("disconnected", (error?: Error) => { xmpp.disableKeepAlive?.(); this.handleDisconnected(xmpp, error); });
-    xmpp.on?.("message:acked", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageAck(msg.id); });
-    xmpp.on?.("message:failed", (msg: { id?: string }) => { if (!this.isCurrentXmpp(xmpp)) return; if (msg?.id) this.handleMessageFailed(msg.id); });
-    xmpp.on?.("message", (message: WasmMessage) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      this.handleMessage(message);
-    });
-    xmpp.on?.("presence", (presence: WasmPresence) => {
-      if (!this.isCurrentXmpp(xmpp)) return;
-      this.handlePresence(presence);
-      applyMucCallPresence(presence);
-      applyRaisedHandPresence(presence);
-      applyMutePresence(presence);
     });
   }
 }

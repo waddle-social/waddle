@@ -5,9 +5,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleSendMessageOutcome
-import social.waddle.client.ffi.WaddleSmResumeState
 
 /**
  * Shared per-attempt session state: which FFI client (if any) is live,
@@ -16,15 +17,13 @@ import social.waddle.client.ffi.WaddleSmResumeState
  * loop is sequential), so plain volatile set-on-ready /
  * clear-on-teardown fields are race-free.
  */
-internal class ActiveSession(
-    private val onResumeState: (WaddleSmResumeState?) -> Unit,
-) {
+internal class ActiveSession {
     /** Serializes attempt replacement against generation-fenced FFI sends. */
     private val attemptMutex = Mutex()
 
     data class Attempt(
         val bridge: XmppEventBridge,
-        val connectionGeneration: Long,
+        val ref: DeliveryAttemptRef,
     )
 
     /**
@@ -39,7 +38,7 @@ internal class ActiveSession(
     var ownBareJid: String? = null
 
     @Volatile
-    var connectionGeneration: Long = 0
+    var attemptRef: DeliveryAttemptRef? = null
         private set
 
     /** The live attempt's bridge, for injecting locally-produced events. */
@@ -56,25 +55,51 @@ internal class ActiveSession(
     var uploadService: String? = null
 
     /** Fresh bridge for a new attempt (the FFI client is one-shot). */
-    suspend fun beginAttempt(): Attempt = attemptMutex.withLock {
-        connectionGeneration += 1
+    suspend fun beginAttempt(
+        attempt: DeliveryAttemptRef,
+    ): Attempt = attemptMutex.withLock {
         client = null
-        val attemptBridge = XmppEventBridge(onResumeState)
+        attemptRef = attempt
+        val attemptBridge = XmppEventBridge()
         bridge = attemptBridge
-        Attempt(attemptBridge, connectionGeneration)
+        Attempt(attemptBridge, attempt)
     }
 
     /** The attempt reached `SessionReady`: expose its client, reset probes. */
-    suspend fun onReady(readyClient: WaddleClientInterface, generation: Long) = attemptMutex.withLock {
-        if (generation != connectionGeneration) return@withLock
+    suspend fun onReady(
+        readyClient: WaddleClientInterface,
+        expectedAttempt: DeliveryAttemptRef,
+    ) = attemptMutex.withLock {
+        if (expectedAttempt != attemptRef) return@withLock
         client = readyClient
         mdsPublishSupported = null
         uploadService = null
     }
 
     /** The attempt ended; passthroughs fall back to their not-connected shape. */
-    suspend fun endAttempt(generation: Long) = attemptMutex.withLock {
-        if (generation == connectionGeneration) client = null
+    suspend fun endAttempt(expectedAttempt: DeliveryAttemptRef) = attemptMutex.withLock {
+        if (expectedAttempt == attemptRef) {
+            client = null
+            attemptRef = null
+            bridge = null
+        }
+    }
+
+    /**
+     * Resume failure keeps the same native client but rotates its durable
+     * callback fence before fresh fallback events are accepted.
+     */
+    suspend fun acceptResumeTransition(
+        transition: DeliveryAttemptTransition,
+    ): Boolean = attemptMutex.withLock {
+        when (attemptRef) {
+            transition.fresh -> true
+            transition.old -> {
+                attemptRef = transition.fresh
+                true
+            }
+            else -> false
+        }
     }
 
     /** Fire-and-check verb shape: no client → [VerbResult.NotConnected],
@@ -107,12 +132,12 @@ internal class ActiveSession(
     /** Generation-fenced message send used by the durable outbound queue.
      * The caller claims its row under [expectedGeneration] before invoking
      * FFI; a replacement attempt therefore cannot inherit the old claim. */
-    suspend fun sendAtGeneration(
-        expectedGeneration: Long,
+    suspend fun sendAtAttempt(
+        expectedAttempt: DeliveryAttemptRef,
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
     ): WaddleSendMessageOutcome = attemptMutex.withLock {
         val liveClient = client
-        if (liveClient == null || connectionGeneration != expectedGeneration) {
+        if (liveClient == null || attemptRef != expectedAttempt) {
             return@withLock WaddleSendMessageOutcome.NotConnected
         }
         try {

@@ -22,7 +22,7 @@ function makeClient(overrides: {
   return {
     listRoomMembers: overrides.listRoomMembers ?? mock(async () => []),
     discoverTopology: overrides.discoverTopology ?? mock(async () => BASE_TOPOLOGY),
-    agent: null,
+    communityProvisioning: {},
   } as unknown as BrowserXmppClient;
 }
 

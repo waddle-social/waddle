@@ -17,9 +17,11 @@
  * These tests poke private state on `BrowserXmppClient` directly — see
  * the comment block in `resume-ordering.test.ts` for the rationale.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(): WaddleSession {
   return {
@@ -47,14 +49,30 @@ type PrivateState = {
   fullJid: string;
 };
 
+const createdClients: BrowserXmppClient[] = [];
+
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as { xmpp: null; connected: boolean };
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients.length = 0;
+});
+
 /** A mock WASM handle that records join_room calls and lets the test
  *  deliver the room self-presence that resolves a join. */
 function connectedClient() {
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
   const state = client as unknown as PrivateState;
   let onPresence: PresenceCb | null = null;
   const joinRoom = mock(async () => undefined);
   const xmpp = {
+    ...noopWasmClientCallbacks(),
     join_room: joinRoom,
     set_on_presence(cb: PresenceCb) {
       onPresence = cb;
@@ -92,18 +110,26 @@ describe("#1221 canonical join key coalesces case variants", () => {
 
 describe("#1221 fanOutAutoJoin is single-flight per epoch", () => {
   test("a failed auto-join is not retried by a later trigger in the same epoch", async () => {
-    const client = new BrowserXmppClient(session());
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: new MemoryDurableOutboundStore(),
+    });
+    createdClients.push(client);
     const state = client as unknown as PrivateState;
     const room = "room2@conference.example.com";
     const joinRoom = mock(async () => {
       throw new Error("join rejected");
     });
-    const xmpp = { join_room: joinRoom, set_on_presence() {} };
+    const xmpp = {
+      ...noopWasmClientCallbacks(),
+      join_room: joinRoom,
+    };
     state.xmpp = xmpp;
     state.connected = true;
     state.wireEvents(xmpp);
 
-    await state.fanOutAutoJoin([room]); // first trigger: join_room throws
+    await expect(state.fanOutAutoJoin([room])).rejects.toThrow(
+      "One or more MUC auto-joins failed",
+    ); // first trigger: join_room throws
     await state.fanOutAutoJoin([room]); // second trigger, same epoch: must not retry
 
     expect(joinRoom).toHaveBeenCalledTimes(1);

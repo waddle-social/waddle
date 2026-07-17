@@ -14,13 +14,10 @@
  *
  *   * XEP-0198 Stream Management resume state
  *     (`PersistedSmResumeState`) — the `previd` plus inbound /
- *     outbound stanza counts and advertised resume window. The richer
- *     "handle" form from the WASM client is a live JS object that cannot
- *     be serialized; the POD `{previd, inboundH, outboundH}` triple can be.
- *     When the native XEP-0198 queue still has unhandled outbound stanzas,
- *     their typed XML token trees and numeric original send instants are
- *     serialized too so `doConnect` can restore sender responsibility after
- *     a full reload without reparsing raw XML.
+ *     outbound stanza counts, advertised resume window, and the authoritative
+ *     ordered outbound-entry array. Every entry carries a typed XML token tree
+ *     and numeric original send instant so `doConnect` can restore sender
+ *     responsibility after a full reload without reparsing raw XML.
  *
  * The shape mirrors `outbound-queue-store.ts` (same `waddle.chat.*`
  * prefix family, same per-account key namespacing, same defensive
@@ -30,17 +27,15 @@
 
 import { reportError } from "@/lib/telemetry";
 import type {
+  DurableOutboundStore,
   DurableOutcome,
+  DurableSmEnvelope,
+  OutboundOwnerActivation,
   OutboundOwnerContext,
-  OutboundOwnerHandoff,
   OutboundOwnerHint,
-} from "@/lib/outbound-durable-store";
-import {
-  IndexedDbDurableSmResumeStore,
-  MemoryDurableSmResumeStore,
-  type DurableSmEnvelope,
-  type DurableSmResumeStore,
-} from "./sm-resume-durable-store";
+  PagehideHandoffResult,
+} from "@/lib/xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
@@ -62,54 +57,42 @@ export type PersistedReconnectCatchup = {
   roomLastSeen: Array<[string, PersistedSeenCursor]>;
 };
 
-export type XmppResumeStanzaKind = "message" | "presence" | "iq";
-
-type XmppResumeXmlName = {
-  namespace: string;
-  localName: string;
-};
-
-type XmppResumeXmlAttribute = {
-  name: XmppResumeXmlName;
-  value: string;
-};
-
-type XmppResumeXmlToken =
-  | { kind: "start"; name: XmppResumeXmlName; attributes: XmppResumeXmlAttribute[] }
-  | { kind: "text"; value: string }
-  | { kind: "end" };
-
-export type XmppResumeStanza = {
-  stanzaKind: XmppResumeStanzaKind;
-  tokens: XmppResumeXmlToken[];
-};
-
-export type XmppResumeEntry = {
-  stanza: XmppResumeStanza;
-  sentAtEpochMs: number;
-};
-
-/**
- * The on-wire shape that `doConnect` feeds to `with_resume_state`.
- * Stamped with a private `savedAt` internally so a stale POD can be
- * rejected without forcing every caller to know about TTL — see
- * `loadSm`.
- */
-export type PersistedSmResumeState = {
-  previd: string;
-  inboundH: number;
-  outboundH: number;
-  maxResumeSeconds?: number;
-  unhandledOutboundEntries?: XmppResumeEntry[];
-  resource?: string;
-};
+export type {
+  PersistedSmResumeState,
+  XmppResumeEntry,
+  XmppResumeStanza,
+  XmppResumeStanzaKind,
+} from "./sm-resume-types";
+import type {
+  PersistedSmResumeState,
+} from "./sm-resume-types";
+import { cloneSmResumeState } from "./sm-resume-types";
 
 type ResumeOwner = {
   ownerId: string;
-  instanceId: string;
+  instanceId: XmppLifecycleId;
   explicit: boolean;
   handoffToken?: string;
 };
+
+/**
+ * Immutable UUID for one browser XMPP client/persistence construction.
+ *
+ * The wrapper prevents a tab/session owner id (which intentionally survives a
+ * reload) from being confused with the live process incarnation that must
+ * never be reused by a replacement client.
+ */
+export class XmppLifecycleId {
+  private constructor(readonly value: string) {}
+
+  static create(): XmppLifecycleId {
+    return new XmppLifecycleId(randomClaimId());
+  }
+
+  static explicitForTest(value: string): XmppLifecycleId {
+    return new XmppLifecycleId(value);
+  }
+}
 
 /**
  * Fallback resumption window for older persisted PODs that predate
@@ -118,68 +101,39 @@ type ResumeOwner = {
  */
 const DEFAULT_SM_MAX_RESUME_SECONDS = 300;
 const SM_SAVED_AT_FUTURE_SKEW_MS = 60_000;
-const OWNER_HANDOFF_TTL_MS = 45_000;
-const liveOwnerInstances = new Map<string, string>();
-let testSmStorageIdentity: Storage | null | undefined;
-let testSmStore: MemoryDurableSmResumeStore | null = null;
-let testSmStoreToken: string | null = null;
-const TEST_SM_STORE_MARKER = `${SM_PREFIX}.bun-store`;
-
-function defaultDurableSmStore(): DurableSmResumeStore {
-  // Bun has no browser IndexedDB. Keep the deterministic adapter scoped to
-  // the current test's localStorage object so multiple simulated tabs share
-  // one transactional store without leaking state between tests.
-  if (Reflect.has(globalThis, "Bun")) {
-    const identity = storage();
-    const marker = identity?.getItem(TEST_SM_STORE_MARKER) ?? null;
-    if (!testSmStore || identity !== testSmStorageIdentity || marker !== testSmStoreToken) {
-      testSmStorageIdentity = identity;
-      testSmStore = new MemoryDurableSmResumeStore();
-      testSmStoreToken = randomClaimId();
-      identity?.setItem(TEST_SM_STORE_MARKER, testSmStoreToken);
-    }
-    return testSmStore;
-  }
-  return new IndexedDbDurableSmResumeStore();
+function defaultDurableSmStore(): DurableOutboundStore {
+  return new IndexedDbDurableOutboundStore();
 }
 
 function cloneSmState(state: PersistedSmResumeState): PersistedSmResumeState {
+  return cloneSmResumeState(state);
+}
+
+function cloneSmEnvelope(envelope: DurableSmEnvelope): DurableSmEnvelope {
   return {
-    previd: state.previd,
-    inboundH: state.inboundH,
-    outboundH: state.outboundH,
-    ...(state.maxResumeSeconds === undefined ? {} : { maxResumeSeconds: state.maxResumeSeconds }),
-    ...(state.unhandledOutboundEntries?.length
-      ? {
-          unhandledOutboundEntries: state.unhandledOutboundEntries.map((entry) => ({
-            stanza: cloneResumeStanza(entry.stanza),
-            sentAtEpochMs: entry.sentAtEpochMs,
-          })),
-        }
-      : {}),
-    ...(state.resource ? { resource: state.resource } : {}),
+    ...envelope,
+    state: cloneSmState(envelope.state),
   };
 }
 
-function cloneResumeStanza(stanza: XmppResumeStanza): XmppResumeStanza {
+function clonePagehideHandoff(
+  receipt: PagehideHandoffResult,
+): PagehideHandoffResult {
   return {
-    stanzaKind: stanza.stanzaKind,
-    tokens: stanza.tokens.map((token) => {
-      if (token.kind === "end") return { kind: "end" };
-      if (token.kind === "text") return { kind: "text", value: token.value };
-      return {
-        kind: "start",
-        name: { ...token.name },
-        attributes: token.attributes.map((attribute) => ({
-          name: { ...attribute.name },
-          value: attribute.value,
-        })),
-      };
-    }),
+    handoff: { ...receipt.handoff },
+    smVersion: receipt.smVersion,
   };
 }
 
 export interface ResumePersistence {
+  /** Exact live incarnation shared by SM and outbound queue ownership. */
+  readonly lifecycleId: XmppLifecycleId;
+  /**
+   * The unified store that owns both outbound claims and this persistence's
+   * SM snapshot. BrowserXmppClient adopts it when a persistence adapter is
+   * injected so the two sides cannot accidentally fence one another.
+   */
+  readonly durableRuntimeStore?: DurableOutboundStore;
   loadCatchup(): PersistedReconnectCatchup | null;
   saveCatchup(snapshot: PersistedReconnectCatchup): void;
   clearCatchup(): void;
@@ -188,9 +142,12 @@ export interface ResumePersistence {
   saveSm(state: PersistedSmResumeState): Promise<DurableOutcome<void>>;
   clearSm(): Promise<DurableOutcome<boolean>>;
   outboundOwnerHint(): OutboundOwnerHint;
-  acceptOutboundOwner(owner: OutboundOwnerContext): void;
-  preparePagehideHandoff(): OutboundOwnerHandoff;
-  reclaimPagehideOwnership(): void;
+  acceptOutboundOwner(activation: OutboundOwnerActivation): void;
+  preparePagehideHandoff(
+    state: PersistedSmResumeState | null,
+  ): Promise<DurableOutcome<PagehideHandoffResult>>;
+  publishPagehideHandoff(receipt: PagehideHandoffResult): void;
+  reclaimPagehideOwnership(): Promise<DurableOutcome<void>>;
   loadJoinedRooms(): string[];
   saveJoinedRooms(roomJids: readonly string[]): void;
   clearJoinedRooms(): void;
@@ -198,6 +155,7 @@ export interface ResumePersistence {
 
 /** No-op persistence — used in tests / non-browser contexts. */
 export const nullResumePersistence: ResumePersistence = {
+  lifecycleId: XmppLifecycleId.explicitForTest("null-persistence"),
   loadCatchup: () => null,
   saveCatchup: () => undefined,
   clearCatchup: () => undefined,
@@ -207,8 +165,20 @@ export const nullResumePersistence: ResumePersistence = {
   clearSm: async () => ({ kind: "committed", value: false }),
   outboundOwnerHint: () => ({ ownerId: "null-owner", ownerInstanceId: "null-instance" }),
   acceptOutboundOwner: () => undefined,
-  preparePagehideHandoff: () => ({ token: "null-handoff", expiresAt: 0 }),
-  reclaimPagehideOwnership: () => undefined,
+  preparePagehideHandoff: async () => ({
+    kind: "committed",
+    value: {
+      handoff: {
+        token: "null-handoff",
+        expiresAt: 0,
+        authorityEpoch: 0,
+        ownerGeneration: 0,
+      },
+      smVersion: 0,
+    },
+  }),
+  publishPagehideHandoff: () => undefined,
+  reclaimPagehideOwnership: async () => ({ kind: "committed", value: undefined }),
   loadJoinedRooms: () => [],
   saveJoinedRooms: () => undefined,
   clearJoinedRooms: () => undefined,
@@ -217,16 +187,76 @@ export const nullResumePersistence: ResumePersistence = {
 export function createLocalStorageResumePersistence(
   accountKey: string,
   ownerId?: string,
-  durableSmStore: DurableSmResumeStore = defaultDurableSmStore(),
+  durableStore: DurableOutboundStore = defaultDurableSmStore(),
+  lifecycleId: XmppLifecycleId = XmppLifecycleId.create(),
 ): ResumePersistence {
-  const owner = ownerId ? explicitResumeOwner(ownerId) : resumeOwner();
+  const owner = ownerId
+    ? explicitResumeOwner(ownerId, lifecycleId)
+    : resumeOwner(lifecycleId);
+  let resolvedOwner: OutboundOwnerContext | null = null;
+  let atomicallyConsumedHandoff: DurableSmEnvelope | null = null;
+  let preparedHandoff: PagehideHandoffResult | null = null;
+  let smVersion: number | null | undefined;
   // Length-prefix the account segment so prefix enumeration cannot make
   // `alice@example.com` consume `alice@example.com.evil` shards.
   const catchupKeyPrefix = `${CATCHUP_PREFIX}.${accountKey.length}:${accountKey}`;
-  const catchupKey = () => `${catchupKeyPrefix}.${owner.ownerId}`;
-  const joinedRoomsKey = () => `${JOINED_ROOMS_PREFIX}.${accountKey}.${owner.ownerId}`;
+  const ownerStorageFence = () => resolvedOwner
+    ? `${resolvedOwner.ownerId}.g${resolvedOwner.ownerGeneration}`
+    : `${owner.ownerId}.pending-${lifecycleId.value}`;
+  const catchupKey = () => `${catchupKeyPrefix}.${ownerStorageFence()}`;
+  const joinedRoomsKeyPrefix = () => (
+    `${JOINED_ROOMS_PREFIX}.${accountKey.length}:${accountKey}.${owner.ownerId}`
+  );
+  const joinedRoomsKey = () => (
+    `${JOINED_ROOMS_PREFIX}.${accountKey.length}:${accountKey}.${ownerStorageFence()}`
+  );
+
+  const ensureOwner = async (): Promise<DurableOutcome<OutboundOwnerContext>> => {
+    if (resolvedOwner) return { kind: "committed", value: resolvedOwner };
+    const outcome = await durableStore.claimOwner(accountKey, {
+      ownerId: owner.ownerId,
+      ownerInstanceId: owner.instanceId.value,
+      ...(owner.handoffToken ? { handoffToken: owner.handoffToken } : {}),
+    });
+    if (outcome.kind === "failed") return outcome;
+    const activation = outcome.value;
+    if (activation.fence.ownerInstanceId !== owner.instanceId.value) {
+      return lifecycleFenceFailure();
+    }
+    resolvedOwner = activation.fence;
+    if (activation.handoffSm) {
+      atomicallyConsumedHandoff = cloneSmEnvelope(activation.handoffSm);
+      smVersion = activation.handoffSm.version;
+    }
+    owner.ownerId = activation.fence.ownerId;
+    delete owner.handoffToken;
+    writeOwnerSession(owner);
+    return { kind: "committed", value: activation.fence };
+  };
+
+  const loadEnvelope = async (
+    currentOwner: OutboundOwnerContext,
+  ): Promise<DurableOutcome<DurableSmEnvelope | null>> => {
+    const outcome = await durableStore.loadSm(currentOwner);
+    if (outcome.kind === "failed") return outcome;
+    if (outcome.value.kind === "fenced") return smFenceFailure("load");
+    const envelope = outcome.value.envelope;
+    smVersion = outcome.value.version;
+    return { kind: "committed", value: envelope };
+  };
+
+  const ensureSmVersion = async (
+    currentOwner: OutboundOwnerContext,
+  ): Promise<DurableOutcome<number | null>> => {
+    if (smVersion !== undefined) return { kind: "committed", value: smVersion };
+    const outcome = await loadEnvelope(currentOwner);
+    if (outcome.kind === "failed") return outcome;
+    return { kind: "committed", value: smVersion ?? null };
+  };
 
   return {
+    lifecycleId,
+    durableRuntimeStore: durableStore,
     loadCatchup() {
       return readCatchupShards(catchupKeyPrefix);
     },
@@ -234,17 +264,28 @@ export function createLocalStorageResumePersistence(
       writeJson(catchupKey(), snapshot, "catchup");
     },
     clearCatchup() {
-      removeKeysWithPrefix(`${catchupKeyPrefix}.`, "catchup");
+      removeKey(catchupKey(), "catchup");
     },
     async loadSm() {
-      const outcome = await durableSmStore.load(accountKey);
+      const ownerOutcome = await ensureOwner();
+      if (ownerOutcome.kind === "failed") return ownerOutcome;
+      if (atomicallyConsumedHandoff) {
+        const envelope = atomicallyConsumedHandoff;
+        if (
+          envelope.ownerId === owner.ownerId
+          && !smEnvelopeExpired(envelope)
+        ) {
+          return { kind: "committed", value: cloneSmState(envelope.state) };
+        }
+        return { kind: "committed", value: null };
+      }
+      const outcome = await loadEnvelope(ownerOutcome.value);
       if (outcome.kind === "failed") return outcome;
       const envelope = outcome.value;
       if (
         !envelope
         || envelope.ownerId !== owner.ownerId
         || envelope.consumed
-        || !isPersistedSmState(envelope.state)
         || smEnvelopeExpired(envelope)
       ) {
         return { kind: "committed", value: null };
@@ -252,59 +293,176 @@ export function createLocalStorageResumePersistence(
       return { kind: "committed", value: cloneSmState(envelope.state) };
     },
     async consumeSm() {
-      const outcome = await durableSmStore.consume(
-        accountKey,
-        owner.ownerId,
-        (envelope) => isPersistedSmState(envelope.state) && !smEnvelopeExpired(envelope),
+      const ownerOutcome = await ensureOwner();
+      if (ownerOutcome.kind === "failed") return ownerOutcome;
+      if (atomicallyConsumedHandoff) {
+        const envelope = atomicallyConsumedHandoff;
+        atomicallyConsumedHandoff = null;
+        return {
+          kind: "committed",
+          value: envelope.ownerId === owner.ownerId
+            && !smEnvelopeExpired(envelope)
+            ? cloneSmState(envelope.state)
+            : null,
+        };
+      }
+      const loaded = await loadEnvelope(ownerOutcome.value);
+      if (loaded.kind === "failed") return loaded;
+      const envelope = loaded.value;
+      if (
+        !envelope
+        || envelope.consumed
+        || smEnvelopeExpired(envelope)
+      ) {
+        return { kind: "committed", value: null };
+      }
+      const outcome = await durableStore.consumeSm(
+        ownerOutcome.value,
+        envelope.version,
+        (envelope) => !smEnvelopeExpired(envelope),
       );
       if (outcome.kind === "failed") return outcome;
+      if (outcome.value.kind === "fenced") return smFenceFailure("consume");
+      if (outcome.value.kind === "stale") return smStaleFailure("consume");
+      smVersion = outcome.value.value?.version ?? envelope.version;
       return {
         kind: "committed",
-        value: outcome.value ? cloneSmState(outcome.value.state) : null,
+        value: outcome.value.value ? cloneSmState(outcome.value.value.state) : null,
       };
     },
     async saveSm(state) {
-      const outcome = await durableSmStore.save(
-        accountKey,
-        owner.ownerId,
+      const ownerOutcome = await ensureOwner();
+      if (ownerOutcome.kind === "failed") return ownerOutcome;
+      const versionOutcome = await ensureSmVersion(ownerOutcome.value);
+      if (versionOutcome.kind === "failed") return versionOutcome;
+      const outcome = await durableStore.saveSm(
+        ownerOutcome.value,
+        versionOutcome.value,
         cloneSmState(state),
         Date.now(),
       );
-      return outcome.kind === "failed"
-        ? outcome
-        : { kind: "committed", value: undefined };
+      if (outcome.kind === "failed") return outcome;
+      if (outcome.value.kind === "fenced") return smFenceFailure("save");
+      if (outcome.value.kind === "stale") return smStaleFailure("save");
+      smVersion = outcome.value.value.version;
+      return { kind: "committed", value: undefined };
     },
-    clearSm() {
-      return durableSmStore.clear(accountKey, owner.ownerId);
+    async clearSm() {
+      const ownerOutcome = await ensureOwner();
+      if (ownerOutcome.kind === "failed") return ownerOutcome;
+      const versionOutcome = await ensureSmVersion(ownerOutcome.value);
+      if (versionOutcome.kind === "failed") return versionOutcome;
+      const outcome = await durableStore.clearSm(
+        ownerOutcome.value,
+        versionOutcome.value,
+      );
+      if (outcome.kind === "failed") return outcome;
+      if (outcome.value.kind === "fenced") return smFenceFailure("clear");
+      if (outcome.value.kind === "stale") return smStaleFailure("clear");
+      smVersion = outcome.value.value.version;
+      return { kind: "committed", value: outcome.value.value.cleared };
     },
     outboundOwnerHint() {
       return {
         ownerId: owner.ownerId,
-        ownerInstanceId: owner.instanceId,
+        ownerInstanceId: owner.instanceId.value,
         ...(owner.handoffToken ? { handoffToken: owner.handoffToken } : {}),
       };
     },
-    acceptOutboundOwner(resolved) {
+    acceptOutboundOwner(activation) {
+      const resolved = activation.fence;
+      if (resolved.ownerInstanceId !== owner.instanceId.value) {
+        throw new DOMException(
+          "Outbound owner lifecycle changed during activation",
+          "AbortError",
+        );
+      }
+      if (
+        resolvedOwner
+        && (
+          resolvedOwner.ownerId !== resolved.ownerId
+          || resolvedOwner.ownerGeneration !== resolved.ownerGeneration
+          || resolvedOwner.authorityEpoch !== resolved.authorityEpoch
+        )
+      ) {
+        smVersion = undefined;
+        preparedHandoff = null;
+      }
+      resolvedOwner = resolved;
+      if (activation.handoffSm) {
+        atomicallyConsumedHandoff = cloneSmEnvelope(activation.handoffSm);
+        smVersion = activation.handoffSm.version;
+      }
       owner.ownerId = resolved.ownerId;
-      owner.instanceId = resolved.ownerInstanceId;
       delete owner.handoffToken;
       writeOwnerSession(owner);
     },
-    preparePagehideHandoff() {
-      const handoff = {
-        token: randomClaimId(),
-        expiresAt: Date.now() + OWNER_HANDOFF_TTL_MS,
+    async preparePagehideHandoff(state) {
+      const ownerOutcome = await ensureOwner();
+      if (ownerOutcome.kind === "failed") return ownerOutcome;
+      const versionOutcome = await ensureSmVersion(ownerOutcome.value);
+      if (versionOutcome.kind === "failed") return versionOutcome;
+      const token = randomClaimId();
+      const prepared = await durableStore.preparePagehideHandoff(
+        ownerOutcome.value,
+        versionOutcome.value,
+        token,
+        state ? cloneSmState(state) : null,
+      );
+      if (prepared.kind === "failed") return prepared;
+      if (prepared.value.kind === "fenced") return smFenceFailure("prepare-handoff");
+      if (prepared.value.kind === "stale") return smStaleFailure("prepare-handoff");
+      smVersion = prepared.value.value.smVersion;
+      preparedHandoff = clonePagehideHandoff(prepared.value.value);
+      return {
+        kind: "committed",
+        value: clonePagehideHandoff(prepared.value.value),
       };
-      owner.handoffToken = handoff.token;
-      writeOwnerSession(owner);
-      return handoff;
     },
-    reclaimPagehideOwnership() {
-      delete owner.handoffToken;
+    publishPagehideHandoff(receipt) {
+      if (
+        !preparedHandoff
+        || preparedHandoff.handoff.token !== receipt.handoff.token
+        || preparedHandoff.smVersion !== receipt.smVersion
+      ) {
+        throw new DOMException(
+          "Pagehide handoff receipt changed before publication",
+          "AbortError",
+        );
+      }
+      owner.handoffToken = receipt.handoff.token;
+      // Publish only after the exact durable owner+SM transaction committed.
       writeOwnerSession(owner);
+    },
+    async reclaimPagehideOwnership() {
+      const current = preparedHandoff;
+      if (!current || !resolvedOwner) {
+        return { kind: "committed", value: undefined };
+      }
+      const outcome = await durableStore.cancelOwnerHandoff(
+        resolvedOwner,
+        current.handoff.token,
+        current.smVersion,
+      );
+      if (outcome.kind === "failed") return outcome;
+      if (outcome.value.kind === "fenced") {
+        return smFenceFailure("cancel-handoff");
+      }
+      if (outcome.value.kind === "stale") {
+        return smStaleFailure("cancel-handoff");
+      }
+      preparedHandoff = null;
+      if (owner.handoffToken === current.handoff.token) {
+        delete owner.handoffToken;
+        writeOwnerSession(owner);
+      }
+      return { kind: "committed", value: undefined };
     },
     loadJoinedRooms() {
-      const stored = readJson<string[]>(joinedRoomsKey(), isStringArray, "joined-rooms") ?? [];
+      const stored = storageKeysWithPrefix(`${joinedRoomsKeyPrefix()}.`)
+        .flatMap((key) => (
+          readJson<string[]>(key, isStringArray, "joined-rooms") ?? []
+        ));
       return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
     },
     saveJoinedRooms(roomJids) {
@@ -320,6 +478,41 @@ export function createLocalStorageResumePersistence(
   };
 }
 
+function smFenceFailure<T>(operation: string): DurableOutcome<T> {
+  return {
+    kind: "failed",
+    reason: "aborted",
+    cause: new DOMException(`SM owner fenced during ${operation}`, "AbortError"),
+  };
+}
+
+function lifecycleFenceFailure<T>(): DurableOutcome<T> {
+  return {
+    kind: "failed",
+    reason: "aborted",
+    cause: new DOMException(
+      "Outbound owner lifecycle changed during activation",
+      "AbortError",
+    ),
+  };
+}
+
+function smStaleFailure<T>(operation: string): DurableOutcome<T> {
+  return {
+    kind: "failed",
+    reason: "aborted",
+    cause: new DOMException(`SM snapshot changed during ${operation}`, "AbortError"),
+  };
+}
+
+function reportSmOwnerFailure(operation: string, cause: unknown): void {
+  reportError("storage.write", cause, {
+    recoverable: false,
+    detail: `SM owner ${operation} failed`,
+    storage_area: "sm-resume",
+  });
+}
+
 function randomClaimId(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
 }
@@ -331,25 +524,28 @@ function smEnvelopeExpired(envelope: DurableSmEnvelope): boolean {
   return ageMs > maxResumeSeconds * 1000;
 }
 
-function explicitResumeOwner(ownerId: string): ResumeOwner {
+function explicitResumeOwner(
+  ownerId: string,
+  lifecycleId: XmppLifecycleId,
+): ResumeOwner {
   return {
     ownerId,
-    instanceId: `explicit:${ownerId}`,
+    instanceId: lifecycleId,
     explicit: true,
   };
 }
 
-function resumeOwner(): ResumeOwner {
+function resumeOwner(lifecycleId: XmppLifecycleId): ResumeOwner {
   const s = sessionStorageForOwner();
   if (!s) {
     const ownerId = randomClaimId();
-    return { ownerId, instanceId: ownerInstanceId(ownerId), explicit: false };
+    return { ownerId, instanceId: lifecycleId, explicit: false };
   }
   try {
     const ownerId = s.getItem(OWNER_KEY) || randomClaimId();
     const owner: ResumeOwner = {
       ownerId,
-      instanceId: ownerInstanceId(ownerId),
+      instanceId: lifecycleId,
       explicit: false,
       ...(s.getItem(OWNER_HANDOFF_TOKEN_KEY)
         ? { handoffToken: s.getItem(OWNER_HANDOFF_TOKEN_KEY)! }
@@ -359,16 +555,8 @@ function resumeOwner(): ResumeOwner {
     return owner;
   } catch {
     const ownerId = randomClaimId();
-    return { ownerId, instanceId: ownerInstanceId(ownerId), explicit: false };
+    return { ownerId, instanceId: lifecycleId, explicit: false };
   }
-}
-
-function ownerInstanceId(ownerId: string): string {
-  const current = liveOwnerInstances.get(ownerId);
-  if (current) return current;
-  const next = randomClaimId();
-  liveOwnerInstances.set(ownerId, next);
-  return next;
 }
 
 function writeOwnerSession(owner: ResumeOwner): void {
@@ -453,10 +641,6 @@ function readCatchupShards(prefix: string): PersistedReconnectCatchup | null {
   };
 }
 
-function removeKeysWithPrefix(prefix: string, kind: string): void {
-  for (const key of storageKeysWithPrefix(prefix)) removeKey(key, kind);
-}
-
 function writeJson(key: string, value: unknown, kind: string): void {
   const s = storage();
   if (!s) return;
@@ -527,127 +711,4 @@ function isStringArray(value: unknown): value is string[] {
 
 function normalizeRoomJid(roomJid: string): string {
   return roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
-}
-
-function isU32(value: unknown): value is number {
-  return typeof value === "number"
-    && Number.isInteger(value)
-    && value >= 0
-    && value <= 0xFFFF_FFFF;
-}
-
-const RESUME_XML_TOKEN_LIMIT = 16_384;
-const RESUME_XML_DEPTH_LIMIT = 64;
-const RESUME_XML_ATTRIBUTE_LIMIT = 16_384;
-const JS_DATE_LIMIT_MS = 8_640_000_000_000_000;
-
-function hasOnlyKeys(candidate: Record<string, unknown>, allowed: readonly string[]): boolean {
-  const allowedKeys = new Set(allowed);
-  return Object.keys(candidate).every((key) => allowedKeys.has(key));
-}
-
-function isResumeXmlName(value: unknown): value is XmppResumeXmlName {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return hasOnlyKeys(candidate, ["namespace", "localName"])
-    && typeof candidate.namespace === "string"
-    && typeof candidate.localName === "string"
-    && candidate.localName.length > 0
-    && !candidate.localName.includes(":")
-    && !/\s/u.test(candidate.localName);
-}
-
-function isResumeStanza(value: unknown): value is XmppResumeStanza {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  if (!hasOnlyKeys(candidate, ["stanzaKind", "tokens"])) return false;
-  if (
-    candidate.stanzaKind !== "message"
-    && candidate.stanzaKind !== "presence"
-    && candidate.stanzaKind !== "iq"
-  ) return false;
-  if (
-    !Array.isArray(candidate.tokens)
-    || candidate.tokens.length === 0
-    || candidate.tokens.length > RESUME_XML_TOKEN_LIMIT
-  ) return false;
-
-  let depth = 0;
-  let rootSeen = false;
-  let attributeCount = 0;
-  for (const rawToken of candidate.tokens) {
-    if (!rawToken || typeof rawToken !== "object") return false;
-    const token = rawToken as Record<string, unknown>;
-    if (token.kind === "start") {
-      if (!hasOnlyKeys(token, ["kind", "name", "attributes"])) return false;
-      if (!isResumeXmlName(token.name) || !Array.isArray(token.attributes)) return false;
-      if (depth === 0) {
-        if (rootSeen) return false;
-        rootSeen = true;
-        if (
-          token.name.namespace !== "jabber:client"
-          || token.name.localName !== candidate.stanzaKind
-        ) return false;
-      }
-      depth += 1;
-      if (depth > RESUME_XML_DEPTH_LIMIT) return false;
-      attributeCount += token.attributes.length;
-      if (attributeCount > RESUME_XML_ATTRIBUTE_LIMIT) return false;
-      const expandedNames = new Set<string>();
-      for (const rawAttribute of token.attributes) {
-        if (!rawAttribute || typeof rawAttribute !== "object") return false;
-        const attribute = rawAttribute as Record<string, unknown>;
-        if (
-          !hasOnlyKeys(attribute, ["name", "value"])
-          || !isResumeXmlName(attribute.name)
-          || typeof attribute.value !== "string"
-        ) return false;
-        const expandedName = `${attribute.name.namespace}\0${attribute.name.localName}`;
-        if (expandedNames.has(expandedName)) return false;
-        expandedNames.add(expandedName);
-      }
-      continue;
-    }
-    if (token.kind === "text") {
-      if (
-        !hasOnlyKeys(token, ["kind", "value"])
-        || depth === 0
-        || typeof token.value !== "string"
-      ) return false;
-      continue;
-    }
-    if (token.kind === "end") {
-      if (!hasOnlyKeys(token, ["kind"]) || depth === 0) return false;
-      depth -= 1;
-      continue;
-    }
-    return false;
-  }
-  return rootSeen && depth === 0;
-}
-
-function isPersistedSmState(value: unknown): value is PersistedSmResumeState {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  if (
-    typeof candidate.previd !== "string"
-    || !isU32(candidate.inboundH)
-    || !isU32(candidate.outboundH)
-    || (
-      candidate.maxResumeSeconds !== undefined
-      && (!isU32(candidate.maxResumeSeconds) || candidate.maxResumeSeconds === 0)
-    )
-    || (candidate.resource !== undefined && typeof candidate.resource !== "string")
-  ) return false;
-  if (candidate.unhandledOutboundEntries === undefined) return true;
-  return Array.isArray(candidate.unhandledOutboundEntries)
-    && candidate.unhandledOutboundEntries.every((entry) => {
-      if (!entry || typeof entry !== "object") return false;
-      const resumeEntry = entry as Record<string, unknown>;
-      return hasOnlyKeys(resumeEntry, ["stanza", "sentAtEpochMs"])
-        && isResumeStanza(resumeEntry.stanza)
-        && typeof resumeEntry.sentAtEpochMs === "number"
-        && Number.isSafeInteger(resumeEntry.sentAtEpochMs)
-        && Math.abs(resumeEntry.sentAtEpochMs) <= JS_DATE_LIMIT_MS;
-    });
 }

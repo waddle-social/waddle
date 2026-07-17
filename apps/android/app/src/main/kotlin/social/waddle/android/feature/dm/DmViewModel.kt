@@ -37,11 +37,19 @@ class DmViewModel(
     companion object {
         fun factory(graph: AppGraph, peerJid: String): ViewModelProvider.Factory =
             viewModelFactoryOf {
+                val ownerBareJid = graph.currentSession.value
+                    ?.jid
+                    ?.substringBefore('/')
+                    ?.takeIf(String::isNotBlank)
                 DmViewModel(
                     sessionManager = graph.sessionManager,
                     peerJid = peerJid,
                     uploader = graph.attachmentUploader,
-                    onConversationRead = graph.messageNotifier::clearConversationNotification,
+                    onConversationRead = { conversationJid ->
+                        ownerBareJid?.let {
+                            graph.messageNotifier.clearConversationNotification(it, conversationJid)
+                        }
+                    },
                 )
             }
     }

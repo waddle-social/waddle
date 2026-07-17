@@ -414,13 +414,7 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 
 
 // Public interface members begin here.
-// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -622,6 +616,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func disconnect() async
 
     /**
+     * Pull exactly one ordered native event. The client never reads a
+     * subsequent core event until the app asks again, so a
+     * `ResumeFailed` journal CAS is an actual durability barrier rather
+     * than an advisory callback ordering assumption.
+     */
+    func nextEvent() async  -> WaddleClientEvent
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -705,7 +707,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
      * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
+     * reported on the ordered event stream so the caller can treat `None` as
      * "fall back to initials".
      */
     func requestAvatar(jid: String) async  -> WaddleAvatar?
@@ -917,7 +919,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
      * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
+     * event stream. The caller MUST persist both fields — node feeds
      * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
      * per-device `disable_push_device` opt-out.
      */
@@ -963,12 +965,11 @@ open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
     public func uniffiCloneHandle() -> UInt64 {
         return try! rustCall { uniffi_waddle_xmpp_client_ffi_fn_clone_waddleclient(self.handle, $0) }
     }
-public convenience init(config: WaddleConfig, listener: WaddleEventListener) {
+public convenience init(config: WaddleConfig) {
     let handle =
         try! rustCall() {
     uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(
-        FfiConverterTypeWaddleConfig_lower(config),
-        FfiConverterCallbackInterfaceWaddleEventListener_lower(listener),$0
+        FfiConverterTypeWaddleConfig_lower(config),$0
     )
 }
     self.init(unsafeFromHandle: handle)
@@ -1017,6 +1018,30 @@ open func disconnect()async   {
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Pull exactly one ordered native event. The client never reads a
+     * subsequent core event until the app asks again, so a
+     * `ResumeFailed` journal CAS is an actual durability barrier rather
+     * than an advisory callback ordering assumption.
+     */
+open func nextEvent()async  -> WaddleClientEvent  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_next_event(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleClientEvent_lift,
             errorHandler: nil
 
         )
@@ -1378,7 +1403,7 @@ open func leaveRoom(roomJid: String, nick: String)async   {
     /**
      * Request the XEP-0084 avatar for a user. Returns `None` when the target
      * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
+     * reported on the ordered event stream so the caller can treat `None` as
      * "fall back to initials".
      */
 open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
@@ -2048,7 +2073,7 @@ open func enablePushNotifications(pushServiceJid: String, node: String)async  ->
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
      * success. Returns `None` on failure with the diagnostic on the
-     * listener. The caller MUST persist both fields — node feeds
+     * event stream. The caller MUST persist both fields — node feeds
      * the user-server XEP-0357 `<enable/>` IQ, device id scopes the
      * per-device `disable_push_device` opt-out.
      */
@@ -3024,6 +3049,11 @@ public struct WaddleConfig: Equatable, Hashable {
     public var accessToken: String
     public var resource: String
     /**
+     * Immutable identity of this native connection attempt. Delivery
+     * callbacks and resume transitions are fenced to this exact value.
+     */
+    public var deliveryAttempt: WaddleDeliveryAttemptRef
+    /**
      * XEP-0198 resume snapshot from a previous session. When present
      * the runtime attempts `<resume/>` before resource binding and
      * replays the queued outbound stanzas the server never acked.
@@ -3034,6 +3064,10 @@ public struct WaddleConfig: Equatable, Hashable {
     // declare one manually.
     public init(serverUrl: String, jid: String, accessToken: String, resource: String,
         /**
+         * Immutable identity of this native connection attempt. Delivery
+         * callbacks and resume transitions are fenced to this exact value.
+         */deliveryAttempt: WaddleDeliveryAttemptRef,
+        /**
          * XEP-0198 resume snapshot from a previous session. When present
          * the runtime attempts `<resume/>` before resource binding and
          * replays the queued outbound stanzas the server never acked.
@@ -3042,6 +3076,7 @@ public struct WaddleConfig: Equatable, Hashable {
         self.jid = jid
         self.accessToken = accessToken
         self.resource = resource
+        self.deliveryAttempt = deliveryAttempt
         self.resumeState = resumeState
     }
 
@@ -3065,6 +3100,7 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
                 jid: FfiConverterString.read(from: &buf),
                 accessToken: FfiConverterString.read(from: &buf),
                 resource: FfiConverterString.read(from: &buf),
+                deliveryAttempt: FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf),
                 resumeState: FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
         )
     }
@@ -3074,6 +3110,7 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.jid, into: &buf)
         FfiConverterString.write(value.accessToken, into: &buf)
         FfiConverterString.write(value.resource, into: &buf)
+        FfiConverterTypeWaddleDeliveryAttemptRef.write(value.deliveryAttempt, into: &buf)
         FfiConverterOptionTypeWaddleSmResumeState.write(value.resumeState, into: &buf)
     }
 }
@@ -3091,6 +3128,281 @@ public func FfiConverterTypeWaddleConfig_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleConfig_lower(_ value: WaddleConfig) -> RustBuffer {
     return FfiConverterTypeWaddleConfig.lower(value)
+}
+
+
+/**
+ * Monotonic generation inside a delivery attempt lineage.
+ */
+public struct WaddleConnectionGeneration: Equatable, Hashable {
+    public var value: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: UInt64) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleConnectionGeneration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleConnectionGeneration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleConnectionGeneration {
+        return
+            try WaddleConnectionGeneration(
+                value: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleConnectionGeneration, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleConnectionGeneration_lift(_ buf: RustBuffer) throws -> WaddleConnectionGeneration {
+    return try FfiConverterTypeWaddleConnectionGeneration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleConnectionGeneration_lower(_ value: WaddleConnectionGeneration) -> RustBuffer {
+    return FfiConverterTypeWaddleConnectionGeneration.lower(value)
+}
+
+
+/**
+ * UUID identity minted once for one native connection incarnation.
+ */
+public struct WaddleDeliveryAttemptId: Equatable, Hashable {
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleDeliveryAttemptId: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleDeliveryAttemptId: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDeliveryAttemptId {
+        return
+            try WaddleDeliveryAttemptId(
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleDeliveryAttemptId, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptId_lift(_ buf: RustBuffer) throws -> WaddleDeliveryAttemptId {
+    return try FfiConverterTypeWaddleDeliveryAttemptId.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptId_lower(_ value: WaddleDeliveryAttemptId) -> RustBuffer {
+    return FfiConverterTypeWaddleDeliveryAttemptId.lower(value)
+}
+
+
+/**
+ * Exact fence carried by every native delivery lifecycle signal.
+ */
+public struct WaddleDeliveryAttemptRef: Equatable, Hashable {
+    public var attemptId: WaddleDeliveryAttemptId
+    public var connectionGeneration: WaddleConnectionGeneration
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(attemptId: WaddleDeliveryAttemptId, connectionGeneration: WaddleConnectionGeneration) {
+        self.attemptId = attemptId
+        self.connectionGeneration = connectionGeneration
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleDeliveryAttemptRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleDeliveryAttemptRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDeliveryAttemptRef {
+        return
+            try WaddleDeliveryAttemptRef(
+                attemptId: FfiConverterTypeWaddleDeliveryAttemptId.read(from: &buf),
+                connectionGeneration: FfiConverterTypeWaddleConnectionGeneration.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleDeliveryAttemptRef, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleDeliveryAttemptId.write(value.attemptId, into: &buf)
+        FfiConverterTypeWaddleConnectionGeneration.write(value.connectionGeneration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptRef_lift(_ buf: RustBuffer) throws -> WaddleDeliveryAttemptRef {
+    return try FfiConverterTypeWaddleDeliveryAttemptRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptRef_lower(_ value: WaddleDeliveryAttemptRef) -> RustBuffer {
+    return FfiConverterTypeWaddleDeliveryAttemptRef.lower(value)
+}
+
+
+/**
+ * Single Rust-minted handoff from a failed resume stream to its fresh
+ * fallback stream. The app commits this exact transition before polling
+ * another native event.
+ */
+public struct WaddleDeliveryAttemptTransition: Equatable, Hashable {
+    public var old: WaddleDeliveryAttemptRef
+    public var fresh: WaddleDeliveryAttemptRef
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(old: WaddleDeliveryAttemptRef, fresh: WaddleDeliveryAttemptRef) {
+        self.old = old
+        self.fresh = fresh
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleDeliveryAttemptTransition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleDeliveryAttemptTransition: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDeliveryAttemptTransition {
+        return
+            try WaddleDeliveryAttemptTransition(
+                old: FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf),
+                fresh: FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleDeliveryAttemptTransition, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleDeliveryAttemptRef.write(value.old, into: &buf)
+        FfiConverterTypeWaddleDeliveryAttemptRef.write(value.fresh, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptTransition_lift(_ buf: RustBuffer) throws -> WaddleDeliveryAttemptTransition {
+    return try FfiConverterTypeWaddleDeliveryAttemptTransition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryAttemptTransition_lower(_ value: WaddleDeliveryAttemptTransition) -> RustBuffer {
+    return FfiConverterTypeWaddleDeliveryAttemptTransition.lower(value)
+}
+
+
+/**
+ * Typed client stanza identity at the native boundary.
+ */
+public struct WaddleDeliveryStanzaId: Equatable, Hashable {
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String) {
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleDeliveryStanzaId: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleDeliveryStanzaId: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleDeliveryStanzaId {
+        return
+            try WaddleDeliveryStanzaId(
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleDeliveryStanzaId, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryStanzaId_lift(_ buf: RustBuffer) throws -> WaddleDeliveryStanzaId {
+    return try FfiConverterTypeWaddleDeliveryStanzaId.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleDeliveryStanzaId_lower(_ value: WaddleDeliveryStanzaId) -> RustBuffer {
+    return FfiConverterTypeWaddleDeliveryStanzaId.lower(value)
 }
 
 
@@ -4548,6 +4860,63 @@ public func FfiConverterTypeWaddleMujiPresence_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeWaddleMujiPresence_lower(_ value: WaddleMujiPresence) -> RustBuffer {
     return FfiConverterTypeWaddleMujiPresence.lower(value)
+}
+
+
+/**
+ * One exact native delivery callback.
+ */
+public struct WaddleNativeDeliverySignal: Equatable, Hashable {
+    public var attempt: WaddleDeliveryAttemptRef
+    public var stanzaId: WaddleDeliveryStanzaId
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(attempt: WaddleDeliveryAttemptRef, stanzaId: WaddleDeliveryStanzaId) {
+        self.attempt = attempt
+        self.stanzaId = stanzaId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleNativeDeliverySignal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleNativeDeliverySignal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleNativeDeliverySignal {
+        return
+            try WaddleNativeDeliverySignal(
+                attempt: FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf),
+                stanzaId: FfiConverterTypeWaddleDeliveryStanzaId.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleNativeDeliverySignal, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleDeliveryAttemptRef.write(value.attempt, into: &buf)
+        FfiConverterTypeWaddleDeliveryStanzaId.write(value.stanzaId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleNativeDeliverySignal_lift(_ buf: RustBuffer) throws -> WaddleNativeDeliverySignal {
+    return try FfiConverterTypeWaddleNativeDeliverySignal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleNativeDeliverySignal_lower(_ value: WaddleNativeDeliverySignal) -> RustBuffer {
+    return FfiConverterTypeWaddleNativeDeliverySignal.lower(value)
 }
 
 
@@ -6691,9 +7060,16 @@ public func FfiConverterTypeWaddleChatState_lower(_ value: WaddleChatState) -> R
 public enum WaddleClientEvent: Equatable, Hashable {
 
     /**
-     * Session is bound and ready (fires on `SessionReady`).
+     * Session is bound and ready under this exact native attempt.
      */
-    case connected
+    case sessionReady(kind: WaddleSessionReadyKind, attempt: WaddleDeliveryAttemptRef
+    )
+    /**
+     * XEP-0198 resume failed. `affected` is the exact set of unhandled
+     * message rows subsumed by the old-to-fresh journal transition.
+     */
+    case resumeFailed(transition: WaddleDeliveryAttemptTransition, affected: [WaddleDeliveryStanzaId]
+    )
     /**
      * The event stream closed; no further events will fire.
      */
@@ -6716,12 +7092,12 @@ public enum WaddleClientEvent: Equatable, Hashable {
     /**
      * XEP-0198: the server acked the outbound message with this id.
      */
-    case deliveryAcked(stanzaId: String
+    case deliveryAcked(signal: WaddleNativeDeliverySignal
     )
     /**
      * XEP-0198: transport-level delivery failure for this id.
      */
-    case deliveryFailed(stanzaId: String
+    case deliveryFailed(signal: WaddleNativeDeliverySignal
     )
     /**
      * XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
@@ -6737,7 +7113,7 @@ public enum WaddleClientEvent: Equatable, Hashable {
      * persist `Some(state)` and feed it back via
      * `WaddleConfig.resume_state` on the next connect.
      */
-    case resumeStateChanged(state: WaddleSmResumeState?
+    case resumeStateChanged(attempt: WaddleDeliveryAttemptRef, state: WaddleSmResumeState?
     )
     /**
      * RFC 6120 §6.5 SASL failure during connect. Terminal for the
@@ -6773,35 +7149,39 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        case 1: return .connected
-
-        case 2: return .disconnected
-
-        case 3: return .message(message: try FfiConverterTypeWaddleMessage.read(from: &buf)
+        case 1: return .sessionReady(kind: try FfiConverterTypeWaddleSessionReadyKind.read(from: &buf), attempt: try FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf)
         )
 
-        case 4: return .presence(presence: try FfiConverterTypeWaddlePresence.read(from: &buf)
+        case 2: return .resumeFailed(transition: try FfiConverterTypeWaddleDeliveryAttemptTransition.read(from: &buf), affected: try FfiConverterSequenceTypeWaddleDeliveryStanzaId.read(from: &buf)
         )
 
-        case 5: return .mamResult(message: try FfiConverterTypeWaddleArchivedMessage.read(from: &buf)
+        case 3: return .disconnected
+
+        case 4: return .message(message: try FfiConverterTypeWaddleMessage.read(from: &buf)
         )
 
-        case 6: return .deliveryAcked(stanzaId: try FfiConverterString.read(from: &buf)
+        case 5: return .presence(presence: try FfiConverterTypeWaddlePresence.read(from: &buf)
         )
 
-        case 7: return .deliveryFailed(stanzaId: try FfiConverterString.read(from: &buf)
+        case 6: return .mamResult(message: try FfiConverterTypeWaddleArchivedMessage.read(from: &buf)
         )
 
-        case 8: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 7: return .deliveryAcked(signal: try FfiConverterTypeWaddleNativeDeliverySignal.read(from: &buf)
         )
 
-        case 9: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+        case 8: return .deliveryFailed(signal: try FfiConverterTypeWaddleNativeDeliverySignal.read(from: &buf)
         )
 
-        case 10: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 9: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 11: return .error(description: try FfiConverterString.read(from: &buf)
+        case 10: return .resumeStateChanged(attempt: try FfiConverterTypeWaddleDeliveryAttemptRef.read(from: &buf), state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+        )
+
+        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 12: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -6812,56 +7192,65 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         switch value {
 
 
-        case .connected:
+        case let .sessionReady(kind,attempt):
             writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleSessionReadyKind.write(kind, into: &buf)
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(attempt, into: &buf)
+
+
+        case let .resumeFailed(transition,affected):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWaddleDeliveryAttemptTransition.write(transition, into: &buf)
+            FfiConverterSequenceTypeWaddleDeliveryStanzaId.write(affected, into: &buf)
 
 
         case .disconnected:
-            writeInt(&buf, Int32(2))
+            writeInt(&buf, Int32(3))
 
 
         case let .message(message):
-            writeInt(&buf, Int32(3))
+            writeInt(&buf, Int32(4))
             FfiConverterTypeWaddleMessage.write(message, into: &buf)
 
 
         case let .presence(presence):
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(5))
             FfiConverterTypeWaddlePresence.write(presence, into: &buf)
 
 
         case let .mamResult(message):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(6))
             FfiConverterTypeWaddleArchivedMessage.write(message, into: &buf)
 
 
-        case let .deliveryAcked(stanzaId):
-            writeInt(&buf, Int32(6))
-            FfiConverterString.write(stanzaId, into: &buf)
-
-
-        case let .deliveryFailed(stanzaId):
+        case let .deliveryAcked(signal):
             writeInt(&buf, Int32(7))
-            FfiConverterString.write(stanzaId, into: &buf)
+            FfiConverterTypeWaddleNativeDeliverySignal.write(signal, into: &buf)
+
+
+        case let .deliveryFailed(signal):
+            writeInt(&buf, Int32(8))
+            FfiConverterTypeWaddleNativeDeliverySignal.write(signal, into: &buf)
 
 
         case let .call(event):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(9))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
-        case let .resumeStateChanged(state):
-            writeInt(&buf, Int32(9))
+        case let .resumeStateChanged(attempt,state):
+            writeInt(&buf, Int32(10))
+            FfiConverterTypeWaddleDeliveryAttemptRef.write(attempt, into: &buf)
             FfiConverterOptionTypeWaddleSmResumeState.write(state, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -8346,6 +8735,73 @@ public func FfiConverterTypeWaddleSendMessageOutcome_lower(_ value: WaddleSendMe
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum WaddleSessionReadyKind: Equatable, Hashable {
+
+    case fresh
+    case resumed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSessionReadyKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSessionReadyKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSessionReadyKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSessionReadyKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .fresh
+
+        case 2: return .resumed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSessionReadyKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .fresh:
+            writeInt(&buf, Int32(1))
+
+
+        case .resumed:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSessionReadyKind_lift(_ buf: RustBuffer) throws -> WaddleSessionReadyKind {
+    return try FfiConverterTypeWaddleSessionReadyKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSessionReadyKind_lower(_ value: WaddleSessionReadyKind) -> RustBuffer {
+    return FfiConverterTypeWaddleSessionReadyKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * Typed outcome of [`WaddleClient::set_dm_notification_mode`] (issue
  * #720). Mirrors [`WaddleSetRoomNotificationModeOutcome`] with one
@@ -8646,141 +9102,6 @@ public func FfiConverterTypeWaddleStanzaErrorType_lower(_ value: WaddleStanzaErr
     return FfiConverterTypeWaddleStanzaErrorType.lower(value)
 }
 
-
-
-
-
-public protocol WaddleEventListener: AnyObject, Sendable {
-
-    func onEvent(event: WaddleClientEvent)
-
-}
-
-
-// Put the implementation in a struct so we don't pollute the top-level namespace
-fileprivate struct UniffiCallbackInterfaceWaddleEventListener {
-
-    // Create the VTable using a series of closures.
-    // Swift automatically converts these into C callback functions.
-    //
-    // Store the vtable directly.
-    static let vtable: UniffiVTableCallbackInterfaceWaddleEventListener = UniffiVTableCallbackInterfaceWaddleEventListener(
-        uniffiFree: { (uniffiHandle: UInt64) -> () in
-            do {
-                try FfiConverterCallbackInterfaceWaddleEventListener.handleMap.remove(handle: uniffiHandle)
-            } catch {
-                print("Uniffi callback interface WaddleEventListener: handle missing in uniffiFree")
-            }
-        },
-        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
-            do {
-                return try FfiConverterCallbackInterfaceWaddleEventListener.handleMap.clone(handle: uniffiHandle)
-            } catch {
-                fatalError("Uniffi callback interface WaddleEventListener: handle missing in uniffiClone")
-            }
-        },
-        onEvent: { (
-            uniffiHandle: UInt64,
-            event: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceWaddleEventListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onEvent(
-                     event: try FfiConverterTypeWaddleClientEvent_lift(event)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        }
-    )
-
-    // Rust stores this pointer for future callback invocations, so it must live
-    // for the process lifetime (not just for the init function call).
-    //
-    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
-    // This is safe because the pointee is initialized once during static init
-    // and never mutated by either side of the FFI.  Its fields are C function pointers.
-    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceWaddleEventListener> = {
-        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceWaddleEventListener>.allocate(capacity: 1)
-        ptr.initialize(to: vtable)
-        return UnsafePointer(ptr)
-    }()
-}
-
-private func uniffiCallbackInitWaddleEventListener() {
-    uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(UniffiCallbackInterfaceWaddleEventListener.vtablePtr)
-}
-
-// FfiConverter protocol for callback interfaces
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterCallbackInterfaceWaddleEventListener {
-    fileprivate static let handleMap = UniffiHandleMap<WaddleEventListener>()
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-extension FfiConverterCallbackInterfaceWaddleEventListener : FfiConverter {
-    typealias SwiftType = WaddleEventListener
-    typealias FfiType = UInt64
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public static func lift(_ handle: UInt64) throws -> SwiftType {
-        try handleMap.get(handle: handle)
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public static func lower(_ v: SwiftType) -> UInt64 {
-        return handleMap.insert(obj: v)
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(v))
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterCallbackInterfaceWaddleEventListener_lift(_ handle: UInt64) throws -> WaddleEventListener {
-    return try FfiConverterCallbackInterfaceWaddleEventListener.lift(handle)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterCallbackInterfaceWaddleEventListener_lower(_ v: WaddleEventListener) -> UInt64 {
-    return FfiConverterCallbackInterfaceWaddleEventListener.lower(v)
-}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -9654,6 +9975,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleDeliveryStanzaId: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleDeliveryStanzaId]
+
+    public static func write(_ value: [WaddleDeliveryStanzaId], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleDeliveryStanzaId.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleDeliveryStanzaId] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleDeliveryStanzaId]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleDeliveryStanzaId.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleDmBookmarkItem: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleDmBookmarkItem]
 
@@ -10108,6 +10454,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_next_event() != 10590) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10159,7 +10508,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 37065) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -10246,17 +10595,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 61395) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 24436) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event() != 13709) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 6984) {
         return InitializationResult.apiChecksumMismatch
     }
 
-    uniffiCallbackInitWaddleEventListener()
     return InitializationResult.ok
 }()
 

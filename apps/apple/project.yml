@@ -71,6 +71,23 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: "Waddle/Waddle-Bridging-Header.h"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
         MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
+  Waddle-macOSTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: WaddleTests
+    dependencies:
+      - target: Waddle-macOS
+      - framework: $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: p4x.waddle.social.tests
+        GENERATE_INFOPLIST_FILE: YES
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework/*/Headers $(SRCROOT)/Waddle/RustClient"
+        MODULEMAP_FILE: "$(SRCROOT)/Waddle/RustClient/module.modulemap"
 schemes:
   Waddle:
     build:
@@ -85,3 +102,6 @@ schemes:
     build:
       targets:
         Waddle-macOS: all
+    test:
+      targets:
+        - Waddle-macOSTests

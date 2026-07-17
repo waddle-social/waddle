@@ -166,6 +166,34 @@ pub enum StreamErrorCondition {
 }
 
 impl StreamErrorCondition {
+    pub const ALL: [Self; 25] = [
+        Self::BadFormat,
+        Self::BadNamespacePrefix,
+        Self::Conflict,
+        Self::ConnectionTimeout,
+        Self::HostGone,
+        Self::HostUnknown,
+        Self::ImproperAddressing,
+        Self::InternalServerError,
+        Self::InvalidFrom,
+        Self::InvalidNamespace,
+        Self::InvalidXml,
+        Self::NotAuthorized,
+        Self::NotWellFormed,
+        Self::PolicyViolation,
+        Self::RemoteConnectionFailed,
+        Self::Reset,
+        Self::ResourceConstraint,
+        Self::RestrictedXml,
+        Self::SeeOtherHost,
+        Self::SystemShutdown,
+        Self::UndefinedCondition,
+        Self::UnsupportedEncoding,
+        Self::UnsupportedFeature,
+        Self::UnsupportedStanzaType,
+        Self::UnsupportedVersion,
+    ];
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "bad-format" => Some(Self::BadFormat),

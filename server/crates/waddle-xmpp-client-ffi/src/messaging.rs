@@ -247,7 +247,7 @@ impl WaddleClient {
 
     /// Request the XEP-0084 avatar for a user. Returns `None` when the target
     /// JID hasn't published an avatar or the fetch failed; errors are
-    /// reported on the event listener so the caller can treat `None` as
+    /// reported on the ordered event stream so the caller can treat `None` as
     /// "fall back to initials".
     pub async fn request_avatar(&self, jid: String) -> Option<WaddleAvatar> {
         let bare: BareJid = match jid.parse() {

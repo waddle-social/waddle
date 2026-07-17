@@ -4,14 +4,6 @@ import type { WaddleSession } from "@/lib/server-auth";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { CommunityFormData, CreateFormData, ChannelEditFormData, CreateChannelResult } from "@/lib/chat-ui";
 import { defaultCreateForm, defaultCreateFormForContext } from "@/lib/chat-ui";
-import {
-  configureMucRoom,
-  createMucRoom,
-  createSpaceNode,
-  createMucInSpace,
-  createSpaceWithMuc,
-  moveMucToSpace,
-} from "@/lib/xmpp/protocol-helpers";
 import { mucServiceDomain, spacesServiceDomain } from "@/lib/xmpp/discovery";
 import { barePeerJid, jidLocalpart } from "@/lib/xmpp/jid";
 
@@ -324,15 +316,9 @@ export function useWaddleDirectory(
     const form = createChannelForm.value;
     if (!xmppClient.value || !session.value) return undefined;
 
-    const xmppAgent = xmppClient.value.agent;
-    if (!xmppAgent) {
-      actionError.value = "XMPP connection not available";
-      return undefined;
-    }
-
     const mucService = mucServiceJid.value ?? mucServiceDomain(session.value.jid);
     const spacesService = spacesServiceJid.value ?? spacesServiceDomain(session.value.jid);
-    const nick = session.value.username;
+    const provisioning = xmppClient.value.communityProvisioning;
 
     isSubmitting.value = true;
     clearActionError();
@@ -341,9 +327,9 @@ export function useWaddleDirectory(
       if (form.intent === "muc") {
         if (!form.name.trim()) return undefined;
 
-        const { roomJid } = await createMucRoom(xmppAgent, mucService, {
+        const { roomJid } = await provisioning.createMucRoom({
+          mucServiceJid: mucService,
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
-          nick,
           name: form.name.trim(),
           description: form.description.trim() || undefined,
           mucType: form.muc_type,
@@ -364,7 +350,8 @@ export function useWaddleDirectory(
       if (form.intent === "space") {
         if (!form.name.trim()) return undefined;
 
-        const { node } = await createSpaceNode(xmppAgent, spacesService, {
+        const { node } = await provisioning.createSpaceNode({
+          spacesServiceJid: spacesService,
           name: form.name.trim(),
           description: form.description.trim() || undefined,
         });
@@ -383,9 +370,10 @@ export function useWaddleDirectory(
         if (!form.name.trim() || !form.space_node.trim()) return undefined;
 
         const spaceNode = form.space_node;
-        const { roomJid } = await createMucInSpace(xmppAgent, mucService, spacesService, {
+        const { roomJid } = await provisioning.createMucInSpace({
+          mucServiceJid: mucService,
+          spacesServiceJid: spacesService,
           roomLocalpart: form.name.trim().toLowerCase().replace(/\s+/g, "-"),
-          nick,
           name: form.name.trim(),
           description: form.description.trim() || undefined,
           mucType: form.muc_type,
@@ -408,20 +396,16 @@ export function useWaddleDirectory(
       if (form.intent === "space-with-muc") {
         if (!form.space_name.trim() || !form.muc_name.trim()) return undefined;
 
-        const { roomJid, spaceNode } = await createSpaceWithMuc(
-          xmppAgent,
-          mucService,
-          spacesService,
-          {
-            spaceName: form.space_name.trim(),
-            spaceDescription: form.space_description.trim() || undefined,
-            roomLocalpart: form.muc_name.trim().toLowerCase().replace(/\s+/g, "-"),
-            nick,
-            mucName: form.muc_name.trim(),
-            mucDescription: form.muc_description.trim() || undefined,
-            mucType: form.muc_type,
-          },
-        );
+        const { roomJid, spaceNode } = await provisioning.createSpaceWithMuc({
+          mucServiceJid: mucService,
+          spacesServiceJid: spacesService,
+          spaceName: form.space_name.trim(),
+          spaceDescription: form.space_description.trim() || undefined,
+          roomLocalpart: form.muc_name.trim().toLowerCase().replace(/\s+/g, "-"),
+          mucName: form.muc_name.trim(),
+          mucDescription: form.muc_description.trim() || undefined,
+          mucType: form.muc_type,
+        });
 
         const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
@@ -458,7 +442,8 @@ export function useWaddleDirectory(
     }
     isSubmitting.value = true;
     try {
-      await configureMucRoom(client, channel.jid, {
+      await client.communityProvisioning.configureMucRoom({
+        roomJid: channel.jid,
         name: editChannelForm.value.name.trim(),
         description: editChannelForm.value.description.trim(),
         pinPermission: editChannelForm.value.pinPermission,
@@ -521,14 +506,17 @@ export function useWaddleDirectory(
     }
     const client = xmppClient.value;
     const sess = session.value;
-    if (!client?.agent || !sess) {
+    if (!client || !sess) {
       actionError.value = "XMPP session is not ready.";
       return false;
     }
     const spacesService = spacesServiceJid.value ?? spacesServiceDomain(sess.jid);
     isSubmitting.value = true;
     try {
-      await moveMucToSpace(client.agent, spacesService, targetSpaceId, channel.jid, {
+      await client.communityProvisioning.moveMucToSpace({
+        spacesServiceJid: spacesService,
+        targetSpaceNode: targetSpaceId,
+        mucJid: channel.jid,
         name: channel.name,
         autojoin: true,
       });

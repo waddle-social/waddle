@@ -185,7 +185,7 @@ class HomeViewModelTest {
             runCurrent()
             assertEquals(ConnectionState.Connecting, awaitItem().connectionState)
 
-            harness.factory.emit(WaddleClientEvent.Connected)
+            harness.factory.emitReady()
             runCurrent()
             assertEquals(ConnectionState.Ready, awaitItem().connectionState)
         }
@@ -198,7 +198,7 @@ class HomeViewModelTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         harness.viewModel.openChannel("general@muc.waddle.test")

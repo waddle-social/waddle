@@ -62,10 +62,6 @@ function storage(): Storage | null {
   }
 }
 
-function legacyQueueKey(accountKey: string): string {
-  return `${PREFIX}.${accountKey}`;
-}
-
 function queueRowPrefix(accountKey: string): string {
   return `${PREFIX}.v2.${accountKey.length}:${accountKey}.`;
 }
@@ -118,20 +114,6 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
       if (isPersistedQueuedMessage(parsed)) persisted.push(parsed);
     }
 
-    // Expand the old whole-array projection once. New writes are one key per
-    // stanza so concurrent tabs can never overwrite an unrelated row.
-    const legacyRaw = s.getItem(legacyQueueKey(accountKey));
-    if (persisted.length === 0 && legacyRaw) {
-      const legacy: unknown = JSON.parse(legacyRaw);
-      if (Array.isArray(legacy)) {
-        for (const entry of legacy.filter(isPersistedQueuedMessage)) {
-          writeProjection(s, accountKey, entry);
-          persisted.push(entry);
-        }
-      }
-      s.removeItem(legacyQueueKey(accountKey));
-    }
-
     const strippedLegacyPreviewTokens = persisted.some(
       (entry) =>
         "linkPreviewToken" in (entry as unknown as Record<string, unknown>)
@@ -141,7 +123,9 @@ function readQueue(accountKey: string): PersistedQueuedMessage[] {
     if (strippedLegacyPreviewTokens) {
       for (const entry of all) writeProjection(s, accountKey, entry);
     }
-    return pruneStaleEntries(s, accountKey, all);
+    // IndexedDB owns retention and claim fencing. This synchronous storage is
+    // only a paint projection, so it must never independently delete rows.
+    return all;
   } catch (err) {
     // Storage read failure usually means corrupt JSON or privacy-mode
     // localStorage. Surface to Faro but keep the app working — we just
@@ -162,66 +146,6 @@ function stripLegacyPreviewToken(message: PersistedQueuedMessage): PersistedQueu
       linkPreviewExpiresAt?: unknown;
     };
   return rest;
-}
-
-/**
- * Filter out queue entries past the TTL and rewrite the snapshot if
- * any were dropped. This keeps the persisted footprint bounded over
- * the lifetime of the account without needing a separate cleanup
- * pass — the next read naturally trims stale rows.
- *
- * Pruning is silent to the UI: the row never enters `messages.value`
- * (the prune fires inside the read that builds the timeline), so
- * there is no "stuck queued" row left dangling. The trade-off is
- * that a user who reloads a long-suspended tab will not see a
- * failure notification for the drop — by design, because 7-day-old
- * drafts are almost always abandoned. Pruning IS logged via
- * `reportError` so a sudden spike in pruned-counts surfaces in
- * telemetry.
- */
-function pruneStaleEntries(
-  s: Storage,
-  accountKey: string,
-  all: PersistedQueuedMessage[],
-): PersistedQueuedMessage[] {
-  const cutoff = Date.now() - QUEUE_TTL_MS;
-  const fresh = all.filter((entry) => parseCreatedAt(entry.createdAt) >= cutoff);
-  if (fresh.length === all.length) return all;
-  const stale = all.filter((entry) => !fresh.some((candidate) => candidate.id === entry.id));
-  const dropped = stale.length;
-  try {
-    for (const entry of stale) s.removeItem(queueRowKey(accountKey, entry.id));
-  } catch (err) {
-    // Best-effort prune; surface to Faro but still hand back the
-    // pruned list to the caller so the stale entries are not used
-    // in this session even if persistence couldn't be updated.
-    reportError("storage.write", err, {
-      recoverable: true,
-      detail: "outbound-queue prune failed",
-      storage_area: "outbound-queue",
-      dropped,
-    });
-    return fresh;
-  }
-  // Successful prune — surface to telemetry so a spike in pruned
-  // counts is visible to operators. `storage.write` is the closest
-  // existing `ErrorKind` (we wrote the pruned snapshot back), and
-  // `recoverable: true` keeps this in the informational tier rather
-  // than alerting on it.
-  reportError("storage.write", new Error("queue ttl prune"), {
-    recoverable: true,
-    detail: `pruned ${dropped} stale queued message(s)`,
-    storage_area: "outbound-queue",
-    dropped,
-  });
-  return fresh;
-}
-
-function parseCreatedAt(value: string): number {
-  const ms = Date.parse(value);
-  // If the timestamp is unparseable, treat the entry as fresh —
-  // refusing to prune is safer than dropping a legitimate send.
-  return Number.isFinite(ms) ? ms : Date.now();
 }
 
 function writeProjection(
@@ -316,8 +240,4 @@ export function removeQueuedMessage(accountKey: string, messageId: string): bool
     });
     return false;
   }
-}
-
-export function countQueuedMessages(accountKey: string): number {
-  return readQueue(accountKey).length;
 }

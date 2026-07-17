@@ -14,7 +14,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import social.waddle.android.client.MentionRef
 import java.io.File
 
 /** Plain-JVM DataStore over a temp dir — no Robolectric needed. */
@@ -35,118 +34,94 @@ class SessionPrefsTest {
     }
 
     @Test
-    fun `round trips scalar session fields`() = runBlocking {
+    fun `active session and projection fields round trip`() = runBlocking {
         val prefs = newPrefs()
 
-        prefs.setServerUrl("https://waddle.test")
-        prefs.setSessionId("sess-1")
+        prefs.activateSession(OWNER_A, "sess-a")
         prefs.setJoinedRooms(setOf("general@muc.waddle.test"))
         prefs.setLastSeen("alice@waddle.test", "2026-07-15T10:00:00Z")
 
-        assertEquals("https://waddle.test", prefs.serverUrl.first())
-        assertEquals("sess-1", prefs.sessionId.first())
+        assertEquals(OWNER_A, prefs.ownerBareJid.first())
+        assertEquals("sess-a", prefs.sessionId.first())
         assertEquals(setOf("general@muc.waddle.test"), prefs.joinedRooms.first())
-        assertEquals(mapOf("alice@waddle.test" to "2026-07-15T10:00:00Z"), prefs.lastSeen.first())
+        assertEquals(
+            mapOf("alice@waddle.test" to "2026-07-15T10:00:00Z"),
+            prefs.lastSeen.first(),
+        )
     }
 
     @Test
-    fun `round trips the resume snapshot and null clears it`() = runBlocking {
+    fun `one journal round trip preserves every native phase and exact attempt`() = runBlocking {
         val prefs = newPrefs()
-        val snapshot = SmResumeSnapshot(
-            previd = "prev-1",
-            inboundH = 5u,
-            outboundH = 7u,
-            maxResumeSeconds = 300u,
-            queuedEntries = listOf(
-                SmResumeEntrySnapshot(
-                    stanza = SmResumeStanzaSnapshot(
-                        stanzaKind = SmResumeStanzaKind.MESSAGE,
-                        tokens = listOf(
-                            SmResumeXmlToken.Start(
-                                name = SmResumeXmlName("jabber:client", "message"),
-                                attributes = emptyList(),
-                            ),
-                            SmResumeXmlToken.End,
-                        ),
-                    ),
-                    sentAtEpochSeconds = 1_752_573_540L,
-                    sentAtNanoseconds = 123_000_000,
-                ),
-            ),
-        )
-
-        prefs.setSmResume(snapshot)
-        assertEquals(snapshot, prefs.smResume.first())
-
-        prefs.setSmResume(null)
-        assertNull(prefs.smResume.first())
-    }
-
-    @Test
-    fun `outbound queue updates atomically and clears when empty`() = runBlocking {
-        val prefs = newPrefs()
-        val message = QueuedOutboundMessage(
-            conversationJid = "alice@waddle.test",
-            isGroupchat = false,
-            body = "hello",
-            clientStanzaId = "q-1",
-            enqueuedAtMillis = 1_000L,
-        )
-
-        prefs.updateOutboundQueue { current -> current + message }
-        assertEquals(listOf(message), prefs.outboundQueue.first())
-
-        prefs.updateOutboundQueue { current -> current.filterNot { it.clientStanzaId == "q-1" } }
-        assertTrue(prefs.outboundQueue.first().isEmpty())
-    }
-
-    @Test
-    fun `outbound ownership discriminators and every native phase round trip`() = runBlocking {
-        val prefs = newPrefs()
-        val ownerships = listOf(
-            OutboundOwnership.Ready,
-            OutboundOwnership.NativeOwned(7L, NativeOutboundPhase.FRESH),
-            OutboundOwnership.NativeOwned(8L, NativeOutboundPhase.RESUME),
-            OutboundOwnership.NativeOwned(9L, NativeOutboundPhase.FALLBACK),
-        )
-        val messages = ownerships.mapIndexed { index, ownership ->
-            QueuedOutboundMessage(
+        prefs.activateSession(OWNER_A, "sess-a")
+        val attempt = attempt(OWNER_A, "00000000-0000-4000-8000-000000000001", 9u)
+        val rows = NativeOutboundPhase.entries.mapIndexed { index, phase ->
+            QueuedOutboundMessage.create(
+                ownerBareJid = OWNER_A,
                 conversationJid = "alice@waddle.test",
                 isGroupchat = false,
                 body = "message-$index",
-                clientStanzaId = "q-ownership-$index",
-                enqueuedAtMillis = index.toLong(),
-                ownership = ownership,
+                clientStanzaId = "q-$index",
+                sequence = index.toLong() + 1,
+                enqueuedAtMillis = 1_000L + index,
+                ownership = OutboundOwnership.NativeOwned(attempt, phase),
             )
         }
 
-        prefs.updateOutboundQueue { messages }
+        prefs.updateDeliveryJournal { journal ->
+            val owner = checkNotNull(journal.owners[OWNER_A])
+            DeliveryJournalMutation(
+                journal.copy(
+                    owners = journal.owners + (
+                        OWNER_A to owner.copy(
+                            activeAttempt = attempt,
+                            nextSequence = rows.size.toLong() + 1,
+                            outboundRows = rows,
+                        )
+                    ),
+                ),
+                Unit,
+            )
+        }
 
-        assertEquals(messages, prefs.outboundQueue.first())
+        val stored = prefs.deliveryJournal.first()
+        assertEquals(attempt, stored.owners[OWNER_A]?.activeAttempt)
+        assertEquals(rows, stored.owners[OWNER_A]?.outboundRows)
+        assertEquals(
+            NativeOutboundPhase.entries,
+            stored.owners[OWNER_A]?.outboundRows?.map {
+                (it.ownership as OutboundOwnership.NativeOwned).phase
+            },
+        )
     }
 
     @Test
-    fun `queued mention refs survive the json round trip`() = runBlocking {
+    fun `clear purges only active owner and preserves foreign owner`() = runBlocking {
         val prefs = newPrefs()
-        val message = QueuedOutboundMessage(
-            conversationJid = "general@muc.waddle.test",
-            isGroupchat = true,
-            body = "hi @bob",
-            clientStanzaId = "q-2",
-            enqueuedAtMillis = 1_000L,
-            mentions = listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 3u, end = 7u)),
-        )
+        val suffix = prefs.resourceSuffix()
+        prefs.activateSession(OWNER_A, "sess-a")
+        prefs.activateSession(OWNER_B, "sess-b")
+        prefs.setJoinedRooms(setOf("secret@muc.waddle.test"))
 
-        prefs.updateOutboundQueue { current -> current + message }
+        prefs.clear()
 
-        assertEquals(listOf(message), prefs.outboundQueue.first())
+        val journal = prefs.deliveryJournal.first()
+        assertNull(journal.activeOwnerBareJid)
+        assertTrue(OWNER_A in journal.owners)
+        assertTrue(OWNER_B !in journal.owners)
+        assertNull(prefs.sessionId.first())
+        assertTrue(prefs.joinedRooms.first().isEmpty())
+        assertEquals("per-install suffix survives logout", suffix, prefs.resourceSuffix())
     }
 
     @Test
     fun `resume cursors round trip and empty clears the key`() = runBlocking {
         val prefs = newPrefs()
         val cursors = mapOf(
-            "alice@waddle.test" to ResumeCursor(stanzaId = "s-1", timestamp = "2026-07-15T10:00:00Z"),
+            "alice@waddle.test" to ResumeCursor(
+                stanzaId = "s-1",
+                timestamp = "2026-07-15T10:00:00Z",
+            ),
         )
 
         prefs.setResumeCursors(cursors)
@@ -164,10 +139,25 @@ class SessionPrefsTest {
         assertTrue("expected 8 hex chars, got $suffix", suffix.matches(Regex("[0-9a-f]{8}")))
         assertEquals(suffix, prefs.resourceSuffix())
 
-        prefs.setSessionId("sess-1")
+        prefs.activateSession(OWNER_A, "sess-a")
         prefs.clear()
 
         assertNull(prefs.sessionId.first())
         assertEquals("per-install suffix survives logout", suffix, prefs.resourceSuffix())
+    }
+
+    private fun attempt(
+        owner: String,
+        id: String,
+        generation: ULong,
+    ): DeliveryAttemptRef = DeliveryAttemptRef(
+        ownerBareJid = owner,
+        attemptId = DeliveryAttemptId(id),
+        nativeGeneration = NativeConnectionGeneration(generation),
+    )
+
+    private companion object {
+        const val OWNER_A = "alice@waddle.test"
+        const val OWNER_B = "bob@waddle.test"
     }
 }

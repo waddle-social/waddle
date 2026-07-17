@@ -10,6 +10,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +25,7 @@ import social.waddle.android.R
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.jid.localpartOf
 import social.waddle.client.ffi.WaddleMessage
@@ -58,8 +60,6 @@ class MessageNotifier(
     )
 
     private val historyLock = Any()
-    private val queuedReplies =
-        java.util.concurrent.ConcurrentHashMap<String, Pair<String, Boolean>>()
 
     /**
      * Serializes append+notify as one unit: the inbound collector and the
@@ -69,7 +69,8 @@ class MessageNotifier(
      * silently missing from the shade).
      */
     private val postMutex = Mutex()
-    private val history = HashMap<String, MutableList<NotificationCompat.MessagingStyle.Message>>()
+    private val history =
+        HashMap<NotificationConversationKey, MutableList<NotificationCompat.MessagingStyle.Message>>()
 
     /**
      * Newest mark-as-read target per conversation. Every re-post
@@ -77,7 +78,8 @@ class MessageNotifier(
      * with FLAG_UPDATE_CURRENT — reading the target from here keeps the
      * process-death read dispatch intact instead of wiping the extras.
      */
-    private val displayedTargets = HashMap<String, XmppSessionManager.DisplayedTarget>()
+    private val displayedTargets =
+        HashMap<NotificationConversationKey, XmppSessionManager.DisplayedTarget>()
 
     fun start(scope: CoroutineScope) {
         scope.launch {
@@ -89,43 +91,47 @@ class MessageNotifier(
                 // killing all future message notifications.
                 when (event) {
                     is XmppEvent.Message -> runCatching { onMessage(event.message) }
-                    is XmppEvent.DeliveryAcked -> queuedReplies.remove(event.stanzaId)
-                    is XmppEvent.DeliveryFailed -> runCatching { onQueuedReplyFailed(event.stanzaId) }
+                    is XmppEvent.DeliveryFailed -> runCatching {
+                        val source = event.delivery.source as? DeliverySource.DirectReply
+                            ?: return@runCatching
+                        val owner = event.delivery.identity.ownerBareJid
+                        if (currentOwnerBareJid() != owner) return@runCatching
+                        notifyReplyFailed(
+                            ownerBareJid = owner,
+                            conversationJid = source.conversationJid,
+                            isGroupchat = source.isGroupchat,
+                        )
+                    }
                     // Read on a sibling device (XEP-0490): the shade
                     // notification is stale.
-                    is XmppEvent.ReadSynced ->
-                        runCatching { clearConversationNotification(event.conversationJid) }
+                    is XmppEvent.ReadSynced -> currentOwnerBareJid()?.let { owner ->
+                        runCatching {
+                            clearConversationNotification(owner, event.conversationJid)
+                        }
+                    }
                     else -> Unit
                 }
             }
         }
     }
 
-    /**
-     * A direct reply that was offline-queued was already echoed into the
-     * shade as delivered; if its replay is later dropped permanently the
-     * shade must stop lying. Track the queued id → conversation so the
-     * eventual DeliveryFailed can re-post the failure note.
-     */
-    fun trackQueuedReply(stanzaId: String, conversationJid: String, isGroupchat: Boolean) {
-        queuedReplies[stanzaId] = conversationJid to isGroupchat
-    }
-
-    private suspend fun onQueuedReplyFailed(stanzaId: String) {
-        val (conversationJid, isGroupchat) = queuedReplies.remove(stanzaId) ?: return
-        notifyReplyFailed(conversationJid, isGroupchat)
-    }
-
     /** Direct-reply echo: append the user's own message and re-post. */
-    suspend fun appendOwnReply(conversationJid: String, isGroupchat: Boolean, body: String) {
+    suspend fun appendOwnReply(
+        ownerBareJid: String,
+        conversationJid: String,
+        isGroupchat: Boolean,
+        body: String,
+    ) {
+        if (!notificationOwnerMatches(currentOwnerBareJid(), ownerBareJid)) return
         postMutex.withLock {
+            val key = NotificationConversationKey(ownerBareJid, conversationJid)
             val entry = NotificationCompat.MessagingStyle.Message(
                 body,
                 System.currentTimeMillis(),
                 selfPerson(),
             )
-            val messages = appendToHistory(conversationJid, entry)
-            postNotification(conversationJid, isGroupchat, messages, silent = true)
+            val messages = appendToHistory(key, entry)
+            postNotification(key, isGroupchat, messages, silent = true)
         }
     }
 
@@ -134,12 +140,18 @@ class MessageNotifier(
      * the conversation WITHOUT echoing the reply, audibly, with an
      * explicit failure note so the loss is visible instead of silent.
      */
-    suspend fun notifyReplyFailed(conversationJid: String, isGroupchat: Boolean) = postMutex.withLock {
+    suspend fun notifyReplyFailed(
+        ownerBareJid: String,
+        conversationJid: String,
+        isGroupchat: Boolean,
+    ) = postMutex.withLock {
+        if (!notificationOwnerMatches(currentOwnerBareJid(), ownerBareJid)) return@withLock
+        val key = NotificationConversationKey(ownerBareJid, conversationJid)
         // Process death wipes the in-memory history while SystemUI still
         // owns the notification (stuck in the RemoteInput spinner). The
         // failure must be surfaced even then, so seed a minimal entry
         // instead of bailing on an empty cache.
-        val messages = synchronized(historyLock) { history[conversationJid]?.toList() }
+        val messages = synchronized(historyLock) { history[key]?.toList() }
             ?: listOf(
                 NotificationCompat.MessagingStyle.Message(
                     context.getString(R.string.notification_reply_failed),
@@ -147,7 +159,7 @@ class MessageNotifier(
                     selfPerson(),
                 ),
             )
-        postNotification(conversationJid, isGroupchat, messages, silent = false, replyFailed = true)
+        postNotification(key, isGroupchat, messages, silent = false, replyFailed = true)
     }
 
     /** Sign-out: drop every message notification and the cached history. */
@@ -160,33 +172,38 @@ class MessageNotifier(
                 history.clear()
                 displayedTargets.clear()
             }
-            queuedReplies.clear()
             NotificationManagerCompat.from(context).cancelAll()
         }
     }
 
     /** The conversation is being read in-app: retire its notification. */
-    suspend fun clearConversationNotification(conversationJid: String) {
+    suspend fun clearConversationNotification(ownerBareJid: String, conversationJid: String) {
+        if (!notificationOwnerMatches(currentOwnerBareJid(), ownerBareJid)) return
+        val key = NotificationConversationKey(ownerBareJid, conversationJid)
         postMutex.withLock {
             synchronized(historyLock) {
-                history.remove(conversationJid)
-                displayedTargets.remove(conversationJid)
+                history.remove(key)
+                displayedTargets.remove(key)
             }
             NotificationManagerCompat.from(context)
-                .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
+                .cancel(key.notificationTag, MESSAGE_NOTIFICATION_ID)
         }
     }
 
     /** Notification dismissed: forget the conversation's history. */
-    fun clearConversation(conversationJid: String) {
+    fun clearConversation(ownerBareJid: String, conversationJid: String) {
+        if (!notificationOwnerMatches(currentOwnerBareJid(), ownerBareJid)) return
+        val key = NotificationConversationKey(ownerBareJid, conversationJid)
         synchronized(historyLock) {
-            history.remove(conversationJid)
-            displayedTargets.remove(conversationJid)
+            history.remove(key)
+            displayedTargets.remove(key)
         }
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
+        val ownerBareJid = currentOwnerBareJid() ?: return
         val decision = policy.decide(message) ?: return
+        val key = NotificationConversationKey(ownerBareJid, decision.conversationJid)
 
         val person = Person.Builder().setName(decision.sender).setKey(decision.sender).build()
         val entry = NotificationCompat.MessagingStyle.Message(
@@ -196,12 +213,12 @@ class MessageNotifier(
         )
         postMutex.withLock {
             decision.displayedTarget?.let { target ->
-                synchronized(historyLock) { displayedTargets[decision.conversationJid] = target }
+                synchronized(historyLock) { displayedTargets[key] = target }
             }
-            val messages = appendToHistory(decision.conversationJid, entry)
+            val messages = appendToHistory(key, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
             postNotification(
-                decision.conversationJid,
+                key,
                 decision.isGroupchat,
                 messages,
                 silent,
@@ -211,10 +228,10 @@ class MessageNotifier(
     }
 
     private fun appendToHistory(
-        conversationJid: String,
+        key: NotificationConversationKey,
         entry: NotificationCompat.MessagingStyle.Message,
     ): List<NotificationCompat.MessagingStyle.Message> = synchronized(historyLock) {
-        val list = history.getOrPut(conversationJid) { mutableListOf() }
+        val list = history.getOrPut(key) { mutableListOf() }
         list += entry
         while (list.size > MAX_HISTORY) {
             list.removeAt(0)
@@ -223,14 +240,15 @@ class MessageNotifier(
     }
 
     private fun postNotification(
-        conversationJid: String,
+        key: NotificationConversationKey,
         isGroupchat: Boolean,
         messages: List<NotificationCompat.MessagingStyle.Message>,
         silent: Boolean,
         replyFailed: Boolean = false,
         mention: Boolean = false,
     ) {
-        val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
+        if (!notificationOwnerMatches(currentOwnerBareJid(), key.ownerBareJid)) return
+        val displayedTarget = synchronized(historyLock) { displayedTargets[key] }
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,
@@ -240,14 +258,14 @@ class MessageNotifier(
         val style = NotificationCompat.MessagingStyle(selfPerson())
             .setGroupConversation(isGroupchat)
         if (isGroupchat) {
-            style.setConversationTitle(localpartOf(conversationJid))
+            style.setConversationTitle(localpartOf(key.conversationJid))
         }
         messages.forEach(style::addMessage)
 
         val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setStyle(style)
-            .setGroup(conversationJid)
+            .setGroup(key.notificationGroup)
             .setAutoCancel(true)
             .setSilent(silent)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -256,18 +274,18 @@ class MessageNotifier(
             .setPriority(
                 if (mention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
             )
-            .setContentIntent(contentIntent(conversationJid))
-            .addAction(replyAction(conversationJid, isGroupchat))
-            .addAction(markReadAction(conversationJid, isGroupchat, displayedTarget))
-            .setDeleteIntent(dismissIntent(conversationJid))
+            .setContentIntent(contentIntent(key))
+            .addAction(replyAction(key, isGroupchat))
+            .addAction(markReadAction(key, isGroupchat, displayedTarget))
+            .setDeleteIntent(dismissIntent(key))
         if (replyFailed) {
             builder.setSubText(context.getString(R.string.notification_reply_failed))
         }
-        // Tag = JID, fixed id: String.hashCode() collides across arbitrary
-        // remote-chosen JIDs (and with the foreground-service id), which
-        // would overwrite other conversations' notifications.
+        // The account-scoped tag prevents an old account's notification
+        // callback from replacing or mutating the same JID under a newly
+        // active account.
         NotificationManagerCompat.from(context)
-            .notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+            .notify(key.notificationTag, MESSAGE_NOTIFICATION_ID, builder.build())
     }
 
     private fun selfPerson(): Person = Person.Builder()
@@ -278,13 +296,13 @@ class MessageNotifier(
         .setKey(SELF_PERSON_KEY)
         .build()
 
-    private fun contentIntent(conversationJid: String): PendingIntent =
+    private fun contentIntent(key: NotificationConversationKey): PendingIntent =
         PendingIntent.getActivity(
             context,
             0,
             Intent(context, MainActivity::class.java)
-                .setData(conversationUri("open", conversationJid))
-                .putExtra(MainActivity.EXTRA_NAVIGATE_JID, conversationJid)
+                .setData(conversationUri(NotificationIntentKind.OPEN, key))
+                .putExtra(MainActivity.EXTRA_NAVIGATE_JID, key.conversationJid)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -295,11 +313,14 @@ class MessageNotifier(
      * FLAG_UPDATE_CURRENT-overwrite) each other's intents — extras alone
      * do not participate in intent identity.
      */
-    private fun conversationUri(kind: String, conversationJid: String): android.net.Uri =
-        android.net.Uri.fromParts("waddle-notify", kind, conversationJid)
+    private fun conversationUri(
+        kind: NotificationIntentKind,
+        key: NotificationConversationKey,
+    ): android.net.Uri =
+        notificationIntentIdentity(kind, key).dataUri.toUri()
 
     private fun replyAction(
-        conversationJid: String,
+        key: NotificationConversationKey,
         isGroupchat: Boolean,
     ): NotificationCompat.Action {
         val remoteInput = RemoteInput.Builder(ReplyReceiver.KEY_REPLY_TEXT)
@@ -307,8 +328,9 @@ class MessageNotifier(
             .build()
         val intent = Intent(context, ReplyReceiver::class.java)
             .setAction(ReplyReceiver.ACTION_REPLY)
-            .setData(conversationUri("reply", conversationJid))
-            .putExtra(ReplyReceiver.EXTRA_CONVERSATION_JID, conversationJid)
+            .setData(conversationUri(NotificationIntentKind.REPLY, key))
+            .putExtra(ReplyReceiver.EXTRA_OWNER_BARE_JID, key.ownerBareJid)
+            .putExtra(ReplyReceiver.EXTRA_CONVERSATION_JID, key.conversationJid)
             .putExtra(ReplyReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
         // FLAG_MUTABLE: the system fills in the RemoteInput result.
         val pendingIntent = PendingIntent.getBroadcast(
@@ -328,14 +350,15 @@ class MessageNotifier(
     }
 
     private fun markReadAction(
-        conversationJid: String,
+        key: NotificationConversationKey,
         isGroupchat: Boolean,
         displayedTarget: XmppSessionManager.DisplayedTarget?,
     ): NotificationCompat.Action {
         val intent = Intent(context, MarkReadReceiver::class.java)
             .setAction(MarkReadReceiver.ACTION_MARK_READ)
-            .setData(conversationUri("mark-read", conversationJid))
-            .putExtra(MarkReadReceiver.EXTRA_CONVERSATION_JID, conversationJid)
+            .setData(conversationUri(NotificationIntentKind.MARK_READ, key))
+            .putExtra(MarkReadReceiver.EXTRA_OWNER_BARE_JID, key.ownerBareJid)
+            .putExtra(MarkReadReceiver.EXTRA_CONVERSATION_JID, key.conversationJid)
             .putExtra(MarkReadReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
         displayedTarget?.let { target ->
             intent
@@ -357,16 +380,23 @@ class MessageNotifier(
         ).build()
     }
 
-    private fun dismissIntent(conversationJid: String): PendingIntent =
+    private fun dismissIntent(key: NotificationConversationKey): PendingIntent =
         PendingIntent.getBroadcast(
             context,
             0,
             Intent(context, NotificationDismissReceiver::class.java)
                 .setAction(NotificationDismissReceiver.ACTION_DISMISS)
-                .setData(conversationUri("dismiss", conversationJid))
-                .putExtra(NotificationDismissReceiver.EXTRA_CONVERSATION_JID, conversationJid),
+                .setData(conversationUri(NotificationIntentKind.DISMISS, key))
+                .putExtra(NotificationDismissReceiver.EXTRA_OWNER_BARE_JID, key.ownerBareJid)
+                .putExtra(
+                    NotificationDismissReceiver.EXTRA_CONVERSATION_JID,
+                    key.conversationJid,
+                ),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
+    private fun currentOwnerBareJid(): String? =
+        currentSession.value?.jid?.substringBefore('/')?.takeIf(String::isNotBlank)
 
     private fun timestampMillis(timestamp: String?): Long {
         timestamp ?: return System.currentTimeMillis()

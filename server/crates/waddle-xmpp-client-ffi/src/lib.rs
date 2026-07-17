@@ -2,11 +2,17 @@
 
 uniffi::setup_scaffolding!("waddle_xmpp_client");
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeSet,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use jid::{BareJid, FullJid};
 use minidom::Element;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use url::Url;
 
 mod boundary_convert;
@@ -27,6 +33,8 @@ mod client_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
 #[cfg(test)]
+mod native_event_pump_tests;
+#[cfg(test)]
 mod notify_settings_tests;
 
 pub use error::WaddleError;
@@ -36,10 +44,11 @@ pub use notify_settings::{
 };
 pub use types::*;
 
-use convert::{dispatch_event, resume_state_from_ffi};
+use convert::{event_to_ffi, resume_state_from_ffi};
 use waddle_xmpp_client::{
-    messaging::SessionId, AccessToken, ClientConfig, ClientHandle, ConnectionConfig,
-    OAuthBearerConfig, WebSocketConfig,
+    messaging::SessionId, AccessToken, ClientConfig, ClientEvent, ClientHandle, ConnectionConfig,
+    ConnectionEvent, MessageDeliveryEvent, OAuthBearerConfig, StreamManagementEvent,
+    WebSocketConfig,
 };
 use waddle_xmpp_client::{ClientResource, XmppClient};
 
@@ -48,24 +57,53 @@ use waddle_xmpp_client::{ClientResource, XmppClient};
 #[derive(uniffi::Object)]
 pub struct WaddleClient {
     config: WaddleConfig,
-    // Stored as Arc<Box<...>> so the constructor can take a Box (UniFFI callback_interface
-    // generates FfiConverter for Box<dyn Trait>, not Arc<dyn Trait>).
-    listener: Arc<Box<dyn WaddleEventListener>>,
     handle: Mutex<Option<ClientHandle>>,
+    event_pump: Mutex<Option<NativeEventPump>>,
+    poll_gate: Mutex<()>,
+    lifecycle_gate: Mutex<()>,
+    diagnostic_tx: mpsc::UnboundedSender<WaddleClientEvent>,
+    diagnostic_rx: Mutex<mpsc::UnboundedReceiver<WaddleClientEvent>>,
+    lifecycle_epoch: AtomicU64,
+    lifecycle_tx: watch::Sender<u64>,
+    #[cfg(test)]
+    test_diagnostic_sink: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl WaddleClient {
     #[uniffi::constructor]
-    pub fn new(config: WaddleConfig, listener: Box<dyn WaddleEventListener>) -> Arc<Self> {
+    pub fn new(config: WaddleConfig) -> Arc<Self> {
+        let (diagnostic_tx, diagnostic_rx) = mpsc::unbounded_channel();
+        let (lifecycle_tx, _) = watch::channel(0);
         Arc::new(Self {
             config,
-            listener: Arc::new(listener),
             handle: Mutex::new(None),
+            event_pump: Mutex::new(None),
+            poll_gate: Mutex::new(()),
+            lifecycle_gate: Mutex::new(()),
+            diagnostic_tx,
+            diagnostic_rx: Mutex::new(diagnostic_rx),
+            lifecycle_epoch: AtomicU64::new(0),
+            lifecycle_tx,
+            #[cfg(test)]
+            test_diagnostic_sink: None,
         })
     }
 
     pub async fn connect(&self) {
+        let connect_epoch = {
+            let _lifecycle_guard = self.lifecycle_gate.lock().await;
+            let epoch = self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.lifecycle_tx.send_replace(epoch);
+            epoch
+        };
+        if let Err(error) =
+            uuid::Uuid::parse_str(&self.config.delivery_attempt.attempt_id.value)
+        {
+            self.emit_error(format!("Invalid delivery attempt UUID: {error}"));
+            return;
+        }
+
         let jid: BareJid = match self.config.jid.parse() {
             Ok(j) => j,
             Err(e) => {
@@ -164,29 +202,277 @@ impl WaddleClient {
             }
         };
 
-        let mut events = client_handle.events();
+        let events = client_handle.events();
         let account_bare_jid = self.config.jid.split('/').next().unwrap_or("").to_string();
-        let listener = Arc::clone(&self.listener);
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(event) => dispatch_event(event, &account_bare_jid, &**listener),
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        listener.on_event(WaddleClientEvent::Disconnected);
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        let lifecycle_guard = self.lifecycle_gate.lock().await;
+        if self.lifecycle_epoch.load(Ordering::Acquire) != connect_epoch {
+            drop(lifecycle_guard);
+            let _ = client_handle.disconnect().await;
+            return;
+        }
+        *self.event_pump.lock().await = Some(NativeEventPump::new(
+            events,
+            account_bare_jid,
+            self.config.delivery_attempt.clone(),
+            self.config.resume_state.is_some(),
+            connect_epoch,
+        ));
+        *self.handle.lock().await = Some(client_handle);
+        // A poll may have observed this epoch after connect started but
+        // before the pump existed. Publish the same epoch again after
+        // installation so that poll can re-check without the poll ever
+        // holding `event_pump` across an await.
+        self.lifecycle_tx.send_replace(connect_epoch);
+        drop(lifecycle_guard);
+    }
+
+    /// Pull exactly one ordered native event. The client never reads a
+    /// subsequent core event until the app asks again, so a
+    /// `ResumeFailed` journal CAS is an actual durability barrier rather
+    /// than an advisory callback ordering assumption.
+    pub async fn next_event(&self) -> WaddleClientEvent {
+        let _poll_guard = self.poll_gate.lock().await;
+        let mut lifecycle = self.lifecycle_tx.subscribe();
+        loop {
+            let expected_epoch = self.lifecycle_epoch.load(Ordering::Acquire);
+            let mut pump_guard = self.event_pump.lock().await;
+            if let Some(pump) = pump_guard.as_ref() {
+                if pump.epoch != expected_epoch {
+                    return WaddleClientEvent::Disconnected;
                 }
             }
-        });
 
-        *self.handle.lock().await = Some(client_handle);
+            let mut diagnostics = self.diagnostic_rx.lock().await;
+            if let Ok(event) = diagnostics.try_recv() {
+                return event;
+            }
+
+            let Some(pump) = pump_guard.as_mut() else {
+                // `connect` must be able to install the pump while this
+                // poll waits. Its post-install notification carries the
+                // same epoch; a disconnect or replacement carries a new
+                // epoch and fences this poll.
+                drop(pump_guard);
+                let changed = tokio::select! {
+                    biased;
+                    changed = lifecycle.changed() => {
+                        let _ = changed;
+                        true
+                    },
+                    diagnostic = diagnostics.recv() => {
+                        return diagnostic.unwrap_or(WaddleClientEvent::Disconnected);
+                    },
+                };
+                if changed && self.lifecycle_epoch.load(Ordering::Acquire) != expected_epoch {
+                    return WaddleClientEvent::Disconnected;
+                }
+                continue;
+            };
+
+            tokio::select! {
+                biased;
+                changed = lifecycle.changed() => {
+                    let _ = changed;
+                    if self.lifecycle_epoch.load(Ordering::Acquire) != expected_epoch {
+                        return WaddleClientEvent::Disconnected;
+                    }
+                },
+                diagnostic = diagnostics.recv() => {
+                    return diagnostic.unwrap_or(WaddleClientEvent::Disconnected);
+                },
+                event = pump.next_event() => return event,
+            }
+        }
     }
 
     pub async fn disconnect(&self) {
-        let mut guard = self.handle.lock().await;
-        if let Some(h) = guard.take() {
+        // Wake a foreign pending `next_event` before waiting on either
+        // the native handle or pump mutex. Swift task cancellation does
+        // not cancel an in-flight UniFFI future.
+        let lifecycle_guard = self.lifecycle_gate.lock().await;
+        let epoch = self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.lifecycle_tx.send_replace(epoch);
+        let handle = self.handle.lock().await.take();
+        *self.event_pump.lock().await = None;
+        drop(lifecycle_guard);
+        if let Some(h) = handle {
             let _ = h.disconnect().await;
+        }
+    }
+}
+
+/// Ordered translation state held behind [`WaddleClient::next_event`].
+/// The core broadcast receiver itself retains all later events while the
+/// app commits a returned resume transition.
+struct NativeEventPump {
+    events: broadcast::Receiver<ClientEvent>,
+    account_bare_jid: String,
+    attempt: WaddleDeliveryAttemptRef,
+    awaiting_resume: bool,
+    resume_acked_stanza_ids: BTreeSet<String>,
+    resume_failed_stanza_ids: BTreeSet<String>,
+    duplicate_resume_failure_count: u64,
+    epoch: u64,
+    poisoned: bool,
+}
+
+impl NativeEventPump {
+    fn new(
+        events: broadcast::Receiver<ClientEvent>,
+        account_bare_jid: String,
+        attempt: WaddleDeliveryAttemptRef,
+        awaiting_resume: bool,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            events,
+            account_bare_jid,
+            attempt,
+            awaiting_resume,
+            resume_acked_stanza_ids: BTreeSet::new(),
+            resume_failed_stanza_ids: BTreeSet::new(),
+            duplicate_resume_failure_count: 0,
+            epoch,
+            poisoned: false,
+        }
+    }
+
+    async fn next_event(&mut self) -> WaddleClientEvent {
+        if self.poisoned {
+            return WaddleClientEvent::Disconnected;
+        }
+        loop {
+            let event = match self.events.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Closed) => {
+                    self.poisoned = true;
+                    return WaddleClientEvent::Disconnected;
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.poisoned = true;
+                    return WaddleClientEvent::Error {
+                        description: format!(
+                            "native event stream lost {skipped} events; connection self-fenced"
+                        ),
+                    };
+                }
+            };
+
+            match event {
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id })
+                    if self.awaiting_resume =>
+                {
+                    let stanza_id = stanza_id.to_string();
+                    if self.resume_failed_stanza_ids.contains(&stanza_id) {
+                        self.poisoned = true;
+                        return WaddleClientEvent::Error {
+                            description:
+                                "resume reported the same stanza acked and failed; connection self-fenced"
+                                    .to_string(),
+                        };
+                    }
+                    self.resume_acked_stanza_ids.insert(stanza_id.clone());
+                    return WaddleClientEvent::DeliveryAcked {
+                        signal: WaddleNativeDeliverySignal {
+                            attempt: self.attempt.clone(),
+                            stanza_id: WaddleDeliveryStanzaId { value: stanza_id },
+                        },
+                    };
+                }
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+                    if self.awaiting_resume =>
+                {
+                    let stanza_id = stanza_id.to_string();
+                    if self.resume_acked_stanza_ids.contains(&stanza_id) {
+                        self.poisoned = true;
+                        return WaddleClientEvent::Error {
+                            description:
+                                "resume reported the same stanza acked and failed; connection self-fenced"
+                                    .to_string(),
+                        };
+                    }
+                    let inserted = self.resume_failed_stanza_ids.insert(stanza_id);
+                    if !inserted {
+                        // Duplicate core failure signals for the same old
+                        // attempt are idempotent. Keep a saturating metric
+                        // without changing the canonical affected set.
+                        self.duplicate_resume_failure_count =
+                            self.duplicate_resume_failure_count.saturating_add(1);
+                    }
+                }
+                ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::Resumed { .. },
+                )) if self.awaiting_resume => {
+                    if !self.resume_failed_stanza_ids.is_empty() {
+                        self.poisoned = true;
+                        return WaddleClientEvent::Error {
+                            description:
+                                "resume succeeded after failures were buffered; connection self-fenced"
+                                    .to_string(),
+                        };
+                    }
+                    self.resume_acked_stanza_ids.clear();
+                    self.awaiting_resume = false;
+                    return WaddleClientEvent::SessionReady {
+                        kind: WaddleSessionReadyKind::Resumed,
+                        attempt: self.attempt.clone(),
+                    };
+                }
+                ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                    StreamManagementEvent::Failed,
+                )) if self.awaiting_resume => {
+                    let Some(next_generation) = self
+                        .attempt
+                        .connection_generation
+                        .value
+                        .checked_add(1)
+                    else {
+                        self.poisoned = true;
+                        return WaddleClientEvent::Error {
+                            description:
+                                "delivery connection generation exhausted; connection self-fenced"
+                                    .to_string(),
+                        };
+                    };
+                    let old = self.attempt.clone();
+                    let fresh = WaddleDeliveryAttemptRef {
+                        attempt_id: WaddleDeliveryAttemptId {
+                            value: uuid::Uuid::new_v4().to_string(),
+                        },
+                        connection_generation: WaddleConnectionGeneration {
+                            value: next_generation,
+                        },
+                    };
+                    let affected = std::mem::take(&mut self.resume_failed_stanza_ids)
+                        .into_iter()
+                        .map(|value| WaddleDeliveryStanzaId { value })
+                        .collect();
+                    self.resume_acked_stanza_ids.clear();
+                    self.attempt = fresh.clone();
+                    self.awaiting_resume = false;
+                    return WaddleClientEvent::ResumeFailed {
+                        transition: WaddleDeliveryAttemptTransition { old, fresh },
+                        affected,
+                    };
+                }
+                ClientEvent::Lifecycle(waddle_xmpp_client::LifecycleEvent::SessionReady(_))
+                    if self.awaiting_resume =>
+                {
+                    self.poisoned = true;
+                    return WaddleClientEvent::Error {
+                        description:
+                            "fresh session became ready before resume transition; connection self-fenced"
+                                .to_string(),
+                    };
+                }
+                event => {
+                    if let Some(event) =
+                        event_to_ffi(event, &self.account_bare_jid, &self.attempt)
+                    {
+                        return event;
+                    }
+                }
+            }
         }
     }
 }
@@ -194,12 +480,40 @@ impl WaddleClient {
 // ── Send helpers ────────────────────────────────────────────────────────────
 
 impl WaddleClient {
+    #[cfg(test)]
+    fn new_for_test(
+        config: WaddleConfig,
+        diagnostic_sink: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Arc<Self> {
+        let (diagnostic_tx, diagnostic_rx) = mpsc::unbounded_channel();
+        let (lifecycle_tx, _) = watch::channel(0);
+        Arc::new(Self {
+            config,
+            handle: Mutex::new(None),
+            event_pump: Mutex::new(None),
+            poll_gate: Mutex::new(()),
+            lifecycle_gate: Mutex::new(()),
+            diagnostic_tx,
+            diagnostic_rx: Mutex::new(diagnostic_rx),
+            lifecycle_epoch: AtomicU64::new(0),
+            lifecycle_tx,
+            test_diagnostic_sink: Some(diagnostic_sink),
+        })
+    }
+
     /// Emit a human-readable diagnostic through the single-event
-    /// listener. Every internal failure path funnels through here so
+    /// ordered event stream. Every internal failure path funnels through here so
     /// diagnostics stay out of the typed payload variants.
     pub(crate) fn emit_error(&self, description: String) {
-        self.listener
-            .on_event(WaddleClientEvent::Error { description });
+        #[cfg(test)]
+        if let Some(sink) = &self.test_diagnostic_sink {
+            sink.lock()
+                .expect("test diagnostic sink poisoned")
+                .push(description.clone());
+        }
+        let _ = self
+            .diagnostic_tx
+            .send(WaddleClientEvent::Error { description });
     }
 
     /// Send a built stanza fire-and-forget. Returns `true` on success.

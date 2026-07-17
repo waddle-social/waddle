@@ -1,4 +1,5 @@
 use jid::Jid;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use waddle_xmpp_client::{
     mds::MdsCatchupEntry,
     messaging::{
@@ -22,72 +23,92 @@ use waddle_xmpp_client::{
 use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
     WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
-    WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
-    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
-    WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
-    WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
-    WaddleResumeStanza, WaddleResumeStanzaKind, WaddleResumeXmlAttribute, WaddleResumeXmlLocalName,
+    WaddleClientEvent, WaddleDeliveryAttemptRef, WaddleDeliveryStanzaId, WaddleEncryptedFile,
+    WaddleEncryptedFileHash, WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview,
+    WaddleLinkPreviewImage, WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin,
+    WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage,
+    WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddleNativeDeliverySignal,
+    WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
+    WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleResumeStanza,
+    WaddleResumeStanzaKind, WaddleResumeXmlAttribute, WaddleResumeXmlLocalName,
     WaddleResumeXmlName, WaddleResumeXmlNamespace, WaddleResumeXmlToken, WaddleResumeXmlValue,
-    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeEntry,
-    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
+    WaddleSaslCondition, WaddleSendOptions, WaddleSessionReadyKind, WaddleSharedFile,
+    WaddleSmResumeEntry, WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
 
-pub(super) fn dispatch_event(
+pub(super) fn event_to_ffi(
     event: ClientEvent,
     account_bare_jid: &str,
-    listener: &dyn WaddleEventListener,
-) {
+    attempt: &WaddleDeliveryAttemptRef,
+) -> Option<WaddleClientEvent> {
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => {
-            listener.on_event(WaddleClientEvent::Connected);
+            Some(WaddleClientEvent::SessionReady {
+                kind: WaddleSessionReadyKind::Fresh,
+                attempt: attempt.clone(),
+            })
         }
-        ClientEvent::Messaging(MessagingEvent::Message(msg)) => {
-            listener.on_event(WaddleClientEvent::Message {
-                message: inbound_to_ffi(trusted_mds_message(*msg, account_bare_jid)),
-            });
-        }
+        ClientEvent::Messaging(MessagingEvent::Message(msg)) => Some(WaddleClientEvent::Message {
+            message: inbound_to_ffi(trusted_mds_message(*msg, account_bare_jid)),
+        }),
         ClientEvent::Messaging(MessagingEvent::Presence(pres)) => {
-            listener.on_event(WaddleClientEvent::Presence {
+            Some(WaddleClientEvent::Presence {
                 presence: presence_to_ffi(*pres),
-            });
+            })
         }
         ClientEvent::MamResult(archived) => {
             // `None` = the trusted parse rejected the row (e.g. spoofed
             // moderation) and it carries no call event — drop, like wasm.
-            if let Some(message) = archived_to_ffi(*archived) {
-                listener.on_event(WaddleClientEvent::MamResult { message });
-            }
+            archived_to_ffi(*archived).map(|message| WaddleClientEvent::MamResult { message })
         }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked { stanza_id }) => {
-            listener.on_event(WaddleClientEvent::DeliveryAcked {
-                stanza_id: stanza_id.to_string(),
-            });
+            Some(WaddleClientEvent::DeliveryAcked {
+                signal: WaddleNativeDeliverySignal {
+                    attempt: attempt.clone(),
+                    stanza_id: WaddleDeliveryStanzaId {
+                        value: stanza_id.to_string(),
+                    },
+                },
+            })
         }
         ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id }) => {
-            listener.on_event(WaddleClientEvent::DeliveryFailed {
-                stanza_id: stanza_id.to_string(),
-            });
+            Some(WaddleClientEvent::DeliveryFailed {
+                signal: WaddleNativeDeliverySignal {
+                    attempt: attempt.clone(),
+                    stanza_id: WaddleDeliveryStanzaId {
+                        value: stanza_id.to_string(),
+                    },
+                },
+            })
         }
-        ClientEvent::Call(call) => {
-            listener.on_event(WaddleClientEvent::Call {
-                event: call_event_to_ffi(*call),
-            });
-        }
+        ClientEvent::Call(call) => Some(WaddleClientEvent::Call {
+            event: call_event_to_ffi(*call),
+        }),
         ClientEvent::ResumeStateChanged(state) => {
-            listener.on_event(WaddleClientEvent::ResumeStateChanged {
-                state: state.map(resume_state_to_ffi),
-            });
+            let state = match state {
+                Some(state) => match resume_state_to_ffi(state) {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        return Some(WaddleClientEvent::Error {
+                            description: error.to_string(),
+                        });
+                    }
+                },
+                None => None,
+            };
+            Some(WaddleClientEvent::ResumeStateChanged {
+                attempt: attempt.clone(),
+                state,
+            })
         }
         ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure)) => {
-            listener.on_event(WaddleClientEvent::AuthenticationFailed {
+            Some(WaddleClientEvent::AuthenticationFailed {
                 condition: sasl_condition_to_ffi(failure.condition),
-            });
+            })
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -464,48 +485,67 @@ fn carbon_to_ffi(direction: CarbonDirection) -> WaddleCarbonDirection {
 
 // ── XEP-0198 resume snapshot round-trip ──────────────────────────────────────
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ResumeFfiBoundaryError {
+    #[error(transparent)]
+    ResumeStanza(#[from] waddle_xmpp_client::ResumeStanzaError),
+    #[error(transparent)]
+    Client(#[from] waddle_xmpp_client::ClientError),
+    #[error("resume timestamp is outside the supported range")]
+    TimestampOutOfRange,
+}
+
 /// Serialize the typed resume snapshot for persistence on the app side.
-pub(super) fn resume_state_to_ffi(state: SmResumeState) -> WaddleSmResumeState {
-    WaddleSmResumeState {
+pub(super) fn resume_state_to_ffi(
+    state: SmResumeState,
+) -> Result<WaddleSmResumeState, ResumeFfiBoundaryError> {
+    let queued_entries = state
+        .unhandled_outbound_entries()
+        .map(|entry| {
+            Ok(WaddleSmResumeEntry {
+                stanza: resume_stanza_to_ffi(entry.stanza())?,
+                sent_at: utc_to_system_time(entry.sent_at())?,
+            })
+        })
+        .collect::<Result<Vec<_>, ResumeFfiBoundaryError>>()?;
+
+    Ok(WaddleSmResumeState {
         previd: state.previd().to_string(),
         inbound_h: state.inbound_h(),
         outbound_h: state.outbound_h(),
         max_resume_seconds: state.max_resume_seconds(),
-        queued_entries: state
-            .unhandled_outbound_entries()
-            .map(|entry| WaddleSmResumeEntry {
-                stanza: resume_stanza_to_ffi(entry.stanza()),
-                sent_at: entry.sent_at().into(),
-            })
-            .collect(),
-    }
+        queued_entries,
+    })
 }
 
 /// Rebuild the typed resume snapshot from persisted FFI data. Invalid token
-/// sequences are surfaced through the listener rather than silently dropped.
-pub(super) fn resume_state_from_ffi(state: WaddleSmResumeState) -> Result<SmResumeState, String> {
+/// sequences are surfaced through the ordered stream rather than silently dropped.
+pub(super) fn resume_state_from_ffi(
+    state: WaddleSmResumeState,
+) -> Result<SmResumeState, ResumeFfiBoundaryError> {
     let entries = state
         .queued_entries
         .into_iter()
         .map(|entry| {
             let stanza = resume_stanza_from_ffi(entry.stanza)?;
-            let sent_at = entry.sent_at.into();
+            let sent_at = system_time_to_utc(entry.sent_at)?;
             Ok(SmResumeEntry::new(stanza, sent_at))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    SmResumeState::from_unhandled_outbound_entries(
+        .collect::<Result<Vec<_>, ResumeFfiBoundaryError>>()?;
+    Ok(SmResumeState::from_unhandled_outbound_entries(
         state.previd,
         state.inbound_h,
         state.outbound_h,
         entries,
-    )
-    .map(|resume| resume.with_max_resume_seconds(state.max_resume_seconds))
-    .map_err(|err| err.to_string())
+    )?
+    .with_max_resume_seconds(state.max_resume_seconds))
 }
 
-fn resume_stanza_to_ffi(stanza: &ResumeStanza) -> WaddleResumeStanza {
-    let snapshot = stanza.snapshot();
-    WaddleResumeStanza {
+fn resume_stanza_to_ffi(
+    stanza: &ResumeStanza,
+) -> Result<WaddleResumeStanza, ResumeFfiBoundaryError> {
+    let snapshot = stanza.snapshot()?;
+    Ok(WaddleResumeStanza {
         stanza_kind: match snapshot.stanza_kind {
             ResumeStanzaKind::Message => WaddleResumeStanzaKind::Message,
             ResumeStanzaKind::Presence => WaddleResumeStanzaKind::Presence,
@@ -516,7 +556,7 @@ fn resume_stanza_to_ffi(stanza: &ResumeStanza) -> WaddleResumeStanza {
             .into_iter()
             .map(resume_xml_token_to_ffi)
             .collect(),
-    }
+    })
 }
 
 fn resume_xml_token_to_ffi(token: ResumeXmlToken) -> WaddleResumeXmlToken {
@@ -553,8 +593,10 @@ fn resume_xml_name_to_ffi(name: ResumeXmlName) -> WaddleResumeXmlName {
     }
 }
 
-fn resume_stanza_from_ffi(stanza: WaddleResumeStanza) -> Result<ResumeStanza, String> {
-    ResumeStanza::from_snapshot(ResumeStanzaSnapshot {
+fn resume_stanza_from_ffi(
+    stanza: WaddleResumeStanza,
+) -> Result<ResumeStanza, ResumeFfiBoundaryError> {
+    Ok(ResumeStanza::from_snapshot(ResumeStanzaSnapshot {
         stanza_kind: match stanza.stanza_kind {
             WaddleResumeStanzaKind::Message => ResumeStanzaKind::Message,
             WaddleResumeStanzaKind::Presence => ResumeStanzaKind::Presence,
@@ -565,11 +607,12 @@ fn resume_stanza_from_ffi(stanza: WaddleResumeStanza) -> Result<ResumeStanza, St
             .into_iter()
             .map(resume_xml_token_from_ffi)
             .collect::<Result<Vec<_>, _>>()?,
-    })
-    .map_err(|error| error.to_string())
+    })?)
 }
 
-fn resume_xml_token_from_ffi(token: WaddleResumeXmlToken) -> Result<ResumeXmlToken, String> {
+fn resume_xml_token_from_ffi(
+    token: WaddleResumeXmlToken,
+) -> Result<ResumeXmlToken, ResumeFfiBoundaryError> {
     match token {
         WaddleResumeXmlToken::Start { name, attributes } => Ok(ResumeXmlToken::Start {
             name: resume_xml_name_from_ffi(name)?,
@@ -581,7 +624,7 @@ fn resume_xml_token_from_ffi(token: WaddleResumeXmlToken) -> Result<ResumeXmlTok
                         value: ResumeXmlValue::new(attribute.value.value),
                     })
                 })
-                .collect::<Result<Vec<_>, String>>()?,
+                .collect::<Result<Vec<_>, ResumeFfiBoundaryError>>()?,
         }),
         WaddleResumeXmlToken::Text { value } => Ok(ResumeXmlToken::Text {
             value: ResumeXmlValue::new(value.value),
@@ -590,12 +633,80 @@ fn resume_xml_token_from_ffi(token: WaddleResumeXmlToken) -> Result<ResumeXmlTok
     }
 }
 
-fn resume_xml_name_from_ffi(name: WaddleResumeXmlName) -> Result<ResumeXmlName, String> {
+fn resume_xml_name_from_ffi(
+    name: WaddleResumeXmlName,
+) -> Result<ResumeXmlName, ResumeFfiBoundaryError> {
     Ok(ResumeXmlName {
         namespace: ResumeXmlNamespace::new(name.namespace.value),
-        local_name: ResumeXmlLocalName::new(name.local_name.value)
-            .map_err(|error| error.to_string())?,
+        local_name: ResumeXmlLocalName::new(name.local_name.value)?,
     })
+}
+
+fn utc_to_system_time(
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<SystemTime, ResumeFfiBoundaryError> {
+    let seconds = timestamp.timestamp();
+    let nanos = timestamp.timestamp_subsec_nanos();
+    if seconds >= 0 {
+        let seconds =
+            u64::try_from(seconds).map_err(|_| ResumeFfiBoundaryError::TimestampOutOfRange)?;
+        return UNIX_EPOCH
+            .checked_add(Duration::new(seconds, nanos))
+            .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange);
+    }
+
+    let magnitude = seconds
+        .checked_abs()
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)?;
+    let duration = if nanos == 0 {
+        Duration::new(magnitude, 0)
+    } else {
+        Duration::new(
+            magnitude
+                .checked_sub(1)
+                .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)?,
+            1_000_000_000 - nanos,
+        )
+    };
+    UNIX_EPOCH
+        .checked_sub(duration)
+        .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)
+}
+
+fn system_time_to_utc(
+    timestamp: SystemTime,
+) -> Result<chrono::DateTime<chrono::Utc>, ResumeFfiBoundaryError> {
+    let (seconds, nanos) = match timestamp.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (
+            i64::try_from(duration.as_secs())
+                .map_err(|_| ResumeFfiBoundaryError::TimestampOutOfRange)?,
+            duration.subsec_nanos(),
+        ),
+        Err(error) => {
+            let duration = error.duration();
+            let magnitude = i64::try_from(duration.as_secs())
+                .map_err(|_| ResumeFfiBoundaryError::TimestampOutOfRange)?;
+            if duration.subsec_nanos() == 0 {
+                (
+                    magnitude
+                        .checked_neg()
+                        .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)?,
+                    0,
+                )
+            } else {
+                (
+                    magnitude
+                        .checked_add(1)
+                        .and_then(i64::checked_neg)
+                        .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)?,
+                    1_000_000_000 - duration.subsec_nanos(),
+                )
+            }
+        }
+    };
+    chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos)
+        .ok_or(ResumeFfiBoundaryError::TimestampOutOfRange)
 }
 
 fn call_media_to_ffi(media: CallMedia) -> WaddleCallMedia {
@@ -907,7 +1018,7 @@ pub(crate) fn archived_to_ffi(
 /// Convert the FFI options record into the typed `SendMessageOptions`. JIDs
 /// are parsed here (the earliest boundary) so the rest of the send path flows
 /// through typed values per the typed-payloads hard rule. Returns a
-/// human-readable error string on malformed input - surfaced via the listener.
+/// human-readable error string on malformed input - surfaced via the ordered stream.
 pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, String> {
     let reply = match opts.reply {
         Some(target) => {
@@ -2013,7 +2124,7 @@ mod tests {
             outbound_h: 9,
             max_resume_seconds: Some(300),
             queued_entries: vec![WaddleSmResumeEntry {
-                stanza: resume_stanza_to_ffi(&stanza),
+                stanza: resume_stanza_to_ffi(&stanza).expect("resume stanza serializes"),
                 sent_at: std::time::SystemTime::UNIX_EPOCH
                     + std::time::Duration::new(1_748_779_140, 123_000_000),
             }],
@@ -2050,7 +2161,7 @@ mod tests {
             .expect("seeded SM state stays resumable");
         assert_eq!(snapshot, typed, "snapshot must preserve the seeded state");
 
-        let round_tripped = resume_state_to_ffi(snapshot);
+        let round_tripped = resume_state_to_ffi(snapshot).expect("resume state serializes");
         assert_eq!(round_tripped, original);
     }
 
@@ -2070,7 +2181,10 @@ mod tests {
             }],
         })
         .expect_err("malformed token sequence must be rejected");
-        assert!(err.contains("token sequence is malformed"), "err: {err}");
+        assert!(
+            err.to_string().contains("token sequence is malformed"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -2112,7 +2226,10 @@ mod tests {
         too_deep.extend((0..65).map(|_| WaddleResumeXmlToken::End));
         let depth_err = resume_state_from_ffi(state(too_deep))
             .expect_err("FFI snapshots beyond the core depth bound must fail");
-        assert!(depth_err.contains("depth limit"), "err: {depth_err}");
+        assert!(
+            depth_err.to_string().contains("depth limit"),
+            "err: {depth_err}"
+        );
 
         let mut too_many = vec![WaddleResumeXmlToken::Start {
             name: name("jabber:client", "message"),
@@ -2126,7 +2243,10 @@ mod tests {
         too_many.push(WaddleResumeXmlToken::End);
         let token_err = resume_state_from_ffi(state(too_many))
             .expect_err("FFI snapshots beyond the core token bound must fail");
-        assert!(token_err.contains("token limit"), "err: {token_err}");
+        assert!(
+            token_err.to_string().contains("token limit"),
+            "err: {token_err}"
+        );
     }
 
     #[test]
@@ -2164,7 +2284,10 @@ mod tests {
             root_name.clone(),
         ))
         .expect_err("declared kind must match the typed root");
-        assert!(kind_err.contains("kind does not match"), "err: {kind_err}");
+        assert!(
+            kind_err.to_string().contains("kind does not match"),
+            "err: {kind_err}"
+        );
 
         let invalid_name = WaddleResumeXmlName {
             local_name: WaddleResumeXmlLocalName {
@@ -2175,44 +2298,28 @@ mod tests {
         let name_err =
             resume_state_from_ffi(state_with(WaddleResumeStanzaKind::Message, invalid_name))
                 .expect_err("invalid XML names must fail at the typed boundary");
-        assert!(name_err.contains("invalid XML name"), "err: {name_err}");
+        assert!(
+            name_err.to_string().contains("invalid XML name"),
+            "err: {name_err}"
+        );
     }
 
-    /// In-test listener that captures every dispatched event in
-    /// order. Used to verify the `dispatch_event` routing without
-    /// spinning up the tokio broadcast bus.
-    #[derive(Default)]
-    struct CapturingListener {
-        // Mutex so we can mutate from `&self` callbacks. `parking_lot`
-        // would be lighter but the test-only `std::sync::Mutex` is
-        // available everywhere the workspace builds.
-        events: std::sync::Mutex<Vec<WaddleClientEvent>>,
-    }
-
-    impl CapturingListener {
-        fn events(&self) -> Vec<WaddleClientEvent> {
-            self.events
-                .lock()
-                .expect("test capture mutex poisoned")
-                .clone()
-        }
-    }
-
-    impl WaddleEventListener for CapturingListener {
-        fn on_event(&self, event: WaddleClientEvent) {
-            self.events
-                .lock()
-                .expect("test capture mutex poisoned")
-                .push(event);
+    fn delivery_attempt() -> WaddleDeliveryAttemptRef {
+        WaddleDeliveryAttemptRef {
+            attempt_id: crate::WaddleDeliveryAttemptId {
+                value: "00000000-0000-4000-8000-000000000001".to_string(),
+            },
+            connection_generation: crate::WaddleConnectionGeneration { value: 7 },
         }
     }
 
     #[test]
-    fn dispatch_event_maps_client_events_to_typed_variants() {
+    fn event_to_ffi_maps_client_events_to_typed_variants() {
         use waddle_xmpp_client::SessionBinding;
 
-        let listener = CapturingListener::default();
         let account = "alice@waddle.test";
+        let attempt = delivery_attempt();
+        let mut events = Vec::new();
 
         let binding = SessionBinding {
             jid: "alice@waddle.test/desktop"
@@ -2221,19 +2328,25 @@ mod tests {
             stream_id: None,
             resumable: false,
         };
-        dispatch_event(
-            ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding)),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(
+                ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding)),
+                account,
+                &attempt,
+            )
+            .expect("ready maps"),
         );
 
         let msg_xml = "<message xmlns='jabber:client' type='chat' \
                         from='bob@waddle.test/desktop'><body>hi</body></message>";
         let msg = parse_message(msg_xml);
-        dispatch_event(
-            ClientEvent::Messaging(MessagingEvent::Message(Box::new(msg))),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(
+                ClientEvent::Messaging(MessagingEvent::Message(Box::new(msg))),
+                account,
+                &attempt,
+            )
+            .expect("message maps"),
         );
 
         let presence_stanza: Element = "<presence xmlns='jabber:client' \
@@ -2243,25 +2356,34 @@ mod tests {
         let Some(MessagingEvent::Presence(pres)) = messaging::parse(&presence_stanza) else {
             panic!("expected Presence variant");
         };
-        dispatch_event(
-            ClientEvent::Messaging(MessagingEvent::Presence(pres)),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(
+                ClientEvent::Messaging(MessagingEvent::Presence(pres)),
+                account,
+                &attempt,
+            )
+            .expect("presence maps"),
         );
 
-        dispatch_event(
-            ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
-                stanza_id: StanzaId::new("acked-1").expect("stanza id"),
-            }),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
+                    stanza_id: StanzaId::new("acked-1").expect("stanza id"),
+                }),
+                account,
+                &attempt,
+            )
+            .expect("ack maps"),
         );
-        dispatch_event(
-            ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
-                stanza_id: StanzaId::new("failed-1").expect("stanza id"),
-            }),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(
+                ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
+                    stanza_id: StanzaId::new("failed-1").expect("stanza id"),
+                }),
+                account,
+                &attempt,
+            )
+            .expect("failure maps"),
         );
 
         let call_xml = "<message xmlns='jabber:client' from='bob@waddle.test/desktop'>\
@@ -2269,20 +2391,38 @@ mod tests {
         </message>";
         let call_stanza: Element = call_xml.parse().expect("fixture parses");
         let call = messaging::parse_call_event(&call_stanza).expect("fixture is a call");
-        dispatch_event(ClientEvent::Call(Box::new(call)), account, &listener);
-
-        dispatch_event(
-            ClientEvent::ResumeStateChanged(Some(
-                SmResumeState::new("prev-1", 3, 7).expect("resume state"),
-            )),
-            account,
-            &listener,
+        events.push(
+            event_to_ffi(ClientEvent::Call(Box::new(call)), account, &attempt)
+                .expect("call maps"),
         );
-        dispatch_event(ClientEvent::ResumeStateChanged(None), account, &listener);
 
-        let events = listener.events();
+        events.push(
+            event_to_ffi(
+                ClientEvent::ResumeStateChanged(Some(
+                    SmResumeState::new("prev-1", 3, 7).expect("resume state"),
+                )),
+                account,
+                &attempt,
+            )
+            .expect("resume snapshot maps"),
+        );
+        events.push(
+            event_to_ffi(
+                ClientEvent::ResumeStateChanged(None),
+                account,
+                &attempt,
+            )
+            .expect("resume clear maps"),
+        );
+
         assert_eq!(events.len(), 8);
-        assert!(matches!(events[0], WaddleClientEvent::Connected));
+        assert!(matches!(
+            &events[0],
+            WaddleClientEvent::SessionReady {
+                kind: WaddleSessionReadyKind::Fresh,
+                ..
+            }
+        ));
         match &events[1] {
             WaddleClientEvent::Message { message } => {
                 assert_eq!(message.body.as_deref(), Some("hi"));
@@ -2296,11 +2436,17 @@ mod tests {
             _ => panic!("expected Presence variant"),
         }
         match &events[3] {
-            WaddleClientEvent::DeliveryAcked { stanza_id } => assert_eq!(stanza_id, "acked-1"),
+            WaddleClientEvent::DeliveryAcked { signal } => {
+                assert_eq!(signal.stanza_id.value, "acked-1");
+                assert_eq!(signal.attempt, attempt);
+            }
             _ => panic!("expected DeliveryAcked variant"),
         }
         match &events[4] {
-            WaddleClientEvent::DeliveryFailed { stanza_id } => assert_eq!(stanza_id, "failed-1"),
+            WaddleClientEvent::DeliveryFailed { signal } => {
+                assert_eq!(signal.stanza_id.value, "failed-1");
+                assert_eq!(signal.attempt, attempt);
+            }
             _ => panic!("expected DeliveryFailed variant"),
         }
         match &events[5] {
@@ -2311,7 +2457,11 @@ mod tests {
             _ => panic!("expected Call variant"),
         }
         match &events[6] {
-            WaddleClientEvent::ResumeStateChanged { state } => {
+            WaddleClientEvent::ResumeStateChanged {
+                attempt: event_attempt,
+                state,
+            } => {
+                assert_eq!(event_attempt, &attempt);
                 let state = state.as_ref().expect("resume snapshot present");
                 assert_eq!(state.previd, "prev-1");
                 assert_eq!(state.inbound_h, 3);
@@ -2320,35 +2470,38 @@ mod tests {
             _ => panic!("expected ResumeStateChanged variant"),
         }
         match &events[7] {
-            WaddleClientEvent::ResumeStateChanged { state } => assert!(state.is_none()),
+            WaddleClientEvent::ResumeStateChanged {
+                attempt: event_attempt,
+                state,
+            } => {
+                assert_eq!(event_attempt, &attempt);
+                assert!(state.is_none());
+            }
             _ => panic!("expected ResumeStateChanged(None) variant"),
         }
     }
 
     #[test]
-    fn dispatch_event_maps_sasl_failure_to_authentication_failed() {
+    fn event_to_ffi_maps_sasl_failure_to_authentication_failed() {
         use waddle_xmpp_client::{ConnectionEvent, SaslFailure, SaslFailureCondition};
-        let listener = CapturingListener::default();
-        dispatch_event(
+        let event = event_to_ffi(
             ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(SaslFailure {
                 condition: SaslFailureCondition::NotAuthorized,
             })),
             "icepuma@waddle.test",
-            &listener,
-        );
-        let events = listener.events.lock().expect("listener lock");
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+            &delivery_attempt(),
+        )
+        .expect("auth failure maps");
+        match event {
             WaddleClientEvent::AuthenticationFailed { condition } => {
-                assert_eq!(*condition, WaddleSaslCondition::NotAuthorized);
+                assert_eq!(condition, WaddleSaslCondition::NotAuthorized);
             }
             _ => panic!("expected AuthenticationFailed"),
         }
     }
 
     #[test]
-    fn dispatch_event_maps_mam_results() {
-        let listener = CapturingListener::default();
+    fn event_to_ffi_maps_mam_results() {
         let archived = parse_mam_archived(
             "<message xmlns='jabber:client'>\
                <result xmlns='urn:xmpp:mam:2' id='mam-1' queryid='q1'>\
@@ -2362,14 +2515,13 @@ mod tests {
                </result>\
              </message>",
         );
-        dispatch_event(
+        let event = event_to_ffi(
             ClientEvent::MamResult(Box::new(archived)),
             "alice@waddle.test",
-            &listener,
-        );
-        let events = listener.events();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+            &delivery_attempt(),
+        )
+        .expect("MAM result maps");
+        match event {
             WaddleClientEvent::MamResult { message } => {
                 assert_eq!(message.mam_id, "mam-1");
                 assert_eq!(message.body.as_deref(), Some("archived"));
@@ -2387,13 +2539,14 @@ mod tests {
         let xml =
             "<message xmlns='jabber:client' from='alice@waddle.test'><body>hi</body></message>";
         let stanza: Element = xml.parse().expect("fixture parses");
-        let listener = CapturingListener::default();
-        dispatch_event(
-            ClientEvent::UnhandledStanza(stanza),
-            "alice@waddle.test",
-            &listener,
+        assert!(
+            event_to_ffi(
+                ClientEvent::UnhandledStanza(stanza),
+                "alice@waddle.test",
+                &delivery_attempt(),
+            )
+            .is_none()
         );
-        assert!(listener.events().is_empty());
     }
 
     #[test]

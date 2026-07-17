@@ -589,15 +589,19 @@ export class WaddleClient {
      * @returns {any}
      */
     get_resume_state() {
-        const ret = wasm.waddleclient_get_resume_state(this.__wbg_ptr);
-        return takeObject(ret);
-    }
-    /**
-     * @returns {WaddleResumeState | undefined}
-     */
-    get_resume_state_handle() {
-        const ret = wasm.waddleclient_get_resume_state_handle(this.__wbg_ptr);
-        return ret === 0 ? undefined : WaddleResumeState.__wrap(ret);
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.waddleclient_get_resume_state(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @returns {Promise<any>}
@@ -1857,87 +1861,12 @@ export class WaddleConfig {
         return this;
     }
     /**
-     * @param {string} previd
-     * @param {number} inbound_h
-     * @param {number} outbound_h
+     * @param {any} state
      */
-    with_resume_state(previd, inbound_h, outbound_h) {
+    with_resume_state(state) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(previd, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.waddleconfig_with_resume_state(retptr, this.__wbg_ptr, ptr0, len0, inbound_h, outbound_h);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            if (r1) {
-                throw takeObject(r0);
-            }
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
-     * @param {string} previd
-     * @param {number} inbound_h
-     * @param {number} outbound_h
-     * @param {any} entries
-     */
-    with_resume_state_entries(previd, inbound_h, outbound_h, entries) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(previd, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.waddleconfig_with_resume_state_entries(retptr, this.__wbg_ptr, ptr0, len0, inbound_h, outbound_h, addHeapObject(entries));
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            if (r1) {
-                throw takeObject(r0);
-            }
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
-     * @param {string} previd
-     * @param {number} inbound_h
-     * @param {number} outbound_h
-     * @param {any} entries
-     * @param {number} max_resume_seconds
-     */
-    with_resume_state_entries_with_max(previd, inbound_h, outbound_h, entries, max_resume_seconds) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(previd, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.waddleconfig_with_resume_state_entries_with_max(retptr, this.__wbg_ptr, ptr0, len0, inbound_h, outbound_h, addHeapObject(entries), max_resume_seconds);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            if (r1) {
-                throw takeObject(r0);
-            }
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
-     * @param {WaddleResumeState} state
-     */
-    with_resume_state_handle(state) {
-        _assertClass(state, WaddleResumeState);
-        wasm.waddleconfig_with_resume_state_handle(this.__wbg_ptr, state.__wbg_ptr);
-    }
-    /**
-     * @param {string} previd
-     * @param {number} inbound_h
-     * @param {number} outbound_h
-     * @param {number} max_resume_seconds
-     */
-    with_resume_state_with_max(previd, inbound_h, outbound_h, max_resume_seconds) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(previd, wasm.__wbindgen_export, wasm.__wbindgen_export2);
-            const len0 = WASM_VECTOR_LEN;
-            wasm.waddleconfig_with_resume_state_with_max(retptr, this.__wbg_ptr, ptr0, len0, inbound_h, outbound_h, max_resume_seconds);
+            wasm.waddleconfig_with_resume_state(retptr, this.__wbg_ptr, addHeapObject(state));
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -1949,26 +1878,6 @@ export class WaddleConfig {
     }
 }
 if (Symbol.dispose) WaddleConfig.prototype[Symbol.dispose] = WaddleConfig.prototype.free;
-
-export class WaddleResumeState {
-    static __wrap(ptr) {
-        const obj = Object.create(WaddleResumeState.prototype);
-        obj.__wbg_ptr = ptr;
-        WaddleResumeStateFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        WaddleResumeStateFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_waddleresumestate_free(ptr, 0);
-    }
-}
-if (Symbol.dispose) WaddleResumeState.prototype[Symbol.dispose] = WaddleResumeState.prototype.free;
 
 /**
  * Compute a CSS `hsl(...)` string for `input` using XEP-0392 with
@@ -2244,7 +2153,7 @@ export function __wbg_new_typed_1137602701dc87d4(arg0, arg1) {
             const a = state0.a;
             state0.a = 0;
             try {
-                return __wasm_bindgen_func_elem_6509(a, state0.b, arg0, arg1);
+                return __wasm_bindgen_func_elem_6531(a, state0.b, arg0, arg1);
             } finally {
                 state0.a = a;
             }
@@ -2362,27 +2271,27 @@ export function __wbg_value_f852716acdeb3e82(arg0) {
 }
 export function __wbindgen_cast_0000000000000001(arg0, arg1) {
     // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 868, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6492);
+    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6514);
     return addHeapObject(ret);
 }
 export function __wbindgen_cast_0000000000000002(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("CloseEvent")], shim_idx: 676, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4244);
+    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("CloseEvent")], shim_idx: 677, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4262);
     return addHeapObject(ret);
 }
 export function __wbindgen_cast_0000000000000003(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("ErrorEvent")], shim_idx: 676, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4244_2);
+    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("ErrorEvent")], shim_idx: 677, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4262_2);
     return addHeapObject(ret);
 }
 export function __wbindgen_cast_0000000000000004(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 676, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4244_3);
+    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 677, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4262_3);
     return addHeapObject(ret);
 }
 export function __wbindgen_cast_0000000000000005(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 677, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4243);
+    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 678, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+    const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_4261);
     return addHeapObject(ret);
 }
 export function __wbindgen_cast_0000000000000006(arg0) {
@@ -2412,26 +2321,26 @@ export function __wbindgen_object_clone_ref(arg0) {
 export function __wbindgen_object_drop_ref(arg0) {
     takeObject(arg0);
 }
-function __wasm_bindgen_func_elem_4243(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_4243(arg0, arg1);
+function __wasm_bindgen_func_elem_4261(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_4261(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_4244(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4244(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4262(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4262(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_4244_2(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4244_2(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4262_2(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4262_2(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_4244_3(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_4244_3(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_4262_3(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_4262_3(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_6492(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_6514(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_6492(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_6514(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -2442,8 +2351,8 @@ function __wasm_bindgen_func_elem_6492(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_6509(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_6509(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_6531(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_6531(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 
@@ -2454,9 +2363,6 @@ const WaddleClientFinalization = (typeof FinalizationRegistry === 'undefined')
 const WaddleConfigFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_waddleconfig_free(ptr, 1));
-const WaddleResumeStateFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_waddleresumestate_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);

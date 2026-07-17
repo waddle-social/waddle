@@ -3,6 +3,7 @@ import type { PinPermission } from "@/lib/chat-types";
 import type { CallThreadAnchor, ExtensionAnnotation } from "@/lib/chat-ui";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
 import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { WasmControlErrorPayload } from "./wasm-types";
 
 /** Shared types for the XMPP client layer. */
 
@@ -91,7 +92,7 @@ export type XmppStanzaErrorType =
   | "wait"
   | "unknown";
 
-export const XMPP_STREAM_ERROR_CONDITIONS = new Set([
+const XMPP_STREAM_ERROR_CONDITIONS = new Set([
   "bad-format",
   "bad-namespace-prefix",
   "conflict",
@@ -154,30 +155,58 @@ export const XMPP_ERROR_CONDITIONS = new Set([
   "precondition-not-met",
 ]);
 
-export interface XmppErrorEvent {
-  kind: XmppErrorKind;
+type XmppErrorEventBase = {
   /** Whether the client expects to recover on its own without UI intervention. */
   recoverable: boolean;
-  /** Short, human-readable reason for local UI/debugging; sanitize before telemetry. */
-  detail: string;
   /** Original error object if one was caught. */
   cause?: unknown;
-  /** XMPP stream-error condition when `kind === "stream"`, or the RFC 6120
-   * §8.3 stanza-error condition when a server error stanza was received. */
+};
+
+type XmppStanzaErrorContext = {
+  /** RFC 6120 stanza-error condition returned by the server. */
   condition?: string;
   /** RFC 6120 §8.3.2 `type` attribute of a received error stanza. */
   errorType?: XmppStanzaErrorType;
   /** Server-provided `<text/>` of a received error stanza. */
   errorText?: string;
-  /** Denied MUC room node only; never the domain, resource, or full room JID. */
-  roomLocalpart?: string;
-  /** XEP-0198 stream-management extension detail when a stream error carries one. */
-  streamManagementError?: {
-    kind: "handled-count-too-high";
-    h: number;
-    sendCount: number;
-  };
-}
+};
+
+type XmppConnectTimeoutReason =
+  | "connection-establishment"
+  | "room-self-presence";
+
+type XmppMemberQueryReason =
+  | "binding-missing"
+  | "affiliation-query-failed"
+  | "affiliation-query-failed-reconstructed-room";
+
+export type XmppErrorEvent =
+  | XmppErrorEventBase & {
+      kind: "stream";
+      /** Exact discriminated callback payload emitted by the generated WASM binding. */
+      controlError: WasmControlErrorPayload;
+    }
+  | XmppErrorEventBase & {
+      kind: "connect-timeout";
+      reason: XmppConnectTimeoutReason;
+    }
+  | XmppErrorEventBase & XmppStanzaErrorContext & {
+      kind: "member-query";
+      reason: XmppMemberQueryReason;
+      affiliation?: "owner" | "admin" | "member" | "outcast";
+    }
+  | XmppErrorEventBase & XmppStanzaErrorContext & {
+      kind: "auth" | "history";
+      /** Short, human-readable reason for local UI/debugging; sanitize before telemetry. */
+      detail: string;
+    }
+  | XmppErrorEventBase & XmppStanzaErrorContext & {
+      kind: "muc-join";
+      /** Short, human-readable reason for local UI/debugging; sanitize before telemetry. */
+      detail: string;
+      /** Denied MUC room node only; never the domain, resource, or full room JID. */
+      roomLocalpart?: string;
+    };
 
 export interface ListRoomMembersOptions {
   /**

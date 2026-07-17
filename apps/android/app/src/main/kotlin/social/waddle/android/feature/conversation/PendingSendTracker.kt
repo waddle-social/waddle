@@ -3,8 +3,10 @@ package social.waddle.android.feature.conversation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import social.waddle.android.client.DeliveryOutcomeRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.prefs.DeliveryRowIdentity
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
@@ -24,14 +26,15 @@ class PendingSendTracker {
     // until their row is pruned as stored — and bounded (oldest-evicted)
     // so ids that never match a row cannot accumulate for the screen's
     // lifetime.
-    private val ackedIds = linkedSetOf<String>()
-    private val failedIds = linkedSetOf<String>()
+    private val ackedDeliveries = linkedSetOf<DeliveryRowIdentity>()
+    private val failedDeliveries = linkedSetOf<DeliveryRowIdentity>()
 
     /** Append an optimistic row for a send about to dispatch. */
     fun append(body: String, extras: MessageSendExtras?, timestampMillis: Long): PendingMessage {
         val message = PendingMessage(
             localId = nextLocalId++,
             stanzaId = null,
+            delivery = null,
             body = body,
             timestampMillis = timestampMillis,
             failed = false,
@@ -42,31 +45,35 @@ class PendingSendTracker {
     }
 
     /**
-     * Adopt the send outcome for [localId]: a `Sent` outcome adopts the
-     * returned stanza id; a QUEUED failure (the manager persisted the
-     * message for replay — [SendResult.queuedId]) adopts the queue id,
+     * Adopt the send outcome for [localId]. Every accepted send carries the
+     * exact durable row identity; queued replay reuses its client stanza id,
      * which the replay reuses as its XEP-0359 origin-id, so the eventual
      * echo collapses this row and delivery events target it, exactly
      * like a live send. Only non-queued (permanent) outcomes mark the
      * row failed. Returns true when the send is tracked (sent or queued).
      */
     fun onSendResult(localId: Long, result: SendResult): Boolean {
-        val trackedId = when (val outcome = result.outcome) {
-            is WaddleSendMessageOutcome.Sent -> outcome.stanzaId
-            else -> result.queuedId
+        val delivery = result.delivery
+        if (delivery == null) {
+            updatePending(localId) { it.copy(failed = true) }
+            return false
         }
-        if (trackedId == null) {
+        val identity = delivery.identity
+        val trackedId = identity.clientStanzaId
+        val sent = result.outcome as? WaddleSendMessageOutcome.Sent
+        if (sent != null && sent.stanzaId != trackedId) {
             updatePending(localId) { it.copy(failed = true) }
             return false
         }
         updatePending(localId) {
             it.copy(
                 stanzaId = trackedId,
-                queued = result.queued && trackedId !in failedIds,
+                delivery = delivery,
+                queued = result.queued && identity !in failedDeliveries,
                 // Both the ack AND the failure event can beat this
                 // continuation; failure wins.
-                acked = trackedId in ackedIds && trackedId !in failedIds,
-                failed = trackedId in failedIds,
+                acked = identity in ackedDeliveries && identity !in failedDeliveries,
+                failed = identity in failedDeliveries,
             )
         }
         return true
@@ -79,20 +86,28 @@ class PendingSendTracker {
      * vanish the message until the next MAM refetch. MUC rows disappear
      * when the stored echo matches an identity id.
      */
-    fun onDeliveryAcked(stanzaId: String) {
-        remember(ackedIds, stanzaId)
+    fun onDeliveryAcked(delivery: DeliveryOutcomeRef) {
+        remember(ackedDeliveries, delivery.identity)
         _pending.update { list ->
             list.map {
-                if (it.stanzaId == stanzaId) it.copy(acked = true, failed = false, queued = false) else it
+                if (it.delivery?.identity == delivery.identity) {
+                    it.copy(acked = true, failed = false, queued = false)
+                } else {
+                    it
+                }
             }
         }
     }
 
-    fun onDeliveryFailed(stanzaId: String) {
-        remember(failedIds, stanzaId)
+    fun onDeliveryFailed(delivery: DeliveryOutcomeRef) {
+        remember(failedDeliveries, delivery.identity)
         _pending.update { list ->
             list.map {
-                if (it.stanzaId == stanzaId) it.copy(failed = true, queued = false) else it
+                if (it.delivery?.identity == delivery.identity) {
+                    it.copy(failed = true, queued = false)
+                } else {
+                    it
+                }
             }
         }
     }
@@ -107,9 +122,11 @@ class PendingSendTracker {
         // A stored row's races are settled: its delivery ids are done.
         // Removal happens OUTSIDE the update lambda (CAS retries must
         // stay side-effect free).
-        val settled = _pending.value.mapNotNull { it.stanzaId }.filter { it in storedIds }.toSet()
-        ackedIds -= settled
-        failedIds -= settled
+        val settled = _pending.value
+            .filter { it.stanzaId != null && it.stanzaId in storedIds }
+            .mapNotNullTo(mutableSetOf()) { it.delivery?.identity }
+        ackedDeliveries -= settled
+        failedDeliveries -= settled
         _pending.update { list ->
             list.filterNot { it.stanzaId != null && it.stanzaId in storedIds }
         }
@@ -132,14 +149,19 @@ class PendingSendTracker {
         }
     }
 
-    private fun remember(ids: LinkedHashSet<String>, id: String) {
-        ids.remove(id)
-        ids.add(id)
-        while (ids.size > MAX_TRACKED_DELIVERY_IDS) ids.remove(ids.first())
+    private fun remember(
+        identities: LinkedHashSet<DeliveryRowIdentity>,
+        identity: DeliveryRowIdentity,
+    ) {
+        identities.remove(identity)
+        identities.add(identity)
+        while (identities.size > MAX_TRACKED_DELIVERIES) {
+            identities.remove(identities.first())
+        }
     }
 
     private companion object {
         /** Far above any realistic in-flight send count. */
-        const val MAX_TRACKED_DELIVERY_IDS = 256
+        const val MAX_TRACKED_DELIVERIES = 256
     }
 }

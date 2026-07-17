@@ -8,6 +8,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_ROOT="$REPO_ROOT/server"
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$SERVER_ROOT/target}"
+if [[ "$CARGO_TARGET_ROOT" != /* ]]; then
+  CARGO_TARGET_ROOT="$REPO_ROOT/$CARGO_TARGET_ROOT"
+fi
+export CARGO_TARGET_DIR="$CARGO_TARGET_ROOT"
+TMP_ROOT="${TMPDIR:-/tmp}"
+if [[ "$TMP_ROOT" != /* ]]; then
+  TMP_ROOT="$REPO_ROOT/$TMP_ROOT"
+fi
+mkdir -p "$TMP_ROOT"
+export TMPDIR="$TMP_ROOT"
 COMMITTED="$REPO_ROOT/apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/waddle_xmpp_client.kt"
 
 case "$(uname -s)" in
@@ -16,7 +27,7 @@ case "$(uname -s)" in
   *) echo "unsupported host for UniFFI binding drift check: $(uname -s)" >&2; exit 1 ;;
 esac
 
-TMP_DIR="$(mktemp -d)"
+TMP_DIR="$(mktemp -d "$TMPDIR/waddle-android-ffi-bindings.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 cargo build \
@@ -29,7 +40,7 @@ cargo build \
   --bin uniffi-bindgen \
   --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
   -- generate \
-  --library "target/debug/libwaddle_xmpp_client_ffi.${LIB_EXT}" \
+  --library "$CARGO_TARGET_ROOT/debug/libwaddle_xmpp_client_ffi.${LIB_EXT}" \
   --language kotlin \
   --no-format \
   --out-dir "$TMP_DIR")
@@ -39,7 +50,7 @@ perl -pi -e 's/[ \t]+$//' "$GENERATED"
 
 if ! diff -u "$COMMITTED" "$GENERATED"; then
   echo "Android UniFFI binding drift detected in waddle_xmpp_client.kt." >&2
-  echo "Run scripts/build-android-rust.sh and commit the regenerated bindings." >&2
+  echo "Run scripts/generate-xmpp-client-ffi-bindings.sh and commit the regenerated bindings." >&2
   exit 1
 fi
 

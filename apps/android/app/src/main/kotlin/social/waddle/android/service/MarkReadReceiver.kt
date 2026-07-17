@@ -15,6 +15,7 @@ import social.waddle.android.client.XmppSessionManager
 class MarkReadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_MARK_READ) return
+        val ownerBareJid = intent.getStringExtra(EXTRA_OWNER_BARE_JID) ?: return
         val conversationJid = intent.getStringExtra(EXTRA_CONVERSATION_JID) ?: return
         val isGroupchat = intent.getBooleanExtra(EXTRA_IS_GROUPCHAT, false)
 
@@ -34,17 +35,24 @@ class MarkReadReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
-                // Same never-throw posture as the other receivers: an
-                // uncaught throw on this root coroutine kills the process.
+                // PendingIntents can outlive logout/login. The manager holds
+                // its lifecycle lock across this owner check and XMPP call.
+                val accepted = runCatching {
+                    graph.sessionManager.markConversationDisplayedForOwner(
+                        expectedOwnerBareJid = ownerBareJid,
+                        conversationJid = conversationJid,
+                        isGroupchat = isGroupchat,
+                        explicitTarget = explicitTarget,
+                    )
+                }.getOrDefault(false)
+                if (!accepted) return@launch
+                runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching {
-                    graph.sessionManager.markConversationDisplayed(
+                    graph.messageNotifier.clearConversationNotification(
+                        ownerBareJid,
                         conversationJid,
-                        isGroupchat,
-                        explicitTarget,
                     )
                 }
-                runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
-                runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
             } finally {
                 pendingResult.finish()
             }
@@ -53,6 +61,7 @@ class MarkReadReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION_MARK_READ = "social.waddle.android.action.MARK_READ"
+        const val EXTRA_OWNER_BARE_JID = "social.waddle.android.extra.OWNER_BARE_JID"
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val EXTRA_MARKER_ID = "social.waddle.android.extra.MARKER_ID"

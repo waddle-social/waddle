@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -38,7 +39,7 @@ class XmppSessionManagerReadStateTest {
         suspend fun loginReady(scope: TestScope) {
             manager.login(testSessionInfo())
             scope.runCurrent()
-            factory.emit(WaddleClientEvent.Connected)
+            factory.emitReady()
             scope.runCurrent()
         }
 
@@ -80,6 +81,34 @@ class XmppSessionManagerReadStateTest {
         assertEquals(1, harness.client.displayedCalls.size)
         assertEquals(1, harness.client.mdsPublishCalls.size)
 
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `notification mark read is atomically fenced to its account`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1")))
+        runCurrent()
+
+        assertFalse(
+            harness.manager.markConversationDisplayedForOwner(
+                expectedOwnerBareJid = "bob@waddle.test",
+                conversationJid = "room@muc.waddle.test",
+                isGroupchat = true,
+            ),
+        )
+        assertTrue(harness.client.displayedCalls.isEmpty())
+        assertEquals(1, harness.manager.unreadStore.counts.value["room@muc.waddle.test"])
+
+        assertTrue(
+            harness.manager.markConversationDisplayedForOwner(
+                expectedOwnerBareJid = "icepuma@waddle.test",
+                conversationJid = "room@muc.waddle.test",
+                isGroupchat = true,
+            ),
+        )
+        assertEquals(1, harness.client.displayedCalls.size)
         harness.manager.logout()
     }
 
@@ -167,7 +196,7 @@ class XmppSessionManagerReadStateTest {
             harness.manager.readCursorStore.cursor("room@muc.waddle.test"),
         )
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
         assertEquals(
@@ -295,7 +324,7 @@ class XmppSessionManagerReadStateTest {
                 stanzaIdBy = "room@muc.waddle.test",
             ),
         )
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         assertEquals("s2", harness.manager.readCursorStore.cursor("room@muc.waddle.test"))

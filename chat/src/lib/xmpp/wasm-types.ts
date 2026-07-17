@@ -517,13 +517,115 @@ export interface WasmSendOptions {
 }
 
 export type WasmSendMessageOutcome =
-  | { kind: "sent"; stanza_id?: string; stanzaId?: string }
+  | { kind: "sent"; stanza_id: string }
   | { kind: "not-connected" }
   | { kind: "invalid-recipient" }
   | { kind: "invalid-options" }
   | { kind: "stanza-error" }
   | { kind: "transport-error" }
   | { kind: "error" };
+
+export const WASM_DRIVER_ERROR_REASONS = [
+  "core-error",
+  "invalid-transport-scheme",
+  "missing-websocket-host",
+  "empty-resource",
+  "empty-stanza-id",
+  "request-id-exhausted",
+  "duplicate-request",
+  "duplicate-stanza-correlation",
+  "unknown-request",
+  "unknown-stanza-correlation",
+  "invalid-phase-transition",
+  "invalid-state-transition",
+  "missing-stream-feature",
+  "invalid-stream-features",
+  "invalid-sasl-failure",
+  "invalid-bind-response",
+  "authentication-rejected",
+  "websocket-connect-timeout",
+  "websocket-write-timeout",
+  "iq-timeout",
+  "websocket-transport-error",
+  "empty-transport-frame",
+  "transport-frame-too-large",
+  "invalid-transport-frame",
+  "invalid-stream-open-to",
+  "invalid-stream-open-from",
+  "unsupported-stream-version",
+  "unsupported-websocket-message",
+  "transport-closed",
+  "request-cancelled",
+  "disconnected",
+  "invalid-resume-stanza",
+  "push-registration-error",
+  "stanza-error",
+] as const;
+
+export type WasmDriverErrorReason = typeof WASM_DRIVER_ERROR_REASONS[number];
+
+export const WASM_AUTHENTICATION_CONDITIONS = [
+  "aborted",
+  "account-disabled",
+  "credentials-expired",
+  "encryption-required",
+  "incorrect-encoding",
+  "invalid-authzid",
+  "invalid-mechanism",
+  "malformed-request",
+  "mechanism-too-weak",
+  "not-authorized",
+  "temporary-auth-failure",
+  "unknown",
+] as const;
+
+export type WasmAuthenticationCondition = typeof WASM_AUTHENTICATION_CONDITIONS[number];
+
+export const WASM_STREAM_ERROR_CONDITIONS = [
+  "bad-format",
+  "bad-namespace-prefix",
+  "conflict",
+  "connection-timeout",
+  "host-gone",
+  "host-unknown",
+  "improper-addressing",
+  "internal-server-error",
+  "invalid-from",
+  "invalid-namespace",
+  "invalid-xml",
+  "not-authorized",
+  "not-well-formed",
+  "policy-violation",
+  "remote-connection-failed",
+  "reset",
+  "resource-constraint",
+  "restricted-xml",
+  "see-other-host",
+  "system-shutdown",
+  "undefined-condition",
+  "unsupported-encoding",
+  "unsupported-feature",
+  "unsupported-stanza-type",
+  "unsupported-version",
+] as const;
+
+export type WasmStreamErrorCondition = typeof WASM_STREAM_ERROR_CONDITIONS[number];
+
+export type WasmControlErrorPayload =
+  | {
+      kind: "driver-error";
+      reason: WasmDriverErrorReason;
+      authenticationCondition?: WasmAuthenticationCondition | null;
+    }
+  | {
+      kind: "stream-error";
+      condition: WasmStreamErrorCondition;
+      streamManagementError?: {
+        kind: "handled-count-too-high";
+        h: number;
+        sendCount: number;
+      } | null;
+    };
 
 // ─── Admin V2 — Spaces ────────────────────────────────────────────────
 //

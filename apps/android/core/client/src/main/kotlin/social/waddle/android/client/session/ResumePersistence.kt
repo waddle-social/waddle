@@ -1,33 +1,44 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import social.waddle.android.client.OutboundQueue
 import social.waddle.android.client.ResumeCursorTracker
 import social.waddle.android.client.nowRfc3339
 import social.waddle.android.client.persistQuietly
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleSmResumeState
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.logging.Level
+import java.util.logging.Logger
 
 /**
- * Persists the XEP-0198 resume snapshot and the per-conversation
- * catch-up cursors behind conflated channels: [queueResumeSnapshot]
- * arrives on Rust threads and never blocks, [recordCursor] never blocks
- * the event fan-out, and the session-scoped persister loops coalesce
- * bursts into single DataStore writes. Re-armed per login via [start].
+ * Persists XEP-0198 resume snapshots in the serialized native-event lane
+ * and keeps only per-conversation catch-up cursors behind a conflated
+ * channel. Snapshot writes therefore complete before the next native event
+ * is pulled, while [recordCursor] remains non-blocking and the
+ * session-scoped cursor persister coalesces bursts into single DataStore
+ * writes. Re-armed per login via [start].
  */
 internal class ResumePersistence(
     private val sessionPrefs: SessionPrefs,
+    private val deliveryJournal: OutboundQueue,
 ) {
     /** In-memory newest-seen cursors ranking the bounded DM catch-up. */
     val cursorTracker = ResumeCursorTracker()
 
-    @Volatile
-    private var resumeSnapshots: Channel<ResumeUpdate> = Channel(Channel.CONFLATED)
+    private val updateSequences =
+        ConcurrentHashMap<DeliveryAttemptRef, AtomicLong>()
 
     /** Conflated "cursors changed" ticks; the persister coalesces bursts. */
     @Volatile
@@ -35,15 +46,45 @@ internal class ResumePersistence(
 
     /** Fresh channels + persister loops on [scope], once per login. */
     fun start(scope: CoroutineScope) {
-        resumeSnapshots = Channel(Channel.CONFLATED)
         cursorWrites = Channel(Channel.CONFLATED)
-        scope.launch { persistResumeSnapshots(resumeSnapshots) }
+        updateSequences.clear()
         scope.launch { persistResumeCursors(cursorWrites) }
     }
 
-    /** Called from Rust threads via the bridge: never blocks. */
-    fun queueResumeSnapshot(state: WaddleSmResumeState?) {
-        resumeSnapshots.trySend(ResumeUpdate(state?.toSnapshot()))
+    /** Register the durable attempt before its bridge can emit callbacks. */
+    fun registerAttempt(attempt: DeliveryAttemptRef, persistedVersion: Long) {
+        updateSequences[attempt] = AtomicLong(persistedVersion)
+    }
+
+    fun retireAttempt(attempt: DeliveryAttemptRef) {
+        updateSequences.remove(attempt)
+    }
+
+    fun acceptResumeTransition(
+        transition: DeliveryAttemptTransition,
+        persistedVersion: Long,
+    ): Boolean {
+        updateSequences[transition.fresh]?.let { existing ->
+            return existing.get() >= persistedVersion
+        }
+        val sequence = updateSequences.remove(transition.old) ?: return false
+        sequence.updateAndGet { current -> maxOf(current, persistedVersion) }
+        updateSequences[transition.fresh] = sequence
+        return true
+    }
+
+    /**
+     * Ordered pull-boundary persistence. The connection loop awaits this
+     * exact attempt/version write before polling another native event.
+     */
+    suspend fun persistResumeSnapshot(
+        attempt: DeliveryAttemptRef,
+        state: WaddleSmResumeState?,
+    ): Boolean {
+        val sequence = updateSequences[attempt]?.incrementAndGet() ?: return false
+        return persistResumeUpdate(
+            ResumeUpdate(attempt, sequence, state?.toSnapshot()),
+        )
     }
 
     /**
@@ -66,11 +107,32 @@ internal class ResumePersistence(
 
     fun clear() {
         cursorTracker.clear()
+        updateSequences.clear()
     }
 
-    private suspend fun persistResumeSnapshots(updates: ReceiveChannel<ResumeUpdate>) {
-        for (update in updates) {
-            persistQuietly { sessionPrefs.setSmResume(update.snapshot) }
+    private suspend fun persistResumeUpdate(update: ResumeUpdate): Boolean {
+        var retryIndex = 0
+        while (true) {
+            try {
+                // false means the attempt/version is stale; retrying could
+                // only threaten the replacement's tombstone.
+                if (
+                    !deliveryJournal.saveSmResume(
+                        attempt = update.attempt,
+                        version = update.sequence,
+                        snapshot = update.snapshot,
+                    )
+                ) {
+                    return false
+                }
+                return true
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Throwable) {
+                LOGGER.log(Level.WARNING, "delivery journal SM update failed; retrying", failure)
+                delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
+                if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
+            }
         }
     }
 
@@ -81,5 +143,14 @@ internal class ResumePersistence(
     }
 
     /** Wrapper so a conflated channel can carry a `null` (= clear) update. */
-    private data class ResumeUpdate(val snapshot: SmResumeSnapshot?)
+    private data class ResumeUpdate(
+        val attempt: DeliveryAttemptRef,
+        val sequence: Long,
+        val snapshot: SmResumeSnapshot?,
+    )
+
+    private companion object {
+        val LOGGER: Logger = Logger.getLogger(ResumePersistence::class.java.name)
+        val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
+    }
 }

@@ -1,4 +1,3 @@
-import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import type { PinPermission } from "@/lib/chat-types";
 import { escapeXml } from "./extension-commands/xml";
 
@@ -10,9 +9,16 @@ const NS_SPACES_0 = "urn:xmpp:spaces:0";
 const NS_MUC_ROOMCONFIG = "http://jabber.org/protocol/muc#roomconfig";
 const NS_PUBSUB_NODE_CONFIG = "http://jabber.org/protocol/pubsub#node_config";
 
-type HybridClient = Partial<WaddleClient> & {
+interface RawIqClient {
   send_raw_iq?: (xml: string) => Promise<string>;
-};
+}
+
+interface RoomLifecycleClient {
+  join_room?: (roomJid: string, nick: string) => Promise<void>;
+  leave_room?: (roomJid: string, nick: string) => Promise<void>;
+}
+
+type MucRoomClient = RawIqClient & RoomLifecycleClient;
 
 export const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
 const FIELD_ROOM_NAME = "muc#roomconfig_roomname";
@@ -54,25 +60,25 @@ function slugifyNodeId(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "space";
 }
 
-async function sendIq(client: HybridClient, type: "get" | "set", xmlPayload: string, to: string): Promise<string> {
+async function sendIq(client: RawIqClient, type: "get" | "set", xmlPayload: string, to: string): Promise<string> {
   if (!client.send_raw_iq) throw new Error("XMPP session is not ready");
   return client.send_raw_iq(`<iq type="${type}" id="${crypto.randomUUID()}" to="${to}">${xmlPayload}</iq>`);
 }
 
-async function joinRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
+async function joinRoom(client: RoomLifecycleClient, roomJid: string, nick: string): Promise<void> {
   // #1255: `join_room` itself always requests `<history maxstanzas='0'/>`
   // (XEP-0045 §7.2.15) — MAM catch-up is the authoritative history source.
   if (!client.join_room) throw new Error("XMPP session is not ready");
   await client.join_room(roomJid, nick);
 }
 
-async function leaveRoom(client: HybridClient, roomJid: string, nick: string): Promise<void> {
+async function leaveRoom(client: RoomLifecycleClient, roomJid: string, nick: string): Promise<void> {
   if (!client.leave_room) throw new Error("XMPP session is not ready");
   return client.leave_room(roomJid, nick);
 }
 
 async function fetchMucOwnerConfig(
-  client: HybridClient,
+  client: RawIqClient,
   roomJid: string,
 ): Promise<Map<string, string>> {
   const responseXml = await sendIq(
@@ -108,7 +114,7 @@ async function fetchMucOwnerConfig(
  * through unchanged so the server doesn't revert un-echoed fields
  * to defaults. */
 export async function configureMucRoom(
-  client: HybridClient,
+  client: RawIqClient,
   roomJid: string,
   params: ConfigureMucRoomParams,
 ): Promise<void> {
@@ -128,7 +134,7 @@ export async function configureMucRoom(
   );
 }
 
-export async function createMucRoom(client: HybridClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {
+export async function createMucRoom(client: MucRoomClient, mucServiceJid: string, params: CreateMucRoomParams): Promise<{ roomJid: string }> {
   const roomJid = `${params.roomLocalpart}@${mucServiceJid}`;
   await joinRoom(client, roomJid, params.nick);
   const fields = [
@@ -147,7 +153,7 @@ export async function createMucRoom(client: HybridClient, mucServiceJid: string,
   return { roomJid };
 }
 
-export async function createSpaceNode(client: HybridClient, spacesServiceJid: string, params: CreateSpaceNodeParams): Promise<{ node: string; serviceJid: string }> {
+export async function createSpaceNode(client: RawIqClient, spacesServiceJid: string, params: CreateSpaceNodeParams): Promise<{ node: string; serviceJid: string }> {
   const nodeId = params.nodeId ?? slugifyNodeId(params.name);
   const fields = [
     dataField("FORM_TYPE", NS_PUBSUB_NODE_CONFIG),
@@ -165,7 +171,7 @@ export async function createSpaceNode(client: HybridClient, spacesServiceJid: st
   return { node: nodeId, serviceJid: spacesServiceJid };
 }
 
-async function publishMucToSpace(client: HybridClient, spacesServiceJid: string, spaceNode: string, mucJid: string, params: PublishMucToSpaceParams): Promise<void> {
+async function publishMucToSpace(client: RawIqClient, spacesServiceJid: string, spaceNode: string, mucJid: string, params: PublishMucToSpaceParams): Promise<void> {
   await sendIq(
     client,
     "set",
@@ -183,7 +189,7 @@ async function publishMucToSpace(client: HybridClient, spacesServiceJid: string,
  * the client doesn't have to issue a separate retract.
  */
 export async function moveMucToSpace(
-  client: HybridClient,
+  client: RawIqClient,
   spacesServiceJid: string,
   targetSpaceNode: string,
   mucJid: string,
@@ -192,13 +198,13 @@ export async function moveMucToSpace(
   await publishMucToSpace(client, spacesServiceJid, targetSpaceNode, mucJid, params);
 }
 
-export async function createMucInSpace(client: HybridClient, mucServiceJid: string, spacesServiceJid: string, params: CreateMucInSpaceParams): Promise<{ roomJid: string; spaceNode: string; spacesServiceJid: string }> {
+export async function createMucInSpace(client: MucRoomClient, mucServiceJid: string, spacesServiceJid: string, params: CreateMucInSpaceParams): Promise<{ roomJid: string; spaceNode: string; spacesServiceJid: string }> {
   const { roomJid } = await createMucRoom(client, mucServiceJid, params);
   await publishMucToSpace(client, spacesServiceJid, params.spaceNode, roomJid, { name: params.name, autojoin: true });
   return { roomJid, spaceNode: params.spaceNode, spacesServiceJid };
 }
 
-export async function createSpaceWithMuc(client: HybridClient, mucServiceJid: string, spacesServiceJid: string, params: CreateSpaceWithMucParams): Promise<{ roomJid: string; spaceNode: string; spacesServiceJid: string }> {
+export async function createSpaceWithMuc(client: MucRoomClient, mucServiceJid: string, spacesServiceJid: string, params: CreateSpaceWithMucParams): Promise<{ roomJid: string; spaceNode: string; spacesServiceJid: string }> {
   const { node: spaceNode } = await createSpaceNode(client, spacesServiceJid, { nodeId: params.spaceNodeId, name: params.spaceName, description: params.spaceDescription });
   const { roomJid } = await createMucRoom(client, mucServiceJid, { roomLocalpart: params.roomLocalpart, nick: params.nick, name: params.mucName, description: params.mucDescription, mucType: params.mucType });
   await publishMucToSpace(client, spacesServiceJid, spaceNode, roomJid, { name: params.mucName, autojoin: true });

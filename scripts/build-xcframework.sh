@@ -15,6 +15,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="$REPO_ROOT/server"
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$SERVER/target}"
+if [[ "$CARGO_TARGET_ROOT" != /* ]]; then
+  CARGO_TARGET_ROOT="$REPO_ROOT/$CARGO_TARGET_ROOT"
+fi
+export CARGO_TARGET_DIR="$CARGO_TARGET_ROOT"
+TMP_ROOT="${TMPDIR:-/tmp}"
+if [[ "$TMP_ROOT" != /* ]]; then
+  TMP_ROOT="$REPO_ROOT/$TMP_ROOT"
+fi
+mkdir -p "$TMP_ROOT"
+export TMPDIR="$TMP_ROOT"
 APPLE="$REPO_ROOT/apps/apple"
 OUT="$APPLE/Generated"
 BINDINGS_DIR="$APPLE/Waddle/RustClient/Generated"
@@ -58,17 +69,17 @@ mkdir -p "$OUT/macos" "$OUT/ios" "$OUT/ios-sim"
 
 echo "==> Creating universal macOS library (arm64 + x86_64)"
 lipo -create \
-  "$SERVER/target/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
-  "$SERVER/target/x86_64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  "$CARGO_TARGET_ROOT/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  "$CARGO_TARGET_ROOT/x86_64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.a" \
   -output "$OUT/macos/libwaddle_xmpp_client_ffi.a"
 
-cp "$SERVER/target/aarch64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+cp "$CARGO_TARGET_ROOT/aarch64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
    "$OUT/ios/libwaddle_xmpp_client_ffi.a"
 
 echo "==> Creating universal iOS Simulator library (arm64 + x86_64)"
 lipo -create \
-  "$SERVER/target/aarch64-apple-ios-sim/$PROFILE/libwaddle_xmpp_client_ffi.a" \
-  "$SERVER/target/x86_64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  "$CARGO_TARGET_ROOT/aarch64-apple-ios-sim/$PROFILE/libwaddle_xmpp_client_ffi.a" \
+  "$CARGO_TARGET_ROOT/x86_64-apple-ios/$PROFILE/libwaddle_xmpp_client_ffi.a" \
   -output "$OUT/ios-sim/libwaddle_xmpp_client_ffi.a"
 
 echo "==> Generating Swift bindings"
@@ -78,7 +89,7 @@ mkdir -p "$BINDINGS_DIR"
   --bin uniffi-bindgen \
   --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
   -- generate \
-  --library "target/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.dylib" \
+  --library "$CARGO_TARGET_ROOT/aarch64-apple-darwin/$PROFILE/libwaddle_xmpp_client_ffi.dylib" \
   --language swift \
   --out-dir "$BINDINGS_DIR")
 

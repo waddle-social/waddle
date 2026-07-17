@@ -1,4 +1,4 @@
-export { BrowserXmppClient } from "./client";
+export { BrowserXmppClient, isStaleOwnerDisposeError } from "./client";
 export type { CatchupConversationFailure, PubsubEvent } from "./client-events";
 export type {
   DmBookmarkItem,

@@ -12,7 +12,7 @@ struct XMPPTopologyDiscoveryResult: Sendable, Equatable {
     }
 }
 
-private final class DiscoveryErrorTracker: @unchecked Sendable {
+final class DiscoveryErrorTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var latestTopologyError: String?
 
@@ -42,44 +42,59 @@ private final class DiscoveryErrorTracker: @unchecked Sendable {
 // MARK: - RustXmppClient
 
 /// Thin adapter that bridges `WaddleClient` (generated UniFFI binding) to a Swift-friendly API.
-/// Implements `WaddleEventListener` so the Rust layer can push events back to Swift.
+/// Pulls one ordered UniFFI event at a time so native durability barriers
+/// complete before Rust advances the stream.
 @MainActor
 final class RustXmppClient: ObservableObject {
     @Published fileprivate(set) var connectionState: XMPPConnectionState = .disconnected
 
-    // Public event stream — consumers iterate with `for await event in rustClient.events`.
-    let events: AsyncStream<XMPPEvent>
-
-    private let continuation: AsyncStream<XMPPEvent>.Continuation
     private let waddleClient: WaddleClient
-    private let eventListener: _EventListener
-    private let discoveryErrors = DiscoveryErrorTracker()
+    private let discoveryErrors: DiscoveryErrorTracker
+    private let eventPump: NativeXMPPEventPump
 
     init(config: WaddleConfig) {
-        var continuation: AsyncStream<XMPPEvent>.Continuation!
-        self.events = AsyncStream { continuation = $0 }
-        self.continuation = continuation
-
-        let listener = _EventListener(continuation: continuation, discoveryErrors: discoveryErrors)
-        self.eventListener = listener
-        self.waddleClient = WaddleClient(config: config, listener: listener)
-        listener.owner = self
-    }
-
-    deinit {
-        continuation.finish()
+        let client = WaddleClient(config: config)
+        let discoveryErrors = DiscoveryErrorTracker()
+        self.waddleClient = client
+        self.discoveryErrors = discoveryErrors
+        self.eventPump = NativeXMPPEventPump(
+            client: client,
+            mapper: NativeXMPPEventMapper(
+                expectedAttempt: config.deliveryAttempt,
+                discoveryErrors: discoveryErrors
+            )
+        )
     }
 
     // MARK: - Connection
 
-    func connect() async {
+    func connect() async -> Bool {
         connectionState = .connecting
-        await waddleClient.connect()
+        let connected = await eventPump.connect()
+        if !connected {
+            connectionState = .disconnected
+        }
+        return connected
+    }
+
+    func nextEvent() async -> NativeXMPPPullResult {
+        let result = await eventPump.nextEvent()
+        switch result {
+        case .event(.sessionReady(_, _)):
+            connectionState = .ready
+        case .event(.disconnected), .closed:
+            connectionState = .disconnected
+        case .event, .consumed:
+            if !eventPump.isConnected {
+                connectionState = .disconnected
+            }
+        }
+        return result
     }
 
     func disconnect() async {
         connectionState = .disconnecting
-        await waddleClient.disconnect()
+        await eventPump.disconnect()
         connectionState = .disconnected
     }
 
@@ -168,7 +183,7 @@ final class RustXmppClient: ObservableObject {
 
     /// Fetch the published PEP avatar for a JID. Returns nil when the user
     /// hasn't published one or the fetch fails (errors surface via the event
-    /// listener's `on_error` path; this call never throws).
+    /// ordered event stream's error path; this call never throws).
     func requestAvatar(jid: String) async -> WaddleAvatar? {
         await waddleClient.requestAvatar(jid: jid)
     }
@@ -314,86 +329,108 @@ enum RustClientError: LocalizedError {
     }
 }
 
-// MARK: - Event listener (non-actor helper)
+// MARK: - Ordered event mapping
 
-/// Non-actor implementation of `WaddleEventListener` that forwards events to the AsyncStream.
-/// Must be a class (reference type) to satisfy UniFFI's AnyObject requirement.
-private final class _EventListener: WaddleEventListener {
-    private let continuation: AsyncStream<XMPPEvent>.Continuation
+final class NativeXMPPEventMapper {
     private let discoveryErrors: DiscoveryErrorTracker
-    // Set by `RustXmppClient.init` after the listener is constructed so the
-    // listener can drive the owning client's `connectionState` without a
-    // retain cycle. Reads on non-main threads are safe — Swift weak references
-    // are atomic; the property is only mutated on the MainActor hop below.
-    weak var owner: RustXmppClient?
+    private let expectedAttempt: WaddleDeliveryAttemptRef
 
-    init(continuation: AsyncStream<XMPPEvent>.Continuation, discoveryErrors: DiscoveryErrorTracker) {
-        self.continuation = continuation
+    init(
+        expectedAttempt: WaddleDeliveryAttemptRef,
+        discoveryErrors: DiscoveryErrorTracker = DiscoveryErrorTracker()
+    ) {
         self.discoveryErrors = discoveryErrors
+        self.expectedAttempt = expectedAttempt
     }
 
     // Exhaustive by design: a new `WaddleClientEvent` variant upstream is a
     // compile error here until the app decides how to surface it.
-    func onEvent(event: WaddleClientEvent) {
+    func map(_ event: WaddleClientEvent) -> NativeXMPPEventMapping {
         switch event {
-        case .connected:
-            onConnected()
+        case let .sessionReady(kind, attempt):
+            guard sameAttempt(attempt, expectedAttempt) else {
+                return mismatchedAttempt("session-ready", attempt)
+            }
+            logger.info("RustXmppClient: connected")
+            return .event(
+                .sessionReady(
+                    kind: makeSessionReadyKind(kind),
+                    attempt: makeDeliveryAttempt(attempt)
+                )
+            )
         case .disconnected:
-            onDisconnected()
+            return .disconnected
         case let .message(message):
-            onMessage(message: message)
+            return .event(.message(makeMessage(message)))
         case let .presence(presence):
-            onPresence(presence: presence)
+            return .event(.presence(makePresence(presence)))
         case let .mamResult(message):
-            onMamResult(message: message)
-        case let .deliveryAcked(stanzaId):
-            continuation.yield(.messageDeliveryAcked(stanzaID: stanzaId))
-        case let .deliveryFailed(stanzaId):
-            continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
+            // MAM results are returned by the explicit history calls.
+            logger.debug("RustXmppClient: MAM result id=\(message.mamId)")
+            return .consumed
+        case let .deliveryAcked(signal):
+            guard sameAttempt(signal.attempt, expectedAttempt) else {
+                return mismatchedAttempt("delivery-acked", signal.attempt)
+            }
+            return .event(
+                .messageDeliveryAcked(makeDeliverySignal(signal))
+            )
+        case let .deliveryFailed(signal):
+            guard sameAttempt(signal.attempt, expectedAttempt) else {
+                return mismatchedAttempt("delivery-failed", signal.attempt)
+            }
+            return .event(
+                .messageDeliveryFailed(makeDeliverySignal(signal))
+            )
         case let .call(callEvent):
-            onCall(event: callEvent)
+            return .event(.call(makeCallEvent(callEvent)))
         case let .authenticationFailed(condition):
-            // Terminal for the presented token — surfaced through the
-            // existing error path; AppModel classifies and re-authenticates.
-            onError(description: "SASL authentication failed: \(condition)")
-        case let .resumeStateChanged(state):
+            let mapped = makeSaslCondition(condition)
+            if mapped.retryDisposition != .retry {
+                return .selfFence(.authenticationFailed(mapped))
+            }
+            return .event(.authenticationFailed(mapped))
+        case let .resumeFailed(transition, affected):
+            // Apple currently never supplies a resume snapshot. Receiving
+            // this transition is therefore a contradictory native state;
+            // self-fence without issuing another native pull.
+            return .selfFence(
+                .error(
+                    "Unexpected failed-resume transition \(transition.old.attemptId.value) affecting \(affected.count) stanzas"
+                )
+            )
+        case let .resumeStateChanged(attempt, state):
+            guard sameAttempt(attempt, expectedAttempt) else {
+                return mismatchedAttempt("resume-state", attempt)
+            }
             // The Apple client does not persist XEP-0198 resume state yet;
             // it reconnects with a fresh stream (`WaddleConfig.resumeState`
             // stays nil in `AppModel+Xmpp.swift`).
             logger.debug("RustXmppClient: resume snapshot \(state == nil ? "cleared" : "updated")")
+            return .consumed
         case let .error(description):
-            onError(description: description)
+            print("[RustXmppClient] Rust FFI onError: \(description)")
+            if discoveryErrors.record(description) {
+                return .consumed
+            }
+            return .event(.error(description))
         }
     }
 
-    private func onConnected() {
-        let owner = self.owner
-        Task { @MainActor in
-            owner?.connectionState = .ready
-            logger.info("RustXmppClient: connected")
-        }
-        continuation.yield(.sessionReady)
+    private func mismatchedAttempt(
+        _ event: String,
+        _ received: WaddleDeliveryAttemptRef
+    ) -> NativeXMPPEventMapping {
+        .selfFence(
+            .error(
+                "Native \(event) attempt mismatch: expected \(expectedAttempt.attemptId.value)/\(expectedAttempt.connectionGeneration.value), received \(received.attemptId.value)/\(received.connectionGeneration.value)"
+            )
+        )
     }
 
-    private func onDisconnected() {
-        let owner = self.owner
-        Task { @MainActor in
-            owner?.connectionState = .disconnected
-        }
-        continuation.yield(.disconnected)
-    }
-
-    private func onError(description: String) {
-        print("[RustXmppClient] Rust FFI onError: \(description)")
-        if discoveryErrors.record(description) {
-            return
-        }
-        continuation.yield(.error(description))
-    }
-
-    private func onMessage(message: WaddleMessage) {
+    private func makeMessage(_ message: WaddleMessage) -> XMPPMessageEvent {
         let timestamp = message.timestamp.flatMap { parseRFC3339($0) }
-        let event = XMPPMessageEvent(
+        return XMPPMessageEvent(
             from: message.from,
             to: message.to,
             type: message.messageType,
@@ -422,11 +459,10 @@ private final class _EventListener: WaddleEventListener {
             parentThreadID: message.parentThreadId,
             isSticker: message.isSticker
         )
-        continuation.yield(.message(event))
     }
 
-    private func onPresence(presence: WaddlePresence) {
-        let event = XMPPPresenceEvent(
+    private func makePresence(_ presence: WaddlePresence) -> XMPPPresenceEvent {
+        XMPPPresenceEvent(
             from: presence.from,
             to: presence.to,
             type: presence.presenceType,
@@ -436,26 +472,62 @@ private final class _EventListener: WaddleEventListener {
             mucAffiliation: presence.mucAffiliation.map(makeMucAffiliation),
             mucRole: presence.mucRole.map(makeMucRole)
         )
-        continuation.yield(.presence(event))
-    }
-
-    private func onMamResult(message: WaddleArchivedMessage) {
-        // MAM results are delivered via the fetchDmHistory / fetchRoomHistory return values;
-        // individual callbacks here are informational only.
-        logger.debug("RustXmppClient: MAM result id=\(message.mamId)")
-    }
-
-    private func onCall(event: WaddleCallEvent) {
-        // XEP-0353 JMI + XEP-0166 Jingle session control events come
-        // through here pre-typed; the AppModel consumes them to drive
-        // the ringing UI, the floating PIP window, and the hang-up
-        // path. Mapping to a Swift-native value (`XMPPCallEvent`)
-        // keeps UniFFI's generated types out of the AppModel surface.
-        continuation.yield(.call(makeCallEvent(event)))
     }
 }
 
 // MARK: - Conversion helpers
+
+func sameAttempt(
+    _ lhs: WaddleDeliveryAttemptRef,
+    _ rhs: WaddleDeliveryAttemptRef
+) -> Bool {
+    lhs.attemptId.value == rhs.attemptId.value
+        && lhs.connectionGeneration.value == rhs.connectionGeneration.value
+}
+
+func makeDeliveryAttempt(
+    _ attempt: WaddleDeliveryAttemptRef
+) -> XMPPDeliveryAttemptRef {
+    XMPPDeliveryAttemptRef(
+        id: attempt.attemptId.value,
+        connectionGeneration: attempt.connectionGeneration.value
+    )
+}
+
+func makeDeliverySignal(
+    _ signal: WaddleNativeDeliverySignal
+) -> XMPPDeliverySignal {
+    XMPPDeliverySignal(
+        attempt: makeDeliveryAttempt(signal.attempt),
+        stanzaID: signal.stanzaId.value
+    )
+}
+
+func makeSessionReadyKind(
+    _ kind: WaddleSessionReadyKind
+) -> XMPPSessionReadyKind {
+    switch kind {
+    case .fresh: return .fresh
+    case .resumed: return .resumed
+    }
+}
+
+func makeSaslCondition(_ condition: WaddleSaslCondition) -> XMPPSaslCondition {
+    switch condition {
+    case .aborted: return .aborted
+    case .accountDisabled: return .accountDisabled
+    case .credentialsExpired: return .credentialsExpired
+    case .encryptionRequired: return .encryptionRequired
+    case .incorrectEncoding: return .incorrectEncoding
+    case .invalidAuthzid: return .invalidAuthzid
+    case .invalidMechanism: return .invalidMechanism
+    case .malformedRequest: return .malformedRequest
+    case .mechanismTooWeak: return .mechanismTooWeak
+    case .notAuthorized: return .notAuthorized
+    case .temporaryAuthFailure: return .temporaryAuthFailure
+    case .unknown: return .unknown
+    }
+}
 
 /// Combine the two `Option<u32>` UniFFI fields into a `Range<Int>?`. A range is
 /// only produced when both ends are present and `end > start`.

@@ -46,12 +46,20 @@ class ChannelViewModel(
     companion object {
         fun factory(graph: AppGraph, roomJid: String): ViewModelProvider.Factory =
             viewModelFactoryOf {
+                val ownerBareJid = graph.currentSession.value
+                    ?.jid
+                    ?.substringBefore('/')
+                    ?.takeIf(String::isNotBlank)
                 ChannelViewModel(
                     sessionManager = graph.sessionManager,
                     roomJid = roomJid,
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                     uploader = graph.attachmentUploader,
-                    onConversationRead = graph.messageNotifier::clearConversationNotification,
+                    onConversationRead = { conversationJid ->
+                        ownerBareJid?.let {
+                            graph.messageNotifier.clearConversationNotification(it, conversationJid)
+                        }
+                    },
                 )
             }
     }

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import {
+  BrowserXmppClient,
+  type BrowserXmppClientOptions,
+} from "../src/lib/xmpp-client";
 import {
   clearDmCallActivities,
   readDmCallActivity,
@@ -9,6 +12,8 @@ import type {
   PersistedSmResumeState,
   ResumePersistence,
 } from "../src/lib/xmpp/resume-persistence";
+import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 
 function session(): WaddleSession {
   return {
@@ -23,12 +28,69 @@ async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void
   await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
 }
 
+const createdClients: BrowserXmppClient[] = [];
+
+function createTestClient(
+  options: BrowserXmppClientOptions = {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  },
+): BrowserXmppClient {
+  const client = new BrowserXmppClient(session(), options);
+  createdClients.push(client);
+  return client;
+}
+
+async function bindCurrentGeneration(client: BrowserXmppClient): Promise<void> {
+  const state = client as unknown as {
+    connectEpoch: number;
+    outboundQueueHydration: Promise<void>;
+    outboundQueue: {
+      beginConnectionGeneration: (generation: number) => number;
+      whenQuiescent: () => Promise<void>;
+    };
+  };
+  await state.outboundQueueHydration;
+  await state.outboundQueue.whenQuiescent();
+  state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
+}
+
+function testPersistence(
+  owner: string,
+  overrides: Partial<ResumePersistence>,
+): BrowserXmppClientOptions {
+  const durableRuntimeStore = overrides.durableRuntimeStore
+    ?? new MemoryDurableOutboundStore();
+  return {
+    durableRuntimeStore,
+    createResumePersistence: (lifecycleId, sharedStore) => ({
+      ...nullResumePersistence,
+      ...overrides,
+      lifecycleId,
+      durableRuntimeStore: sharedStore,
+      outboundOwnerHint: () => ({
+        ownerId: `dm-call-${owner}`,
+        ownerInstanceId: lifecycleId.value,
+      }),
+      acceptOutboundOwner: () => undefined,
+    }),
+  };
+}
+
 describe("DM call activity hydration", () => {
   beforeEach(() => {
     clearDmCallActivities();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const client of createdClients) {
+      await client.whenLifecycleQuiescent();
+      await bindCurrentGeneration(client);
+      const state = client as unknown as { xmpp: null; connected: boolean };
+      state.xmpp = null;
+      state.connected = false;
+    }
+    await Promise.all(createdClients.map((client) => client.dispose()));
+    createdClients.length = 0;
     clearDmCallActivities();
   });
 
@@ -37,10 +99,13 @@ describe("DM call activity hydration", () => {
       previd: "prev",
       inboundH: 1,
       outboundH: 2,
+      unhandledOutboundEntries: [],
       resource: "web-existing-resource",
     };
     const consumedStates: PersistedSmResumeState[] = [];
-    const persistence: ResumePersistence = {
+    const durableRuntimeStore = new MemoryDurableOutboundStore();
+    const persistenceOverrides: Partial<ResumePersistence> = {
+      durableRuntimeStore,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
@@ -60,15 +125,12 @@ describe("DM call activity hydration", () => {
         sm = null;
         return { kind: "committed", value: removed };
       },
-      preparePagehideHandoff: () => undefined,
-      reclaimPagehideOwnership: () => undefined,
-      loadJoinedRooms: () => [],
-      saveJoinedRooms: () => undefined,
-      clearJoinedRooms: () => undefined,
     };
+    const firstPersistence = testPersistence("resource-first", persistenceOverrides);
+    const secondPersistence = testPersistence("resource-second", persistenceOverrides);
 
-    const client = new BrowserXmppClient(session(), persistence);
-    const secondClient = new BrowserXmppClient(session(), persistence);
+    const client = createTestClient(firstPersistence);
+    const secondClient = createTestClient(secondPersistence);
     await Promise.all([
       waitForOutboundHydration(client),
       waitForOutboundHydration(secondClient),
@@ -82,7 +144,9 @@ describe("DM call activity hydration", () => {
   test("does not publish transient reconnect resources into shared SM persistence", async () => {
     let sm: PersistedSmResumeState | null = null;
     const savedStates: PersistedSmResumeState[] = [];
-    const persistence: ResumePersistence = {
+    const durableRuntimeStore = new MemoryDurableOutboundStore();
+    const persistenceOverrides: Partial<ResumePersistence> = {
+      durableRuntimeStore,
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
@@ -102,18 +166,21 @@ describe("DM call activity hydration", () => {
         sm = null;
         return { kind: "committed", value: removed };
       },
-      preparePagehideHandoff: () => undefined,
-      reclaimPagehideOwnership: () => undefined,
-      loadJoinedRooms: () => [],
-      saveJoinedRooms: () => undefined,
-      clearJoinedRooms: () => undefined,
     };
-    const client = new BrowserXmppClient(session(), persistence);
-    await waitForOutboundHydration(client);
+    const client = createTestClient(
+      testPersistence("transient-first", persistenceOverrides),
+    );
+    await bindCurrentGeneration(client);
     const resource = client.fullJid.split("/")[1];
     const xmpp = {
-      get_resume_state_handle: () => ({ free: () => undefined }),
-      get_resume_state: () => ({ previd: "prev", inboundH: 1, outboundH: 2 }),
+      get_resume_state: () => ({
+        previd: "prev",
+        inboundH: 1,
+        outboundH: 2,
+        unhandledOutboundEntries: [],
+      }),
+      disconnect: async () => undefined,
+      dispose: () => undefined,
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
@@ -121,7 +188,9 @@ describe("DM call activity hydration", () => {
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
 
-    const secondClient = new BrowserXmppClient(session(), persistence);
+    const secondClient = createTestClient(
+      testPersistence("transient-second", persistenceOverrides),
+    );
     await waitForOutboundHydration(secondClient);
 
     expect(savedStates).toEqual([]);
@@ -131,8 +200,9 @@ describe("DM call activity hydration", () => {
   test("pagehide persists real SM state with resource, including reconnect fallback state", async () => {
     let sm: PersistedSmResumeState | null = null;
     const savedStates: PersistedSmResumeState[] = [];
+    const handedOffStates: Array<PersistedSmResumeState | null> = [];
     const pagehideOrder: string[] = [];
-    const persistence: ResumePersistence = {
+    const persistence = testPersistence("pagehide", {
       loadCatchup: () => null,
       saveCatchup: () => undefined,
       clearCatchup: () => undefined,
@@ -153,47 +223,75 @@ describe("DM call activity hydration", () => {
         sm = null;
         return { kind: "committed", value: removed };
       },
-      preparePagehideHandoff: () => {
+      preparePagehideHandoff: async (state) => {
         pagehideOrder.push("prepare-handoff");
+        handedOffStates.push(state);
+        return {
+          kind: "committed",
+          value: {
+            handoff: {
+              token: "pagehide-test-handoff",
+              expiresAt: Date.now() + 30_000,
+              authorityEpoch: 1,
+              ownerGeneration: 1,
+            },
+            smVersion: 1,
+          },
+        };
       },
-      reclaimPagehideOwnership: () => undefined,
-      loadJoinedRooms: () => [],
-      saveJoinedRooms: () => undefined,
-      clearJoinedRooms: () => undefined,
-    };
-    const client = new BrowserXmppClient(session(), persistence);
-    await waitForOutboundHydration(client);
+    });
+    const client = createTestClient(persistence);
+    await bindCurrentGeneration(client);
     const resource = client.fullJid.split("/")[1];
     const requestStreamManagementAck = mock(async () => {
       pagehideOrder.push("request-ack");
     });
     const xmpp = {
-      get_resume_state_handle: () => ({ free: () => undefined }),
       get_resume_state: () => {
         pagehideOrder.push("snapshot-sm");
-        return { previd: "prev-live", inboundH: 7, outboundH: 9 };
+        return {
+          previd: "prev-live",
+          inboundH: 7,
+          outboundH: 9,
+          unhandledOutboundEntries: [],
+        };
       },
       request_stream_management_ack: requestStreamManagementAck,
+      disconnect: async () => undefined,
+      dispose: () => undefined,
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
 
     client.prepareForPageHide();
+    await client.whenLifecycleQuiescent();
     expect(pagehideOrder).toEqual([
       "request-ack",
       "snapshot-sm",
       "prepare-handoff",
-      "save-sm",
     ]);
     (client as unknown as { handleDisconnected: (xmpp: typeof xmpp) => void }).handleDisconnected(xmpp);
     (client as unknown as { clearReconnectTimer: () => void }).clearReconnectTimer();
     client.persistResumeStateForPageHide();
-    await Promise.resolve();
+    await client.whenLifecycleQuiescent();
 
-    expect(savedStates).toEqual([
-      { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
-      { previd: "prev-live", inboundH: 7, outboundH: 9, resource },
+    expect(handedOffStates).toEqual([
+      {
+        previd: "prev-live",
+        inboundH: 7,
+        outboundH: 9,
+        unhandledOutboundEntries: [],
+        resource,
+      },
+      {
+        previd: "prev-live",
+        inboundH: 7,
+        outboundH: 9,
+        unhandledOutboundEntries: [],
+        resource,
+      },
     ]);
+    expect(savedStates).toEqual([]);
     expect(requestStreamManagementAck).toHaveBeenCalledTimes(1);
   });
 
@@ -241,7 +339,7 @@ describe("DM call activity hydration", () => {
     const fetchPersonalHistoryPage = mock(async (_max: number, pageParam: unknown) => {
       return (pageParam as { type: string }).type === "latest" ? latestPage : olderPage;
     });
-    const client = new BrowserXmppClient(session());
+    const client = createTestClient();
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { xmpp: { fetch_personal_history_page: typeof fetchPersonalHistoryPage } }).xmpp = {
       fetch_personal_history_page: fetchPersonalHistoryPage,
@@ -314,7 +412,7 @@ describe("DM call activity hydration", () => {
     const fetchPersonalHistoryPage = mock(async (_max: number, pageParam: unknown) => {
       return (pageParam as { type: string }).type === "latest" ? latestPage : olderPage;
     });
-    const client = new BrowserXmppClient(session());
+    const client = createTestClient();
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { xmpp: { fetch_personal_history_page: typeof fetchPersonalHistoryPage } }).xmpp = {
       fetch_personal_history_page: fetchPersonalHistoryPage,
@@ -361,7 +459,7 @@ describe("DM call activity hydration", () => {
     const fetchPersonalHistoryPage = mock(() => new Promise<typeof page>((resolve) => {
       resolveFetch = resolve;
     }));
-    const client = new BrowserXmppClient(session());
+    const client = createTestClient();
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { xmpp: { fetch_personal_history_page: typeof fetchPersonalHistoryPage } }).xmpp = {
       fetch_personal_history_page: fetchPersonalHistoryPage,
@@ -408,7 +506,7 @@ describe("DM call activity hydration", () => {
     const fetchPersonalHistoryPage = mock(() => new Promise<typeof page>((resolve) => {
       resolveFetch = resolve;
     }));
-    const client = new BrowserXmppClient(session());
+    const client = createTestClient();
     (client as unknown as { connected: boolean }).connected = true;
     (client as unknown as { xmpp: { fetch_personal_history_page: typeof fetchPersonalHistoryPage } }).xmpp = {
       fetch_personal_history_page: fetchPersonalHistoryPage,

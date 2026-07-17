@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -16,10 +17,12 @@ import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
-import social.waddle.client.ffi.WaddleEventListener
+import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
+import social.waddle.client.ffi.WaddleDeliveryStanzaId
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleNativeDeliverySignal
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
@@ -29,10 +32,13 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSessionReadyKind
+import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 fun testSessionInfo(
     sessionId: String = "sess-1",
@@ -67,14 +73,20 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
     private val mutex = Mutex()
     private val state = MutableStateFlow<Preferences>(emptyPreferences())
 
+    val updateAttempts = AtomicInteger()
+
     @Volatile
     var failNextUpdate: Boolean = false
+
+    @Volatile
+    var failAllUpdates: Boolean = false
 
     override val data: Flow<Preferences> = state
 
     override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
         mutex.withLock {
-            if (failNextUpdate) {
+            updateAttempts.incrementAndGet()
+            if (failAllUpdates || failNextUpdate) {
                 failNextUpdate = false
                 error("injected preferences write failure")
             }
@@ -88,37 +100,104 @@ class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {
 }
 
 /**
- * Captures the per-attempt listener + config so tests can drive the
- * session manager by firing FFI events, without loading the native lib.
+ * Captures the per-attempt pull stream + config so tests can drive the
+ * session manager by supplying FFI events without loading the native lib.
  */
 class FakeClientFactory : ClientFactory {
     val clients = CopyOnWriteArrayList<FakeWaddleClient>()
     val configs = CopyOnWriteArrayList<WaddleConfig>()
-    val listeners = CopyOnWriteArrayList<WaddleEventListener>()
 
     @Volatile
-    private var listener: WaddleEventListener? = null
+    private var client: FakeWaddleClient? = null
 
-    override fun create(config: WaddleConfig, listener: WaddleEventListener): WaddleClientInterface {
-        this.listener = listener
-        listeners += listener
+    override fun create(config: WaddleConfig): WaddleClientInterface {
         configs += config
-        return FakeWaddleClient().also { clients += it }
+        return FakeWaddleClient().also {
+            client = it
+            clients += it
+        }
     }
 
     /**
-     * Fire an FFI event at the MOST RECENT attempt's listener. Only the
+     * Supply an FFI event to the MOST RECENT attempt. Only the
      * latest attempt is addressable: a test that drives a reconnection
      * while asserting on the previous attempt's event flow would deliver
-     * here to the wrong listener without any failure.
+     * here to the wrong pull stream without any failure.
      */
     fun emit(event: WaddleClientEvent) {
-        checkNotNull(listener) { "no client created yet" }.onEvent(event)
+        checkNotNull(client) { "no client created yet" }.emit(event)
     }
 
     /** Fire an event at an immutable historical attempt for stale-generation tests. */
     fun emitAt(attemptIndex: Int, event: WaddleClientEvent) {
-        listeners[attemptIndex].onEvent(event)
+        clients[attemptIndex].emit(event)
+    }
+
+    fun emitReady(
+        kind: WaddleSessionReadyKind = WaddleSessionReadyKind.FRESH,
+        attemptIndex: Int = configs.lastIndex,
+    ) {
+        emitAt(
+            attemptIndex,
+            WaddleClientEvent.SessionReady(kind, configs[attemptIndex].deliveryAttempt),
+        )
+    }
+
+    fun emitAcked(
+        clientStanzaId: String,
+        attemptIndex: Int = configs.lastIndex,
+    ) {
+        emitAt(
+            attemptIndex,
+            WaddleClientEvent.DeliveryAcked(
+                WaddleNativeDeliverySignal(
+                    attempt = configs[attemptIndex].deliveryAttempt,
+                    stanzaId = WaddleDeliveryStanzaId(clientStanzaId),
+                ),
+            ),
+        )
+    }
+
+    fun emitFailed(
+        clientStanzaId: String,
+        attemptIndex: Int = configs.lastIndex,
+    ) {
+        emitAt(
+            attemptIndex,
+            WaddleClientEvent.DeliveryFailed(
+                WaddleNativeDeliverySignal(
+                    attempt = configs[attemptIndex].deliveryAttempt,
+                    stanzaId = WaddleDeliveryStanzaId(clientStanzaId),
+                ),
+            ),
+        )
+    }
+
+    fun emitResumeStateChanged(
+        state: WaddleSmResumeState?,
+        attemptIndex: Int = configs.lastIndex,
+    ) {
+        emitAt(
+            attemptIndex,
+            WaddleClientEvent.ResumeStateChanged(
+                attempt = configs[attemptIndex].deliveryAttempt,
+                state = state,
+            ),
+        )
+    }
+
+    fun emitResumeFailed(
+        transition: WaddleDeliveryAttemptTransition,
+        affectedStanzaIds: Collection<String>,
+        attemptIndex: Int = configs.lastIndex,
+    ) {
+        emitAt(
+            attemptIndex,
+            WaddleClientEvent.ResumeFailed(
+                transition = transition,
+                affected = affectedStanzaIds.map(::WaddleDeliveryStanzaId),
+            ),
+        )
     }
 }
 
@@ -137,6 +216,7 @@ data class SearchCall(
  * dispatcher.
  */
 class FakeWaddleClient : WaddleClientInterface {
+    private val events = Channel<WaddleClientEvent>(Channel.UNLIMITED)
     @Volatile
     var connectCalls = 0
 
@@ -156,11 +236,11 @@ class FakeWaddleClient : WaddleClientInterface {
     var mamPage: WaddleMamPage =
         WaddleMamPage(messages = emptyList(), firstId = null, lastId = null, isComplete = true)
 
-    /** Recorded (recipientJid, body) sends and the canned outcome. */
+    /** Recorded (recipientJid, body) sends and an optional canned outcome. */
     val sendCalls = CopyOnWriteArrayList<Pair<String, String>>()
 
     @Volatile
-    var sendOutcome: WaddleSendMessageOutcome = WaddleSendMessageOutcome.Sent("sent-1")
+    var sendOutcome: WaddleSendMessageOutcome? = null
 
     /** Options captured per send (the manager passes the stanza id here). */
     val sendOptions = CopyOnWriteArrayList<WaddleSendOptions?>()
@@ -171,12 +251,39 @@ class FakeWaddleClient : WaddleClientInterface {
     /** Runs after the call is recorded but before its outcome is returned. */
     var beforeSendReturns: (suspend () -> Unit)? = null
 
+    /**
+     * Number of serialized native pulls begun. Tests use this to prove a
+     * durability barrier completes before Kotlin requests the next event.
+     */
+    val nextEventCalls = AtomicInteger()
+
+    /** Pulls currently suspended in the fake native client. */
+    val inFlightNextEvents = AtomicInteger()
+
+    /** High-water mark used to reject accidental native prefetch. */
+    val maxInFlightNextEvents = AtomicInteger()
+
     override suspend fun connect() {
         connectCalls += 1
     }
 
     override suspend fun disconnect() {
         disconnectCalls += 1
+    }
+
+    override suspend fun nextEvent(): WaddleClientEvent {
+        nextEventCalls.incrementAndGet()
+        val inFlight = inFlightNextEvents.incrementAndGet()
+        maxInFlightNextEvents.updateAndGet { previous -> maxOf(previous, inFlight) }
+        return try {
+            events.receive()
+        } finally {
+            inFlightNextEvents.decrementAndGet()
+        }
+    }
+
+    fun emit(event: WaddleClientEvent) {
+        events.trySend(event)
     }
 
     override suspend fun discoverTopology(): WaddleTopology =
@@ -283,7 +390,7 @@ class FakeWaddleClient : WaddleClientInterface {
         sendCalls += peerJid to body
         sendOptions += options
         beforeSendReturns?.invoke()
-        return sendOutcomes.pollFirst() ?: sendOutcome
+        return sendOutcomes.pollFirst() ?: sendOutcome ?: echoSent(options)
     }
 
     override suspend fun sendGroupchatMessage(
@@ -294,7 +401,7 @@ class FakeWaddleClient : WaddleClientInterface {
         sendCalls += roomJid to body
         sendOptions += options
         beforeSendReturns?.invoke()
-        return sendOutcomes.pollFirst() ?: sendOutcome
+        return sendOutcomes.pollFirst() ?: sendOutcome ?: echoSent(options)
     }
     override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
 
@@ -484,6 +591,11 @@ class FakeWaddleClient : WaddleClientInterface {
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
     ): WaddleRegisterDeviceResult? = unused()
+
+    private fun echoSent(options: WaddleSendOptions?): WaddleSendMessageOutcome =
+        options?.stanzaId
+            ?.let(WaddleSendMessageOutcome::Sent)
+            ?: WaddleSendMessageOutcome.Error
 
     private fun unused(): Nothing = throw UnsupportedOperationException("not exercised by the session manager")
 }

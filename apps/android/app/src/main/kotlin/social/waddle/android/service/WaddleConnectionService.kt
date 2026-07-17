@@ -18,6 +18,7 @@ import social.waddle.android.MainActivity
 import social.waddle.android.R
 import social.waddle.android.WaddleApplication
 import social.waddle.android.client.ConnectionState
+import social.waddle.android.client.SaslRetryDisposition
 
 /**
  * `specialUse` foreground service keeping the XMPP socket alive without
@@ -96,7 +97,17 @@ class WaddleConnectionService : Service() {
         is ConnectionState.Reconnecting ->
             getString(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> getString(R.string.connection_offline)
-        ConnectionState.AuthFailed -> getString(R.string.connection_auth_failed)
+        is ConnectionState.AuthenticationStopped -> when (state.disposition) {
+            SaslRetryDisposition.RETRY -> getString(R.string.connection_failed)
+            SaslRetryDisposition.STOP_CREDENTIAL ->
+                getString(R.string.connection_auth_failed)
+            SaslRetryDisposition.STOP_CONFIGURATION ->
+                getString(R.string.connection_auth_configuration_failed)
+            SaslRetryDisposition.STOP_ABORTED ->
+                getString(R.string.connection_auth_aborted)
+            SaslRetryDisposition.STOP_UNKNOWN ->
+                getString(R.string.connection_auth_unknown)
+        }
         ConnectionState.Failed -> getString(R.string.connection_failed)
         ConnectionState.Idle -> getString(R.string.connection_status_idle)
     }

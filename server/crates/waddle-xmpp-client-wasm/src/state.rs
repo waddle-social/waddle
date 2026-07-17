@@ -1,5 +1,41 @@
 use super::*;
 
+#[wasm_bindgen(typescript_custom_section)]
+const RESUME_STATE_TYPESCRIPT: &str = r#"
+export type WaddleResumeStanzaKind = "message" | "presence" | "iq";
+export interface WaddleResumeXmlName {
+    readonly namespace: string;
+    readonly localName: string;
+}
+export interface WaddleResumeXmlAttribute {
+    readonly name: WaddleResumeXmlName;
+    readonly value: string;
+}
+export type WaddleResumeXmlToken =
+    | {
+        readonly kind: "start";
+        readonly name: WaddleResumeXmlName;
+        readonly attributes: WaddleResumeXmlAttribute[];
+    }
+    | { readonly kind: "text"; readonly value: string }
+    | { readonly kind: "end" };
+export interface WaddleResumeStanzaSnapshot {
+    readonly stanzaKind: WaddleResumeStanzaKind;
+    readonly tokens: WaddleResumeXmlToken[];
+}
+export interface WaddleResumeEntrySnapshot {
+    readonly stanza: WaddleResumeStanzaSnapshot;
+    readonly sentAtEpochMs: number;
+}
+export interface WaddleResumeStateSnapshot {
+    readonly previd: string;
+    readonly inboundH: number;
+    readonly outboundH: number;
+    readonly unhandledOutboundEntries: WaddleResumeEntrySnapshot[];
+    readonly maxResumeSeconds?: number;
+}
+"#;
+
 pub(crate) type DriverResult<T> = Result<T, ClientError>;
 
 pub(crate) trait WasmDriverWire {
@@ -12,11 +48,6 @@ pub(crate) trait WasmDriverWire {
 
 pub(crate) trait DriverTimerBackend {
     fn wait(&self, delay_ms: Option<u64>) -> futures::future::LocalBoxFuture<'static, ()>;
-}
-
-#[wasm_bindgen]
-pub struct WaddleResumeState {
-    pub(crate) inner: waddle_xmpp_client::SmResumeState,
 }
 
 #[wasm_bindgen]
@@ -46,108 +77,93 @@ impl WaddleConfig {
         }
     }
 
-    pub fn with_resume_state(
-        &mut self,
-        previd: String,
-        inbound_h: u32,
-        outbound_h: u32,
-    ) -> Result<(), JsValue> {
-        self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(previd, inbound_h, outbound_h)
-                .map_err(|err| js_error(err.to_string()))?,
-        );
+    pub fn with_resume_state(&mut self, state: JsValue) -> Result<(), JsValue> {
+        let state = serde_wasm_bindgen::from_value::<JsResumeStateInput>(state)
+            .map_err(ResumeWasmBoundaryError::from)
+            .and_then(resume_state_from_input)
+            .map_err(|error| js_error(error.to_string()))?;
+        self.resume_state = Some(state);
         Ok(())
-    }
-
-    pub fn with_resume_state_with_max(
-        &mut self,
-        previd: String,
-        inbound_h: u32,
-        outbound_h: u32,
-        max_resume_seconds: u32,
-    ) -> Result<(), JsValue> {
-        self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(previd, inbound_h, outbound_h)
-                .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
-                .map_err(|err| js_error(err.to_string()))?,
-        );
-        Ok(())
-    }
-
-    pub fn with_resume_state_entries(
-        &mut self,
-        previd: String,
-        inbound_h: u32,
-        outbound_h: u32,
-        entries: JsValue,
-    ) -> Result<(), JsValue> {
-        let entries = parse_resume_entries(entries)?;
-        self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
-                previd, inbound_h, outbound_h, entries,
-            )
-            .map_err(|err| js_error(err.to_string()))?,
-        );
-        Ok(())
-    }
-
-    pub fn with_resume_state_entries_with_max(
-        &mut self,
-        previd: String,
-        inbound_h: u32,
-        outbound_h: u32,
-        entries: JsValue,
-        max_resume_seconds: u32,
-    ) -> Result<(), JsValue> {
-        let entries = parse_resume_entries(entries)?;
-        self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
-                previd, inbound_h, outbound_h, entries,
-            )
-            .map(|state| state.with_max_resume_seconds(Some(max_resume_seconds)))
-            .map_err(|err| js_error(err.to_string()))?,
-        );
-        Ok(())
-    }
-
-    pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
-        self.resume_state = Some(state.inner.clone());
     }
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JsResumeStateInput {
+    previd: String,
+    inbound_h: u32,
+    outbound_h: u32,
+    unhandled_outbound_entries: Vec<JsResumeEntryInput>,
+    max_resume_seconds: Option<u32>,
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JsResumeEntryInput {
     stanza: waddle_xmpp_client::ResumeStanzaSnapshot,
     sent_at_epoch_ms: f64,
 }
 
-fn parse_resume_entries(
-    entries: JsValue,
-) -> Result<Vec<waddle_xmpp_client::SmResumeEntry>, JsValue> {
-    let entries: Vec<JsResumeEntryInput> = serde_wasm_bindgen::from_value(entries)
-        .map_err(|err| js_error(format!("invalid resume entries: {err}")))?;
-    entries
-        .into_iter()
-        .map(|entry| resume_entry_from_input(entry).map_err(js_error))
-        .collect()
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResumeWasmBoundaryError {
+    #[error("invalid resume entries: {0}")]
+    Deserialize(#[from] serde_wasm_bindgen::Error),
+    #[error("resume sentAtEpochMs must be a finite safe integer")]
+    InvalidTimestamp,
+    #[error("resume sentAtEpochMs is outside the supported range")]
+    TimestampOutOfRange,
+    #[error("resume maxResumeSeconds must be greater than zero")]
+    InvalidMaxResumeSeconds,
+    #[error(transparent)]
+    ResumeStanza(#[from] waddle_xmpp_client::ResumeStanzaError),
+    #[error(transparent)]
+    Client(#[from] waddle_xmpp_client::ClientError),
 }
 
-fn resume_entry_from_input(
-    entry: JsResumeEntryInput,
-) -> Result<waddle_xmpp_client::SmResumeEntry, String> {
-    if !entry.sent_at_epoch_ms.is_finite()
-        || entry.sent_at_epoch_ms.fract() != 0.0
-        || entry.sent_at_epoch_ms.abs() > 9_007_199_254_740_991.0
-    {
-        return Err("invalid resume sentAtEpochMs".to_owned());
+fn resume_state_from_input(
+    state: JsResumeStateInput,
+) -> Result<waddle_xmpp_client::SmResumeState, ResumeWasmBoundaryError> {
+    if state.max_resume_seconds == Some(0) {
+        return Err(ResumeWasmBoundaryError::InvalidMaxResumeSeconds);
     }
-    let sent_at_epoch_ms = entry.sent_at_epoch_ms as i64;
-    let sent_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(sent_at_epoch_ms)
-        .ok_or_else(|| "resume sentAtEpochMs is outside the supported range".to_owned())?;
-    let stanza = waddle_xmpp_client::ResumeStanza::from_snapshot(entry.stanza)
-        .map_err(|err| format!("invalid resume stanza: {err}"))?;
-    Ok(waddle_xmpp_client::SmResumeEntry::new(stanza, sent_at))
+    let mut sent_at = Vec::with_capacity(state.unhandled_outbound_entries.len());
+    let snapshots = state
+        .unhandled_outbound_entries
+        .into_iter()
+        .map(|entry| {
+            sent_at.push(resume_timestamp(entry.sent_at_epoch_ms)?);
+            Ok(entry.stanza)
+        })
+        .collect::<Result<Vec<_>, ResumeWasmBoundaryError>>()?;
+    let stanzas = waddle_xmpp_client::ResumeStanza::from_snapshot_batch(snapshots)?;
+    let entries = stanzas
+        .into_iter()
+        .zip(sent_at)
+        .map(|(stanza, sent_at)| waddle_xmpp_client::SmResumeEntry::new(stanza, sent_at));
+    Ok(
+        waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
+            state.previd,
+            state.inbound_h,
+            state.outbound_h,
+            entries,
+        )?
+        .with_max_resume_seconds(state.max_resume_seconds),
+    )
+}
+
+fn resume_timestamp(
+    sent_at_epoch_ms: f64,
+) -> Result<chrono::DateTime<chrono::Utc>, ResumeWasmBoundaryError> {
+    const JS_DATE_LIMIT_MS: f64 = 8_640_000_000_000_000.0;
+    if !sent_at_epoch_ms.is_finite()
+        || sent_at_epoch_ms.fract() != 0.0
+        || sent_at_epoch_ms < 0.0
+        || sent_at_epoch_ms > JS_DATE_LIMIT_MS
+    {
+        return Err(ResumeWasmBoundaryError::InvalidTimestamp);
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(sent_at_epoch_ms as i64)
+        .ok_or(ResumeWasmBoundaryError::TimestampOutOfRange)
 }
 
 #[derive(Clone)]
@@ -177,7 +193,6 @@ pub(crate) struct JsResumeState {
     pub(crate) previd: String,
     pub(crate) inbound_h: u32,
     pub(crate) outbound_h: u32,
-    pub(crate) has_unacked_outbound: bool,
     pub(crate) unhandled_outbound_entries: Vec<JsResumeEntry>,
     pub(crate) max_resume_seconds: Option<u32>,
 }
@@ -189,23 +204,30 @@ pub(crate) struct JsResumeEntry {
     pub(crate) sent_at_epoch_ms: f64,
 }
 
-impl From<waddle_xmpp_client::SmResumeState> for JsResumeState {
-    fn from(value: waddle_xmpp_client::SmResumeState) -> Self {
+impl TryFrom<waddle_xmpp_client::SmResumeState> for JsResumeState {
+    type Error = ResumeWasmBoundaryError;
+
+    fn try_from(value: waddle_xmpp_client::SmResumeState) -> Result<Self, Self::Error> {
         let unhandled_outbound_entries = value
             .unhandled_outbound_entries()
-            .map(|entry| JsResumeEntry {
-                stanza: entry.stanza().snapshot(),
-                sent_at_epoch_ms: entry.sent_at().timestamp_millis() as f64,
+            .map(|entry| {
+                let sent_at_epoch_ms = entry.sent_at().timestamp_millis();
+                if !(0..=8_640_000_000_000_000_i64).contains(&sent_at_epoch_ms) {
+                    return Err(ResumeWasmBoundaryError::TimestampOutOfRange);
+                }
+                Ok(JsResumeEntry {
+                    stanza: entry.stanza().snapshot()?,
+                    sent_at_epoch_ms: sent_at_epoch_ms as f64,
+                })
             })
-            .collect();
-        Self {
+            .collect::<Result<Vec<_>, ResumeWasmBoundaryError>>()?;
+        Ok(Self {
             previd: value.previd().to_string(),
             inbound_h: value.inbound_h(),
             outbound_h: value.outbound_h(),
-            has_unacked_outbound: value.has_unhandled_outbound_stanzas(),
             unhandled_outbound_entries,
             max_resume_seconds: value.max_resume_seconds(),
-        }
+        })
     }
 }
 
@@ -366,20 +388,68 @@ mod tests {
         })
     }
 
+    fn resume_state_input(
+        unhandled_outbound_entries: Vec<JsResumeEntryInput>,
+    ) -> JsResumeStateInput {
+        JsResumeStateInput {
+            previd: "wasm-prev".to_owned(),
+            inbound_h: 2,
+            outbound_h: 3,
+            unhandled_outbound_entries,
+            max_resume_seconds: Some(300),
+        }
+    }
+
+    fn resume_state_from_entries(
+        entries: Vec<JsResumeEntryInput>,
+    ) -> Result<waddle_xmpp_client::SmResumeState, ResumeWasmBoundaryError> {
+        resume_state_from_input(resume_state_input(entries))
+    }
+
+    fn message_snapshot(
+        attributes: Vec<waddle_xmpp_client::ResumeXmlAttribute>,
+        text_values: impl IntoIterator<Item = String>,
+    ) -> waddle_xmpp_client::ResumeStanzaSnapshot {
+        let mut tokens = vec![waddle_xmpp_client::ResumeXmlToken::Start {
+            name: waddle_xmpp_client::ResumeXmlName {
+                namespace: waddle_xmpp_client::ResumeXmlNamespace::new("jabber:client"),
+                local_name: waddle_xmpp_client::ResumeXmlLocalName::new("message")
+                    .expect("valid root"),
+            },
+            attributes,
+        }];
+        tokens.extend(text_values.into_iter().map(|value| {
+            waddle_xmpp_client::ResumeXmlToken::Text {
+                value: waddle_xmpp_client::ResumeXmlValue::new(value),
+            }
+        }));
+        tokens.push(waddle_xmpp_client::ResumeXmlToken::End);
+        waddle_xmpp_client::ResumeStanzaSnapshot {
+            stanza_kind: waddle_xmpp_client::ResumeStanzaKind::Message,
+            tokens,
+        }
+    }
+
+    fn resume_entry(
+        stanza: waddle_xmpp_client::ResumeStanzaSnapshot,
+        sent_at_epoch_ms: f64,
+    ) -> JsResumeEntryInput {
+        JsResumeEntryInput {
+            stanza,
+            sent_at_epoch_ms,
+        }
+    }
+
     #[test]
     fn wasm_resume_entry_round_trips_structured_stanza_and_millisecond_time() {
         let timestamp_ms = 1_748_779_140_123_i64;
         let input: JsResumeEntryInput =
             serde_json::from_value(resume_entry_json(timestamp_ms)).expect("typed input");
-        let entry = resume_entry_from_input(input).expect("entry converts");
-        let state = waddle_xmpp_client::SmResumeState::from_unhandled_outbound_entries(
-            "wasm-prev",
-            2,
-            3,
-            [entry],
+        let state = resume_state_from_entries(vec![input]).expect("entry converts");
+        let output = serde_json::to_value(
+            JsResumeState::try_from(state).expect("resume state converts"),
         )
-        .expect("resume state");
-        let output = serde_json::to_value(JsResumeState::from(state)).expect("output serializes");
+        .expect("output serializes");
 
         assert_eq!(
             output["unhandledOutboundEntries"][0]["sentAtEpochMs"].as_f64(),
@@ -413,10 +483,10 @@ mod tests {
                 .expect("snapshot"),
             sent_at_epoch_ms: 1.5,
         };
-        assert_eq!(
-            resume_entry_from_input(fractional).expect_err("fractional time rejected"),
-            "invalid resume sentAtEpochMs"
-        );
+        assert!(matches!(
+            resume_state_from_entries(vec![fractional]),
+            Err(ResumeWasmBoundaryError::InvalidTimestamp)
+        ));
     }
 
     #[test]
@@ -426,19 +496,27 @@ mod tests {
 
         let mut unbalanced = base.stanza.clone();
         unbalanced.tokens.pop();
-        assert!(resume_entry_from_input(JsResumeEntryInput {
+        assert!(resume_state_from_entries(vec![JsResumeEntryInput {
             stanza: unbalanced,
             sent_at_epoch_ms: 0.0,
-        })
+        }])
         .is_err());
 
         let mut oversized = base.stanza.clone();
-        oversized.tokens = vec![waddle_xmpp_client::ResumeXmlToken::End; 16_385];
-        assert!(resume_entry_from_input(JsResumeEntryInput {
+        let root = oversized.tokens[0].clone();
+        oversized.tokens = vec![root];
+        oversized.tokens.extend((0..16_383).map(|_| {
+            waddle_xmpp_client::ResumeXmlToken::Text {
+                value: waddle_xmpp_client::ResumeXmlValue::new(""),
+            }
+        }));
+        oversized.tokens.push(waddle_xmpp_client::ResumeXmlToken::End);
+        assert!(resume_state_from_entries(vec![JsResumeEntryInput {
             stanza: oversized,
             sent_at_epoch_ms: 0.0,
-        })
+        }])
         .expect_err("token limit rejected")
+        .to_string()
         .contains("token limit"));
 
         let root_name = waddle_xmpp_client::ResumeXmlName {
@@ -458,15 +536,159 @@ mod tests {
             attributes: Vec::new(),
         }));
         tokens.extend((0..65).map(|_| waddle_xmpp_client::ResumeXmlToken::End));
-        assert!(resume_entry_from_input(JsResumeEntryInput {
+        assert!(resume_state_from_entries(vec![JsResumeEntryInput {
             stanza: waddle_xmpp_client::ResumeStanzaSnapshot {
                 stanza_kind: waddle_xmpp_client::ResumeStanzaKind::Message,
                 tokens,
             },
             sent_at_epoch_ms: 0.0,
-        })
+        }])
         .expect_err("depth limit rejected")
+        .to_string()
         .contains("depth limit"));
+    }
+
+    #[test]
+    fn wasm_resume_state_requires_positive_max_and_timestamp_intersection() {
+        let mut zero_max = resume_state_input(Vec::new());
+        zero_max.max_resume_seconds = Some(0);
+        assert!(matches!(
+            resume_state_from_input(zero_max),
+            Err(ResumeWasmBoundaryError::InvalidMaxResumeSeconds)
+        ));
+
+        let snapshot = message_snapshot(Vec::new(), []);
+        let chrono_max_ms = chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp_millis();
+        for timestamp in [0.0, 1_748_779_140_123.0, chrono_max_ms as f64] {
+            resume_state_from_entries(vec![resume_entry(snapshot.clone(), timestamp)])
+                .expect("timestamp in JS Date and chrono intersection");
+        }
+
+        for timestamp in [
+            -1.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            9_007_199_254_740_992.0,
+        ] {
+            assert!(matches!(
+                resume_state_from_entries(vec![resume_entry(snapshot.clone(), timestamp)]),
+                Err(ResumeWasmBoundaryError::InvalidTimestamp)
+            ));
+        }
+        assert!(matches!(
+            resume_state_from_entries(vec![resume_entry(
+                snapshot,
+                chrono_max_ms as f64 + 1.0,
+            )]),
+            Err(ResumeWasmBoundaryError::TimestampOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn wasm_resume_state_accepts_exact_entry_limit_and_rejects_limit_plus_one() {
+        let entry = resume_entry(message_snapshot(Vec::new(), []), 0.0);
+        let exact = resume_state_from_entries(vec![entry.clone(); 4_096])
+            .expect("exact WASM resume entry limit");
+        assert_eq!(exact.unhandled_outbound_entries().count(), 4_096);
+
+        assert!(matches!(
+            resume_state_from_entries(vec![entry; 4_097]),
+            Err(ResumeWasmBoundaryError::ResumeStanza(
+                waddle_xmpp_client::ResumeStanzaError::EntryLimit
+            ))
+        ));
+    }
+
+    #[test]
+    fn wasm_resume_state_shares_exact_aggregate_xml_budgets() {
+        let first_token_count = 16_384 / 2;
+        let second_token_count = 16_384 - first_token_count;
+        let first = resume_entry(
+            message_snapshot(
+                Vec::new(),
+                std::iter::repeat_n(String::new(), first_token_count - 2),
+            ),
+            0.0,
+        );
+        let second = resume_entry(
+            message_snapshot(
+                Vec::new(),
+                std::iter::repeat_n(String::new(), second_token_count - 2),
+            ),
+            0.0,
+        );
+        resume_state_from_entries(vec![first.clone(), second.clone()])
+            .expect("exact aggregate token budget");
+        let mut token_overflow = second;
+        token_overflow.stanza.tokens.insert(
+            1,
+            waddle_xmpp_client::ResumeXmlToken::Text {
+                value: waddle_xmpp_client::ResumeXmlValue::new(""),
+            },
+        );
+        assert!(matches!(
+            resume_state_from_entries(vec![first, token_overflow]),
+            Err(ResumeWasmBoundaryError::ResumeStanza(
+                waddle_xmpp_client::ResumeStanzaError::TokenLimit
+            ))
+        ));
+
+        let attributes = |count: usize| {
+            (0..count)
+                .map(|index| waddle_xmpp_client::ResumeXmlAttribute {
+                    name: waddle_xmpp_client::ResumeXmlName {
+                        namespace: waddle_xmpp_client::ResumeXmlNamespace::new(""),
+                        local_name: waddle_xmpp_client::ResumeXmlLocalName::new(format!(
+                            "a{index}"
+                        ))
+                        .expect("valid attribute name"),
+                    },
+                    value: waddle_xmpp_client::ResumeXmlValue::new(""),
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = resume_entry(message_snapshot(attributes(8_192), []), 0.0);
+        let second = resume_entry(message_snapshot(attributes(8_192), []), 0.0);
+        resume_state_from_entries(vec![first.clone(), second.clone()])
+            .expect("exact aggregate attribute budget");
+        let mut attribute_overflow = second;
+        let waddle_xmpp_client::ResumeXmlToken::Start { attributes, .. } =
+            &mut attribute_overflow.stanza.tokens[0]
+        else {
+            panic!("message snapshot starts with root");
+        };
+        attributes.push(waddle_xmpp_client::ResumeXmlAttribute {
+            name: waddle_xmpp_client::ResumeXmlName {
+                namespace: waddle_xmpp_client::ResumeXmlNamespace::new(""),
+                local_name: waddle_xmpp_client::ResumeXmlLocalName::new("overflow")
+                    .expect("valid attribute name"),
+            },
+            value: waddle_xmpp_client::ResumeXmlValue::new(""),
+        });
+        assert!(matches!(
+            resume_state_from_entries(vec![first, attribute_overflow]),
+            Err(ResumeWasmBoundaryError::ResumeStanza(
+                waddle_xmpp_client::ResumeStanzaError::AttributeLimit
+            ))
+        ));
+
+        let root_bytes = 2 * ("jabber:client".len() + "message".len());
+        let exact_text = "x".repeat(1024 * 1024 - root_bytes);
+        let first = resume_entry(message_snapshot(Vec::new(), [exact_text]), 0.0);
+        let second = resume_entry(message_snapshot(Vec::new(), []), 0.0);
+        resume_state_from_entries(vec![first.clone(), second])
+            .expect("exact aggregate UTF-8 budget");
+        let byte_overflow = resume_entry(
+            message_snapshot(Vec::new(), ["x".to_owned()]),
+            0.0,
+        );
+        assert!(matches!(
+            resume_state_from_entries(vec![first, byte_overflow]),
+            Err(ResumeWasmBoundaryError::ResumeStanza(
+                waddle_xmpp_client::ResumeStanzaError::ByteLimit
+            ))
+        ));
     }
 }
 
@@ -480,8 +702,134 @@ pub(crate) struct InboxPage {
 pub(crate) enum DriverEvent {
     Client(Box<ClientEvent>),
     ResumeState(Option<waddle_xmpp_client::SmResumeState>),
-    Error(String),
+    Error {
+        reason: DriverErrorReason,
+        authentication_condition: Option<DriverAuthenticationCondition>,
+    },
     Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DriverErrorReason {
+    #[serde(rename = "core-error")]
+    Core,
+    InvalidTransportScheme,
+    #[serde(rename = "missing-websocket-host")]
+    MissingWebSocketHost,
+    EmptyResource,
+    EmptyStanzaId,
+    RequestIdExhausted,
+    DuplicateRequest,
+    DuplicateStanzaCorrelation,
+    UnknownRequest,
+    UnknownStanzaCorrelation,
+    InvalidPhaseTransition,
+    InvalidStateTransition,
+    MissingStreamFeature,
+    InvalidStreamFeatures,
+    InvalidSaslFailure,
+    InvalidBindResponse,
+    AuthenticationRejected,
+    #[serde(rename = "websocket-connect-timeout")]
+    WebSocketConnectTimeout,
+    #[serde(rename = "websocket-write-timeout")]
+    WebSocketWriteTimeout,
+    IqTimeout,
+    #[serde(rename = "websocket-transport-error")]
+    WebSocketTransport,
+    EmptyTransportFrame,
+    TransportFrameTooLarge,
+    InvalidTransportFrame,
+    InvalidStreamOpenTo,
+    InvalidStreamOpenFrom,
+    UnsupportedStreamVersion,
+    #[serde(rename = "unsupported-websocket-message")]
+    UnsupportedWebSocketMessage,
+    TransportClosed,
+    RequestCancelled,
+    Disconnected,
+    InvalidResumeStanza,
+    #[serde(rename = "push-registration-error")]
+    PushRegistration,
+    StanzaError,
+}
+
+impl DriverErrorReason {
+    #[cfg(test)]
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Core,
+        Self::InvalidTransportScheme,
+        Self::MissingWebSocketHost,
+        Self::EmptyResource,
+        Self::EmptyStanzaId,
+        Self::RequestIdExhausted,
+        Self::DuplicateRequest,
+        Self::DuplicateStanzaCorrelation,
+        Self::UnknownRequest,
+        Self::UnknownStanzaCorrelation,
+        Self::InvalidPhaseTransition,
+        Self::InvalidStateTransition,
+        Self::MissingStreamFeature,
+        Self::InvalidStreamFeatures,
+        Self::InvalidSaslFailure,
+        Self::InvalidBindResponse,
+        Self::AuthenticationRejected,
+        Self::WebSocketConnectTimeout,
+        Self::WebSocketWriteTimeout,
+        Self::IqTimeout,
+        Self::WebSocketTransport,
+        Self::EmptyTransportFrame,
+        Self::TransportFrameTooLarge,
+        Self::InvalidTransportFrame,
+        Self::InvalidStreamOpenTo,
+        Self::InvalidStreamOpenFrom,
+        Self::UnsupportedStreamVersion,
+        Self::UnsupportedWebSocketMessage,
+        Self::TransportClosed,
+        Self::RequestCancelled,
+        Self::Disconnected,
+        Self::InvalidResumeStanza,
+        Self::PushRegistration,
+        Self::StanzaError,
+    ];
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DriverAuthenticationCondition {
+    Aborted,
+    AccountDisabled,
+    CredentialsExpired,
+    EncryptionRequired,
+    IncorrectEncoding,
+    InvalidAuthzid,
+    InvalidMechanism,
+    MalformedRequest,
+    MechanismTooWeak,
+    NotAuthorized,
+    TemporaryAuthFailure,
+    Unknown,
+}
+
+impl DriverAuthenticationCondition {
+    #[cfg(test)]
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Aborted,
+        Self::AccountDisabled,
+        Self::CredentialsExpired,
+        Self::EncryptionRequired,
+        Self::IncorrectEncoding,
+        Self::InvalidAuthzid,
+        Self::InvalidMechanism,
+        Self::MalformedRequest,
+        Self::MechanismTooWeak,
+        Self::NotAuthorized,
+        Self::TemporaryAuthFailure,
+        Self::Unknown,
+    ];
+
 }
 
 pub(crate) fn client_driver_event(event: ClientEvent) -> DriverEvent {

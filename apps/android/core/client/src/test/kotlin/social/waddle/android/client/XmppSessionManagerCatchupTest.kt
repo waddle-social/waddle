@@ -17,6 +17,7 @@ import social.waddle.android.client.store.ConversationKind
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddleSessionReadyKind
 
 /**
  * Reconnect catch-up + per-conversation resume cursors (web
@@ -45,7 +46,7 @@ class XmppSessionManagerCatchupTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         harness.factory.emit(
@@ -93,7 +94,7 @@ class XmppSessionManagerCatchupTest {
 
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val client = harness.factory.clients.single()
@@ -122,7 +123,7 @@ class XmppSessionManagerCatchupTest {
 
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val fetched = harness.factory.clients.single().fetchHistoryCalls.map { it.first }
@@ -142,7 +143,7 @@ class XmppSessionManagerCatchupTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         assertEquals(
             "first session of the process catches up",
@@ -153,13 +154,13 @@ class XmppSessionManagerCatchupTest {
         // Persist a resume snapshot, drop, and reconnect: the next
         // attempt presents the snapshot, so the manager assumes the
         // stream resumed and 0198 replay covered the gap.
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
+        harness.factory.emitResumeStateChanged(testResumeState())
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
         advanceTimeBy(1_000L)
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady(WaddleSessionReadyKind.RESUMED)
         runCurrent()
 
         assertEquals(2, harness.factory.clients.size)
@@ -178,18 +179,18 @@ class XmppSessionManagerCatchupTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         // The FFI cleared the resume state (rejected/expired): the next
         // attempt carries no snapshot and is definitely a fresh stream.
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(null))
+        harness.factory.emitResumeStateChanged(null)
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
         advanceTimeBy(1_000L)
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         assertEquals(2, harness.factory.clients.size)
@@ -209,7 +210,7 @@ class XmppSessionManagerCatchupTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val client = harness.factory.clients.single()
@@ -230,7 +231,7 @@ class XmppSessionManagerCatchupTest {
                 richPayloadOptIn = false,
             ),
         )
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val store = harness.manager.notifySettingsStore
@@ -251,17 +252,17 @@ class XmppSessionManagerCatchupTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         assertEquals(1, harness.factory.clients.single().fetchUserBookmarksCalls)
 
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(testResumeState()))
+        harness.factory.emitResumeStateChanged(testResumeState())
         runCurrent()
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
         advanceTimeBy(1_000L)
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady(WaddleSessionReadyKind.RESUMED)
         runCurrent()
 
         assertEquals(2, harness.factory.clients.size)
@@ -285,7 +286,7 @@ class XmppSessionManagerCatchupTest {
                 richPayloadOptIn = false,
             ),
         )
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         assertTrue(harness.manager.notifySettingsStore.entries.value.isNotEmpty())
 

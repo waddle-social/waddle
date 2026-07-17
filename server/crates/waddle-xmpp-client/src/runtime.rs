@@ -360,7 +360,7 @@ impl XmppRuntime {
                 self.handle_received_element(element, now_ms, events)?;
             }
             TransportEvent::MessageSent(TransportMessage::Element(element)) => {
-                self.handle_sent_element(&element, now_ms, events);
+                self.handle_sent_element(&element, now_ms, events)?;
             }
             TransportEvent::MessageReceived(TransportMessage::Close(_)) => {
                 self.stream_close.received = true;
@@ -437,10 +437,10 @@ impl XmppRuntime {
         element: &Element,
         now_ms: u64,
         events: &mut Vec<ClientEvent>,
-    ) {
+    ) -> ClientResult<()> {
         if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
             self.sm_state.start_outbound();
-            return;
+            return Ok(());
         }
 
         if SmState::is_request_ack(element) {
@@ -454,14 +454,15 @@ impl XmppRuntime {
                     )));
                 }
             }
-            return;
+            return Ok(());
         }
 
-        let sent = self.sm_state.record_sent_stanza_at(element, now_ms);
+        let sent = self.sm_state.record_sent_stanza_at(element, now_ms)?;
         if let Some(request) = sent.request {
             self.push_ack_request(request, events);
         }
         self.mark_fallback_retry_sent(element);
+        Ok(())
     }
 
     fn handle_stream_open(

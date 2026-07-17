@@ -20,7 +20,7 @@ interface ConversationIo {
     suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage?
 
     /**
-     * Send [body] to the conversation; [SendResult.queuedId] is set when
+     * Send [body] to the conversation; [SendResult.deliveryIdentity] is set when
      * the session manager persisted the message for offline replay.
      * [extras] carry XEP-0461 reply / XEP-0201 thread annotations.
      */

@@ -16,6 +16,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.client.ConnectionState
+import social.waddle.android.client.SaslRetryDisposition
 
 /** Persistent surface while the connection is not ready. */
 @Composable
@@ -29,7 +30,17 @@ fun ConnectionBanner(
         is ConnectionState.Reconnecting ->
             stringResource(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> stringResource(R.string.connection_offline)
-        ConnectionState.AuthFailed -> stringResource(R.string.connection_auth_failed)
+        is ConnectionState.AuthenticationStopped -> when (state.disposition) {
+            SaslRetryDisposition.RETRY -> null
+            SaslRetryDisposition.STOP_CREDENTIAL ->
+                stringResource(R.string.connection_auth_failed)
+            SaslRetryDisposition.STOP_CONFIGURATION ->
+                stringResource(R.string.connection_auth_configuration_failed)
+            SaslRetryDisposition.STOP_ABORTED ->
+                stringResource(R.string.connection_auth_aborted)
+            SaslRetryDisposition.STOP_UNKNOWN ->
+                stringResource(R.string.connection_auth_unknown)
+        }
         ConnectionState.Failed -> stringResource(R.string.connection_failed)
         ConnectionState.Idle, ConnectionState.Ready -> null
     } ?: return

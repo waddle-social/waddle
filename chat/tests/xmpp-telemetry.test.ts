@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
-import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
+import { BrowserXmppClient as BrowserXmppClientBase, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
 import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
 import {
   __clearSensitiveUrlsForTesting,
@@ -31,11 +31,39 @@ import {
 } from "../src/lib/telemetry";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
+import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
 import {
   committedOrThrow,
   MemoryDurableOutboundStore,
-} from "../src/lib/outbound-durable-store";
+} from "../src/lib/xmpp-runtime-durable-store";
+import {
+  WASM_AUTHENTICATION_CONDITIONS,
+  WASM_DRIVER_ERROR_REASONS,
+  type WasmControlErrorPayload as TestXmppStreamErrorPayload,
+} from "../src/lib/xmpp/wasm-types";
+import {
+  WASM_DRIVER_ERROR_DETAILS,
+  WASM_DRIVER_TELEMETRY_CODES,
+} from "../src/lib/xmpp/wasm-control-errors";
+import {
+  noopWasmClientCallbacks,
+  WasmClientCallbackDouble,
+} from "./helpers/wasm-client-callbacks";
+
+const createdClients = new Set<BrowserXmppClientBase>();
+
+class BrowserXmppClient extends BrowserXmppClientBase {
+  constructor(...args: ConstructorParameters<typeof BrowserXmppClientBase>) {
+    const [clientSession, options] = args;
+    super(clientSession, {
+      ...options,
+      durableRuntimeStore: options?.durableRuntimeStore
+        ?? new MemoryDurableOutboundStore(),
+    });
+    createdClients.add(this);
+  }
+}
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -46,12 +74,6 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
     ...partial,
   } as WaddleSession;
 }
-
-type TestXmppStreamErrorPayload = string | {
-  detail?: string;
-  condition?: string;
-  streamManagementError?: { kind: "handled-count-too-high"; h: number; sendCount: number };
-};
 
 function createStorageMock() {
   const values = new Map<string, string>();
@@ -101,9 +123,48 @@ async function clientWithDurableRows(
           }),
     );
   }
-  const client = new BrowserXmppClient(session(), undefined, durableStore);
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: durableStore,
+  });
   await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+  (client as unknown as {
+    outboundQueue: { beginConnectionGeneration(generation: number): number };
+  }).outboundQueue.beginConnectionGeneration(0);
   return client;
+}
+
+async function beginTelemetryAttempt(
+  client: BrowserXmppClient,
+  id: string,
+  kind: "room" | "dm",
+): Promise<void> {
+  const queue = (client as unknown as {
+    outboundQueue: {
+      persistPendingRoomSend(
+        roomJid: string,
+        body: string,
+        opts: { id: string },
+      ): Promise<unknown>;
+      persistPendingDirectSend(
+        peerJid: string,
+        body: string,
+        opts: { id: string },
+      ): Promise<unknown>;
+      beginAttempt(id: string, kind: "room" | "dm", claim: unknown): void;
+    };
+  }).outboundQueue;
+  const claim = kind === "room"
+    ? await queue.persistPendingRoomSend(
+        "room@example.com",
+        "telemetry fixture",
+        { id },
+      )
+    : await queue.persistPendingDirectSend(
+        "bob@example.com",
+        "telemetry fixture",
+        { id },
+      );
+  queue.beginAttempt(id, kind, claim);
 }
 
 function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
@@ -189,7 +250,21 @@ beforeEach(() => {
   __clearSensitiveUrlsForTesting();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all([...createdClients].map(async (client) => {
+    const internal = client as unknown as {
+      clearReconnectTimer?: () => void;
+      stopSelfPing?: () => void;
+      disarmOnlineRecovery?: () => void;
+      xmpp: null;
+    };
+    internal.clearReconnectTimer?.();
+    internal.stopSelfPing?.();
+    internal.disarmOnlineRecovery?.();
+    internal.xmpp = null;
+    await client.dispose();
+  }));
+  createdClients.clear();
   localStorage.clear();
   __setFaroForTesting(null);
   __clearSensitiveUrlsForTesting();
@@ -844,31 +919,18 @@ describe("BrowserXmppClient telemetry hooks", () => {
     client.onMessageAcked((id, meta) => hookAcks.push({ id, kind: meta.kind, latencyMs: meta.latencyMs }));
 
     // Stub the pending-send bookkeeping by simulating a flush that
-    // added an inflight entry plus a pending timestamp, then emit ack.
+    // atomically claimed the durable row plus a pending timestamp.
     const internal = client as unknown as {
-      outboundQueue: {
-        beginAttempt: (id: string, kind: "room" | "dm") => void;
-      };
       xmpp: { on: (name: string, fn: (msg: unknown) => void) => void; emit: (name: string, msg: unknown) => void };
       wireEvents: (xmpp: unknown) => void;
     };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
+    const stubXmpp = new WasmClientCallbackDouble();
     internal.xmpp = stubXmpp as never;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.beginAttempt("room-1", "room");
+    await beginTelemetryAttempt(client, "room-1", "room");
 
     const acked = nextMessageAck(client, "room-1");
-    stubXmpp.emit("message:acked", { id: "room-1" });
+    stubXmpp.emitMessageDeliveryAcked("room-1");
     await acked;
 
     expect(primaryAcks).toEqual(["room-1"]);
@@ -889,45 +951,33 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
 
     const internal = client as unknown as {
-      outboundQueue: {
-        beginAttempt: (id: string, kind: "room" | "dm") => void;
-      };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
       emitStatus: (snap: { state: string; detail?: string }) => void;
       emitSessionLifecycle: (evt: SessionLifecycleEvent) => void;
       events: { emitSafe: (event: string, ...args: unknown[]) => void };
     };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
     let onStreamManagement: ((event: {
       kind: "ack-request-timeout";
       unacked: number;
     }) => void) | undefined;
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
+    const stubXmpp = Object.assign(new WasmClientCallbackDouble(), {
       set_on_stream_management(callback: typeof onStreamManagement) {
         onStreamManagement = callback;
       },
-    };
+    });
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.beginAttempt("dm-9", "dm");
+    await beginTelemetryAttempt(client, "dm-9", "dm");
     // Record the pending kind so the failure hook reports it truthfully.
-    internal.outboundQueue.beginAttempt("live-1", "dm");
+    await beginTelemetryAttempt(client, "live-1", "dm");
 
     // Ack → Faro event + measurement
     const acked = nextMessageAck(client, "dm-9");
-    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "dm-9" });
+    stubXmpp.emitMessageDeliveryAcked("dm-9");
     // Fail → Faro event
     const failed = nextMessageFailure(client, "live-1");
-    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:failed", { id: "live-1" });
+    stubXmpp.emitMessageDeliveryFailed("live-1");
     await Promise.all([acked, failed]);
     // Session lifecycle + status
     internal.emitSessionLifecycle({ type: "resumed" });
@@ -1033,13 +1083,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
 
     const internal = client as unknown as {
-      emitError: (event: {
-        kind: "stream" | "auth" | "connect-timeout" | "member-query";
-        recoverable: boolean;
-        detail: string;
-        cause?: unknown;
-        condition?: string;
-      }) => void;
+      emitError: (event: XmppErrorEvent) => void;
     };
 
     // Fatal stream error with an XMPP condition.
@@ -1047,9 +1091,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitError({
       kind: "stream",
       recoverable: false,
-      detail: "not-authorized",
       cause: streamCause,
-      condition: "not-authorized",
+      controlError: {
+        kind: "stream-error",
+        condition: "not-authorized",
+      },
     });
 
     // Recoverable auth (treated as non-recoverable from the client's POV
@@ -1064,12 +1110,12 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitError({
       kind: "connect-timeout",
       recoverable: true,
-      detail: "Rust client reconnect stalled past 15s; discarding agent",
+      reason: "connection-establishment",
     });
     internal.emitError({
       kind: "member-query",
       recoverable: true,
-      detail: "affiliation query failed for owner",
+      reason: "affiliation-query-failed",
       condition: "room@example.com",
     });
 
@@ -1108,17 +1154,13 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
 
     const internal = client as unknown as {
-      emitError: (event: {
-        kind: "connect-timeout";
-        recoverable: boolean;
-        detail: string;
-      }) => void;
+      emitError: (event: XmppErrorEvent) => void;
     };
 
     internal.emitError({
       kind: "connect-timeout",
       recoverable: true,
-      detail: "Timed out waiting for self-presence in c1@muc.example.com",
+      reason: "room-self-presence",
     });
 
     expect(stub.errors).toHaveLength(1);
@@ -1136,22 +1178,14 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
 
     const internal = client as unknown as {
-      emitError: (event: {
-        kind: "stream" | "auth" | "connect-timeout" | "member-query";
-        recoverable: boolean;
-        detail: string;
-        cause?: unknown;
-        condition?: string;
-        errorType?: string;
-        errorText?: string;
-      }) => void;
+      emitError: (event: XmppErrorEvent) => void;
     };
 
     // Server-returned stanza error with full context.
     internal.emitError({
       kind: "member-query",
       recoverable: true,
-      detail: "affiliation query failed for owner",
+      reason: "affiliation-query-failed",
       condition: "item-not-found",
       errorType: "cancel",
       errorText: "no such room",
@@ -1161,7 +1195,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitError({
       kind: "member-query",
       recoverable: true,
-      detail: "affiliation query failed for owner",
+      reason: "affiliation-query-failed",
       condition: "not-allowed",
       errorType: "cancel",
     });
@@ -1170,7 +1204,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.emitError({
       kind: "member-query",
       recoverable: true,
-      detail: "affiliation query failed for owner",
+      reason: "affiliation-query-failed",
     });
 
     expect(stub.errors).toHaveLength(3);
@@ -1200,15 +1234,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
 
     const internal = client as unknown as {
-      emitError: (event: {
-        kind: "muc-join";
-        recoverable: boolean;
-        detail: string;
-        condition?: string;
-        errorType?: string;
-        errorText?: string;
-        roomLocalpart?: string;
-      }) => void;
+      emitError: (event: XmppErrorEvent) => void;
     };
 
     internal.emitError({
@@ -1278,15 +1304,41 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(stub.errors).toHaveLength(0);
   });
 
+  test("typed WASM driver reasons have exhaustive display and telemetry mappings", () => {
+    expect(Object.keys(WASM_DRIVER_ERROR_DETAILS)).toEqual([...WASM_DRIVER_ERROR_REASONS]);
+    expect(Object.keys(WASM_DRIVER_TELEMETRY_CODES)).toEqual([...WASM_DRIVER_ERROR_REASONS]);
+    for (const reason of WASM_DRIVER_ERROR_REASONS) {
+      expect(WASM_DRIVER_ERROR_DETAILS[reason].length).toBeGreaterThan(0);
+      expect(WASM_DRIVER_TELEMETRY_CODES[reason]).toStartWith("stream-");
+    }
+    expect(WASM_AUTHENTICATION_CONDITIONS).toEqual([
+      "aborted",
+      "account-disabled",
+      "credentials-expired",
+      "encryption-required",
+      "incorrect-encoding",
+      "invalid-authzid",
+      "invalid-mechanism",
+      "malformed-request",
+      "mechanism-too-weak",
+      "not-authorized",
+      "temporary-auth-failure",
+      "unknown",
+    ]);
+  });
+
   test("set_on_error bridge preserves stream error conditions for telemetry", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
     const client = new BrowserXmppClient(session());
     installInstrumentation(client);
+    const errorEvents: XmppErrorEvent[] = [];
+    client.onError((event) => errorEvents.push(event));
 
     let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       set_on_error(cb: NonNullable<typeof onError>) {
         onError = cb;
       },
@@ -1298,16 +1350,30 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.xmpp = xmpp;
     internal.wireEvents(xmpp);
 
-    onError?.({ detail: "stream error", condition: "not-authorized" });
+    const payload = {
+      kind: "stream-error",
+      condition: "not-authorized",
+    } as const;
+    onError?.(payload);
 
     expect(stub.errors).toHaveLength(1);
+    expect(errorEvents).toHaveLength(1);
+    expect(errorEvents[0]).toMatchObject({
+      kind: "stream",
+      recoverable: false,
+    });
+    expect(
+      errorEvents[0]?.kind === "stream"
+        ? errorEvents[0].controlError
+        : undefined,
+    ).toBe(payload);
     expect(stub.errors[0].error.message).toBe("stream-not-authorized");
     expect(stub.errors[0].options?.type).toBe("xmpp.stream");
     expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
     expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
   });
 
-  test("set_on_error bridge recovers stream condition from object detail", () => {
+  test("set_on_error bridge preserves typed driver authentication conditions", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
@@ -1316,125 +1382,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({ detail: "not-authorized" });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("not-authorized");
-  });
-
-  test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.("forbidden");
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-error");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-error");
-  });
-
-  test("set_on_error bridge classifies driver errors without losing stream detail", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.("websocket transport error");
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-transport-error");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-transport-error");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("websocket transport error");
-  });
-
-  test("set_on_error bridge names handled-count detail when SM metadata is absent", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
-      set_on_error(cb: NonNullable<typeof onError>) {
-        onError = cb;
-      },
-    };
-    const internal = client as unknown as {
-      xmpp: typeof xmpp;
-      wireEvents: (xmpp: typeof xmpp) => void;
-    };
-    internal.xmpp = xmpp;
-    internal.wireEvents(xmpp);
-
-    onError?.({ detail: "handled-count-too-high" });
-
-    expect(stub.errors).toHaveLength(1);
-    expect(stub.errors[0].error.message).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
-    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
-    expect(stub.errors[0].options?.context?.detail).toBe("stream-handled-count-too-high");
-    expect(stub.errors[0].options?.context?.streamDetail).toBe("handled-count-too-high");
-  });
-
-  test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
-
-    const client = new BrowserXmppClient(session());
-    installInstrumentation(client);
-
-    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
-    const xmpp = {
+      ...noopWasmClientCallbacks(),
       set_on_error(cb: NonNullable<typeof onError>) {
         onError = cb;
       },
@@ -1447,7 +1395,103 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.wireEvents(xmpp);
 
     onError?.({
-      detail: "stream error",
+      kind: "driver-error",
+      reason: "authentication-rejected",
+      authenticationCondition: "not-authorized",
+    });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBe("not-authorized");
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-not-authorized");
+    expect(stub.errors[0].options?.context?.streamDetail).toBe("authentication-rejected");
+  });
+
+  test("set_on_error bridge keeps stanza-only conditions out of stream telemetry", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      ...noopWasmClientCallbacks(),
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ kind: "driver-error", reason: "stanza-error" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-stanza-error");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-stanza-error");
+  });
+
+  test("set_on_error bridge classifies driver errors without losing stream detail", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      ...noopWasmClientCallbacks(),
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({ kind: "driver-error", reason: "websocket-transport-error" });
+
+    expect(stub.errors).toHaveLength(1);
+    expect(stub.errors[0].error.message).toBe("stream-transport-error");
+    expect(stub.errors[0].options?.type).toBe("xmpp.stream");
+    expect(stub.errors[0].options?.context?.condition).toBeUndefined();
+    expect(stub.errors[0].options?.context?.detail).toBe("stream-transport-error");
+    expect(stub.errors[0].options?.context?.streamDetail).toBe("websocket-transport-error");
+  });
+
+  test("set_on_error bridge names XEP-0198 handled-count stream failures", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session());
+    installInstrumentation(client);
+
+    let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
+    const xmpp = {
+      ...noopWasmClientCallbacks(),
+      set_on_error(cb: NonNullable<typeof onError>) {
+        onError = cb;
+      },
+    };
+    const internal = client as unknown as {
+      xmpp: typeof xmpp;
+      wireEvents: (xmpp: typeof xmpp) => void;
+    };
+    internal.xmpp = xmpp;
+    internal.wireEvents(xmpp);
+
+    onError?.({
+      kind: "stream-error",
       condition: "undefined-condition",
       streamManagementError: {
         kind: "handled-count-too-high",
@@ -1496,33 +1540,20 @@ describe("BrowserXmppClient telemetry hooks", () => {
     });
 
     const internal = client as unknown as {
-      outboundQueue: {
-        beginAttempt: (id: string, kind: "room" | "dm") => void;
-      };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
     };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
+    const stubXmpp = new WasmClientCallbackDouble();
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.beginAttempt("m-bad", "dm");
+    await beginTelemetryAttempt(client, "m-bad", "dm");
 
     const acknowledged = new Promise<void>((resolve) => {
       client.setMessageAckHandler((id) => {
         if (id === "m-bad") resolve();
       });
     });
-    (stubXmpp as { emit: (e: string, m: unknown) => void }).emit("message:acked", { id: "m-bad" });
+    stubXmpp.emitMessageDeliveryAcked("m-bad");
     await acknowledged;
   });
 
@@ -1535,29 +1566,16 @@ describe("BrowserXmppClient telemetry hooks", () => {
     client.onQueueDepthChange((d) => depths.push(d));
 
     const internal = client as unknown as {
-      outboundQueue: {
-        beginAttempt: (id: string, kind: "room" | "dm") => void;
-      };
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
     };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
+    const stubXmpp = new WasmClientCallbackDouble();
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    internal.outboundQueue.beginAttempt("dm-fail-1", "dm");
+    await beginTelemetryAttempt(client, "dm-fail-1", "dm");
 
     const failed = nextMessageFailure(client, "dm-fail-1");
-    stubXmpp.emit("message:failed", { id: "dm-fail-1" });
+    stubXmpp.emitMessageDeliveryFailed("dm-fail-1");
     await failed;
 
     expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
@@ -1588,21 +1606,11 @@ describe("BrowserXmppClient telemetry hooks", () => {
       xmpp: unknown;
       wireEvents: (xmpp: unknown) => void;
     };
-    const handlers = new Map<string, Array<(msg: unknown) => void>>();
-    const stubXmpp = {
-      on(event: string, handler: (msg: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, msg: unknown) {
-        for (const h of handlers.get(event) ?? []) h(msg);
-      },
-    };
+    const stubXmpp = new WasmClientCallbackDouble();
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
 
-    stubXmpp.emit("message:failed", { id: "orphan" });
+    stubXmpp.emitMessageDeliveryFailed("orphan");
 
     expect(fails).toEqual([]);
   });

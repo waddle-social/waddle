@@ -162,10 +162,12 @@ open class ConversationViewModel(
 
     private suspend fun onEvent(event: XmppEvent) {
         when (event) {
-            is XmppEvent.DeliveryAcked -> tracker.onDeliveryAcked(event.stanzaId)
-            is XmppEvent.DeliveryFailed -> tracker.onDeliveryFailed(event.stanzaId)
+            is XmppEvent.DeliveryAcked ->
+                tracker.onDeliveryAcked(event.delivery)
+            is XmppEvent.DeliveryFailed ->
+                tracker.onDeliveryFailed(event.delivery)
             // Reconnect catch-up: refetch the newest page.
-            XmppEvent.SessionReady -> {
+            is XmppEvent.SessionReady -> {
                 // A join tapped before the first Ready only persisted
                 // its intent; re-ensure it here so the open screen goes
                 // live without waiting for a reconnect (no-op when

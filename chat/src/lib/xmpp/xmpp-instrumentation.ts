@@ -10,10 +10,13 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { ErrorKind } from "@/lib/telemetry";
 import {
   XMPP_ERROR_CONDITIONS,
-  XMPP_STREAM_ERROR_CONDITIONS,
   type XmppErrorKind,
   type XmppErrorEvent,
 } from "@/lib/xmpp/types";
+import {
+  WASM_DRIVER_TELEMETRY_CODES,
+  wasmControlErrorCondition,
+} from "@/lib/xmpp/wasm-control-errors";
 import {
   reportCatchup,
   reportError,
@@ -65,22 +68,29 @@ export function installInstrumentation(client: BrowserXmppClient): void {
   });
   client.onError((event) => {
     const kind = ERROR_KIND_MAP[event.kind];
-    const condition = telemetryCondition(event.kind, event.condition);
+    const condition = telemetryEventCondition(event);
     const detail = telemetryErrorDetail(event, condition);
     const streamDetail = event.kind === "stream"
-      ? telemetryStreamSourceDetail(event.detail, detail)
+      && event.controlError.kind === "driver-error"
+      ? event.controlError.reason
       : undefined;
     const smCounts = event.kind === "stream"
       ? telemetryStreamManagementCounts(event)
       : undefined;
     const errorSource = telemetryErrorSource(event.kind, condition);
+    const stanzaContext = event.kind !== "stream"
+      && event.kind !== "connect-timeout"
+      ? event
+      : undefined;
     const cause = new Error(detail);
     reportError(kind, cause, {
       recoverable: event.recoverable,
       detail,
       ...(condition ? { condition } : {}),
-      ...(event.errorType ? { errorType: event.errorType } : {}),
-      ...(event.kind !== "muc-join" && event.errorText ? { errorText: event.errorText } : {}),
+      ...(stanzaContext?.errorType ? { errorType: stanzaContext.errorType } : {}),
+      ...(event.kind !== "muc-join" && stanzaContext?.errorText
+        ? { errorText: stanzaContext.errorText }
+        : {}),
       ...(event.kind === "muc-join" && event.roomLocalpart
         ? { roomLocalpart: event.roomLocalpart }
         : {}),
@@ -102,64 +112,40 @@ function telemetryErrorDetail(event: XmppErrorEvent, condition: string | undefin
     case "auth":
       return "auth-error";
     case "connect-timeout":
-      return event.detail.includes("self-presence")
+      return event.reason === "room-self-presence"
         ? "room-self-presence-timeout"
         : "connect-timeout";
     case "history":
       return "reconnect-catchup-failed";
     case "member-query":
-      if (event.detail === "missing list_room_members") return "missing-list-room-members";
+      if (event.reason === "binding-missing") return "missing-list-room-members";
       return condition ? `member-query-${condition}` : "member-query-failed";
     case "muc-join":
       return condition ? `room-join-${condition}` : "room-join-rejected";
     case "stream":
       if (
         condition === "undefined-condition" &&
-        event.streamManagementError?.kind === "handled-count-too-high"
+        event.controlError.kind === "stream-error" &&
+        event.controlError.streamManagementError?.kind === "handled-count-too-high"
       ) {
         return "stream-handled-count-too-high";
       }
-      return condition ? `stream-${condition}` : telemetryStreamFallbackDetail(event.detail);
+      if (condition) return `stream-${condition}`;
+      return event.controlError.kind === "driver-error"
+        ? WASM_DRIVER_TELEMETRY_CODES[event.controlError.reason]
+        : "stream-error";
   }
-}
-
-function telemetryStreamFallbackDetail(detail: string): string {
-  const normalized = detail.trim().toLowerCase();
-  if (!normalized || normalized === "stream error") return "stream-error";
-  if (normalized === "handled-count-too-high") return "stream-handled-count-too-high";
-  if (
-    normalized.includes("websocket transport error") ||
-    normalized.includes("websocket transport failed") ||
-    normalized.includes("websocket transport is already closed") ||
-    normalized.includes("transport closed")
-  ) {
-    return "stream-transport-error";
-  }
-  if (
-    normalized.includes("malformed xmpp framing") ||
-    normalized.includes("invalid transport frame")
-  ) {
-    return "stream-invalid-transport-frame";
-  }
-  if (normalized.includes("empty xmpp frame")) return "stream-empty-transport-frame";
-  if (normalized.includes("unsupported message type")) return "stream-unsupported-websocket-message";
-  if (normalized.includes("disconnected")) return "stream-disconnected";
-  return "stream-error";
-}
-
-function telemetryStreamSourceDetail(detail: string, telemetryDetail: string): string | undefined {
-  const trimmed = detail.trim();
-  if (!trimmed || trimmed.toLowerCase() === "stream error" || trimmed === telemetryDetail) {
-    return undefined;
-  }
-  return trimmed;
 }
 
 function telemetryStreamManagementCounts(event: XmppErrorEvent): Record<string, string> | undefined {
-  if (event.streamManagementError?.kind !== "handled-count-too-high") return undefined;
+  if (
+    event.kind !== "stream"
+    || event.controlError.kind !== "stream-error"
+    || event.controlError.streamManagementError?.kind !== "handled-count-too-high"
+  ) return undefined;
   return {
-    smH: String(event.streamManagementError.h),
-    smSendCount: String(event.streamManagementError.sendCount),
+    smH: String(event.controlError.streamManagementError.h),
+    smSendCount: String(event.controlError.streamManagementError.sendCount),
   };
 }
 
@@ -176,10 +162,25 @@ function telemetryErrorSource(
   return undefined;
 }
 
-function telemetryCondition(kind: XmppErrorKind, condition: string | undefined): string | undefined {
+type StanzaErrorKind = Exclude<
+  XmppErrorKind,
+  "stream" | "connect-timeout"
+>;
+
+function telemetryCondition(
+  _kind: StanzaErrorKind,
+  condition: string | undefined,
+): string | undefined {
   if (!condition) return undefined;
   const normalized = condition.trim().toLowerCase();
   if (!normalized) return undefined;
-  const allowed = kind === "stream" ? XMPP_STREAM_ERROR_CONDITIONS : XMPP_ERROR_CONDITIONS;
-  return allowed.has(normalized) ? normalized : "unknown";
+  return XMPP_ERROR_CONDITIONS.has(normalized) ? normalized : "unknown";
+}
+
+function telemetryEventCondition(event: XmppErrorEvent): string | undefined {
+  if (event.kind === "stream") {
+    return wasmControlErrorCondition(event.controlError);
+  }
+  if (event.kind === "connect-timeout") return undefined;
+  return telemetryCondition(event.kind, event.condition);
 }

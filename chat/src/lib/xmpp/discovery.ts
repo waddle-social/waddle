@@ -1,4 +1,3 @@
-import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { normalizeChannelType } from "@/lib/channel-types";
 import { reportError } from "@/lib/telemetry";
 import { XMPP_ERROR_CONDITIONS } from "./types";
@@ -22,10 +21,10 @@ const FIELD_FORUM_MODE = "muc#roomconfig_forum";
 
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 
-type HybridClient = Partial<WaddleClient> & {
+interface DiscoveryIqClient {
   send_raw_iq?: (xml: string) => Promise<string>;
   cancel_raw_iq?: (id: string) => Promise<void>;
-};
+}
 
 export type DiscoInfoData = {
   features: string[];
@@ -112,7 +111,7 @@ export function withIqTimeout<T>(
   });
 }
 
-function cancelRawIqOnTimeout(xmpp: HybridClient, id: string): { cancel?: () => Promise<void> } {
+function cancelRawIqOnTimeout(xmpp: DiscoveryIqClient, id: string): { cancel?: () => Promise<void> } {
   return typeof xmpp.cancel_raw_iq === "function"
     ? { cancel: () => xmpp.cancel_raw_iq!(id) }
     : {};
@@ -248,7 +247,7 @@ function logDiscoFailure(kind: "info" | "items" | "pubsub", to: string, node: st
   });
 }
 
-async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Promise<DiscoInfoData | null> {
+async function sendDiscoInfo(xmpp: DiscoveryIqClient, to: string, node?: string): Promise<DiscoInfoData | null> {
   if (!xmpp.send_raw_iq) return null;
   const id = crypto.randomUUID();
   const nodeAttr = node ? ` node="${xmlAttr(node)}"` : "";
@@ -289,7 +288,7 @@ async function sendDiscoInfo(xmpp: HybridClient, to: string, node?: string): Pro
   };
 }
 
-async function sendDiscoItems(xmpp: HybridClient, to: string, node?: string): Promise<Array<{ jid?: string; name?: string; node?: string }>> {
+async function sendDiscoItems(xmpp: DiscoveryIqClient, to: string, node?: string): Promise<Array<{ jid?: string; name?: string; node?: string }>> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
   const nodeAttr = node ? ` node="${xmlAttr(node)}"` : "";
@@ -316,7 +315,7 @@ type PubsubBookmarkItem = {
   autojoin?: boolean;
 };
 
-async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Promise<PubsubBookmarkItem[]> {
+async function sendPubsubItems(xmpp: DiscoveryIqClient, to: string, node: string): Promise<PubsubBookmarkItem[]> {
   if (!xmpp.send_raw_iq) return [];
   const id = crypto.randomUUID();
   const toAttr = xmlAttr(to);
@@ -354,7 +353,7 @@ async function sendPubsubItems(xmpp: HybridClient, to: string, node: string): Pr
 export function spacesServiceDomain(jid: string): string { return `spaces.${jidDomain(jid)}`; }
 export function mucServiceDomain(jid: string): string { return `muc.${jidDomain(jid)}`; }
 
-async function discoverComponentServices(xmpp: HybridClient, domain: string, jid: string): Promise<{ muc: string; spaces: string }> {
+async function discoverComponentServices(xmpp: DiscoveryIqClient, domain: string, jid: string): Promise<{ muc: string; spaces: string }> {
   const fallback = { muc: mucServiceDomain(jid), spaces: spacesServiceDomain(jid) };
   try {
     const items = await sendDiscoItems(xmpp, domain);
@@ -424,7 +423,7 @@ export function applyDiscoInfoToChannel(room: DiscoveredChannel, info: DiscoInfo
   };
 }
 
-async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
+async function hydrateRoomInfo(xmpp: DiscoveryIqClient, room: DiscoveredChannel): Promise<DiscoveredChannel> {
   if (!room.jid) return room;
   // No internal try/catch: callers wrap this in `Promise.allSettled` and
   // map rejected entries to the unhydrated `channelFromRoom` record, so a
@@ -436,7 +435,7 @@ async function hydrateRoomInfo(xmpp: HybridClient, room: DiscoveredChannel): Pro
   return applyDiscoInfoToChannel(room, info);
 }
 
-export async function discoverChannels(xmpp: HybridClient, jid: string): Promise<DiscoveredChannel[]> {
+export async function discoverChannels(xmpp: DiscoveryIqClient, jid: string): Promise<DiscoveredChannel[]> {
   const spacesService = spacesServiceDomain(jid);
   const spaces = await sendDiscoItems(xmpp, spacesService);
   const spaceNode = spaces[0]?.node;
@@ -457,7 +456,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
   return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
 }
 
-export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {
+export async function discoverTopology(xmpp: DiscoveryIqClient, jid: string): Promise<DiscoveredTopology> {
   const domain = jidDomain(jid);
   const services = await discoverComponentServices(xmpp, domain, jid);
   let rooms: DiscoveredChannel[] = [];

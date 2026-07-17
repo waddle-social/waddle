@@ -6,10 +6,60 @@ pub struct WaddleConfig {
     pub jid: String,
     pub access_token: String,
     pub resource: String,
+    /// Immutable identity of this native connection attempt. Delivery
+    /// callbacks and resume transitions are fenced to this exact value.
+    pub delivery_attempt: WaddleDeliveryAttemptRef,
     /// XEP-0198 resume snapshot from a previous session. When present
     /// the runtime attempts `<resume/>` before resource binding and
     /// replays the queued outbound stanzas the server never acked.
     pub resume_state: Option<WaddleSmResumeState>,
+}
+
+/// UUID identity minted once for one native connection incarnation.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleDeliveryAttemptId {
+    pub value: String,
+}
+
+/// Monotonic generation inside a delivery attempt lineage.
+#[derive(uniffi::Record, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaddleConnectionGeneration {
+    pub value: u64,
+}
+
+/// Exact fence carried by every native delivery lifecycle signal.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleDeliveryAttemptRef {
+    pub attempt_id: WaddleDeliveryAttemptId,
+    pub connection_generation: WaddleConnectionGeneration,
+}
+
+/// Typed client stanza identity at the native boundary.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleDeliveryStanzaId {
+    pub value: String,
+}
+
+/// One exact native delivery callback.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleNativeDeliverySignal {
+    pub attempt: WaddleDeliveryAttemptRef,
+    pub stanza_id: WaddleDeliveryStanzaId,
+}
+
+/// Single Rust-minted handoff from a failed resume stream to its fresh
+/// fallback stream. The app commits this exact transition before polling
+/// another native event.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleDeliveryAttemptTransition {
+    pub old: WaddleDeliveryAttemptRef,
+    pub fresh: WaddleDeliveryAttemptRef,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleSessionReadyKind {
+    Fresh,
+    Resumed,
 }
 
 /// XEP-0198 client resume snapshot crossing the FFI as a typed persistence
@@ -942,8 +992,17 @@ impl From<WaddlePushDeviceCredentials> for waddle_xmpp_client::push::PushDeviceC
 /// stable across FFI releases.
 #[derive(uniffi::Enum, Clone)]
 pub enum WaddleClientEvent {
-    /// Session is bound and ready (fires on `SessionReady`).
-    Connected,
+    /// Session is bound and ready under this exact native attempt.
+    SessionReady {
+        kind: WaddleSessionReadyKind,
+        attempt: WaddleDeliveryAttemptRef,
+    },
+    /// XEP-0198 resume failed. `affected` is the exact set of unhandled
+    /// message rows subsumed by the old-to-fresh journal transition.
+    ResumeFailed {
+        transition: WaddleDeliveryAttemptTransition,
+        affected: Vec<WaddleDeliveryStanzaId>,
+    },
     /// The event stream closed; no further events will fire.
     Disconnected,
     /// Typed inbound chat/groupchat message (or message-shaped event).
@@ -953,9 +1012,9 @@ pub enum WaddleClientEvent {
     /// XEP-0313 archived message from an active history query.
     MamResult { message: WaddleArchivedMessage },
     /// XEP-0198: the server acked the outbound message with this id.
-    DeliveryAcked { stanza_id: String },
+    DeliveryAcked { signal: WaddleNativeDeliverySignal },
     /// XEP-0198: transport-level delivery failure for this id.
-    DeliveryFailed { stanza_id: String },
+    DeliveryFailed { signal: WaddleNativeDeliverySignal },
     /// XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
     /// envelope and Jingle session control stanza addressed to the
     /// bound resource. The Swift app surfaces it as the ringing UI,
@@ -965,7 +1024,10 @@ pub enum WaddleClientEvent {
     /// disconnect or when the session carries no resumable state;
     /// persist `Some(state)` and feed it back via
     /// `WaddleConfig.resume_state` on the next connect.
-    ResumeStateChanged { state: Option<WaddleSmResumeState> },
+    ResumeStateChanged {
+        attempt: WaddleDeliveryAttemptRef,
+        state: Option<WaddleSmResumeState>,
+    },
     /// RFC 6120 §6.5 SASL failure during connect. Terminal for the
     /// presented credentials — apps must not blindly retry with the
     /// same token (web #1164: surface "sign in again", never an
@@ -973,9 +1035,4 @@ pub enum WaddleClientEvent {
     AuthenticationFailed { condition: WaddleSaslCondition },
     /// Human-readable diagnostic. Never carries protocol data.
     Error { description: String },
-}
-
-#[uniffi::export(callback_interface)]
-pub trait WaddleEventListener: Send + Sync {
-    fn on_event(&self, event: WaddleClientEvent);
 }

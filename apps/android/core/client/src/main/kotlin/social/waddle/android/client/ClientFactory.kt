@@ -3,7 +3,6 @@ package social.waddle.android.client
 import social.waddle.client.ffi.WaddleClient
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
-import social.waddle.client.ffi.WaddleEventListener
 
 /**
  * Seam over `WaddleClient` construction so `XmppSessionManager` is
@@ -12,11 +11,11 @@ import social.waddle.client.ffi.WaddleEventListener
  * config, bridge, and client.
  */
 fun interface ClientFactory {
-    fun create(config: WaddleConfig, listener: WaddleEventListener): WaddleClientInterface
+    fun create(config: WaddleConfig): WaddleClientInterface
 }
 
 /** Production factory: constructs the UniFFI-backed Rust client. */
 class RustClientFactory : ClientFactory {
-    override fun create(config: WaddleConfig, listener: WaddleEventListener): WaddleClientInterface =
-        WaddleClient(config, listener)
+    override fun create(config: WaddleConfig): WaddleClientInterface =
+        WaddleClient(config)
 }

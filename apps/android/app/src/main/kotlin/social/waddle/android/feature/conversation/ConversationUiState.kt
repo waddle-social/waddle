@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import social.waddle.android.client.DeliveryOutcomeRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.store.TimelineItem
 
@@ -11,6 +12,8 @@ data class PendingMessage(
      * queued send (the replay reuses it); matches the echo for dedupe.
      */
     val stanzaId: String?,
+    /** Exact durable row identity used to fence ACK/failure races. */
+    val delivery: DeliveryOutcomeRef? = null,
     val body: String,
     val timestampMillis: Long,
     val failed: Boolean,

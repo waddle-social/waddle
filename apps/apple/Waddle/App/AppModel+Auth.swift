@@ -203,6 +203,9 @@ extension AppModel {
             AppConfig.saveSessionID(loaded.sessionID, for: serverURL)
         }
 
+        openXMPPAdmissions(
+            sessionIdentity: XMPPLoginSessionIdentity(value: loaded.sessionID)
+        )
         session = loaded
         deviceAuth = nil
         errorMessage = ""
@@ -214,13 +217,8 @@ extension AppModel {
     private func clearSessionState() async {
         reconnectTask?.cancel()
         reconnectTask = nil
-        xmppEventsTask?.cancel()
-        xmppEventsTask = nil
+        await closeXMPPAdmissions()
         failPendingRoomJoins(with: XMPPServiceError.disconnected)
-        if let rustClient {
-            await rustClient.disconnect()
-        }
-        rustClient = nil
 
         session = nil
         spaceName = nil

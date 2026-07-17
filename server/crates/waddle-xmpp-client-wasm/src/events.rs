@@ -10,7 +10,14 @@ pub(crate) async fn event_dispatch_loop(
             DriverEvent::ResumeState(state) => {
                 inner.borrow_mut().resume_state = state;
             }
-            DriverEvent::Error(description) => emit_error_callback(&inner, &description),
+            DriverEvent::Error {
+                reason,
+                authentication_condition,
+            } => emit_error_callback(
+                &inner,
+                reason,
+                authentication_condition,
+            ),
             DriverEvent::Disconnected => {
                 // Clone the callback before invoking it so a JS handler that
                 // synchronously re-enters the WaddleClient via a `send_*`
@@ -220,18 +227,106 @@ fn emit_stream_management_callback(
     }
 }
 
-pub(crate) fn emit_error_callback(inner: &Rc<RefCell<WaddleClientInner>>, description: &str) {
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum JsControlErrorKind {
+    DriverError,
+    StreamError,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsDriverError {
+    kind: JsControlErrorKind,
+    reason: DriverErrorReason,
+    authentication_condition: Option<DriverAuthenticationCondition>,
+}
+
+pub(crate) fn emit_error_callback(
+    inner: &Rc<RefCell<WaddleClientInner>>,
+    reason: DriverErrorReason,
+    authentication_condition: Option<DriverAuthenticationCondition>,
+) {
     let callback = inner.borrow().on_error.clone();
     if let Some(callback) = callback {
-        let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(description));
+        let payload = JsDriverError {
+            kind: JsControlErrorKind::DriverError,
+            reason,
+            authentication_condition,
+        };
+        if let Ok(value) = to_js_value(&payload) {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum JsStreamErrorCondition {
+    BadFormat,
+    BadNamespacePrefix,
+    Conflict,
+    ConnectionTimeout,
+    HostGone,
+    HostUnknown,
+    ImproperAddressing,
+    InternalServerError,
+    InvalidFrom,
+    InvalidNamespace,
+    InvalidXml,
+    NotAuthorized,
+    NotWellFormed,
+    PolicyViolation,
+    RemoteConnectionFailed,
+    Reset,
+    ResourceConstraint,
+    RestrictedXml,
+    SeeOtherHost,
+    SystemShutdown,
+    UndefinedCondition,
+    UnsupportedEncoding,
+    UnsupportedFeature,
+    UnsupportedStanzaType,
+    UnsupportedVersion,
+}
+
+impl From<StreamErrorCondition> for JsStreamErrorCondition {
+    fn from(value: StreamErrorCondition) -> Self {
+        match value {
+            StreamErrorCondition::BadFormat => Self::BadFormat,
+            StreamErrorCondition::BadNamespacePrefix => Self::BadNamespacePrefix,
+            StreamErrorCondition::Conflict => Self::Conflict,
+            StreamErrorCondition::ConnectionTimeout => Self::ConnectionTimeout,
+            StreamErrorCondition::HostGone => Self::HostGone,
+            StreamErrorCondition::HostUnknown => Self::HostUnknown,
+            StreamErrorCondition::ImproperAddressing => Self::ImproperAddressing,
+            StreamErrorCondition::InternalServerError => Self::InternalServerError,
+            StreamErrorCondition::InvalidFrom => Self::InvalidFrom,
+            StreamErrorCondition::InvalidNamespace => Self::InvalidNamespace,
+            StreamErrorCondition::InvalidXml => Self::InvalidXml,
+            StreamErrorCondition::NotAuthorized => Self::NotAuthorized,
+            StreamErrorCondition::NotWellFormed => Self::NotWellFormed,
+            StreamErrorCondition::PolicyViolation => Self::PolicyViolation,
+            StreamErrorCondition::RemoteConnectionFailed => Self::RemoteConnectionFailed,
+            StreamErrorCondition::Reset => Self::Reset,
+            StreamErrorCondition::ResourceConstraint => Self::ResourceConstraint,
+            StreamErrorCondition::RestrictedXml => Self::RestrictedXml,
+            StreamErrorCondition::SeeOtherHost => Self::SeeOtherHost,
+            StreamErrorCondition::SystemShutdown => Self::SystemShutdown,
+            StreamErrorCondition::UndefinedCondition => Self::UndefinedCondition,
+            StreamErrorCondition::UnsupportedEncoding => Self::UnsupportedEncoding,
+            StreamErrorCondition::UnsupportedFeature => Self::UnsupportedFeature,
+            StreamErrorCondition::UnsupportedStanzaType => Self::UnsupportedStanzaType,
+            StreamErrorCondition::UnsupportedVersion => Self::UnsupportedVersion,
+        }
     }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct JsStreamError<'a> {
-    detail: &'a str,
-    condition: &'a str,
+struct JsStreamError {
+    kind: JsControlErrorKind,
+    condition: JsStreamErrorCondition,
     stream_management_error: Option<JsStreamManagementError>,
 }
 
@@ -239,7 +334,11 @@ struct JsStreamError<'a> {
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum JsStreamManagementError {
     #[serde(rename = "handled-count-too-high")]
-    HandledCountTooHigh { h: u32, send_count: u32 },
+    HandledCountTooHigh {
+        h: u32,
+        #[serde(rename = "sendCount")]
+        send_count: u32,
+    },
 }
 
 fn emit_stream_error_callback(
@@ -249,16 +348,15 @@ fn emit_stream_error_callback(
 ) {
     let callback = inner.borrow().on_error.clone();
     if let Some(callback) = callback {
-        let condition = condition.as_str();
         let stream_management_error = stream_management_error_to_js(detail);
-        let detail = stream_error_detail_label(condition, stream_management_error.as_ref());
         let payload = JsStreamError {
-            detail,
-            condition,
+            kind: JsControlErrorKind::StreamError,
+            condition: condition.into(),
             stream_management_error,
         };
-        let value = to_js_value(&payload).unwrap_or_else(|_| JsValue::from_str(condition));
-        let _ = callback.call1(&JsValue::NULL, &value);
+        if let Ok(value) = to_js_value(&payload) {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
     }
 }
 
@@ -270,12 +368,122 @@ fn stream_management_error_to_js(
     })
 }
 
-fn stream_error_detail_label(
-    condition: &'static str,
-    stream_management_error: Option<&JsStreamManagementError>,
-) -> &'static str {
-    match stream_management_error {
-        Some(JsStreamManagementError::HandledCountTooHigh { .. }) => "handled-count-too-high",
-        None => condition,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn driver_error_reason_codes_cover_every_typed_variant() {
+        assert_eq!(
+            DriverErrorReason::ALL
+                .iter()
+                .copied()
+                .map(|reason| serde_json::to_value(reason).expect("reason serializes"))
+                .collect::<Vec<_>>(),
+            [
+                "core-error", "invalid-transport-scheme", "missing-websocket-host",
+                "empty-resource", "empty-stanza-id", "request-id-exhausted",
+                "duplicate-request", "duplicate-stanza-correlation", "unknown-request",
+                "unknown-stanza-correlation", "invalid-phase-transition",
+                "invalid-state-transition", "missing-stream-feature", "invalid-stream-features",
+                "invalid-sasl-failure", "invalid-bind-response", "authentication-rejected",
+                "websocket-connect-timeout", "websocket-write-timeout", "iq-timeout",
+                "websocket-transport-error", "empty-transport-frame",
+                "transport-frame-too-large", "invalid-transport-frame",
+                "invalid-stream-open-to", "invalid-stream-open-from",
+                "unsupported-stream-version", "unsupported-websocket-message",
+                "transport-closed", "request-cancelled", "disconnected",
+                "invalid-resume-stanza", "push-registration-error", "stanza-error",
+            ]
+            .map(serde_json::Value::from),
+        );
+    }
+
+    #[test]
+    fn driver_authentication_codes_cover_every_typed_variant() {
+        assert_eq!(
+            DriverAuthenticationCondition::ALL
+                .iter()
+                .copied()
+                .map(|condition| {
+                    serde_json::to_value(condition).expect("authentication condition serializes")
+                })
+                .collect::<Vec<_>>(),
+            [
+                "aborted", "account-disabled", "credentials-expired", "encryption-required",
+                "incorrect-encoding", "invalid-authzid", "invalid-mechanism",
+                "malformed-request", "mechanism-too-weak", "not-authorized",
+                "temporary-auth-failure", "unknown",
+            ]
+            .map(serde_json::Value::from),
+        );
+    }
+
+    #[test]
+    fn stream_error_codes_cover_every_core_typed_variant() {
+        assert_eq!(
+            StreamErrorCondition::ALL
+                .into_iter()
+                .map(JsStreamErrorCondition::from)
+                .map(|condition| {
+                    serde_json::to_value(condition).expect("stream condition serializes")
+                })
+                .collect::<Vec<_>>(),
+            [
+                "bad-format", "bad-namespace-prefix", "conflict", "connection-timeout",
+                "host-gone", "host-unknown", "improper-addressing",
+                "internal-server-error", "invalid-from", "invalid-namespace", "invalid-xml",
+                "not-authorized", "not-well-formed", "policy-violation",
+                "remote-connection-failed", "reset", "resource-constraint", "restricted-xml",
+                "see-other-host", "system-shutdown", "undefined-condition",
+                "unsupported-encoding", "unsupported-feature", "unsupported-stanza-type",
+                "unsupported-version",
+            ]
+            .map(serde_json::Value::from),
+        );
+    }
+
+    #[test]
+    fn driver_errors_serialize_as_tagged_payloads_with_typed_authentication_condition() {
+        let payload = JsDriverError {
+            kind: JsControlErrorKind::DriverError,
+            reason: DriverErrorReason::AuthenticationRejected,
+            authentication_condition: Some(DriverAuthenticationCondition::NotAuthorized),
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload).expect("driver error serializes"),
+            json!({
+                "kind": "driver-error",
+                "reason": "authentication-rejected",
+                "authenticationCondition": "not-authorized",
+            }),
+        );
+    }
+
+    #[test]
+    fn stream_errors_serialize_as_tagged_payloads_with_typed_sm_metadata() {
+        let payload = JsStreamError {
+            kind: JsControlErrorKind::StreamError,
+            condition: JsStreamErrorCondition::from(StreamErrorCondition::UndefinedCondition),
+            stream_management_error: Some(JsStreamManagementError::HandledCountTooHigh {
+                h: 3,
+                send_count: 2,
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload).expect("stream error serializes"),
+            json!({
+                "kind": "stream-error",
+                "condition": "undefined-condition",
+                "streamManagementError": {
+                    "kind": "handled-count-too-high",
+                    "h": 3,
+                    "sendCount": 2,
+                },
+            }),
+        );
     }
 }

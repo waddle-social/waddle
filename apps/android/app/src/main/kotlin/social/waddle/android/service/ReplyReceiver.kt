@@ -19,8 +19,9 @@ class ReplyReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_REPLY) return
         val results = RemoteInput.getResultsFromIntent(intent) ?: return
         val text = results.getCharSequence(KEY_REPLY_TEXT)?.toString()?.trim().orEmpty()
+        val ownerBareJid = intent.getStringExtra(EXTRA_OWNER_BARE_JID)
         val conversationJid = intent.getStringExtra(EXTRA_CONVERSATION_JID)
-        if (text.isEmpty() || conversationJid == null) return
+        if (text.isEmpty() || ownerBareJid == null || conversationJid == null) return
         val isGroupchat = intent.getBooleanExtra(EXTRA_IS_GROUPCHAT, false)
 
         val graph = (context.applicationContext as WaddleApplication).graph
@@ -32,10 +33,16 @@ class ReplyReceiver : BroadcastReceiver() {
                 // shade re-post is a notify() — both can throw, and an
                 // uncaught throw on this root coroutine kills the process
                 // while leaving the RemoteInput spinner stuck.
-                runCatching { deliver(graph, conversationJid, isGroupchat, text) }
+                runCatching {
+                    deliver(graph, ownerBareJid, conversationJid, isGroupchat, text)
+                }
                     .onFailure {
                         runCatching {
-                            graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
+                            graph.messageNotifier.notifyReplyFailed(
+                                ownerBareJid,
+                                conversationJid,
+                                isGroupchat,
+                            )
                         }
                     }
             } finally {
@@ -46,15 +53,17 @@ class ReplyReceiver : BroadcastReceiver() {
 
     private suspend fun deliver(
         graph: AppGraph,
+        ownerBareJid: String,
         conversationJid: String,
         isGroupchat: Boolean,
         text: String,
     ) {
-        val result = if (isGroupchat) {
-            graph.sessionManager.sendGroupchatMessage(conversationJid, text)
-        } else {
-            graph.sessionManager.sendChatMessage(conversationJid, text)
-        }
+        val result = graph.sessionManager.sendDirectReply(
+            expectedOwnerBareJid = ownerBareJid,
+            conversationJid = conversationJid,
+            isGroupchat = isGroupchat,
+            body = text,
+        )
         // A written send OR a queued one may echo into the shade:
         // queued replies are persisted and replayed by the session
         // manager on reconnect, so prompting the user to retype
@@ -64,17 +73,24 @@ class ReplyReceiver : BroadcastReceiver() {
         // swallowing the reply while showing it as sent loses
         // the message.
         if (result.outcome is WaddleSendMessageOutcome.Sent || result.queued) {
-            result.queuedId?.let { queuedId ->
-                graph.messageNotifier.trackQueuedReply(queuedId, conversationJid, isGroupchat)
-            }
-            graph.messageNotifier.appendOwnReply(conversationJid, isGroupchat, text)
+            graph.messageNotifier.appendOwnReply(
+                ownerBareJid,
+                conversationJid,
+                isGroupchat,
+                text,
+            )
         } else {
-            graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
+            graph.messageNotifier.notifyReplyFailed(
+                ownerBareJid,
+                conversationJid,
+                isGroupchat,
+            )
         }
     }
 
     companion object {
         const val ACTION_REPLY = "social.waddle.android.action.REPLY"
+        const val EXTRA_OWNER_BARE_JID = "social.waddle.android.extra.OWNER_BARE_JID"
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val KEY_REPLY_TEXT = "waddle.reply.text"

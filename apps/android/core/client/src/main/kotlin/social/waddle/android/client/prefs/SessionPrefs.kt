@@ -11,33 +11,35 @@ import kotlinx.serialization.json.Json
 import kotlin.random.Random
 
 /**
- * Session-scoped persistence (`session.preferences_pb`), mirroring the
- * web localStorage keys: `waddle.chat.session`, `waddle.chat.sm-resume`,
- * `waddle.chat.joined-rooms`, `waddle.chat.last-seen`,
- * `waddle.chat.outbound-queue`, `waddle.chat.resume-cursors`.
+ * Session-scoped persistence (`session.preferences_pb`).
+ *
+ * Delivery state has exactly one authority: [deliveryJournal]. Account
+ * metadata, SM snapshots, outbound rows, and terminal intents are encoded
+ * under one versioned key and changed through [updateDeliveryJournal].
  */
 class SessionPrefs(
     private val dataStore: DataStore<Preferences>,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
-    val serverUrl: Flow<String?> = dataStore.data.map { it[KEY_SERVER_URL] }
-    val sessionId: Flow<String?> = dataStore.data.map { it[KEY_SESSION_ID] }
-    val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }
+    val deliveryJournal: Flow<DeliveryJournal> =
+        dataStore.data.map(::decodeDeliveryJournal)
 
-    val smResume: Flow<SmResumeSnapshot?> = dataStore.data.map { prefs ->
-        prefs[KEY_SM_RESUME]?.let { stored ->
-            runCatching { json.decodeFromString<SmResumeSnapshot>(stored) }.getOrNull()
-        }
+    val ownerBareJid: Flow<String?> =
+        deliveryJournal.map { journal -> journal.activeOwnerBareJid }
+
+    val sessionId: Flow<String?> = deliveryJournal.map { journal ->
+        journal.activeOwnerBareJid
+            ?.let(journal.owners::get)
+            ?.session
+            ?.sessionId
     }
+
+    val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }
 
     val lastSeen: Flow<Map<String, String>> = dataStore.data.map { prefs ->
         prefs[KEY_LAST_SEEN]?.let { stored ->
             runCatching { json.decodeFromString<Map<String, String>>(stored) }.getOrNull()
         } ?: emptyMap()
-    }
-
-    val outboundQueue: Flow<List<QueuedOutboundMessage>> = dataStore.data.map { prefs ->
-        prefs[KEY_OUTBOUND_QUEUE]?.let(::decodeOutboundQueue) ?: emptyList()
     }
 
     val resumeCursors: Flow<Map<String, ResumeCursor>> = dataStore.data.map { prefs ->
@@ -46,35 +48,43 @@ class SessionPrefs(
         } ?: emptyMap()
     }
 
-    suspend fun setServerUrl(url: String) {
-        dataStore.edit { it[KEY_SERVER_URL] = url }
+    /**
+     * Select and persist one authenticated owner without touching any
+     * foreign owner's delivery state.
+     */
+    suspend fun activateSession(ownerBareJid: String, sessionId: String) {
+        updateDeliveryJournal { journal ->
+            val owner = journal.owners[ownerBareJid] ?: DeliveryOwnerJournal()
+            DeliveryJournalMutation(
+                journal = journal.copy(
+                    activeOwnerBareJid = ownerBareJid,
+                    owners = journal.owners + (
+                        ownerBareJid to owner.copy(
+                            session = DeliverySessionMetadata(sessionId),
+                        )
+                    ),
+                ),
+                result = Unit,
+            )
+        }
     }
 
     /**
-     * Bare JID of the signed-in account, persisted so process-death
-     * revivals (notification direct replies) can attribute work before
-     * the in-memory session manager has restored. Cleared with the rest
-     * of the session on logout.
+     * The sole delivery-journal read-modify-write boundary. DataStore
+     * serializes edits; [transform] returns both the new journal and the
+     * exact operation result observed from that same committed state.
      */
-    val ownerBareJid: Flow<String?> = dataStore.data.map { prefs -> prefs[KEY_OWNER_BARE_JID] }
-
-    suspend fun setOwnerBareJid(bareJid: String) {
-        dataStore.edit { prefs -> prefs[KEY_OWNER_BARE_JID] = bareJid }
-    }
-
-    suspend fun setSessionId(sessionId: String) {
-        dataStore.edit { it[KEY_SESSION_ID] = sessionId }
-    }
-
-    /** `null` clears the snapshot (explicit disconnect / resume rejected). */
-    suspend fun setSmResume(snapshot: SmResumeSnapshot?) {
+    suspend fun <T> updateDeliveryJournal(
+        transform: (DeliveryJournal) -> DeliveryJournalMutation<T>,
+    ): T {
+        var outcome: Result<T>? = null
         dataStore.edit { prefs ->
-            if (snapshot == null) {
-                prefs.remove(KEY_SM_RESUME)
-            } else {
-                prefs[KEY_SM_RESUME] = json.encodeToString(snapshot)
-            }
+            val mutation = transform(decodeDeliveryJournal(prefs))
+            require(mutation.journal.schemaVersion == DeliveryJournal.CURRENT_SCHEMA_VERSION)
+            prefs[KEY_DELIVERY_JOURNAL] = json.encodeToString(mutation.journal)
+            outcome = Result.success(mutation.result)
         }
+        return checkNotNull(outcome) { "delivery journal edit did not run" }.getOrThrow()
     }
 
     suspend fun setJoinedRooms(rooms: Set<String>) {
@@ -90,24 +100,6 @@ class SessionPrefs(
         }
     }
 
-    /**
-     * Atomic read-modify-write of the persisted outbound queue: the
-     * DataStore serializes concurrent edits, so enqueue/remove callers
-     * need no external lock.
-     */
-    suspend fun updateOutboundQueue(
-        transform: (List<QueuedOutboundMessage>) -> List<QueuedOutboundMessage>,
-    ) {
-        dataStore.edit { prefs ->
-            val next = transform(prefs[KEY_OUTBOUND_QUEUE]?.let(::decodeOutboundQueue) ?: emptyList())
-            if (next.isEmpty()) {
-                prefs.remove(KEY_OUTBOUND_QUEUE)
-            } else {
-                prefs[KEY_OUTBOUND_QUEUE] = json.encodeToString(next)
-            }
-        }
-    }
-
     suspend fun setResumeCursors(cursors: Map<String, ResumeCursor>) {
         dataStore.edit { prefs ->
             if (cursors.isEmpty()) {
@@ -117,9 +109,6 @@ class SessionPrefs(
             }
         }
     }
-
-    private fun decodeOutboundQueue(stored: String): List<QueuedOutboundMessage>? =
-        runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
 
     /**
      * Stable-per-install 8-hex suffix for the XMPP resource
@@ -136,12 +125,39 @@ class SessionPrefs(
         return suffix
     }
 
-    /** Logout: wipe everything except the per-install resource suffix. */
+    /**
+     * Logout: purge only the active owner's session/SM/rows/intents while
+     * preserving every foreign owner and the per-install resource suffix.
+     * Other session-scoped projection keys belong to the active owner and
+     * are cleared for privacy.
+     */
     suspend fun clear() {
         dataStore.edit { prefs ->
             val suffix = prefs[KEY_RESOURCE_SUFFIX]
+            val journal = decodeDeliveryJournal(prefs)
+            val activeOwner = journal.activeOwnerBareJid
+            val retainedJournal = journal.copy(
+                activeOwnerBareJid = null,
+                owners = if (activeOwner == null) {
+                    journal.owners
+                } else {
+                    journal.owners - activeOwner
+                },
+            )
             prefs.clear()
             suffix?.let { prefs[KEY_RESOURCE_SUFFIX] = it }
+            if (retainedJournal.owners.isNotEmpty()) {
+                prefs[KEY_DELIVERY_JOURNAL] = json.encodeToString(retainedJournal)
+            }
+        }
+    }
+
+    private fun decodeDeliveryJournal(prefs: Preferences): DeliveryJournal {
+        val stored = prefs[KEY_DELIVERY_JOURNAL] ?: return DeliveryJournal()
+        return json.decodeFromString<DeliveryJournal>(stored).also { journal ->
+            require(journal.schemaVersion == DeliveryJournal.CURRENT_SCHEMA_VERSION) {
+                "unsupported delivery journal schema version: ${journal.schemaVersion}"
+            }
         }
     }
 
@@ -151,13 +167,9 @@ class SessionPrefs(
         }
 
     private companion object {
-        val KEY_SERVER_URL = stringPreferencesKey("server_url")
-        val KEY_SESSION_ID = stringPreferencesKey("session_id")
-        val KEY_OWNER_BARE_JID = stringPreferencesKey("owner_bare_jid")
-        val KEY_SM_RESUME = stringPreferencesKey("sm_resume")
+        val KEY_DELIVERY_JOURNAL = stringPreferencesKey("delivery_journal_v1")
         val KEY_JOINED_ROOMS = stringSetPreferencesKey("joined_rooms")
         val KEY_LAST_SEEN = stringPreferencesKey("last_seen")
-        val KEY_OUTBOUND_QUEUE = stringPreferencesKey("outbound_queue")
         val KEY_RESUME_CURSORS = stringPreferencesKey("resume_cursors")
         val KEY_RESOURCE_SUFFIX = stringPreferencesKey("resource_suffix")
 

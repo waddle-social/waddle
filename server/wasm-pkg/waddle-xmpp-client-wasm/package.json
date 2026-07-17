@@ -5,7 +5,7 @@
     "Waddle Contributors"
   ],
   "description": "WebAssembly bindings for Waddle's native XMPP client",
-  "version": "0.0.0-wasm-7f84e0e518eebc10868ab198820f15dab25d2f3ec8e210dd14cdd1a0187c4c3e",
+  "version": "0.0.0-wasm-d0f54547ccc900aab90ffbc045081dec4f92d7e42f461acb616f4375ab711ba9",
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",

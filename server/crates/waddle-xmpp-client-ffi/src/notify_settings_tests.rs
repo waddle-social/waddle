@@ -26,9 +26,9 @@ use crate::notify_settings::{
     parse_dm_bookmarks_response, room_outcome_to_ffi,
 };
 use crate::{
-    WaddleClient, WaddleClientEvent, WaddleConfig, WaddleDmBookmarkItem, WaddleError,
-    WaddleEventListener, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
-    WaddleSetRoomNotificationModeOutcome,
+    WaddleClient, WaddleConfig, WaddleConnectionGeneration, WaddleDeliveryAttemptId,
+    WaddleDeliveryAttemptRef, WaddleDmBookmarkItem, WaddleError, WaddleNotifyMode,
+    WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
 };
 
 #[derive(Clone, Default)]
@@ -36,29 +36,24 @@ struct RecordingListener {
     errors: Arc<StdMutex<Vec<String>>>,
 }
 
-impl WaddleEventListener for RecordingListener {
-    fn on_event(&self, event: WaddleClientEvent) {
-        if let WaddleClientEvent::Error { description } = event {
-            self.errors
-                .lock()
-                .expect("test mutex poisoned")
-                .push(description);
-        }
-    }
-}
-
 fn test_client() -> Arc<WaddleClient> {
-    Arc::new(WaddleClient {
-        config: WaddleConfig {
+    let listener = RecordingListener::default();
+    WaddleClient::new_for_test(
+        WaddleConfig {
             server_url: "wss://xmpp.waddle.test".to_string(),
             jid: "alice@waddle.test".to_string(),
             access_token: "token".to_string(),
             resource: "test".to_string(),
+            delivery_attempt: WaddleDeliveryAttemptRef {
+                attempt_id: WaddleDeliveryAttemptId {
+                    value: "00000000-0000-4000-8000-000000000001".to_string(),
+                },
+                connection_generation: WaddleConnectionGeneration { value: 0 },
+            },
             resume_state: None,
         },
-        listener: Arc::new(Box::new(RecordingListener::default()) as Box<dyn WaddleEventListener>),
-        handle: tokio::sync::Mutex::new(None),
-    })
+        listener.errors,
+    )
 }
 
 fn stanza_error(condition: &str) -> ClientError {

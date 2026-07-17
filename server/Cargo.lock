@@ -7862,6 +7862,7 @@ dependencies = [
 name = "waddle-xmpp-client-ffi"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "jid",
  "minidom",
  "thiserror 2.0.18",

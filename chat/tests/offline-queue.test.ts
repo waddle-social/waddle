@@ -12,7 +12,10 @@ import {
 import {
   committedOrThrow,
   MemoryDurableOutboundStore,
-} from "../src/lib/outbound-durable-store";
+  type OutboundOwnerContext,
+  type OutboundTerminalIntent,
+} from "../src/lib/xmpp-runtime-durable-store";
+import { WasmClientCallbackDouble } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -22,6 +25,11 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
     xmpp_websocket_url: "wss://example.com/ws",
     ...partial,
   } as WaddleSession;
+}
+
+function wasmSent(stanzaId: string | undefined) {
+  if (!stanzaId) throw new Error("test send is missing stanza_id");
+  return { kind: "sent" as const, stanza_id: stanzaId };
 }
 
 function createStorageMock() {
@@ -49,7 +57,60 @@ function createStorageMock() {
 }
 
 async function waitForOutboundHydration(client: BrowserXmppClient): Promise<void> {
+  if (!createdClients.includes(client)) createdClients.push(client);
   await (client as unknown as { outboundQueueHydration: Promise<void> }).outboundQueueHydration;
+}
+
+async function bindReplayGeneration(
+  client: BrowserXmppClient,
+  generation = 1,
+): Promise<void> {
+  await waitForOutboundHydration(client);
+  const state = client as unknown as {
+    connectEpoch: number;
+    outboundQueue: {
+      beginConnectionGeneration(generation: number): number;
+    };
+  };
+  state.connectEpoch = generation;
+  expect(state.outboundQueue.beginConnectionGeneration(generation)).toBe(generation);
+}
+
+type TerminalExecution = {
+  executor: OutboundOwnerContext;
+  intent: OutboundTerminalIntent;
+};
+
+function observeTerminalExecutions(
+  store: MemoryDurableOutboundStore,
+): TerminalExecution[] {
+  const executions: TerminalExecution[] = [];
+  const applyTerminal = store.applyTerminal.bind(store);
+  store.applyTerminal = async (executor, intent) => {
+    executions.push({
+      executor: structuredClone(executor),
+      intent: structuredClone(intent),
+    });
+    return applyTerminal(executor, intent);
+  };
+  return executions;
+}
+
+function expectExactTerminalExecution(
+  execution: TerminalExecution | undefined,
+  messageId: string,
+  connectionGeneration: number,
+): void {
+  if (!execution) throw new Error(`missing terminal execution for ${messageId}`);
+  expect(execution.intent.identity.messageId).toBe(messageId);
+  expect(execution.intent.expected.connectionGeneration).toBe(connectionGeneration);
+  expect(execution.executor).toEqual({
+    accountKey: execution.intent.expected.accountKey,
+    ownerId: execution.intent.expected.ownerId,
+    ownerInstanceId: execution.intent.expected.ownerInstanceId,
+    ownerGeneration: execution.intent.expected.ownerGeneration,
+    authorityEpoch: execution.intent.expected.authorityEpoch,
+  });
 }
 
 function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
@@ -62,8 +123,10 @@ function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<vo
 
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
+let createdClients: BrowserXmppClient[] = [];
 
 beforeEach(() => {
+  createdClients = [];
   const storage = createStorageMock();
   (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
   (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
@@ -73,7 +136,17 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as {
+      xmpp: null;
+      connected: boolean;
+    };
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients = [];
   localStorage.clear();
   if (originalLocalStorage === undefined) {
     Reflect.deleteProperty(globalThis, "localStorage");
@@ -90,8 +163,10 @@ afterEach(() => {
 describe("offline outbound queue replay", () => {
   test("does not persist decodable link preview tokens for queued sends", async () => {
     const durableStore = new MemoryDurableOutboundStore();
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
-    await waitForOutboundHydration(client);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
+    await bindReplayGeneration(client);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -121,14 +196,16 @@ describe("offline outbound queue replay", () => {
       peerJid: " Bob@Example.COM/desktop ",
       body: "read https://example.com/article",
     }));
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
-    await waitForOutboundHydration(client);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
+    await bindReplayGeneration(client);
 
     const xmpp = {
       send_raw_iq: mock(async () => {
         throw new Error("queued replay must not perform composer preview lookup");
       }),
-      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
       on() {},
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
@@ -143,8 +220,11 @@ describe("offline outbound queue replay", () => {
 
   test("replays queued DM messages in order when the session returns", async () => {
     const durableStore = new MemoryDurableOutboundStore();
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
-    await waitForOutboundHydration(client);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
+    await bindReplayGeneration(client);
+    const terminalExecutions = observeTerminalExecutions(durableStore);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -156,24 +236,12 @@ describe("offline outbound queue replay", () => {
       "dm-2",
     ]);
 
-    // The XMPP client emits ack events; the BrowserXmppClient
-    // wires "message:acked" in `wireEvents`, and that's what drives
-    // removal from the persisted queue post-fix. For the flush test we
-    // drive the Rust send method directly and simulate the ack afterwards.
-    const handlers = new Map<string, Array<(payload: unknown) => void>>();
-    const xmpp = {
-      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
-      on(event: string, handler: (payload: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, payload: unknown) {
-        for (const handler of handlers.get(event) ?? []) {
-          handler(payload);
-        }
-      },
-    };
+    // The generated XMPP callback carries delivery acks into `wireEvents`,
+    // which drives removal from the persisted queue. The test double keeps
+    // Closed typed callback controls mirror the generated binding exactly.
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
+      send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
+    });
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
     // Wire the ack handler the same way wireEvents would.
@@ -186,13 +254,9 @@ describe("offline outbound queue replay", () => {
 
     await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
 
-    expect(statuses).toEqual([
-      { id: "dm-1", status: "sending" },
-      { id: "dm-2", status: "sending" },
-    ]);
+    expect(statuses).toEqual([{ id: "dm-1", status: "sending" }]);
     expect(xmpp.send_chat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id)).toEqual([
       "dm-1",
-      "dm-2",
     ]);
     // Post-fix: persisted queue entries linger until XEP-0198
     // `message:acked` confirms the server received them.
@@ -206,25 +270,37 @@ describe("offline outbound queue replay", () => {
     await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
     expect(xmpp.send_chat_message.mock.calls).toEqual([]);
 
-    // Now simulate the server acking dm-1 — that entry drops out of the
-    // persisted queue; dm-2 is still pending.
+    // Now simulate the server acking dm-1. The exact durable terminal commit
+    // advances the one-head direct lane and makes dm-2 eligible.
     const firstAck = nextMessageAck(client, "dm-1");
-    xmpp.emit("message:acked", { id: "dm-1" });
+    xmpp.emitMessageDeliveryAcked("dm-1");
     await firstAck;
+    expectExactTerminalExecution(terminalExecutions[0], "dm-1", 1);
+    await (client as unknown as { flushQueuedDirectMessages: () => Promise<void> }).flushQueuedDirectMessages();
     expect(
       listQueuedDmMessages("alice@example.com", "bob@example.com", "account").map((message) => message.id),
     ).toEqual(["dm-2"]);
+    expect(xmpp.send_chat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id))
+      .toEqual(["dm-2"]);
+    expect(statuses).toEqual([
+      { id: "dm-1", status: "sending" },
+      { id: "dm-2", status: "sending" },
+    ]);
 
     const secondAck = nextMessageAck(client, "dm-2");
-    xmpp.emit("message:acked", { id: "dm-2" });
+    xmpp.emitMessageDeliveryAcked("dm-2");
     await secondAck;
+    expectExactTerminalExecution(terminalExecutions[1], "dm-2", 1);
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
   });
 
   test("replays queued room messages in order after the room rejoins", async () => {
     const durableStore = new MemoryDurableOutboundStore();
-    const client = new BrowserXmppClient(session(), undefined, durableStore);
-    await waitForOutboundHydration(client);
+    const client = new BrowserXmppClient(session(), {
+      durableRuntimeStore: durableStore,
+    });
+    await bindReplayGeneration(client);
+    const terminalExecutions = observeTerminalExecutions(durableStore);
     (client as unknown as { connect: ReturnType<typeof mock> }).connect = mock(async () => {
       throw new Error("Reconnection timed out");
     });
@@ -241,23 +317,12 @@ describe("offline outbound queue replay", () => {
       "room-2",
     ]);
 
-    const handlers = new Map<string, Array<(payload: unknown) => void>>();
-    const xmpp = {
+    const xmpp = Object.assign(new WasmClientCallbackDouble(), {
       send_raw_iq: mock(async () => {
         throw new Error("queued replay must not perform composer preview lookup");
       }),
-      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
-      on(event: string, handler: (payload: unknown) => void) {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-      },
-      emit(event: string, payload: unknown) {
-        for (const handler of handlers.get(event) ?? []) {
-          handler(payload);
-        }
-      },
-    };
+      send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => wasmSent(opts.stanza_id)),
+    });
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).connected = true;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean; currentRoom: string | null }).currentRoom =
@@ -270,11 +335,8 @@ describe("offline outbound queue replay", () => {
     expect(xmpp.send_raw_iq).not.toHaveBeenCalled();
     expect(xmpp.send_groupchat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id)).toEqual([
       "room-1",
-      "room-2",
     ]);
     expect((xmpp.send_groupchat_message.mock.calls[0]?.[2] as { link_preview_token?: string }).link_preview_token)
-      .toBeUndefined();
-    expect((xmpp.send_groupchat_message.mock.calls[1]?.[2] as { link_preview_token?: string }).link_preview_token)
       .toBeUndefined();
     // Persisted entries stay until ack, same as the DM path.
     expect(
@@ -282,11 +344,19 @@ describe("offline outbound queue replay", () => {
     ).toEqual(["room-1", "room-2"]);
 
     const firstAck = nextMessageAck(client, "room-1");
-    xmpp.emit("message:acked", { id: "room-1" });
+    xmpp.emitMessageDeliveryAcked("room-1");
     await firstAck;
+    expectExactTerminalExecution(terminalExecutions[0], "room-1", 1);
+    await (client as unknown as { flushQueuedRoomMessages: (roomJid: string) => Promise<void> })
+      .flushQueuedRoomMessages(roomJid);
+    expect(xmpp.send_groupchat_message.mock.calls.map((call) => (call[2] as { stanza_id?: string }).stanza_id))
+      .toEqual(["room-1", "room-2"]);
+    expect((xmpp.send_groupchat_message.mock.calls[1]?.[2] as { link_preview_token?: string }).link_preview_token)
+      .toBeUndefined();
     const secondAck = nextMessageAck(client, "room-2");
-    xmpp.emit("message:acked", { id: "room-2" });
+    xmpp.emitMessageDeliveryAcked("room-2");
     await secondAck;
+    expectExactTerminalExecution(terminalExecutions[1], "room-2", 1);
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 });

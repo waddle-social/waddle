@@ -1,142 +1,185 @@
 /**
- * PR4 — outbound queue TTL.
+ * Durable outbound queue retention.
  *
- * A queued message that fails to ack (e.g. user typed it, closed
- * the tab before sending, then opened a new tab weeks later) used
- * to replay forever with its frozen `createdAt`, inserting ahead
- * of every message received since and surprising the user with a
- * send they don't remember intending. The store now prunes
- * entries older than 7 days on read so the persisted footprint
- * stays bounded over the lifetime of the account.
+ * IndexedDB is the canonical queue and the synchronous localStorage view is
+ * only a paint projection. Retention therefore runs transactionally through
+ * DurableOutboundStore: projection reads must never independently delete work
+ * that may still be claimed by a live sender or awaiting terminal handling.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
+import { QUEUE_TTL_MS } from "../src/lib/outbound-queue-store";
 import {
-  countQueuedMessages,
-  enqueueQueuedMessage,
-  listQueuedDmMessages,
-} from "../src/lib/outbound-queue-store";
+  MemoryDurableOutboundStore,
+  committedOrThrow,
+  createOutboundClaim,
+} from "../src/lib/xmpp-runtime-durable-store";
 
-function createStorageMock() {
-  const values = new Map<string, string>();
+const ACCOUNT = "alice@example.com";
+const NOW = Date.parse("2026-07-17T12:00:00.000Z");
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CUTOFF = NOW - QUEUE_TTL_MS;
+
+function directMessage(
+  id: string,
+  createdAt: string,
+): PersistedQueuedDmMessage {
   return {
-    getItem(key: string) { return values.has(key) ? values.get(key)! : null; },
-    setItem(key: string, value: string) { values.set(key, value); },
-    removeItem(key: string) { values.delete(key); },
-    clear() { values.clear(); },
-    has(key: string) { return values.has(key); },
-    key(index: number) { return [...values.keys()][index] ?? null; },
-    get length() { return values.size; },
+    kind: "dm",
+    id,
+    createdAt,
+    peerJid: "bob@example.com",
+    body: id,
   };
 }
 
-const originalWindow = globalThis.window;
-const originalLocalStorage = globalThis.localStorage;
-let storage: ReturnType<typeof createStorageMock>;
-
-beforeEach(() => {
-  storage = createStorageMock();
-  (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
-  (globalThis as typeof globalThis & { window: Window & { localStorage: typeof storage } }).window = {
-    ...(originalWindow ?? {}),
-    localStorage: storage,
-  } as Window & { localStorage: typeof storage };
-});
-
-afterEach(() => {
-  storage.clear();
-  if (originalLocalStorage === undefined) {
-    Reflect.deleteProperty(globalThis, "localStorage");
-  } else {
-    (globalThis as typeof globalThis & { localStorage: Storage }).localStorage = originalLocalStorage;
-  }
-  if (originalWindow === undefined) {
-    Reflect.deleteProperty(globalThis, "window");
-  } else {
-    (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = originalWindow;
-  }
-});
-
-function isoDaysAgo(days: number): string {
-  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+async function activate(store: MemoryDurableOutboundStore) {
+  return committedOrThrow(
+    "activate-test-owner",
+    await store.claimOwner(ACCOUNT, {
+      ownerId: "ttl-owner",
+      ownerInstanceId: crypto.randomUUID(),
+    }),
+  ).fence;
 }
 
-describe("outbound queue TTL", () => {
-  test("entries within the 7-day window are preserved", () => {
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-fresh",
-      createdAt: isoDaysAgo(3),
-      peerJid: "bob@example.com",
-      body: "still in window",
-    });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toHaveLength(1);
+describe("durable outbound queue TTL", () => {
+  test("ready entries within the 7-day window are preserved", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    await store.persistReady(
+      ACCOUNT,
+      directMessage("dm-fresh", new Date(NOW - 3 * DAY_MS).toISOString()),
+    );
+
+    const scan = committedOrThrow(
+      "scan-fresh",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned).toEqual([]);
+    expect(scan.entries.map((entry) => entry.identity.messageId)).toEqual(["dm-fresh"]);
   });
 
-  test("entries older than 7 days are pruned on read", () => {
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-stale",
-      createdAt: isoDaysAgo(30),
-      peerJid: "bob@example.com",
-      body: "ancient draft",
-    });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  test("stale ready entries are deleted from canonical storage", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    await store.persistReady(
+      ACCOUNT,
+      directMessage("dm-stale", new Date(NOW - 30 * DAY_MS).toISOString()),
+    );
+
+    const scan = committedOrThrow(
+      "scan-stale",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned.map((identity) => identity.messageId)).toEqual(["dm-stale"]);
+    expect(scan.entries).toEqual([]);
+    expect(committedOrThrow("list-after-prune", await store.list(ACCOUNT))).toEqual([]);
   });
 
-  test("pruning rewrites the persisted snapshot (the entry is gone, not just hidden)", () => {
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-stale",
-      createdAt: isoDaysAgo(30),
-      peerJid: "bob@example.com",
-      body: "ancient draft",
-    });
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-fresh",
-      createdAt: isoDaysAgo(1),
-      peerJid: "bob@example.com",
-      body: "recent draft",
-    });
+  test("a mixed scan prunes only stale canonical rows", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    await store.persistReady(
+      ACCOUNT,
+      directMessage("dm-stale", new Date(NOW - 30 * DAY_MS).toISOString()),
+    );
+    await store.persistReady(
+      ACCOUNT,
+      directMessage("dm-fresh", new Date(NOW - DAY_MS).toISOString()),
+    );
 
-    // Reading triggers prune.
-    expect(countQueuedMessages("alice@example.com")).toBe(1);
-    // The persisted blob should reflect just the fresh entry now.
-    const raw = storage.getItem("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-fresh");
-    expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw!);
-    expect(parsed.id).toBe("dm-fresh");
+    const scan = committedOrThrow(
+      "scan-mixed",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned.map((identity) => identity.messageId)).toEqual(["dm-stale"]);
+    expect(scan.entries.map((entry) => entry.identity.messageId)).toEqual(["dm-fresh"]);
   });
 
-  test("when every entry is stale the storage key is removed entirely", () => {
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-stale-1",
-      createdAt: isoDaysAgo(30),
-      peerJid: "bob@example.com",
-      body: "ancient 1",
-    });
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-stale-2",
-      createdAt: isoDaysAgo(60),
-      peerJid: "bob@example.com",
-      body: "ancient 2",
-    });
+  test("a stale row with a live claim is immune to pruning", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    const owner = await activate(store);
+    const persisted = committedOrThrow(
+      "persist-live-claim",
+      await store.persistClaimed(
+        ACCOUNT,
+        directMessage("dm-live", new Date(NOW - 30 * DAY_MS).toISOString()),
+        createOutboundClaim(owner, 1, "sending"),
+      ),
+    );
+    expect(persisted.kind).toBe("claimed");
 
-    expect(countQueuedMessages("alice@example.com")).toBe(0);
-    expect(storage.has("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-stale-1")).toBe(false);
-    expect(storage.has("waddle.chat.outbound-queue.v2.17:alice@example.com.dm-stale-2")).toBe(false);
+    const scan = committedOrThrow(
+      "scan-live-claim",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned).toEqual([]);
+    expect(scan.entries[0]?.state.kind).toBe("claimed");
   });
 
-  test("unparseable createdAt is treated as fresh (refuse-to-prune is safer than dropping)", () => {
-    enqueueQueuedMessage("alice@example.com", {
-      kind: "dm",
-      id: "dm-mystery",
-      createdAt: "not-a-date",
-      peerJid: "bob@example.com",
-      body: "weird stamp",
-    });
-    expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toHaveLength(1);
+  test("a stale row is pruned after its claim expires", async () => {
+    let now = NOW;
+    const store = new MemoryDurableOutboundStore({ now: () => now });
+    const owner = await activate(store);
+    const persisted = committedOrThrow(
+      "persist-expiring-claim",
+      await store.persistClaimed(
+        ACCOUNT,
+        directMessage("dm-expired", new Date(NOW - 30 * DAY_MS).toISOString()),
+        createOutboundClaim(owner, 1, "sending"),
+      ),
+    );
+    if (persisted.kind !== "claimed") throw new Error("expected claimed row");
+    now = persisted.claim.leaseUntil + 1;
+
+    const scan = committedOrThrow(
+      "scan-expired-claim",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned.map((identity) => identity.messageId)).toEqual(["dm-expired"]);
+    expect(scan.entries).toEqual([]);
+  });
+
+  test("terminal rows are immune until their terminal intent is applied", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    const owner = await activate(store);
+    const persisted = committedOrThrow(
+      "persist-terminal",
+      await store.persistClaimed(
+        ACCOUNT,
+        directMessage("dm-terminal", new Date(NOW - 30 * DAY_MS).toISOString()),
+        createOutboundClaim(owner, 1, "sending"),
+      ),
+    );
+    if (persisted.kind !== "claimed") throw new Error("expected claimed row");
+    const terminal = committedOrThrow(
+      "record-terminal",
+      await store.recordTerminal(
+        persisted.entry.identity,
+        "ack",
+        persisted.claim,
+      ),
+    );
+    expect(terminal.kind).toBe("recorded");
+
+    const scan = committedOrThrow(
+      "scan-terminal",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned).toEqual([]);
+    expect(scan.entries[0]?.state.kind).toBe("terminal");
+  });
+
+  test("unparseable createdAt fails closed and remains durable", async () => {
+    const store = new MemoryDurableOutboundStore({ now: () => NOW });
+    await store.persistReady(
+      ACCOUNT,
+      directMessage("dm-mystery", "not-a-date"),
+    );
+
+    const scan = committedOrThrow(
+      "scan-invalid-created-at",
+      await store.scanAndPrune(ACCOUNT, CUTOFF),
+    );
+    expect(scan.pruned).toEqual([]);
+    expect(scan.entries.map((entry) => entry.identity.messageId)).toEqual(["dm-mystery"]);
   });
 });

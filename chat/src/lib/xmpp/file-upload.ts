@@ -1,5 +1,4 @@
 /** XEP-0363: HTTP File Upload for sharing images and files in chat. */
-import type { WaddleClient } from "@waddle/xmpp-client-wasm";
 import { markSensitiveUrlForTelemetry, reportError } from "@/lib/telemetry";
 import type { WasmUploadSlot } from "./wasm-types";
 
@@ -23,12 +22,25 @@ interface SlotInfo {
   getUrl: string;
 }
 
-export async function discoverUploadService(xmpp: WaddleClient): Promise<string | null> {
+interface UploadServiceDiscoveryClient {
+  discover_upload_service(): Promise<string | null>;
+}
+
+interface UploadSlotClient {
+  request_upload_slot(
+    serviceJid: string,
+    filename: string,
+    size: bigint,
+    contentType: string,
+  ): Promise<WasmUploadSlot>;
+}
+
+export async function discoverUploadService(xmpp: UploadServiceDiscoveryClient): Promise<string | null> {
   return await xmpp.discover_upload_service();
 }
 
 export async function uploadFile(
-  xmpp: WaddleClient,
+  xmpp: UploadSlotClient,
   file: File | Blob,
   uploadDomain: string,
   onProgress?: (progress: UploadProgress) => void,
@@ -39,7 +51,7 @@ export async function uploadFile(
   if (size === 0) throw new Error("Cannot upload an empty file");
 
   const slot = parseSlotResponse(
-    await xmpp.request_upload_slot(uploadDomain, filename, BigInt(size), contentType) as WasmUploadSlot,
+    await xmpp.request_upload_slot(uploadDomain, filename, BigInt(size), contentType),
   );
   await uploadToSlot(file, slot.putUrl, slot.putHeaders, contentType, onProgress);
   return { getUrl: slot.getUrl, filename, contentType, size };

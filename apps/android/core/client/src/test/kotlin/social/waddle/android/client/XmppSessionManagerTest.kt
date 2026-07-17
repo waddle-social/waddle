@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMamPage
@@ -47,7 +48,7 @@ class XmppSessionManagerTest {
             runCurrent()
             assertEquals(ConnectionState.Connecting, awaitItem())
 
-            harness.factory.emit(WaddleClientEvent.Connected)
+            harness.factory.emitReady()
             runCurrent()
             assertEquals(ConnectionState.Ready, awaitItem())
         }
@@ -74,7 +75,7 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         assertEquals(ConnectionState.Ready, harness.manager.connectionState.value)
 
@@ -175,10 +176,69 @@ class XmppSessionManagerTest {
         )
         runCurrent()
 
-        assertEquals(ConnectionState.AuthFailed, harness.manager.connectionState.value)
+        assertEquals(
+            ConnectionState.AuthenticationStopped(
+                WaddleSaslCondition.NOT_AUTHORIZED,
+                SaslRetryDisposition.STOP_CREDENTIAL,
+            ),
+            harness.manager.connectionState.value,
+        )
         assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
         assertEquals("session id cleared on auth failure", null, harness.prefs.sessionId.first())
         assertEquals("no retry after auth failure", 1, harness.factory.clients.size)
+    }
+
+    @Test
+    fun `typed sasl failures have exhaustive retry dispositions`() {
+        val expected = mapOf(
+            WaddleSaslCondition.TEMPORARY_AUTH_FAILURE to SaslRetryDisposition.RETRY,
+            WaddleSaslCondition.NOT_AUTHORIZED to SaslRetryDisposition.STOP_CREDENTIAL,
+            WaddleSaslCondition.ACCOUNT_DISABLED to SaslRetryDisposition.STOP_CREDENTIAL,
+            WaddleSaslCondition.CREDENTIALS_EXPIRED to SaslRetryDisposition.STOP_CREDENTIAL,
+            WaddleSaslCondition.INVALID_AUTHZID to SaslRetryDisposition.STOP_CREDENTIAL,
+            WaddleSaslCondition.INVALID_MECHANISM to SaslRetryDisposition.STOP_CONFIGURATION,
+            WaddleSaslCondition.MECHANISM_TOO_WEAK to SaslRetryDisposition.STOP_CONFIGURATION,
+            WaddleSaslCondition.ENCRYPTION_REQUIRED to SaslRetryDisposition.STOP_CONFIGURATION,
+            WaddleSaslCondition.INCORRECT_ENCODING to SaslRetryDisposition.STOP_CONFIGURATION,
+            WaddleSaslCondition.MALFORMED_REQUEST to SaslRetryDisposition.STOP_CONFIGURATION,
+            WaddleSaslCondition.ABORTED to SaslRetryDisposition.STOP_ABORTED,
+            WaddleSaslCondition.UNKNOWN to SaslRetryDisposition.STOP_UNKNOWN,
+        )
+
+        assertEquals(WaddleSaslCondition.entries.toSet(), expected.keys)
+        expected.forEach { (condition, disposition) ->
+            assertEquals(disposition, condition.retryDisposition())
+        }
+    }
+
+    @Test
+    fun `configuration sasl failure stops reconnect without signing out`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        harness.factory.emit(
+            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.INVALID_MECHANISM),
+        )
+        runCurrent()
+
+        assertEquals(
+            ConnectionState.AuthenticationStopped(
+                WaddleSaslCondition.INVALID_MECHANISM,
+                SaslRetryDisposition.STOP_CONFIGURATION,
+            ),
+            harness.manager.connectionState.value,
+        )
+        assertEquals(WaddleAppState.Ready, harness.manager.appState.value)
+        assertNotNull(harness.prefs.sessionId.first())
+        assertEquals("no blind retry after configuration failure", 1, harness.factory.clients.size)
+
+        harness.manager.login(testSessionInfo(sessionId = "sess-2"))
+        runCurrent()
+        assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
+        assertEquals("explicit login starts a new generation", 2, harness.factory.clients.size)
+
+        harness.manager.logout()
     }
 
     @Test
@@ -208,7 +268,7 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
         assertEquals(ConnectionState.Ready, harness.manager.connectionState.value)
 
@@ -239,7 +299,7 @@ class XmppSessionManagerTest {
 
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val client = harness.factory.clients.last()
@@ -281,13 +341,19 @@ class XmppSessionManagerTest {
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val state = testResumeState()
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(state))
+        harness.factory.emitResumeStateChanged(state)
         runCurrent()
-        assertEquals(state.toSnapshot(), harness.prefs.smResume.first())
+        assertEquals(
+            state.toSnapshot(),
+            harness.prefs.deliveryJournal.first()
+                .owners["icepuma@waddle.test"]
+                ?.sm
+                ?.snapshot,
+        )
 
         harness.factory.emit(WaddleClientEvent.Disconnected)
         runCurrent()
@@ -298,9 +364,15 @@ class XmppSessionManagerTest {
         assertNotNull("second attempt must carry the persisted snapshot", resumed)
         assertEquals("prev-1", resumed?.previd)
 
-        harness.factory.emit(WaddleClientEvent.ResumeStateChanged(null))
+        harness.factory.emitResumeStateChanged(null)
         runCurrent()
-        assertEquals(null, harness.prefs.smResume.first())
+        assertEquals(
+            null,
+            harness.prefs.deliveryJournal.first()
+                .owners["icepuma@waddle.test"]
+                ?.sm
+                ?.snapshot,
+        )
 
         harness.manager.logout()
     }
@@ -330,9 +402,17 @@ class XmppSessionManagerTest {
         runCurrent()
 
         harness.manager.events.test {
-            harness.factory.emit(WaddleClientEvent.Connected)
+            harness.factory.emitReady()
             runCurrent()
-            assertEquals(XmppEvent.SessionReady, awaitItem())
+            assertEquals(
+                XmppEvent.SessionReady(
+                    kind = SessionReadyKind.FRESH,
+                    attempt = harness.factory.configs.single()
+                        .deliveryAttempt
+                        .toDomain("icepuma@waddle.test"),
+                ),
+                awaitItem(),
+            )
 
             val message = testMessage(stanzaId = "s1", from = "alice@waddle.test", to = "icepuma@waddle.test")
             harness.factory.emit(WaddleClientEvent.Message(message))
@@ -371,7 +451,7 @@ class XmppSessionManagerTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         assertEquals(VerbResult.Ok, harness.manager.joinRoom("general@muc.waddle.test", "icepuma"))
@@ -392,7 +472,7 @@ class XmppSessionManagerTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val client = harness.factory.clients.single()
@@ -430,18 +510,25 @@ class XmppSessionManagerTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         runCurrent()
 
         val client = harness.factory.clients.single()
-        client.sendOutcome = WaddleSendMessageOutcome.Sent("stanza-42")
 
         val roomSend = harness.manager.sendGroupchatMessage("general@muc.waddle.test", "hello room")
-        assertEquals(WaddleSendMessageOutcome.Sent("stanza-42"), roomSend.outcome)
-        assertEquals("live sends are not reported as waiting for replay", false, roomSend.queued)
         assertEquals(
-            WaddleSendMessageOutcome.Sent("stanza-42"),
-            harness.manager.sendChatMessage("alice@waddle.test", "hello dm").outcome,
+            WaddleSendMessageOutcome.Sent(
+                checkNotNull(roomSend.delivery).identity.clientStanzaId,
+            ),
+            roomSend.outcome,
+        )
+        assertEquals("live sends are not reported as waiting for replay", false, roomSend.queued)
+        val dmSend = harness.manager.sendChatMessage("alice@waddle.test", "hello dm")
+        assertEquals(
+            WaddleSendMessageOutcome.Sent(
+                checkNotNull(dmSend.delivery).identity.clientStanzaId,
+            ),
+            dmSend.outcome,
         )
         assertEquals(
             listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
@@ -453,15 +540,25 @@ class XmppSessionManagerTest {
         )
         assertTrue(
             "successful live sends remain durable under native ownership until ack",
-            harness.prefs.outboundQueue.first().all {
+            harness.prefs.deliveryJournal.first()
+                .owners["icepuma@waddle.test"]
+                ?.outboundRows
+                .orEmpty()
+                .all {
                 it.ownership is social.waddle.android.client.prefs.OutboundOwnership.NativeOwned
             },
         )
         client.sendOptions.mapNotNull { it?.stanzaId }.forEach { stanzaId ->
-            harness.factory.emit(WaddleClientEvent.DeliveryAcked(stanzaId))
+            harness.factory.emitAcked(stanzaId)
         }
         runCurrent()
-        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+        assertTrue(
+            harness.prefs.deliveryJournal.first()
+                .owners["icepuma@waddle.test"]
+                ?.outboundRows
+                .orEmpty()
+                .isEmpty(),
+        )
 
         // The attempt died → the passthrough must stop targeting the client.
         harness.factory.emit(WaddleClientEvent.Disconnected)
@@ -479,7 +576,7 @@ class XmppSessionManagerTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.factory.emit(WaddleClientEvent.Connected)
+        harness.factory.emitReady()
         harness.factory.emit(WaddleClientEvent.Message(testMessage(stanzaId = "s1")))
         runCurrent()
 

@@ -119,7 +119,7 @@ schema.#Project & {
 				contents:   "read"
 				"id-token": "write"
 			}
-			"tasks": [tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
+			"tasks": [tasks.test, tasks.browserDurability, tasks.lint, tasks.build, tasks.checkStartupBuild, tasks.tokensCheck]
 		}
 	}
 
@@ -194,7 +194,6 @@ schema.#Project & {
 		test: schema.#Task & {
 			command: "bun"
 			args: ["test"]
-			dependsOn: [build]
 			inputs: [
 				"../package.json",
 				"../bun.lock",
@@ -202,6 +201,37 @@ schema.#Project & {
 				"tsconfig.json",
 				"src/**",
 				"tests/**",
+			]
+		}
+
+		// Real browser durability boundary. Playwright is configured to launch
+		// the runner's installed stable Chrome (`channel: "chrome"`); package
+		// installation skips browser downloads, so CI cannot silently substitute
+		// an unpinned Playwright-managed browser binary.
+		browserDurability: schema.#Task & {
+			command: "bun"
+			args: ["run", "test:browser:durability"]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"env.cue",
+				"package.json",
+				"tsconfig.json",
+				"tests/browser/**",
+				"src/**",
+			]
+		}
+
+		// Emitted-chunk assertions are intentionally separate from the
+		// source-only Bun suite. This task can run only after the canonical
+		// Astro build and remains mandatory in the pull-request pipeline.
+		checkStartupBuild: schema.#Task & {
+			command: "bun"
+			args: ["run", "check:startup-build"]
+			dependsOn: [build]
+			inputs: [
+				"package.json",
+				"scripts/check-startup-build.ts",
 				"dist/**",
 			]
 		}

@@ -53,7 +53,7 @@ class MessageSearchViewModelTest {
         suspend fun loginReady(scope: TestScope) {
             manager.login(testSessionInfo())
             scope.runCurrent()
-            factory.emit(WaddleClientEvent.Connected)
+            factory.emitReady()
             scope.runCurrent()
         }
 

@@ -5,8 +5,8 @@ import kotlinx.coroutines.CancellationException
 /**
  * Passthroughs document a never-throw contract, but DataStore writes
  * can raise IOException (disk-full, corruption). Persistence best-
- * effort here: losing a prefs write degrades a convenience (queue,
- * recency), while an escaped throw would crash the caller's scope.
+ * effort here only covers disposable projections such as recency and
+ * catch-up cursors. Delivery-journal writes use explicit durable barriers.
  */
 internal suspend fun persistQuietly(write: suspend () -> Unit) {
     try {

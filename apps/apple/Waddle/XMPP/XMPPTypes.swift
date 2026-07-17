@@ -241,16 +241,137 @@ struct XMPPEncryptedSource: Sendable, Equatable, Hashable {
     let cipher: String
 }
 
+struct XMPPDeliveryAttemptRef: Sendable, Equatable, Hashable {
+    let id: String
+    let connectionGeneration: UInt64
+}
+
+struct XMPPDeliverySignal: Sendable, Equatable {
+    let attempt: XMPPDeliveryAttemptRef
+    let stanzaID: String
+}
+
+enum XMPPSessionReadyKind: Sendable, Equatable {
+    case fresh
+    case resumed
+}
+
+enum XMPPSessionBootstrapPlan: Sendable, Equatable {
+    case establishFreshSession
+    case preserveResumedSession
+}
+
+extension XMPPSessionReadyKind {
+    var bootstrapPlan: XMPPSessionBootstrapPlan {
+        switch self {
+        case .fresh:
+            return .establishFreshSession
+        case .resumed:
+            return .preserveResumedSession
+        }
+    }
+}
+
+enum XMPPSaslCondition: Sendable, Equatable {
+    case aborted
+    case accountDisabled
+    case credentialsExpired
+    case encryptionRequired
+    case incorrectEncoding
+    case invalidAuthzid
+    case invalidMechanism
+    case malformedRequest
+    case mechanismTooWeak
+    case notAuthorized
+    case temporaryAuthFailure
+    case unknown
+}
+
+enum XMPPSaslRetryDisposition: Sendable, Equatable {
+    case retry
+    case stopCredential
+    case stopConfiguration
+    case stopAborted
+    case stopUnknown
+}
+
+struct StoppedXMPPAuthentication: Sendable, Equatable {
+    let loginGeneration: UInt64
+    let condition: XMPPSaslCondition
+    let disposition: XMPPSaslRetryDisposition
+}
+
+struct XMPPConnectionAdmission: Sendable, Equatable {
+    private(set) var generation: UInt64 = 0
+    private(set) var isOpen = false
+
+    @discardableResult
+    mutating func open() -> UInt64 {
+        generation &+= 1
+        isOpen = true
+        return generation
+    }
+
+    mutating func close() {
+        generation &+= 1
+        isOpen = false
+    }
+
+    func admits(generation candidate: UInt64) -> Bool {
+        isOpen && generation == candidate
+    }
+}
+
+extension XMPPSaslCondition {
+    var retryDisposition: XMPPSaslRetryDisposition {
+        switch self {
+        case .temporaryAuthFailure:
+            return .retry
+        case .notAuthorized, .accountDisabled, .credentialsExpired, .invalidAuthzid:
+            return .stopCredential
+        case .invalidMechanism, .mechanismTooWeak, .encryptionRequired,
+             .incorrectEncoding, .malformedRequest:
+            return .stopConfiguration
+        case .aborted:
+            return .stopAborted
+        case .unknown:
+            return .stopUnknown
+        }
+    }
+}
+
+func updatedStoppedXMPPAuthentication(
+    _ current: StoppedXMPPAuthentication?,
+    loginGeneration: UInt64,
+    condition: XMPPSaslCondition
+) -> StoppedXMPPAuthentication? {
+    let disposition = condition.retryDisposition
+    guard disposition != .retry else { return current }
+    guard current?.loginGeneration != loginGeneration else { return current }
+    return StoppedXMPPAuthentication(
+        loginGeneration: loginGeneration,
+        condition: condition,
+        disposition: disposition
+    )
+}
+
+func xmppReconnectAllowed(
+    admission: XMPPConnectionAdmission,
+    stopped: StoppedXMPPAuthentication?
+) -> Bool {
+    admission.isOpen && stopped?.loginGeneration != admission.generation
+}
+
 enum XMPPEvent: Sendable, Equatable {
     case streamFeatures(XMPPStreamFeatures)
     case authenticated
-    case authenticationFailed(String?)
+    case authenticationFailed(XMPPSaslCondition)
     case resourceBound(jid: String)
-    case sessionReady
+    case sessionReady(kind: XMPPSessionReadyKind, attempt: XMPPDeliveryAttemptRef)
     case message(XMPPMessageEvent)
     case presence(XMPPPresenceEvent)
-    case messageDeliveryAcked(stanzaID: String)
-    case messageDeliveryFailed(stanzaID: String)
+    case messageDeliveryAcked(XMPPDeliverySignal)
+    case messageDeliveryFailed(XMPPDeliverySignal)
     case streamError(name: String, text: String?)
     case error(String)
     case disconnected

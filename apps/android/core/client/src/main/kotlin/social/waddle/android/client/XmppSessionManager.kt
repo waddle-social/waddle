@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
@@ -70,9 +71,11 @@ class XmppSessionManager(
 
     private val lifecycleMutex = Mutex()
 
-    private val resume = ResumePersistence(sessionPrefs)
+    private val deliveryJournal = OutboundQueue(sessionPrefs)
 
-    private val activeSession = ActiveSession(resume::queueResumeSnapshot)
+    private val resume = ResumePersistence(sessionPrefs, deliveryJournal)
+
+    private val activeSession = ActiveSession()
 
     private val readState: ReadStateCoordinator =
         ReadStateCoordinator(activeSession, stores, userPrefs) { event ->
@@ -84,7 +87,14 @@ class XmppSessionManager(
             persistDmSeen(peer, timestamp)
         }
 
-    private val messenger = OutboundMessenger(activeSession, stores, sessionPrefs, router::dispatch)
+    private val messenger = OutboundMessenger(
+        activeSession = activeSession,
+        stores = stores,
+        sessionPrefs = sessionPrefs,
+        journal = deliveryJournal,
+        resume = resume,
+        dispatchEvent = router::dispatch,
+    )
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
 
@@ -95,11 +105,12 @@ class XmppSessionManager(
         networkSignal = networkSignal,
         sessionPrefs = sessionPrefs,
         activeSession = activeSession,
+        resume = resume,
         router = router,
         messenger = messenger,
         callbacks = ConnectionLoopCallbacks(
             onReady = ::onSessionReady,
-            onTerminalAuthFailure = ::onTerminalAuthFailure,
+            onAuthenticationStopped = ::onAuthenticationStopped,
         ),
         settings = ConnectionLoopSettings(
             reconnectPolicy = reconnectPolicy,
@@ -114,25 +125,29 @@ class XmppSessionManager(
 
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
-        cancelSessionScope()
+        loop.stopAdmissions()
+        stopAndCancelCurrentSession()
         clearSessionState()
-        activeSession.ownBareJid = bareJid(session.jid)
-        persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
+        val ownerBareJid = bareJid(session.jid)
+        sessionPrefs.activateSession(ownerBareJid, session.sessionId)
+        activeSession.ownBareJid = ownerBareJid
         timelineStore.setOwnBareJid(session.jid)
-        persistQuietly { sessionPrefs.setSessionId(session.sessionId) }
         persistQuietly { seedStoresFromPrefs() }
 
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
+        messenger.start(scope, ownerBareJid)
+        loop.startAdmissions()
         scope.launch { router.sweepChatStates() }
         scope.launch { loop.run(session) }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
-        cancelSessionScope()
+        loop.stopAdmissions()
+        stopAndCancelCurrentSession()
         activeSession.ownBareJid = null
         clearSessionState()
         sessionPrefs.clear()
@@ -186,6 +201,25 @@ class XmppSessionManager(
     ): SendResult =
         messenger.sendOrEnqueue(conversationJid = peerJid, isGroupchat = false, body = body, extras = extras)
 
+    /**
+     * Process-death notification reply. [expectedOwnerBareJid] is part of
+     * the PendingIntent identity and must still be the authenticated owner.
+     */
+    suspend fun sendDirectReply(
+        expectedOwnerBareJid: String,
+        conversationJid: String,
+        isGroupchat: Boolean,
+        body: String,
+    ): SendResult = lifecycleMutex.withLock {
+        messenger.sendOrEnqueue(
+            conversationJid = conversationJid,
+            isGroupchat = isGroupchat,
+            body = body,
+            expectedOwnerBareJid = expectedOwnerBareJid,
+            source = DeliverySource.DirectReply(conversationJid, isGroupchat),
+        )
+    }
+
     /** XEP-0363: request an upload slot from the account's upload service. */
     suspend fun requestUploadSlot(
         filename: String,
@@ -238,6 +272,24 @@ class XmppSessionManager(
         explicitTarget: DisplayedTarget? = null,
     ) = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
 
+    /**
+     * Process-death notification action. The lifecycle lock makes the owner
+     * check atomic with the XMPP mutation, so an account-A PendingIntent can
+     * never dispatch a marker through account B during login replacement.
+     */
+    suspend fun markConversationDisplayedForOwner(
+        expectedOwnerBareJid: String,
+        conversationJid: String,
+        isGroupchat: Boolean,
+        explicitTarget: DisplayedTarget? = null,
+    ): Boolean = lifecycleMutex.withLock {
+        if (activeSession.ownBareJid != expectedOwnerBareJid) {
+            return@withLock false
+        }
+        readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
+        true
+    }
+
     /** XEP-0085 typing notification: best-effort and live-session-only. */
     suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): VerbResult =
         verbs.sendChatState(conversationJid, isGroupchat, state)
@@ -274,14 +326,29 @@ class XmppSessionManager(
         attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
     }
 
-    private suspend fun onTerminalAuthFailure() {
-        _appState.value = WaddleAppState.SignedOut
-        persistQuietly { sessionPrefs.clear() }
-        // Last statement on purpose: cancelling the session scope kills
-        // this coroutine too, but also the parked snapshot persister that
-        // would otherwise leak until the next login.
-        sessionScope?.cancel()
-        sessionScope = null
+    private suspend fun onAuthenticationStopped(
+        disposition: SaslRetryDisposition,
+    ) {
+        lifecycleMutex.withLock {
+            loop.stopAdmissions()
+            val credentialsInvalid = disposition == SaslRetryDisposition.STOP_CREDENTIAL
+            try {
+                messenger.fenceAndStop(activeSession.attemptRef)
+                if (credentialsInvalid) {
+                    sessionPrefs.clear()
+                }
+            } finally {
+                if (credentialsInvalid) {
+                    _appState.value = WaddleAppState.SignedOut
+                    activeSession.ownBareJid = null
+                    clearSessionState()
+                }
+                // Do not join: this callback runs inside the session scope.
+                val scope = sessionScope
+                sessionScope = null
+                scope?.cancel()
+            }
+        }
     }
 
     /** Persist DM-list recency (UI hook and router callback). */
@@ -304,6 +371,23 @@ class XmppSessionManager(
             job.cancel()
             job.join()
         }
+    }
+
+    /**
+     * Always tear down the node-local socket scope, even if durable fencing
+     * fails. The failure is then rethrown so login cannot activate another
+     * owner over an unfenced journal.
+     */
+    private suspend fun stopAndCancelCurrentSession() {
+        var failure: Throwable? = null
+        try {
+            messenger.fenceAndStop(activeSession.attemptRef)
+        } catch (caught: Throwable) {
+            failure = caught
+        } finally {
+            cancelSessionScope()
+        }
+        failure?.let { throw it }
     }
 
     private fun clearSessionState() {

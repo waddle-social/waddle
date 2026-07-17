@@ -17,8 +17,8 @@ use crate::messaging_verbs::{
     verb_message_type,
 };
 use crate::{
-    WaddleChatState, WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError,
-    WaddleEventListener, WaddleSendMessageOutcome,
+    WaddleChatState, WaddleClient, WaddleConfig, WaddleConnectionGeneration,
+    WaddleDeliveryAttemptId, WaddleDeliveryAttemptRef, WaddleError, WaddleSendMessageOutcome,
 };
 
 // XEP-0334 hint namespace; the client crate keeps its constant
@@ -37,29 +37,23 @@ impl RecordingListener {
     }
 }
 
-impl WaddleEventListener for RecordingListener {
-    fn on_event(&self, event: WaddleClientEvent) {
-        if let WaddleClientEvent::Error { description } = event {
-            self.errors
-                .lock()
-                .expect("test mutex poisoned")
-                .push(description);
-        }
-    }
-}
-
 fn test_client(listener: RecordingListener) -> Arc<WaddleClient> {
-    Arc::new(WaddleClient {
-        config: WaddleConfig {
+    WaddleClient::new_for_test(
+        WaddleConfig {
             server_url: "wss://xmpp.waddle.test".to_string(),
             jid: "alice@waddle.test".to_string(),
             access_token: "token".to_string(),
             resource: "test".to_string(),
+            delivery_attempt: WaddleDeliveryAttemptRef {
+                attempt_id: WaddleDeliveryAttemptId {
+                    value: "00000000-0000-4000-8000-000000000001".to_string(),
+                },
+                connection_generation: WaddleConnectionGeneration { value: 0 },
+            },
             resume_state: None,
         },
-        listener: Arc::new(Box::new(listener) as Box<dyn WaddleEventListener>),
-        handle: tokio::sync::Mutex::new(None),
-    })
+        listener.errors,
+    )
 }
 
 fn jid(value: &str) -> Jid {

@@ -93,10 +93,41 @@ export class MucAdmin {
     const listMembers = xmpp.list_room_members
       ? async (affiliation: "owner" | "admin" | "member" | "outcast") => await xmpp.list_room_members?.(roomJid, affiliation)
       : null;
-    if (!listMembers) { this.deps.emitError({ kind: "member-query", recoverable: false, detail: "missing list_room_members" }); throw new Error("missing list_room_members"); }
+    if (!listMembers) {
+      this.deps.emitError({
+        kind: "member-query",
+        recoverable: false,
+        reason: "binding-missing",
+      });
+      throw new Error("missing list_room_members");
+    }
     const affiliations = ["owner", "admin", "member", "outcast"] as const; const members: MemberSummary[] = []; const failedAffiliations: string[] = [];
     for (const affiliation of affiliations) {
-      try { const result = await listMembers(affiliation); for (const item of result ?? []) { if (!item.jid) continue; members.push({ jid: item.jid, username: jidLocalpart(item.jid), avatar_url: null, affiliation, joined_at: "" }); } } catch (error) { failedAffiliations.push(affiliation); const context = stanzaErrorContext(error); const detail = context.condition === "forbidden" ? `forbidden affiliation query — ${roomJid}` : context.condition === "service-unavailable" ? `unsupported member query — ${roomJid}` : `affiliation query failed for ${affiliation} — ${roomJid}; reconstructed room JID may not match`; this.deps.emitError({ kind: "member-query", recoverable: true, detail, cause: error, ...context }); }
+      try {
+        const result = await listMembers(affiliation);
+        for (const item of result ?? []) {
+          if (!item.jid) continue;
+          members.push({
+            jid: item.jid,
+            username: jidLocalpart(item.jid),
+            avatar_url: null,
+            affiliation,
+            joined_at: "",
+          });
+        }
+      } catch (error) {
+        failedAffiliations.push(affiliation);
+        this.deps.emitError({
+          kind: "member-query",
+          recoverable: true,
+          reason: options?.roomJid
+            ? "affiliation-query-failed"
+            : "affiliation-query-failed-reconstructed-room",
+          affiliation,
+          cause: error,
+          ...stanzaErrorContext(error),
+        });
+      }
     }
     if (members.length === 0 && failedAffiliations.length > 0) {
       throw new RoomMemberListUnavailableError();

@@ -61,7 +61,8 @@ describe("MucAdmin.listRoomMembers", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].kind).toBe("member-query");
     expect(errors[0].recoverable).toBe(true);
-    expect(errors[0].condition).toBe("forbidden");
+    expect(errors[0]?.kind === "member-query" ? errors[0].condition : undefined)
+      .toBe("forbidden");
   });
 
   test("structured Error rejections from the wasm bridge surface condition, errorType, and text", async () => {
@@ -80,9 +81,11 @@ describe("MucAdmin.listRoomMembers", () => {
 
     expect(members.map((member) => member.jid)).toEqual(["bob@example.com"]);
     expect(errors).toHaveLength(1);
-    expect(errors[0].condition).toBe("item-not-found");
-    expect(errors[0].errorType).toBe("cancel");
-    expect(errors[0].errorText).toBe("no such room");
+    const error = errors[0];
+    if (error?.kind !== "member-query") throw new Error("expected member query error");
+    expect(error.condition).toBe("item-not-found");
+    expect(error.errorType).toBe("cancel");
+    expect(error.errorText).toBe("no such room");
   });
 
   test("throws RoomMemberListUnavailableError when every affiliation query fails", async () => {

@@ -1,10 +1,15 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
-import { BrowserXmppClient } from "../src/lib/xmpp/client";
+import {
+  BrowserXmppClient,
+  type BrowserXmppClientOptions,
+} from "../src/lib/xmpp/client";
 import { useDmReadMarkers } from "../src/dms/read-markers";
 import type { TimelineMessage } from "../src/lib/chat-ui";
-import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import type { WaddleSession } from "../src/lib/server-auth";
+import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -21,22 +26,47 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   };
 }
 
+const createdClients: BrowserXmppClient[] = [];
+
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as { xmpp: null; connected: boolean };
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients.length = 0;
+});
+
 function connectedClient(xmpp: Record<string, unknown>): BrowserXmppClient {
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
   (client as unknown as { xmpp: unknown }).xmpp = xmpp;
   (client as unknown as { connected: boolean }).connected = true;
   return client;
 }
 
-function persistedOccupants(...occupants: string[]): ResumePersistence {
+function persistedOccupants(...occupants: string[]): BrowserXmppClientOptions {
+  const durableRuntimeStore = new MemoryDurableOutboundStore();
   return {
-    ...nullResumePersistence,
-    loadCatchup: () => ({
-      dmLastSeen: occupants.map((occupant, index) => [occupant, {
-        timestamp: `2026-07-01T10:00:0${index}.000Z`,
-        scope: "muc-occupant" as const,
-      }]),
-      roomLastSeen: [],
+    durableRuntimeStore,
+    createResumePersistence: (lifecycleId, sharedStore) => ({
+      ...nullResumePersistence,
+      lifecycleId,
+      durableRuntimeStore: sharedStore,
+      outboundOwnerHint: () => ({
+        ownerId: "mds-persisted-occupants",
+        ownerInstanceId: lifecycleId.value,
+      }),
+      loadCatchup: () => ({
+        dmLastSeen: occupants.map((occupant, index) => [occupant, {
+          timestamp: `2026-07-01T10:00:0${index}.000Z`,
+          scope: "muc-occupant" as const,
+        }]),
+        roomLastSeen: [],
+      }),
     }),
   };
 }
@@ -46,6 +76,7 @@ describe("BrowserXmppClient MDS publish preflight", () => {
     const alice = "room@rooms.custom.example/alice";
     const publish = mock(async () => undefined);
     const client = new BrowserXmppClient(session(), persistedOccupants(alice));
+    createdClients.push(client);
     (client as unknown as { xmpp: unknown }).xmpp = {
       publish_mds_displayed: publish,
       supports_mds_publish_options: mock(async () => true),
@@ -82,6 +113,7 @@ describe("BrowserXmppClient MDS publish preflight", () => {
       stanza_id_by: string;
     }) => void) | undefined;
     const xmpp = {
+      ...noopWasmClientCallbacks(),
       fetch_mds_displayed: mock(async () => [
         { chat_id: alice, stanza_id: "alice-catchup", stanza_id_by: "archive.example" },
         { chat_id: bob, stanza_id: "bob-catchup", stanza_id_by: "archive.example" },
@@ -94,8 +126,9 @@ describe("BrowserXmppClient MDS publish preflight", () => {
     client.setMdsDisplayedHandler((entry) => received.push(entry));
 
     (client as unknown as { wireEvents: (handle: typeof xmpp) => void }).wireEvents(xmpp);
-    await (client as unknown as { bootstrapMdsDisplayed: (handle: typeof xmpp) => Promise<void> })
-      .bootstrapMdsDisplayed(xmpp);
+    await (client as unknown as {
+      bootstrapMdsDisplayed: (handle: typeof xmpp, generation: number) => Promise<void>;
+    }).bootstrapMdsDisplayed(xmpp, 0);
     onDisplayed?.({ chat_id: alice, stanza_id: "alice-live", stanza_id_by: "archive.example" });
 
     expect(received).toEqual([

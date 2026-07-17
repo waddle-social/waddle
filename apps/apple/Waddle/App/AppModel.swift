@@ -69,8 +69,7 @@ final class AppModel: ObservableObject {
     var devicePollTask: Task<Void, Never>?
     var reconnectTask: Task<Void, Never>?
     var uploadServiceJID: String?
-    var rustClient: RustXmppClient?
-    var xmppEventsTask: Task<Void, Never>?
+    let xmppLifecycle = XMPPClientLifecycleController<RustXmppClient>()
     var isStructureLoadRunning = false
     var structureLoadRerunRequested = false
     var structureLoadWaiters: [CheckedContinuation<Void, Never>] = []
@@ -84,6 +83,10 @@ final class AppModel: ObservableObject {
     var roomJoinTimeoutTasks: [String: Task<Void, Never>] = [:]
     var roomHistoryBeforeCursorByRoomJID: [String: String] = [:]
     let roomHistoryPageSize = 50
+
+    var rustClient: RustXmppClient? {
+        xmppLifecycle.currentClient
+    }
 
     init() {
         let persistedServerURL = AppConfig.persistedServerURL

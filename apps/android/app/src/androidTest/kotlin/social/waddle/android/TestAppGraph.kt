@@ -99,7 +99,7 @@ class TestAppGraph {
     fun signInAndConnect(session: WaddleSessionInfo = testSessionInfo()) {
         signIn(session)
         awaitCondition("a connection attempt") { clientFactory.clients.isNotEmpty() }
-        clientFactory.emit(WaddleClientEvent.Connected)
+        clientFactory.emitReady()
         awaitCondition("the ready connection") {
             graph.sessionManager.connectionState.value == ConnectionState.Ready
         }

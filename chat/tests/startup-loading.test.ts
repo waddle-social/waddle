@@ -1,26 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-
-// Find whichever Vite-emitted chunk contains the static fallback shell —
-// the chunk name depends on Rollup's choice of entrypoint and isn't
-// stable (it used to be `AppLayout_*.mjs`; after the per-route island
-// split it lives in a router/registry-anchored chunk). The shell HTML is
-// the contract we care about, not the filename.
-function findShellChunk(): string {
-  const chunksDir = new URL("../dist/server/chunks/", import.meta.url);
-  for (const name of readdirSync(chunksDir)) {
-    if (!name.endsWith(".mjs")) continue;
-    const contents = readFileSync(new URL(name, chunksDir), "utf8");
-    if (contents.includes("chat-app-shell chat-startup-shell")) {
-      return contents;
-    }
-  }
-  throw new Error("built static-shell chunk not found; run `bun run build` before this test");
-}
+import { readFileSync } from "node:fs";
+import {
+  STARTUP_SHELL_MARKERS,
+  selectStartupShellChunk,
+} from "../scripts/check-startup-build";
 
 describe("startup loading fallback", () => {
-  test("build output includes the static shell before AppShell hydrates", () => {
-    const html = findShellChunk();
+  test("source includes the static shell before AppShell hydrates", () => {
+    const html = readFileSync(
+      new URL("../src/layouts/AppLayout.astro", import.meta.url),
+      "utf8",
+    );
 
     expect(html).toContain("chat-app-shell chat-startup-shell");
     expect(html).toContain("Loading Waddle");
@@ -37,5 +27,42 @@ describe("startup loading fallback", () => {
     expect(styles).toContain("height: 100dvh;");
     expect(styles).toContain(".chat-startup-main");
     expect(styles).toContain("flex: 1 1 0%;");
+  });
+
+  test("selects the single complete emitted shell candidate", () => {
+    expect(selectStartupShellChunk([
+      { name: "z.mjs", contents: "unrelated" },
+      { name: "shell.mjs", contents: STARTUP_SHELL_MARKERS.join(" ") },
+    ]).name).toBe("shell.mjs");
+  });
+
+  test("reports sorted chunk names when no shell candidate exists", () => {
+    expect(() => selectStartupShellChunk([
+      { name: "z.mjs", contents: "Loading Waddle" },
+      { name: "a.mjs", contents: "unrelated" },
+    ])).toThrow(
+      "no startup-shell candidate found; scanned chunks: a.mjs, z.mjs",
+    );
+  });
+
+  test("rejects ambiguous shell candidates in sorted order", () => {
+    const marker = STARTUP_SHELL_MARKERS[0];
+    expect(() => selectStartupShellChunk([
+      { name: "z-shell.mjs", contents: marker },
+      { name: "a-shell.mjs", contents: marker },
+    ])).toThrow(
+      "ambiguous startup-shell candidates: a-shell.mjs, z-shell.mjs",
+    );
+  });
+
+  test("names the sole candidate and every missing contract marker", () => {
+    expect(() => selectStartupShellChunk([
+      {
+        name: "partial-shell.mjs",
+        contents: STARTUP_SHELL_MARKERS[0],
+      },
+    ])).toThrow(
+      'startup-shell candidate partial-shell.mjs is missing markers: "Loading Waddle", "Checking session."',
+    );
   });
 });

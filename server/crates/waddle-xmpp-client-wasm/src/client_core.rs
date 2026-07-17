@@ -28,21 +28,16 @@ impl WaddleClient {
         }
     }
 
-    pub fn get_resume_state(&self) -> JsValue {
+    pub fn get_resume_state(&self) -> Result<JsValue, JsValue> {
         match self.inner.borrow().resume_state.as_ref() {
-            Some(state) => {
-                to_js_value(&JsResumeState::from(state.clone())).unwrap_or(JsValue::NULL)
-            }
-            None => JsValue::NULL,
+            Some(state) => JsResumeState::try_from(state.clone())
+                .map_err(|error| js_error(error.to_string()))
+                .and_then(|state| {
+                    to_js_value(&state)
+                        .map_err(|error| js_error(format!("failed to serialize resume state: {error:?}")))
+                }),
+            None => Ok(JsValue::NULL),
         }
-    }
-
-    pub fn get_resume_state_handle(&self) -> Option<WaddleResumeState> {
-        self.inner
-            .borrow()
-            .resume_state
-            .clone()
-            .map(|inner| WaddleResumeState { inner })
     }
 
     pub fn set_on_message(&mut self, cb: Function) {

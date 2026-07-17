@@ -9,15 +9,17 @@ import social.waddle.android.WaddleApplication
 class NotificationDismissReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_DISMISS) return
+        val ownerBareJid = intent.getStringExtra(EXTRA_OWNER_BARE_JID) ?: return
         val conversationJid = intent.getStringExtra(EXTRA_CONVERSATION_JID) ?: return
         (context.applicationContext as WaddleApplication)
             .graph
             .messageNotifier
-            .clearConversation(conversationJid)
+            .clearConversation(ownerBareJid, conversationJid)
     }
 
     companion object {
         const val ACTION_DISMISS = "social.waddle.android.action.DISMISS_MESSAGES"
+        const val EXTRA_OWNER_BARE_JID = "social.waddle.android.extra.OWNER_BARE_JID"
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
     }
 }

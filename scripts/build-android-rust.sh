@@ -17,6 +17,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="$REPO_ROOT/server"
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$SERVER/target}"
+if [[ "$CARGO_TARGET_ROOT" != /* ]]; then
+  CARGO_TARGET_ROOT="$REPO_ROOT/$CARGO_TARGET_ROOT"
+fi
+export CARGO_TARGET_DIR="$CARGO_TARGET_ROOT"
+TMP_ROOT="${TMPDIR:-/tmp}"
+if [[ "$TMP_ROOT" != /* ]]; then
+  TMP_ROOT="$REPO_ROOT/$TMP_ROOT"
+fi
+mkdir -p "$TMP_ROOT"
+export TMPDIR="$TMP_ROOT"
 JNILIBS="$REPO_ROOT/apps/android/core/client/src/main/jniLibs"
 BINDINGS_DIR="$REPO_ROOT/apps/android/core/client/src/main/kotlin"
 BINDINGS_FILE="$BINDINGS_DIR/social/waddle/client/ffi/waddle_xmpp_client.kt"
@@ -75,7 +86,7 @@ echo "==> Generating Kotlin bindings"
   --bin uniffi-bindgen \
   --features waddle-xmpp-client-ffi/uniffi-bindgen-bin \
   -- generate \
-  --library "target/debug/libwaddle_xmpp_client_ffi.${LIB_EXT}" \
+  --library "$CARGO_TARGET_ROOT/debug/libwaddle_xmpp_client_ffi.${LIB_EXT}" \
   --language kotlin \
   --no-format \
   --out-dir "$BINDINGS_DIR")

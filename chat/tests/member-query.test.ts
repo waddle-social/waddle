@@ -1,7 +1,8 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, RoomMemberListUnavailableError } from "../src/lib/xmpp-client";
 import type { XmppErrorEvent } from "../src/lib/xmpp-client";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 
 type TestXmpp = {
   list_room_members?: (
@@ -21,8 +22,23 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   } as WaddleSession;
 }
 
+const createdClients: BrowserXmppClient[] = [];
+
+afterEach(async () => {
+  for (const client of createdClients) {
+    const state = client as unknown as { xmpp: null; connected: boolean };
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(createdClients.map((client) => client.dispose()));
+  createdClients.length = 0;
+});
+
 function clientWithXmpp(xmpp: TestXmpp) {
-  const client = new BrowserXmppClient(session());
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
   (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).connect = mock(async () => {});
   (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).xmpp = xmpp;
   (client as unknown as { connect: () => Promise<void>; xmpp: TestXmpp; connected: boolean }).connected = true;
@@ -41,6 +57,7 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     expect(errors[0]).toMatchObject({
       kind: "member-query",
       recoverable: false,
+      reason: "binding-missing",
     });
   });
 
@@ -79,9 +96,15 @@ describe("BrowserXmppClient.listRoomMembers", () => {
       "room-123@conference.example.net",
       "room-123@conference.example.net",
     ]);
-    expect(errors.map((event) => event.condition)).toEqual(["forbidden", "service-unavailable"]);
-    expect(errors[0].detail).toContain("forbidden affiliation query");
-    expect(errors[1].detail).toContain("unsupported member query");
+    expect(errors.map((event) => (
+      event.kind === "member-query" ? event.condition : undefined
+    ))).toEqual(["forbidden", "service-unavailable"]);
+    expect(errors.map((event) => (
+      event.kind === "member-query" ? event.reason : undefined
+    ))).toEqual([
+      "affiliation-query-failed",
+      "affiliation-query-failed",
+    ]);
   });
 
   test("reports unavailable member lists without the retired zero-member failure copy", async () => {
@@ -104,7 +127,10 @@ describe("BrowserXmppClient.listRoomMembers", () => {
     await expect(result).rejects.toThrow("Member list is temporarily unavailable.");
 
     expect(listRoomMembers).toHaveBeenCalledTimes(4);
-    expect(errors.some((event) => event.detail.includes("reconstructed room JID may not match"))).toBe(true);
+    expect(errors.some((event) => (
+      event.kind === "member-query"
+      && event.reason === "affiliation-query-failed-reconstructed-room"
+    ))).toBe(true);
   });
 });
 

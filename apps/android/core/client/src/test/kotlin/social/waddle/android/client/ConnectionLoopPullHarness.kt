@@ -1,0 +1,137 @@
+package social.waddle.android.client
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import social.waddle.android.client.OutboundQueue.EnqueueResult
+import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.QueuedOutboundDraft
+import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.prefs.toSnapshot
+import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.session.ConnectionLoop
+import social.waddle.android.client.session.ConnectionLoopCallbacks
+import social.waddle.android.client.session.ConnectionLoopSettings
+import social.waddle.android.client.session.ResumePersistence
+import social.waddle.android.client.store.SessionStores
+
+internal class ConnectionLoopPullHarness(
+    testScope: TestScope,
+    val dataStore: FailingPreferencesDataStore = FailingPreferencesDataStore(),
+) {
+    val factory = FakeClientFactory()
+    val prefs = SessionPrefs(dataStore)
+    val queue = OutboundQueue(prefs)
+    val activeSession = ActiveSession()
+    val stores = SessionStores()
+
+    private val ownerJob = SupervisorJob()
+    private val ownerScope = CoroutineScope(
+        ownerJob + StandardTestDispatcher(testScope.testScheduler),
+    )
+    private val resume = ResumePersistence(prefs, queue)
+    private val readState = ReadStateCoordinator(
+        activeSession,
+        stores,
+        UserPrefs(InMemoryPreferencesDataStore()),
+    ) { }
+    private val router = XmppEventRouter(
+        activeSession,
+        stores,
+        resume,
+        readState,
+    ) { _, _ -> }
+
+    val messenger = OutboundMessenger(
+        activeSession = activeSession,
+        stores = stores,
+        sessionPrefs = prefs,
+        journal = queue,
+        resume = resume,
+        dispatchEvent = router::dispatch,
+    )
+    val loop = ConnectionLoop(
+        clientFactory = factory,
+        networkSignal = FakeNetworkSignal(),
+        sessionPrefs = prefs,
+        activeSession = activeSession,
+        resume = resume,
+        router = router,
+        messenger = messenger,
+        callbacks = ConnectionLoopCallbacks(
+            onReady = { _, _, _, _ -> },
+            onAuthenticationStopped = { },
+        ),
+        settings = ConnectionLoopSettings(
+            reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
+        ),
+    )
+
+    lateinit var loopJob: Job
+        private set
+
+    private var terminalWorkerStopped = false
+
+    suspend fun seedResumableRow(stanzaId: String) {
+        prefs.activateSession(OWNER, SESSION_ID)
+        val previous = queue.beginAttempt(OWNER).attempt
+        check(
+            queue.enqueueClaimed(
+                QueuedOutboundDraft.create(
+                    ownerBareJid = OWNER,
+                    conversationJid = PEER,
+                    isGroupchat = false,
+                    body = "queued before resume",
+                    clientStanzaId = stanzaId,
+                    enqueuedAtMillis = 1_000,
+                    source = DeliverySource.Composer,
+                ),
+                previous,
+            ) is EnqueueResult.Stored,
+        )
+        check(
+            queue.saveSmResume(
+                previous,
+                version = 1,
+                snapshot = testResumeState(queuedStanzaId = stanzaId).toSnapshot(),
+            ),
+        )
+    }
+
+    suspend fun start(session: WaddleSessionInfo = testSessionInfo()) {
+        prefs.activateSession(OWNER, session.sessionId)
+        activeSession.ownBareJid = OWNER
+        resume.start(ownerScope)
+        messenger.start(ownerScope, OWNER)
+        loop.startAdmissions()
+        loopJob = ownerScope.launch { loop.run(session) }
+    }
+
+    suspend fun stopTerminalWorker(): DeliveryTerminalWorker.StopResult =
+        messenger.fenceAndStop(activeSession.attemptRef).also {
+            terminalWorkerStopped = true
+        }
+
+    suspend fun shutdown() {
+        dataStore.failAllUpdates = false
+        dataStore.failNextUpdate = false
+        loop.stopAdmissions()
+        if (!terminalWorkerStopped) {
+            messenger.fenceAndStop(activeSession.attemptRef)
+            terminalWorkerStopped = true
+        }
+        ownerJob.cancelAndJoin()
+    }
+
+    companion object {
+        const val OWNER = "icepuma@waddle.test"
+        const val PEER = "alice@waddle.test"
+        private const val SESSION_ID = "sess-1"
+    }
+}

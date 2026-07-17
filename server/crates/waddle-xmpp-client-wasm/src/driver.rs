@@ -153,12 +153,105 @@ pub(crate) async fn driver_loop(
         Ok(task) => task,
         Err(err) => {
             let mut event_tx = event_tx;
-            let _ = event_tx.send(DriverEvent::Error(err.to_string())).await;
+            let _ = event_tx.send(driver_error_event(&err)).await;
             let _ = event_tx.send(DriverEvent::Disconnected).await;
             return;
         }
     };
     task.run().await;
+}
+
+fn driver_error_event(error: &ClientError) -> DriverEvent {
+    let (reason, authentication_condition) = match error {
+        ClientError::Core(_) => (DriverErrorReason::Core, None),
+        ClientError::InvalidTransportScheme { .. } => {
+            (DriverErrorReason::InvalidTransportScheme, None)
+        }
+        ClientError::MissingWebSocketHost => (DriverErrorReason::MissingWebSocketHost, None),
+        ClientError::EmptyResource => (DriverErrorReason::EmptyResource, None),
+        ClientError::EmptyStanzaId => (DriverErrorReason::EmptyStanzaId, None),
+        ClientError::RequestIdExhausted => (DriverErrorReason::RequestIdExhausted, None),
+        ClientError::DuplicateRequest { .. } => (DriverErrorReason::DuplicateRequest, None),
+        ClientError::DuplicateStanzaCorrelation { .. } => {
+            (DriverErrorReason::DuplicateStanzaCorrelation, None)
+        }
+        ClientError::UnknownRequest { .. } => (DriverErrorReason::UnknownRequest, None),
+        ClientError::UnknownStanzaCorrelation { .. } => {
+            (DriverErrorReason::UnknownStanzaCorrelation, None)
+        }
+        ClientError::InvalidPhaseTransition { .. } => {
+            (DriverErrorReason::InvalidPhaseTransition, None)
+        }
+        ClientError::InvalidStateTransition { .. } => {
+            (DriverErrorReason::InvalidStateTransition, None)
+        }
+        ClientError::MissingStreamFeature { .. } => {
+            (DriverErrorReason::MissingStreamFeature, None)
+        }
+        ClientError::InvalidStreamFeatures => (DriverErrorReason::InvalidStreamFeatures, None),
+        ClientError::InvalidSaslFailure => (DriverErrorReason::InvalidSaslFailure, None),
+        ClientError::InvalidBindResponse => (DriverErrorReason::InvalidBindResponse, None),
+        ClientError::AuthenticationRejected { condition } => (
+            DriverErrorReason::AuthenticationRejected,
+            Some(driver_authentication_condition(*condition)),
+        ),
+        ClientError::WebSocketConnectTimeout { .. } => {
+            (DriverErrorReason::WebSocketConnectTimeout, None)
+        }
+        ClientError::WebSocketWriteTimeout { .. } => {
+            (DriverErrorReason::WebSocketWriteTimeout, None)
+        }
+        ClientError::IqTimeout { .. } => (DriverErrorReason::IqTimeout, None),
+        ClientError::EmptyTransportFrame => (DriverErrorReason::EmptyTransportFrame, None),
+        ClientError::TransportFrameTooLarge { .. } => {
+            (DriverErrorReason::TransportFrameTooLarge, None)
+        }
+        ClientError::InvalidTransportFrame => (DriverErrorReason::InvalidTransportFrame, None),
+        ClientError::InvalidStreamOpenTo => (DriverErrorReason::InvalidStreamOpenTo, None),
+        ClientError::InvalidStreamOpenFrom => (DriverErrorReason::InvalidStreamOpenFrom, None),
+        ClientError::UnsupportedStreamVersion { .. } => {
+            (DriverErrorReason::UnsupportedStreamVersion, None)
+        }
+        ClientError::UnsupportedWebSocketMessage => {
+            (DriverErrorReason::UnsupportedWebSocketMessage, None)
+        }
+        ClientError::TransportClosed => (DriverErrorReason::TransportClosed, None),
+        ClientError::RequestCancelled => (DriverErrorReason::RequestCancelled, None),
+        ClientError::Disconnected => (DriverErrorReason::Disconnected, None),
+        ClientError::InvalidResumeStanza(_) => (DriverErrorReason::InvalidResumeStanza, None),
+        ClientError::PushRegistration(_) => (DriverErrorReason::PushRegistration, None),
+        ClientError::StanzaError(_) => (DriverErrorReason::StanzaError, None),
+    };
+    DriverEvent::Error {
+        reason,
+        authentication_condition,
+    }
+}
+
+fn driver_error_reason_event(reason: DriverErrorReason) -> DriverEvent {
+    DriverEvent::Error {
+        reason,
+        authentication_condition: None,
+    }
+}
+
+fn driver_authentication_condition(
+    condition: SaslFailureCondition,
+) -> DriverAuthenticationCondition {
+    match condition {
+        SaslFailureCondition::Aborted => DriverAuthenticationCondition::Aborted,
+        SaslFailureCondition::AccountDisabled => DriverAuthenticationCondition::AccountDisabled,
+        SaslFailureCondition::CredentialsExpired => DriverAuthenticationCondition::CredentialsExpired,
+        SaslFailureCondition::EncryptionRequired => DriverAuthenticationCondition::EncryptionRequired,
+        SaslFailureCondition::IncorrectEncoding => DriverAuthenticationCondition::IncorrectEncoding,
+        SaslFailureCondition::InvalidAuthzid => DriverAuthenticationCondition::InvalidAuthzid,
+        SaslFailureCondition::InvalidMechanism => DriverAuthenticationCondition::InvalidMechanism,
+        SaslFailureCondition::MalformedRequest => DriverAuthenticationCondition::MalformedRequest,
+        SaslFailureCondition::MechanismTooWeak => DriverAuthenticationCondition::MechanismTooWeak,
+        SaslFailureCondition::NotAuthorized => DriverAuthenticationCondition::NotAuthorized,
+        SaslFailureCondition::TemporaryAuthFailure => DriverAuthenticationCondition::TemporaryAuthFailure,
+        SaslFailureCondition::Unknown => DriverAuthenticationCondition::Unknown,
+    }
 }
 
 impl WasmDriverTask {
@@ -216,7 +309,7 @@ impl WasmDriverTask {
                 }
             }
             Err(err) => {
-                self.emit_error(err.to_string()).await;
+                self.emit_error(&err).await;
                 self.finish().await;
                 return;
             }
@@ -308,8 +401,9 @@ impl WasmDriverTask {
                         self.apply_transport_event(TransportEvent::MessageReceived(message))
                             .await
                     }
-                    Err(err) => {
-                        self.emit_error(err.to_string()).await;
+                    Err(_err) => {
+                        self.emit_error_reason(DriverErrorReason::InvalidTransportFrame)
+                            .await;
                         let _ = self
                             .apply_transport_event(TransportEvent::StateChanged(
                                 TransportState::Failed,
@@ -328,7 +422,7 @@ impl WasmDriverTask {
                 false
             }
             Some(WasmTransportEvent::Error) => {
-                self.emit_error("websocket transport error".to_string())
+                self.emit_error_reason(DriverErrorReason::WebSocketTransport)
                     .await;
                 let _ = self
                     .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
@@ -467,7 +561,7 @@ impl WasmDriverTask {
                 true
             }
             Err(failure) => {
-                self.emit_error(failure.source().to_string()).await;
+                self.emit_error(failure.source()).await;
                 if failure.initiating_message_confirmed() {
                     // The application stanza is already owned by XEP-0198.
                     // Resolving success prevents the persisted browser queue
@@ -508,7 +602,7 @@ impl WasmDriverTask {
                 }
             },
             Err(failure) => {
-                self.emit_error(failure.source().to_string()).await;
+                self.emit_error(failure.source()).await;
                 if failure.initiating_message_confirmed() {
                     if let Some(id) = id {
                         self.pending_iqs.insert(id, responder);
@@ -547,7 +641,7 @@ impl WasmDriverTask {
                 }
             },
             Err(failure) => {
-                self.emit_error(failure.source().to_string()).await;
+                self.emit_error(failure.source()).await;
                 if failure.initiating_message_confirmed() {
                     if let Some(id) = id {
                         self.pending_mam_queries
@@ -593,7 +687,7 @@ impl WasmDriverTask {
                 }
             },
             Err(failure) => {
-                self.emit_error(failure.source().to_string()).await;
+                self.emit_error(failure.source()).await;
                 if failure.initiating_message_confirmed() {
                     if let Some(id) = id {
                         self.pending_inbox_queries.insert(
@@ -673,7 +767,7 @@ impl WasmDriverTask {
         let events = match self.runtime.apply_transport_event(event) {
             Ok(events) => events,
             Err(err) => {
-                self.emit_error(err.to_string()).await;
+                self.emit_error(&err).await;
                 return false;
             }
         };
@@ -700,7 +794,7 @@ impl WasmDriverTask {
     async fn handle_client_event(&mut self, event: ClientEvent) -> bool {
         if let Some(message) = self.dispatch_client_event(event).await {
             if let Err(failure) = self.send_transport_message(message).await {
-                self.emit_error(failure.source().to_string()).await;
+                self.emit_error(failure.source()).await;
                 self.terminate_uncleanly().await;
                 return false;
             }
@@ -930,11 +1024,19 @@ impl WasmDriverTask {
             .await;
     }
 
-    async fn emit_error(&mut self, description: String) {
+    async fn emit_error(&mut self, error: &ClientError) {
         let _ = self
             .event_tx
             .clone()
-            .send(DriverEvent::Error(description))
+            .send(driver_error_event(error))
+            .await;
+    }
+
+    async fn emit_error_reason(&mut self, reason: DriverErrorReason) {
+        let _ = self
+            .event_tx
+            .clone()
+            .send(driver_error_reason_event(reason))
             .await;
     }
 

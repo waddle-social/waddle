@@ -10,20 +10,27 @@ import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events"
 import {
   OfflineSendQueue,
   ReconnectScheduler,
+  ResumeStateTeardownError,
   ResumeStateStore,
-  compatWasmSendResult,
+  wasmSendMessageId,
   type XmppResumeState,
 } from "../src/lib/xmpp/client-connection";
 import { listQueuedMessages } from "../src/lib/outbound-queue-store";
 import {
+  committedOrThrow,
   MemoryDurableOutboundStore,
   OUTBOUND_CLAIM_LEASE_MS,
+  OutboundPersistenceError,
   type DurableOutboundStore,
-} from "../src/lib/outbound-durable-store";
+  type OutboundOwnerActivation,
+  type OutboundOwnerContext,
+  type OutboundOwnerHint,
+} from "../src/lib/xmpp-runtime-durable-store";
 import type {
   ResumePersistence,
   XmppResumeEntry,
 } from "../src/lib/xmpp/resume-persistence";
+import { XmppLifecycleId } from "../src/lib/xmpp/resume-persistence";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 const SCOPE = "alice@example.com";
@@ -72,8 +79,10 @@ function createStorageMock() {
 const originalWindow = globalThis.window;
 const originalLocalStorage = globalThis.localStorage;
 let durableStore: MemoryDurableOutboundStore;
+let createdQueues: OfflineSendQueue[] = [];
 
 beforeEach(() => {
+  createdQueues = [];
   durableStore = new MemoryDurableOutboundStore();
   const storage = createStorageMock();
   (globalThis as typeof globalThis & { localStorage: typeof storage }).localStorage = storage;
@@ -84,7 +93,9 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(createdQueues.map((queue) => queue.dispose()));
+  createdQueues = [];
   localStorage.clear();
   if (originalLocalStorage === undefined) {
     Reflect.deleteProperty(globalThis, "localStorage");
@@ -105,11 +116,14 @@ type QueueOverrides = {
   sendRoom?: (roomJid: string, body: string, opts: { id: string }) => Promise<string | null>;
   emitStatus?: (snapshot: XmppStatusSnapshot) => void;
   durableStore?: DurableOutboundStore;
+  outboundOwnerHint?: () => OutboundOwnerHint;
+  acceptOutboundOwner?: (activation: OutboundOwnerActivation) => void;
 };
 
 function createQueue(overrides: QueueOverrides = {}) {
   const events = new TypedEventBus<ClientEvents>();
   const statuses: XmppStatusSnapshot[] = [];
+  const lifecycleId = XmppLifecycleId.create();
   const queue = new OfflineSendQueue({
     queueScope: () => SCOPE,
     events,
@@ -121,14 +135,203 @@ function createQueue(overrides: QueueOverrides = {}) {
     sendDirect: overrides.sendDirect ?? (async (_peer, _body, opts) => opts.id),
     sendRoom: overrides.sendRoom ?? (async (_room, _body, opts) => opts.id),
     durableStore: overrides.durableStore ?? durableStore,
+    lifecycleId,
+    outboundOwnerHint: overrides.outboundOwnerHint ?? (() => ({
+      ownerId: `queue-owner-${lifecycleId.value}`,
+      ownerInstanceId: lifecycleId.value,
+    })),
+    acceptOutboundOwner: overrides.acceptOutboundOwner ?? (() => undefined),
+    onAuthorityLost: () => undefined,
   });
+  createdQueues.push(queue);
   return { queue, events, statuses };
 }
 
+async function createActiveQueue(overrides: QueueOverrides = {}) {
+  const created = createQueue(overrides);
+  await created.queue.ready();
+  created.queue.beginConnectionGeneration(1);
+  return created;
+}
+
 describe("OfflineSendQueue drain ordering", () => {
-  test("flushDirect replays queued DMs in enqueue order and marks them in flight", async () => {
+  test("a successor generation cannot bind before predecessor reconciliation settles", async () => {
+    let blockNext = false;
+    let releaseBlocked: (() => void) | null = null;
+    let markBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    const store = new MemoryDurableOutboundStore(
+      undefined,
+      async () => {
+        if (!blockNext) return;
+        blockNext = false;
+        markBlocked();
+        await new Promise<void>((resolve) => {
+          releaseBlocked = resolve;
+        });
+      },
+    );
+    const { queue } = createQueue({ durableStore: store });
+    await queue.ready();
+    queue.beginConnectionGeneration(1);
+
+    blockNext = true;
+    const predecessor = queue.reconcileNativeSnapshot(1, null);
+    expect(() => queue.beginConnectionGeneration(2)).toThrow(
+      "A predecessor native snapshot is still reconciling",
+    );
+    await blocked;
+    releaseBlocked?.();
+    await predecessor;
+    await queue.whenQuiescent();
+
+    expect(queue.beginConnectionGeneration(2)).toBe(2);
+  });
+
+  test("final disposal never reclaims a consumed handoff or fences its successor", async () => {
+    const store = new MemoryDurableOutboundStore();
+    const activations: OutboundOwnerActivation[] = [];
+    const { queue } = await createActiveQueue({
+      durableStore: store,
+      outboundOwnerHint: () => ({
+        ownerId: "dispose-handoff-owner",
+        ownerInstanceId: "dispose-instance-a",
+      }),
+      acceptOutboundOwner: (activation) => {
+        activations.push(activation);
+      },
+    });
+    const predecessor = activations[0];
+    if (!predecessor) throw new Error("predecessor activation was not installed");
+
+    committedOrThrow(
+      "prepare-dispose-handoff",
+      await store.preparePagehideHandoff(
+        predecessor.fence,
+        null,
+        "dispose-handoff-token",
+        null,
+      ),
+    );
+    const successor = committedOrThrow(
+      "claim-dispose-successor",
+      await store.claimOwner(SCOPE, {
+        ownerId: predecessor.fence.ownerId,
+        ownerInstanceId: "dispose-instance-b",
+        handoffToken: "dispose-handoff-token",
+      }),
+    );
+
+    const claimOwner = store.claimOwner.bind(store);
+    const renewOwner = store.renewOwner.bind(store);
+    let claimsAfterBoundary = 0;
+    let renewalsAfterBoundary = 0;
+    store.claimOwner = async (...arguments_) => {
+      claimsAfterBoundary += 1;
+      return claimOwner(...arguments_);
+    };
+    store.renewOwner = async (...arguments_) => {
+      renewalsAfterBoundary += 1;
+      return renewOwner(...arguments_);
+    };
+
+    queue.beginFinalDisposal();
+    await expect(queue.reconcileFinalNativeSnapshot(1, null)).rejects.toThrow(
+      "Outbound owner fenced during native reconciliation",
+    );
+    await expect(queue.whenQuiescent()).rejects.toThrow(
+      "Outbound queue quiescence failed",
+    );
+    await queue.dispose();
+
+    expect(claimsAfterBoundary).toBe(0);
+    expect(renewalsAfterBoundary).toBe(0);
+    expect(committedOrThrow(
+      "renew-dispose-successor",
+      await renewOwner(successor.fence),
+    )).toBe(true);
+  });
+
+  test("queue quiescence drains real rejected terminal waves and reports each failure once", async () => {
+    const store = new MemoryDurableOutboundStore();
+    const { queue } = await createActiveQueue({ durableStore: store });
+    const firstError = new Error("first queue wave failed");
+    const secondError = new Error("second queue wave failed");
+    let markFirstStarted!: () => void;
+    let markSecondStarted!: () => void;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const recordTerminal = store.recordTerminal.bind(store);
+    let call = 0;
+    store.recordTerminal = async (...arguments_) => {
+      call += 1;
+      if (call === 1) {
+        markFirstStarted();
+        await firstGate;
+        throw firstError;
+      }
+      if (call === 2) {
+        markSecondStarted();
+        await secondGate;
+        throw secondError;
+      }
+      return recordTerminal(...arguments_);
+    };
+
+    await queue.queueDirectMessage("bob@example.com", "terminal failure", {
+      id: "dm-terminal-failure",
+    });
+    await queue.flushDirect();
+
+    const first = queue.handleAck("dm-terminal-failure");
+    await firstStarted;
+    let settled = false;
+    const barrier = queue.whenQuiescent().finally(() => {
+      settled = true;
+    });
+    const second = queue.handleFailed("dm-terminal-failure");
+
+    releaseFirst();
+    await secondStarted;
+    expect(settled).toBe(false);
+
+    releaseSecond();
+    const [firstOutcome, secondOutcome, barrierOutcome] = await Promise.allSettled([
+      first,
+      second,
+      barrier,
+    ]);
+    expect(firstOutcome).toEqual({ status: "rejected", reason: firstError });
+    expect(secondOutcome).toEqual({ status: "rejected", reason: secondError });
+    expect(barrierOutcome.status).toBe("rejected");
+    if (barrierOutcome.status !== "rejected") {
+      throw new Error("barrier unexpectedly resolved");
+    }
+    expect(barrierOutcome.reason).toBeInstanceOf(AggregateError);
+    const failures = (barrierOutcome.reason as AggregateError).errors;
+    expect(failures.filter((error) => error === firstError)).toHaveLength(1);
+    expect(failures.filter((error) => error === secondError)).toHaveLength(1);
+
+    await expect(queue.whenQuiescent()).resolves.toBeUndefined();
+  });
+
+  test("flushDirect advances the direct lane only after each exact acknowledgement", async () => {
     const sent: string[] = [];
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendDirect: async (_peer, body, opts) => {
         sent.push(body);
         return opts.id;
@@ -143,18 +346,25 @@ describe("OfflineSendQueue drain ordering", () => {
 
     await queue.flushDirect();
 
+    expect(sent).toEqual(["first"]);
+    await queue.handleAck("dm-1");
+    await queue.flushDirect();
+    expect(sent).toEqual(["first", "second"]);
+    await queue.handleAck("dm-2");
+    await queue.flushDirect();
     expect(sent).toEqual(["first", "second", "third"]);
     expect(statusEvents.filter((event) => event.status === "sending").map((event) => event.id))
       .toEqual(["dm-1", "dm-2", "dm-3"]);
-    // Replayed entries stay persisted until the server acks them.
-    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-1", "dm-2", "dm-3"]);
+    // The current head stays persisted until the server acks it; earlier
+    // heads were removed only by their exact durable acknowledgement.
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-3"]);
   });
 
   test("MUC-PM drains to the full occupant JID, never the room bare JID (#1256)", async () => {
-    const sent: Array<{ peer: string; mucPm?: boolean }> = [];
-    const { queue } = createQueue({
+    const sent: Array<{ id: string; peer: string; mucPm?: boolean }> = [];
+    const { queue } = await createActiveQueue({
       sendDirect: async (peer, _body, opts) => {
-        sent.push({ peer, ...(opts.mucPm ? { mucPm: true } : {}) });
+        sent.push({ id: opts.id, peer, ...(opts.mucPm ? { mucPm: true } : {}) });
         return opts.id;
       },
     });
@@ -163,19 +373,22 @@ describe("OfflineSendQueue drain ordering", () => {
     await queue.queueDirectMessage("bob@example.com/desktop", "hi", { id: "dm-1" });
 
     await queue.flushDirect();
+    expect(sent).toHaveLength(1);
+    await queue.handleAck(sent[0]!.id);
+    await queue.flushDirect();
 
     expect(sent.sort((a, b) => a.peer.localeCompare(b.peer))).toEqual([
       // Normal DM sends stay bare-folded.
-      { peer: "bob@example.com" },
+      { id: "dm-1", peer: "bob@example.com" },
       // Occupant address preserved verbatim + the muc#user marker option.
-      { peer: "room@muc.example.com/juliet", mucPm: true },
+      { id: "pm-1", peer: "room@muc.example.com/juliet", mucPm: true },
     ]);
   });
 
-  test("flushDirect skips entries already in flight and stops when the session drops", async () => {
+  test("flushDirect waits for a claimed head and stops when the session drops", async () => {
     let connected = true;
     const sent: string[] = [];
-    const { queue } = createQueue({
+    const { queue } = await createActiveQueue({
       canUseConnectedSession: () => connected,
       sendDirect: async (_peer, body, opts) => {
         sent.push(body);
@@ -187,16 +400,25 @@ describe("OfflineSendQueue drain ordering", () => {
     await queue.queueDirectMessage("bob@example.com", "first", { id: "dm-1" });
     await queue.queueDirectMessage("bob@example.com", "second", { id: "dm-2" });
     await queue.queueDirectMessage("bob@example.com", "third", { id: "dm-3" });
-    queue.beginAttempt("dm-1", "dm");
+    await queue.reconcileNativeSnapshot(1, {
+      previd: "p",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [messageResumeEntry("dm-1")],
+    }, "resume-replay");
 
     await queue.flushDirect();
+    expect(sent).toEqual([]);
+    await queue.handleAck("dm-1");
+    await queue.flushDirect();
 
-    // dm-1 already in flight, dm-3 not reached after the drop mid-drain.
+    // dm-1 fenced the lane until its exact ack. dm-3 is not reached after
+    // sending dm-2 drops the connected session.
     expect(sent).toEqual(["second"]);
   });
 
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
-    const { queue, events } = createQueue();
+    const { queue, events } = await createActiveQueue();
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
@@ -216,7 +438,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a synchronous ack inside send clears persistence before the promise resolves", async () => {
     let queue!: OfflineSendQueue;
-    const created = createQueue({
+    const created = await createActiveQueue({
       sendDirect: async (_peer, _body, opts) => {
         await queue.handleAck(opts.id);
         return opts.id;
@@ -235,7 +457,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a synchronous room ack inside send clears persistence before the promise resolves", async () => {
     let queue!: OfflineSendQueue;
-    const created = createQueue({
+    const created = await createActiveQueue({
       sendRoom: async (_room, _body, opts) => {
         await queue.handleAck(opts.id);
         return opts.id;
@@ -251,7 +473,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a rejected attempt rolls back so the persisted message can retry", async () => {
     let attempt = 0;
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendDirect: async (_peer, _body, opts) => {
         attempt += 1;
         if (attempt === 1) throw new Error("socket unavailable");
@@ -279,11 +501,11 @@ describe("OfflineSendQueue drain ordering", () => {
   test("a confirmed WASM send stays inflight when its control follow-up disconnects", async () => {
     let connected = true;
     let attempts = 0;
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       canUseConnectedSession: () => connected,
       sendDirect: async (_peer, _body, opts) => {
         attempts += 1;
-        const id = compatWasmSendResult({ kind: "sent", stanza_id: opts.id });
+        const id = wasmSendMessageId({ kind: "sent", stanza_id: opts.id });
         connected = false;
         return id;
       },
@@ -303,16 +525,13 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(failures).toEqual([]);
     expect(listQueuedMessages(SCOPE).map((message) => message.id))
       .toEqual(["dm-confirmed-control-failure"]);
-    expect(depths.at(-1)).toEqual({
-      persisted: 1,
-      inflight: 1,
-      oldestAgeMs: 0,
-    });
+    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
+    expect(depths.at(-1)?.oldestAgeMs).toBeGreaterThanOrEqual(0);
   });
 
   test("null and mismatched queued DM attempts roll back before a later acked retry", async () => {
     let attempt = 0;
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendDirect: async (_peer, _body, opts) => {
         attempt += 1;
         if (attempt === 1) return null;
@@ -347,7 +566,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a rejected queued room attempt stays retryable before a later acked retry", async () => {
     let attempt = 0;
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendRoom: async (_room, _body, opts) => {
         attempt += 1;
         if (attempt === 1) throw new Error("room socket unavailable");
@@ -375,7 +594,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("null and mismatched queued room attempts roll back and the coalescer later retries", async () => {
     let attempt = 0;
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendRoom: async (_room, _body, opts) => {
         attempt += 1;
         if (attempt === 1) return null;
@@ -407,13 +626,16 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
   });
 
-  test("an ack after reload deletes persistence without ephemeral inflight state", async () => {
-    const { queue } = createQueue();
+  test("an ack without an exact generation claim cannot delete a reloaded row", async () => {
+    const { queue, events } = await createActiveQueue();
+    const acknowledgements: string[] = [];
+    events.on("messageAck", (id) => acknowledgements.push(id));
     await queue.queueDirectMessage("bob@example.com", "already handled", { id: "dm-reloaded" });
 
     await queue.handleAck("dm-reloaded");
 
-    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(acknowledgements).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-reloaded"]);
   });
 
   test("projection loss cannot suppress durable resend or fabricate an acknowledgement", async () => {
@@ -428,7 +650,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
     const sent: string[] = [];
     try {
-      const { queue } = createQueue({
+      const { queue } = await createActiveQueue({
         sendDirect: async (_peer, _body, opts) => {
           sent.push(opts.id);
           return opts.id;
@@ -441,12 +663,12 @@ describe("OfflineSendQueue drain ordering", () => {
       expect(sent).toEqual(["dm-no-projection"]);
       await queue.handleAck("dm-no-projection");
 
-      const reconstructed = createQueue({
+      const reconstructed = (await createActiveQueue({
         sendDirect: async (_peer, _body, opts) => {
           sent.push(opts.id);
           return opts.id;
         },
-      }).queue;
+      })).queue;
       await reconstructed.flushDirect();
       expect(sent).toEqual(["dm-no-projection"]);
     } finally {
@@ -462,7 +684,7 @@ describe("OfflineSendQueue drain ordering", () => {
       cause: new DOMException("durable quota", "QuotaExceededError"),
     });
     const sent: string[] = [];
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       durableStore: failingStore,
       sendDirect: async (_peer, _body, opts) => {
         sent.push(opts.id);
@@ -481,24 +703,40 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 
-  test("durable ack delete failure retains ownership and emits no false acknowledgement", async () => {
+  test("a transient terminal-apply failure emits no acknowledgement before durable commit", async () => {
     const store = new MemoryDurableOutboundStore();
-    const { queue, events } = createQueue({ durableStore: store });
+    const { queue, events } = await createActiveQueue({ durableStore: store });
     const acknowledgements: string[] = [];
     events.on("messageAck", (id) => acknowledgements.push(id));
     await queue.queueDirectMessage("bob@example.com", "retain until commit", { id: "dm-delete-fail" });
     await queue.flushDirect();
-    store.delete = async () => ({
-      kind: "failed",
-      reason: "aborted",
-      cause: new DOMException("delete aborted", "AbortError"),
-    });
+    const applyTerminal = store.applyTerminal.bind(store);
+    let attempts = 0;
+    const executors: OutboundOwnerContext[] = [];
+    store.applyTerminal = async (executor, intent) => {
+      attempts += 1;
+      executors.push({ ...executor });
+      if (attempts === 1) {
+        return {
+          kind: "failed",
+          reason: "aborted",
+          cause: new DOMException("terminal apply aborted", "AbortError"),
+        };
+      }
+      return applyTerminal(executor, intent);
+    };
 
-    await expect(queue.handleAck("dm-delete-fail"))
-      .rejects.toThrow("Outbound persistence ack-delete failed: aborted");
-
+    const acknowledgement = queue.handleAck("dm-delete-fail");
+    await Promise.resolve();
     expect(acknowledgements).toEqual([]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-delete-fail"]);
+    await acknowledgement;
+
+    expect(attempts).toBe(2);
+    expect(executors).toHaveLength(2);
+    expect(executors[1]).toEqual(executors[0]);
+    expect(acknowledgements).toEqual(["dm-delete-fail"]);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
   });
 
   test("two same-account tabs cannot claim and send the same durable row", async () => {
@@ -508,9 +746,9 @@ describe("OfflineSendQueue drain ordering", () => {
       sends.push(opts.id);
       return opts.id;
     };
-    const first = createQueue({ durableStore: store, sendDirect }).queue;
+    const first = (await createActiveQueue({ durableStore: store, sendDirect })).queue;
     await first.queueDirectMessage("bob@example.com", "once", { id: "dm-cross-tab" });
-    const second = createQueue({ durableStore: store, sendDirect }).queue;
+    const second = (await createActiveQueue({ durableStore: store, sendDirect })).queue;
 
     await Promise.all([first.flushDirect(), second.flushDirect()]);
 
@@ -519,10 +757,10 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("non-retryable send failures are discarded instead of retried forever", async () => {
     const attempts: string[] = [];
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendDirect: async (_peer, body, _opts) => {
         attempts.push(body);
-        if (body === "bad recipient") return compatWasmSendResult({ kind: "invalid-recipient" });
+        if (body === "bad recipient") return wasmSendMessageId({ kind: "invalid-recipient" });
         return _opts.id;
       },
     });
@@ -541,7 +779,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("flushRoom only drains the ready room and merges its member mentions", async () => {
     const sends: Array<{ roomJid: string; body: string }> = [];
-    const { queue } = createQueue({
+    const { queue } = await createActiveQueue({
       roomIsReady: (roomJid) => roomJid === "general@muc.example.com",
       sendRoom: async (roomJid, body, opts) => {
         sends.push({ roomJid, body });
@@ -559,7 +797,7 @@ describe("OfflineSendQueue drain ordering", () => {
   });
 
   test("queueing while connected (room not joined) does not emit a reconnecting status (#1164)", async () => {
-    const { queue, statuses } = createQueue({
+    const { queue, statuses } = await createActiveQueue({
       canUseConnectedSession: () => true,
       roomIsReady: () => false,
     });
@@ -572,7 +810,7 @@ describe("OfflineSendQueue drain ordering", () => {
   });
 
   test("queueing while the session is unusable still reports the reconnecting status", async () => {
-    const { queue, statuses } = createQueue({
+    const { queue, statuses } = await createActiveQueue({
       canUseConnectedSession: () => false,
     });
 
@@ -583,18 +821,18 @@ describe("OfflineSendQueue drain ordering", () => {
     ]);
   });
 
-  test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", async () => {
-    const { queue, events } = createQueue();
+  test("resume reconciliation tracks XEP-0198 replayed stanza ids so acks clear the store", async () => {
+    const { queue, events } = await createActiveQueue();
     const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
     await queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
-    await queue.seedFromResumeState({
+    await queue.reconcileNativeSnapshot(1, {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
       unhandledOutboundEntries: [messageResumeEntry("dm-native")],
-    });
+    }, "resume-replay");
 
     await queue.handleAck("dm-native");
 
@@ -605,9 +843,9 @@ describe("OfflineSendQueue drain ordering", () => {
     ]);
   });
 
-  test("failed resume transfers retry ownership without deleting or browser-flushing the durable row", async () => {
+  test("failed resume retains fallback ownership until a fresh bind releases it", async () => {
     const sent: string[] = [];
-    const { queue, events } = createQueue({
+    const { queue, events } = await createActiveQueue({
       sendDirect: async (_peer, _body, opts) => {
         sent.push(opts.id);
         return opts.id;
@@ -619,19 +857,24 @@ describe("OfflineSendQueue drain ordering", () => {
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
     await queue.queueDirectMessage("bob@example.com", "native fallback", { id: "dm-native-fallback" });
-    await queue.seedFromResumeState({
+    await queue.reconcileNativeSnapshot(1, {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
       unhandledOutboundEntries: [messageResumeEntry("dm-native-fallback")],
-    });
+    }, "resume-replay");
 
     await queue.handleFailed("dm-native-fallback");
-    await queue.clearInflight();
     await queue.flushDirect();
-
     expect(sent).toEqual([]);
     expect(failures).toEqual([]);
+    expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
+    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
+
+    await queue.reconcileFreshSession(1, null);
+    await queue.flushDirect();
+
+    expect(sent).toEqual(["dm-native-fallback"]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
     expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
 
@@ -642,21 +885,21 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("a plain fresh bind releases an unattempted resume replay claim to the durable browser queue", async () => {
     const sent: string[] = [];
-    const { queue } = createQueue({
+    const { queue } = await createActiveQueue({
       sendDirect: async (_peer, _body, opts) => {
         sent.push(opts.id);
         return opts.id;
       },
     });
     await queue.queueDirectMessage("bob@example.com", "fresh without SM", { id: "dm-no-resume" });
-    await queue.seedFromResumeState({
+    await queue.reconcileNativeSnapshot(1, {
       previd: "p",
       inboundH: 1,
       outboundH: 2,
       unhandledOutboundEntries: [messageResumeEntry("dm-no-resume")],
-    });
+    }, "resume-replay");
 
-    await queue.clearInflight();
+    await queue.reconcileFreshSession(1, null);
     await queue.flushDirect();
 
     expect(sent).toEqual(["dm-no-resume"]);
@@ -664,31 +907,34 @@ describe("OfflineSendQueue drain ordering", () => {
   });
 
   test("a reconstructed queue reclaims a retained failed-resume row after an immediate or mid-write crash", async () => {
-    const original = createQueue().queue;
+    let authorityNow = Date.now();
+    const store = new MemoryDurableOutboundStore({
+      now: () => authorityNow,
+    });
+    const original = (await createActiveQueue({ durableStore: store })).queue;
     await original.queueDirectMessage("bob@example.com", "survive fallback crash", { id: "dm-crash-fallback" });
-    await original.seedFromResumeState({
+    await original.reconcileNativeSnapshot(1, {
       previd: "p",
       inboundH: 3,
       outboundH: 4,
       unhandledOutboundEntries: [messageResumeEntry("dm-crash-fallback")],
-    });
+    }, "resume-replay");
     await original.handleFailed("dm-crash-fallback");
+    // Simulate the crashed runtime becoming inert without releasing or
+    // renewing its durable owner/row claims.
+    original.beginFinalDisposal();
+    authorityNow += OUTBOUND_CLAIM_LEASE_MS + 1;
 
     const reclaimed: string[] = [];
-    const reconstructed = createQueue({
+    const reconstructed = (await createActiveQueue({
+      durableStore: store,
       sendDirect: async (_peer, _body, opts) => {
         reclaimed.push(opts.id);
         return opts.id;
       },
-    }).queue;
+    })).queue;
 
-    const actualNow = Date.now;
-    Date.now = () => actualNow() + OUTBOUND_CLAIM_LEASE_MS + 1;
-    try {
-      await reconstructed.flushDirect();
-    } finally {
-      Date.now = actualNow;
-    }
+    await reconstructed.flushDirect();
 
     expect(reclaimed).toEqual(["dm-crash-fallback"]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-crash-fallback"]);
@@ -772,7 +1018,10 @@ describe("ReconnectScheduler", () => {
 function createRecordingPersistence() {
   let saved: XmppResumeState | null = null;
   const calls: string[] = [];
+  const lifecycleId = XmppLifecycleId.create();
   const persistence: ResumePersistence = {
+    lifecycleId,
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
     loadCatchup: () => null,
     saveCatchup: () => undefined,
     clearCatchup: () => undefined,
@@ -792,8 +1041,32 @@ function createRecordingPersistence() {
       saved = null;
       return { kind: "committed", value: removed };
     },
-    preparePagehideHandoff: () => calls.push("preparePagehideHandoff"),
-    reclaimPagehideOwnership: () => calls.push("reclaimPagehideOwnership"),
+    outboundOwnerHint: () => ({
+      ownerId: "recording-owner",
+      ownerInstanceId: lifecycleId.value,
+    }),
+    acceptOutboundOwner: () => undefined,
+    preparePagehideHandoff: async (state) => {
+      calls.push("preparePagehideHandoff");
+      saved = state;
+      return {
+        kind: "committed",
+        value: {
+          handoff: {
+            token: "recording-handoff",
+            expiresAt: Date.now() + 30_000,
+            authorityEpoch: 1,
+            ownerGeneration: 1,
+          },
+          smVersion: 1,
+        },
+      };
+    },
+    publishPagehideHandoff: () => calls.push("publishPagehideHandoff"),
+    reclaimPagehideOwnership: async () => {
+      calls.push("reclaimPagehideOwnership");
+      return { kind: "committed", value: undefined };
+    },
     loadJoinedRooms: () => [],
     saveJoinedRooms: () => undefined,
     clearJoinedRooms: () => calls.push("clearJoinedRooms"),
@@ -802,38 +1075,94 @@ function createRecordingPersistence() {
 }
 
 describe("ResumeStateStore", () => {
+  test("page lifecycle quiescence drains a rejected wave before reporting each failure once", async () => {
+    const { persistence } = createRecordingPersistence();
+    const store = new ResumeStateStore(persistence);
+    const state = store as unknown as {
+      enqueuePageLifecycle: (operation: () => Promise<void>) => void;
+    };
+    const firstError = new Error("first page lifecycle wave failed");
+    const secondError = new Error("second page lifecycle wave failed");
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let markSecondStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    state.enqueuePageLifecycle(async () => {
+      await firstGate;
+      state.enqueuePageLifecycle(async () => {
+        await secondGate;
+        throw secondError;
+      });
+      markSecondStarted();
+      throw firstError;
+    });
+
+    let settled = false;
+    const barrier = store.whenPageLifecycleQuiescent().finally(() => {
+      settled = true;
+    });
+    releaseFirst();
+    await secondStarted;
+    expect(settled).toBe(false);
+
+    releaseSecond();
+    const [outcome] = await Promise.allSettled([barrier]);
+    expect(outcome?.status).toBe("rejected");
+    if (outcome?.status !== "rejected") throw new Error("barrier unexpectedly resolved");
+    expect(outcome.reason).toBeInstanceOf(AggregateError);
+    const failures = (outcome.reason as AggregateError).errors;
+    expect(failures.filter((error) => error === firstError)).toHaveLength(1);
+    expect(failures.filter((error) => error === secondError)).toHaveLength(1);
+  });
+
   test("persistForPageHide snapshots the live state with the session resource", async () => {
     const { persistence, calls, getSaved } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     let persistedRooms = 0;
 
     store.persistForPageHide(
-      { previd: "p1", inboundH: 3, outboundH: 4 },
+      { previd: "p1", inboundH: 3, outboundH: 4, unhandledOutboundEntries: [] },
       "web-abc",
       () => { persistedRooms += 1; },
     );
-    await Promise.resolve();
+    await store.whenPageLifecycleQuiescent();
 
-    expect(calls).toEqual(["preparePagehideHandoff", "saveSm"]);
-    expect(getSaved()).toEqual({ previd: "p1", inboundH: 3, outboundH: 4, resource: "web-abc" });
+    expect(calls).toEqual([
+      "preparePagehideHandoff",
+      "publishPagehideHandoff",
+    ]);
+    expect(getSaved()).toEqual({
+      previd: "p1",
+      inboundH: 3,
+      outboundH: 4,
+      unhandledOutboundEntries: [],
+      resource: "web-abc",
+    });
     expect(persistedRooms).toBe(1);
   });
 
-  test("persistForPageHide drops unacked-outbound state it cannot replay", async () => {
+  test("persistForPageHide rejects a snapshot without the ordered entry array", () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     let persistedRooms = 0;
 
-    store.persistForPageHide(
-      { previd: "p1", inboundH: 3, outboundH: 4, hasUnackedOutbound: true },
+    expect(() => store.persistForPageHide(
+      { previd: "p1", inboundH: 3, outboundH: 4 } as never,
       "web-abc",
       () => { persistedRooms += 1; },
-    );
-    await Promise.resolve();
+    )).toThrow("unhandledOutboundEntries must be an ordered array");
 
-    expect(calls).toEqual(["preparePagehideHandoff", "clearSm"]);
+    expect(calls).toEqual([]);
     expect(store.state).toBeNull();
-    expect(persistedRooms).toBe(1);
+    expect(persistedRooms).toBe(0);
   });
 
   test("captureFromDisconnect stamps the resource and keeps state in memory only", async () => {
@@ -841,21 +1170,37 @@ describe("ResumeStateStore", () => {
     const store = new ResumeStateStore(persistence);
 
     const captured = store.captureFromDisconnect(
-      { get_resume_state: () => ({ previd: "p2", inboundH: 1, outboundH: 2 }) },
+      { get_resume_state: () => ({
+        previd: "p2",
+        inboundH: 1,
+        outboundH: 2,
+        unhandledOutboundEntries: [],
+      }) },
       "web-xyz",
     );
 
-    expect(captured).toEqual({ previd: "p2", inboundH: 1, outboundH: 2, resource: "web-xyz" });
+    expect(captured).toEqual({
+      previd: "p2",
+      inboundH: 1,
+      outboundH: 2,
+      unhandledOutboundEntries: [],
+      resource: "web-xyz",
+    });
     expect(store.state).toEqual(captured);
     // In-memory only: ordinary disconnects never touch the persisted slot.
     expect(calls).toEqual([]);
   });
 
-  test("discardState clears the persisted slot; clearAll also drops joined rooms + handle", async () => {
+  test("discardState clears the persisted slot; clearAll also drops joined rooms", async () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     store.captureFromDisconnect(
-      { get_resume_state: () => ({ previd: "p3", inboundH: 0, outboundH: 0 }) },
+      { get_resume_state: () => ({
+        previd: "p3",
+        inboundH: 0,
+        outboundH: 0,
+        unhandledOutboundEntries: [],
+      }) },
       "web-r",
     );
 
@@ -863,10 +1208,40 @@ describe("ResumeStateStore", () => {
     expect(store.state).toBeNull();
     expect(calls).toEqual(["clearSm"]);
 
-    let freed = 0;
-    store.setHandle({ free: () => { freed += 1; } } as never);
     await store.clearAll();
-    expect(freed).toBe(1);
-    expect(store.handle).toBeNull();
+  });
+
+  test("clearAll attempts every teardown and aggregates typed stage failures", async () => {
+    const { persistence } = createRecordingPersistence();
+    const smFailure = new DOMException("SM clear failed", "AbortError");
+    const roomsFailure = new Error("joined rooms clear failed");
+    persistence.clearSm = async () => ({
+      kind: "failed",
+      reason: "aborted",
+      cause: smFailure,
+    });
+    persistence.clearJoinedRooms = () => {
+      throw roomsFailure;
+    };
+    const store = new ResumeStateStore(persistence);
+
+    let failure: unknown;
+    try {
+      await store.clearAll();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(ResumeStateTeardownError);
+    const teardown = failure as ResumeStateTeardownError;
+    expect(teardown.failures.map(({ stage }) => stage)).toEqual([
+      "sm-clear",
+      "joined-rooms-clear",
+    ]);
+    expect(teardown.failures[0]?.cause).toBeInstanceOf(OutboundPersistenceError);
+    const persistenceFailure = teardown.failures[0]?.cause as OutboundPersistenceError;
+    expect(persistenceFailure.operation).toBe("sm-clear-all");
+    expect(persistenceFailure.reason).toBe("aborted");
+    expect(persistenceFailure.cause).toBe(smFailure);
+    expect(teardown.failures[1]?.cause).toBe(roomsFailure);
   });
 });

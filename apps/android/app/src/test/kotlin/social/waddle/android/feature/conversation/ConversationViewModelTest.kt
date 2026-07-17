@@ -16,12 +16,21 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import social.waddle.android.client.DeliveryOutcomeRef
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.SessionReadyKind
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
+import social.waddle.android.client.prefs.DeliveryAttemptId
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryIncarnation
+import social.waddle.android.client.prefs.DeliveryPayloadDigest
+import social.waddle.android.client.prefs.DeliveryRowIdentity
+import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.NativeConnectionGeneration
 import social.waddle.android.client.store.TimelineStore
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.android.client.testArchivedMessage
@@ -29,6 +38,7 @@ import social.waddle.android.client.testMamPage
 import social.waddle.android.client.testMessage
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationViewModelTest {
@@ -37,7 +47,10 @@ class ConversationViewModelTest {
         val fetchCalls = mutableListOf<Pair<UInt, String?>>()
         val pages = ArrayDeque<WaddleMamPage>()
         var joinedCount = 0
-        var sendResult: SendResult = SendResult(WaddleSendMessageOutcome.Sent("stanza-1"))
+        var sendResult: SendResult = SendResult(
+            WaddleSendMessageOutcome.Sent("stanza-1"),
+            testDelivery("stanza-1"),
+        )
         val sent = mutableListOf<String>()
 
         override suspend fun ensureJoined() {
@@ -183,7 +196,12 @@ class ConversationViewModelTest {
             messages = listOf(archived(mamId = "mam-2", stanzaId = "s2")),
             isComplete = true,
         )
-        events.emit(XmppEvent.SessionReady)
+        events.emit(
+            XmppEvent.SessionReady(
+                kind = SessionReadyKind.FRESH,
+                attempt = testAttempt(),
+            ),
+        )
         runCurrent()
 
         assertEquals(listOf(50u to null, 50u to null), io.fetchCalls)
@@ -196,7 +214,10 @@ class ConversationViewModelTest {
         // stanza-id; only the origin-id round-trips the client id the
         // send returned. Matching on the collapsed timeline key alone
         // rendered every sent channel message twice.
-        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("client-origin-id"))
+        io.sendResult = SendResult(
+            WaddleSendMessageOutcome.Sent("client-origin-id"),
+            testDelivery("client-origin-id"),
+        )
         val viewModel = createViewModel()
         runCurrent()
 
@@ -227,7 +248,11 @@ class ConversationViewModelTest {
 
     @Test
     fun `delivery ack marks the pending row without hiding it`() = runTest {
-        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("client-origin-id"))
+        val delivery = testDelivery("client-origin-id")
+        io.sendResult = SendResult(
+            WaddleSendMessageOutcome.Sent("client-origin-id"),
+            delivery,
+        )
         val viewModel = createViewModel()
         runCurrent()
 
@@ -235,7 +260,7 @@ class ConversationViewModelTest {
         runCurrent()
         assertEquals(1, viewModel.uiState.value.rows.size)
 
-        events.emit(XmppEvent.DeliveryAcked("client-origin-id"))
+        events.emit(XmppEvent.DeliveryAcked(delivery))
         runCurrent()
 
         // Deleting on ack would vanish DM sends (no reflection to the
@@ -276,14 +301,18 @@ class ConversationViewModelTest {
         assertTrue(failedRow.message.failed)
 
         // Retry with a working transport that later reports a 0198 failure.
-        io.sendResult = SendResult(WaddleSendMessageOutcome.Sent("s-late-fail"))
+        val lateDelivery = testDelivery("s-late-fail")
+        io.sendResult = SendResult(
+            WaddleSendMessageOutcome.Sent("s-late-fail"),
+            lateDelivery,
+        )
         viewModel.retry(failedRow.message.localId)
         runCurrent()
         assertEquals(listOf("rejected message", "rejected message"), io.sent)
         val retried = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
         assertFalse(retried.message.failed)
 
-        events.emit(XmppEvent.DeliveryFailed("s-late-fail"))
+        events.emit(XmppEvent.DeliveryFailed(lateDelivery))
         runCurrent()
         val lateFailed = viewModel.uiState.value.rows.single() as ConversationRow.Unconfirmed
         assertTrue(lateFailed.message.failed)
@@ -293,7 +322,10 @@ class ConversationViewModelTest {
     fun `queued send renders as queued and reconciles with the replayed echo`() = runTest {
         // The manager persisted the offline send under "q-1"; the queue
         // replay reuses that id as the XEP-0359 origin-id.
-        io.sendResult = SendResult(WaddleSendMessageOutcome.NotConnected, queuedId = "q-1")
+        io.sendResult = SendResult(
+            WaddleSendMessageOutcome.NotConnected,
+            testDelivery("q-1"),
+        )
         val viewModel = createViewModel()
         runCurrent()
 
@@ -487,3 +519,25 @@ class ConversationViewModelTest {
         const val OWN_JID = "icepuma@waddle.test"
     }
 }
+
+private fun testAttempt(): DeliveryAttemptRef = DeliveryAttemptRef(
+    ownerBareJid = "icepuma@waddle.test",
+    attemptId = DeliveryAttemptId("00000000-0000-4000-8000-000000000001"),
+    nativeGeneration = NativeConnectionGeneration.initial(),
+)
+
+private fun testDelivery(
+    stanzaId: String,
+    ownerBareJid: String = "icepuma@waddle.test",
+    incarnationSeed: String = stanzaId,
+): DeliveryOutcomeRef = DeliveryOutcomeRef(
+    identity = DeliveryRowIdentity(
+        ownerBareJid = ownerBareJid,
+        clientStanzaId = stanzaId,
+        incarnation = DeliveryIncarnation(
+            UUID.nameUUIDFromBytes("$ownerBareJid:$incarnationSeed".toByteArray()).toString(),
+        ),
+        payloadDigest = DeliveryPayloadDigest("v1:sha256:${"0".repeat(64)}"),
+    ),
+    source = DeliverySource.Composer,
+)

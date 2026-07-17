@@ -54,6 +54,10 @@ class ThreadViewModel(
             isGroupchat: Boolean,
             threadId: String,
         ): ViewModelProvider.Factory = viewModelFactoryOf {
+            val ownerBareJid = graph.currentSession.value
+                ?.jid
+                ?.substringBefore('/')
+                ?.takeIf(String::isNotBlank)
             ThreadViewModel(
                 sessionManager = graph.sessionManager,
                 conversationJid = conversationJid,
@@ -61,7 +65,11 @@ class ThreadViewModel(
                 threadId = threadId,
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                 uploader = graph.attachmentUploader,
-                onConversationRead = graph.messageNotifier::clearConversationNotification,
+                onConversationRead = { jid ->
+                    ownerBareJid?.let {
+                        graph.messageNotifier.clearConversationNotification(it, jid)
+                    }
+                },
             )
         }
     }
