@@ -5,7 +5,7 @@
 //! export, `xmpp.<rest>` becomes `xmpp_<rest>_total`, leaving the live
 //! `waddle_<rest>_total` scrape distinct until recording-rule aliases cut over.
 
-use super::attributes::{Janitor, PushSuppressReason, SweepOutcome};
+use super::attributes::{Janitor, PushRetryReason, PushSuppressReason, SweepOutcome};
 
 macro_rules! dual_increment {
     ($helper:ident, $legacy:path, $name:literal, $unit:literal, $description:literal) => {
@@ -119,13 +119,22 @@ dual_increment!(
     "{notification}",
     "XEP-0357 notification outbox jobs accepted by the Push Service."
 );
-dual_increment!(
-    increment_push_outbox_retry_scheduled,
-    crate::prometheus::increment_push_outbox_retry_scheduled,
-    "xmpp.push.outbox_retry_scheduled",
-    "{notification}",
-    "XEP-0357 notification outbox jobs scheduled for retry."
-);
+/// Dual-emit for outbox retry scheduling. Hand-written (not
+/// `dual_increment!`) because the OTel successor must carry the same
+/// `reason` label shape the legacy text family renders
+/// (`waddle_push_outbox_retry_scheduled_total{reason="unknown"}`) —
+/// otherwise PromQL filtering or grouping by `reason` would stop
+/// matching at the alias cutover.
+pub fn increment_push_outbox_retry_scheduled(reason: PushRetryReason) {
+    crate::prometheus::increment_push_outbox_retry_scheduled();
+    crate::counter_add!(
+        "xmpp.push.outbox_retry_scheduled",
+        "{notification}",
+        "XEP-0357 notification outbox jobs scheduled for retry.",
+        1,
+        reason,
+    );
+}
 dual_increment!(
     increment_push_outbox_dead_lettered,
     crate::prometheus::increment_push_outbox_dead_lettered,

@@ -252,6 +252,32 @@ impl MetricAttribute for PushSuppressReason {
     }
 }
 
+/// `reason` — why an XEP-0357 push outbox job was scheduled for retry.
+///
+/// The legacy text family only ever rendered
+/// `waddle_push_outbox_retry_scheduled_total{reason="unknown"}`, so the
+/// OTel successor carries the same closed label shape through the alias
+/// cutover. Gains real variants if the outbox ever classifies retry
+/// causes; until then `Unknown` is the whole set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushRetryReason {
+    /// The retry cause was not classified.
+    Unknown,
+}
+
+impl sealed::Sealed for PushRetryReason {}
+impl MetricAttribute for PushRetryReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions,
 /// reusing the crate's existing typed enum (its `as_str()` already
 /// yields the hyphenated wire names). Re-exported here so metric call

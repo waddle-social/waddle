@@ -232,7 +232,9 @@ impl NotificationOutboxStore {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
                 }
                 NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
-                    waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled();
+                    waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled(
+                        waddle_xmpp::telemetry::attributes::PushRetryReason::Unknown,
+                    );
                 }
                 NotificationOutboxPublishOutcome::Failed { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();

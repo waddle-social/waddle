@@ -559,6 +559,15 @@ fn render_push_suppressed_lines(out: &mut String) {
         out.push_str(&value.to_string());
         out.push('\n');
     }
+    // Frozen at 0 through the expand phase: the sealed
+    // `PushSuppressReason` enum makes an unmapped reason a compile
+    // error, so nothing can increment this series any more — but the
+    // expand release must not change the text renderer's output shape.
+    // Absence-sensitive queries keep answering until the contract PR
+    // deletes the family wholesale.
+    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason outside the typed allowlist. Structurally unreachable since the reason set became a sealed enum; frozen at 0 until the family's contract-phase deletion.\n");
+    out.push_str("# TYPE waddle_push_suppressed_unknown_reason_total counter\n");
+    out.push_str("waddle_push_suppressed_unknown_reason_total 0\n");
 }
 
 #[cfg(any(test, feature = "test-utils"))]
