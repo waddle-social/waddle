@@ -4,6 +4,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.XmppSessionManager.DisplayedTarget
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -313,10 +314,14 @@ internal class ReadStateCoordinator(
                 // publish an older MDS cursor over a sibling's newer one.
                 val applied = Job()
                 activeSession.bridge?.submit(XmppEvent.MdsEntries(entries, applied))
-                // Bare join: swallowing a cancellation here (attempt
-                // teardown drops unconsumed events) would resume a
-                // cancelled pipeline into the drain.
-                applied.join()
+                // The bounded join still propagates outer cancellation;
+                // a stuck consumer times out instead of resuming this
+                // pipeline into the pending-displayed drain.
+                val appliedInTime = withTimeoutOrNull(MDS_APPLY_TIMEOUT_MILLIS) {
+                    applied.join()
+                    true
+                } == true
+                if (!appliedInTime) return
             }
         }
         runCatching { client.subscribeMdsDisplayed() }
@@ -330,4 +335,8 @@ internal class ReadStateCoordinator(
 
     /** A non-stale explicit dispatch: the cursor to CAS against. */
     private data class CursorExpectation(val cursor: String?)
+
+    private companion object {
+        const val MDS_APPLY_TIMEOUT_MILLIS = 5_000L
+    }
 }

@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -117,6 +116,9 @@ internal class DeliveryTerminalWorker(
         startupDrain.await()
     }
 
+    fun canRestart(): Boolean =
+        workerJob == null && activeOwnerBareJid == null
+
     /**
      * Ordered native-poll barrier: record and apply the callback before the
      * connection loop asks Rust for another event.
@@ -173,8 +175,12 @@ internal class DeliveryTerminalWorker(
             "delivery terminal shutdown timed out; owner={0}, pending={1}; journal retained for restart",
             arrayOf<Any>(ownerBareJid, pendingAtFence),
         )
-        job?.cancelAndJoin()
-        workerJob = null
+        job?.cancel()
+        val cancelled = withTimeoutOrNull(stopTimeoutMillis) {
+            job?.join()
+            true
+        } == true
+        if (cancelled) workerJob = null
         return StopResult.FencedWithPending(ownerBareJid, pendingAtFence)
     }
 

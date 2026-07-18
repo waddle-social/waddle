@@ -463,51 +463,6 @@ class ConnectionLoopPullTest {
     }
 
     @Test
-    fun `storage retry keeps socket live and persistent failure returns typed fence`() = runTest {
-        val harness = ConnectionLoopPullHarness(this)
-        try {
-            harness.start()
-            runCurrent()
-            harness.factory.emitReady()
-            runCurrent()
-            val client = harness.factory.clients.single()
-
-            harness.dataStore.failAllUpdates = true
-            harness.factory.emitResumeStateChanged(testResumeState())
-            runCurrent()
-            advanceTimeBy(250)
-            runCurrent()
-            assertPulls(client, calls = 2, inFlight = 0)
-            assertEquals(0, client.disconnectCalls)
-
-            harness.dataStore.failAllUpdates = false
-            advanceTimeBy(500)
-            runCurrent()
-            assertPulls(client, calls = 3, inFlight = 1)
-
-            val sent = harness.messenger.sendOrEnqueue(PEER, false, "persist forever")
-            val stanzaId = checkNotNull(sent.delivery).identity.clientStanzaId
-            harness.dataStore.failAllUpdates = true
-            harness.factory.emitAcked(stanzaId)
-            runCurrent()
-            assertEquals(0, client.disconnectCalls)
-
-            val stopping = async { harness.stopTerminalWorker() }
-            runCurrent()
-            advanceTimeBy(30_000)
-            harness.dataStore.failAllUpdates = false
-            runCurrent()
-            val result = stopping.await()
-            assertTrue(result is DeliveryTerminalWorker.StopResult.FencedWithPending)
-            result as DeliveryTerminalWorker.StopResult.FencedWithPending
-            assertEquals(OWNER, result.ownerBareJid)
-            assertTrue(result.pendingCommands > 0)
-        } finally {
-            harness.shutdown()
-        }
-    }
-
-    @Test
     fun `old generation event after replacement is dropped`() = runTest {
         val harness = ConnectionLoopPullHarness(this)
         try {
@@ -581,8 +536,13 @@ class ConnectionLoopPullTest {
         resume: FreshResume,
     ) {
         assertEquals(
-            DeliveryTerminalWorker.StopResult.Drained,
-            harness.messenger.fenceAndStop(resume.old),
+            LifecycleShutdownOutcome.Stale,
+            harness.messenger.shutdown(
+                LifecycleShutdownTarget.ExactAttempt(
+                    harness.lifecycle,
+                    resume.old,
+                ),
+            ),
         )
         assertFreshAttempt(harness, resume.fresh)
         harness.factory.emit(

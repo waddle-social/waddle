@@ -3,6 +3,7 @@ package social.waddle.android.client
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +14,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.SessionPrefs
@@ -68,6 +70,10 @@ class XmppSessionManager(
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
 
     private var sessionScope: CoroutineScope? = null
+    private var sessionLoopJob: Job? = null
+    private var sessionLifecycle: SessionLifecycleRef? = null
+    private var pendingLifecycleShutdown:
+        LifecycleShutdownOutcome.FencedWithPending? = null
 
     private val lifecycleMutex = Mutex()
 
@@ -90,7 +96,6 @@ class XmppSessionManager(
     private val messenger = OutboundMessenger(
         activeSession = activeSession,
         stores = stores,
-        sessionPrefs = sessionPrefs,
         journal = deliveryJournal,
         resume = resume,
         dispatchEvent = router::dispatch,
@@ -103,7 +108,6 @@ class XmppSessionManager(
     private val loop = ConnectionLoop(
         attemptClientFactory = ConnectionAttemptClientFactory(clientFactory, sessionPrefs),
         networkSignal = networkSignal,
-        activeSession = activeSession,
         resume = resume,
         router = router,
         messenger = messenger,
@@ -135,10 +139,11 @@ class XmppSessionManager(
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
-        messenger.start(scope, ownerBareJid)
+        val lifecycle = messenger.start(scope, ownerBareJid)
+        sessionLifecycle = lifecycle
         loop.startAdmissions()
         scope.launch { router.sweepChatStates() }
-        scope.launch { loop.run(session) }
+        sessionLoopJob = scope.launch { loop.run(session, lifecycle) }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
@@ -324,26 +329,38 @@ class XmppSessionManager(
     }
 
     private suspend fun onAuthenticationStopped(
+        lifecycle: SessionLifecycleRef,
         disposition: SaslRetryDisposition,
     ) {
         lifecycleMutex.withLock {
+            if (sessionLifecycle != lifecycle) return@withLock
             loop.stopAdmissions()
             val credentialsInvalid = disposition == SaslRetryDisposition.STOP_CREDENTIAL
+            var shutdownComplete = false
             try {
-                messenger.fenceAndStop(activeSession.attemptRef)
+                messenger.beginShutdown(lifecycle)
+                requireStopped(
+                    lifecycle,
+                    messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)),
+                )
+                shutdownComplete = true
                 if (credentialsInvalid) {
                     sessionPrefs.clear()
                 }
             } finally {
-                if (credentialsInvalid) {
-                    _appState.value = WaddleAppState.SignedOut
-                    activeSession.ownBareJid = null
-                    clearSessionState()
+                sessionLoopJob = null
+                if (shutdownComplete) {
+                    if (credentialsInvalid) {
+                        _appState.value = WaddleAppState.SignedOut
+                        activeSession.ownBareJid = null
+                        clearSessionState()
+                    }
+                    // Do not join: this callback runs inside the session scope.
+                    val scope = sessionScope
+                    sessionScope = null
+                    sessionLifecycle = null
+                    scope?.cancel()
                 }
-                // Do not join: this callback runs inside the session scope.
-                val scope = sessionScope
-                sessionScope = null
-                scope?.cancel()
             }
         }
     }
@@ -364,9 +381,15 @@ class XmppSessionManager(
     private suspend fun cancelSessionScope() {
         val scope = sessionScope ?: return
         sessionScope = null
-        scope.coroutineContext.job.let { job ->
-            job.cancel()
-            job.join()
+        val stopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
+            scope.coroutineContext.job.let { job ->
+                job.cancel()
+                job.join()
+            }
+            true
+        } == true
+        check(stopped) {
+            "session scope did not quiesce within the shutdown bound"
         }
     }
 
@@ -376,15 +399,78 @@ class XmppSessionManager(
      * owner over an unfenced journal.
      */
     private suspend fun stopAndCancelCurrentSession() {
+        val lifecycle = sessionLifecycle
         var failure: Throwable? = null
         try {
-            messenger.fenceAndStop(activeSession.attemptRef)
+            if (lifecycle != null) {
+                if (recoverPendingTerminal(lifecycle)) return
+                messenger.beginShutdown(lifecycle)
+                val loopJob = sessionLoopJob
+                loopJob?.cancel()
+                val producerStopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
+                    loopJob?.join()
+                    true
+                } == true
+                if (!producerStopped) {
+                    throw LifecycleTransitionException(
+                        lifecycle,
+                        LifecyclePendingComponent.NATIVE_PRODUCER,
+                        1,
+                    )
+                }
+                sessionLoopJob = null
+                requireStopped(
+                    lifecycle,
+                    messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)),
+                )
+                sessionLifecycle = null
+            }
         } catch (caught: Throwable) {
             failure = caught
         } finally {
-            cancelSessionScope()
+            if (failure == null) cancelSessionScope()
         }
         failure?.let { throw it }
+    }
+
+    private fun requireStopped(
+        lifecycle: SessionLifecycleRef,
+        outcome: LifecycleShutdownOutcome,
+    ) {
+        when (outcome) {
+            LifecycleShutdownOutcome.Stopped -> pendingLifecycleShutdown = null
+            is LifecycleShutdownOutcome.FencedWithPending -> {
+                pendingLifecycleShutdown = outcome
+                throw LifecycleTransitionException(
+                    lifecycle,
+                    outcome.component,
+                    outcome.pending,
+                )
+            }
+            LifecycleShutdownOutcome.AttemptClosed,
+            LifecycleShutdownOutcome.Stale,
+            -> error("current owner shutdown lost lifecycle authority")
+        }
+    }
+
+    private suspend fun recoverPendingTerminal(
+        lifecycle: SessionLifecycleRef,
+    ): Boolean {
+        val pending = pendingLifecycleShutdown ?: return false
+        if (
+            pending.lifecycle != lifecycle ||
+            pending.component != LifecyclePendingComponent.TERMINAL_DRAIN
+        ) {
+            return false
+        }
+        cancelSessionScope()
+        check(messenger.recoverFencedTerminal(lifecycle)) {
+            "fenced terminal lifecycle is not safe to recover"
+        }
+        sessionLoopJob = null
+        sessionLifecycle = null
+        pendingLifecycleShutdown = null
+        return true
     }
 
     private fun clearSessionState() {
@@ -408,6 +494,7 @@ class XmppSessionManager(
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = ConnectionLoop.CONNECT_TIMEOUT_MILLIS
+        private const val SHUTDOWN_TIMEOUT_MILLIS = 5_000L
 
         /** Newest page per conversation on fresh-stream catch-up. */
         const val CATCHUP_PAGE_SIZE = SessionCatchup.CATCHUP_PAGE_SIZE

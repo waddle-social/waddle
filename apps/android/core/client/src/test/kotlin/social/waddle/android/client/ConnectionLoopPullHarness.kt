@@ -56,7 +56,6 @@ internal class ConnectionLoopPullHarness(
     val messenger = OutboundMessenger(
         activeSession = activeSession,
         stores = stores,
-        sessionPrefs = prefs,
         journal = queue,
         resume = resume,
         dispatchEvent = { event ->
@@ -67,18 +66,20 @@ internal class ConnectionLoopPullHarness(
     val loop = ConnectionLoop(
         attemptClientFactory = ConnectionAttemptClientFactory(factory, prefs),
         networkSignal = FakeNetworkSignal(),
-        activeSession = activeSession,
         resume = resume,
         router = router,
         messenger = messenger,
         configuration = ConnectionLoopConfiguration(
             onReady = { _, _, _, _ -> },
-            onAuthenticationStopped = { },
+            onAuthenticationStopped = { _, _ -> },
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
         ),
     )
 
     lateinit var loopJob: Job
+        private set
+
+    lateinit var lifecycle: SessionLifecycleRef
         private set
 
     private var terminalWorkerStopped = false
@@ -114,22 +115,48 @@ internal class ConnectionLoopPullHarness(
         prefs.activateSession(OWNER, session.sessionId)
         activeSession.ownBareJid = OWNER
         resume.start(ownerScope)
-        messenger.start(ownerScope, OWNER)
+        lifecycle = messenger.start(ownerScope, OWNER)
         loop.startAdmissions()
-        loopJob = ownerScope.launch { loop.run(session) }
+        loopJob = ownerScope.launch { loop.run(session, lifecycle) }
     }
 
-    suspend fun stopTerminalWorker(): DeliveryTerminalWorker.StopResult =
-        messenger.fenceAndStop(activeSession.attemptRef).also {
+    suspend fun stopTerminalWorker(): LifecycleShutdownOutcome {
+        messenger.beginShutdown(lifecycle)
+        loopJob.cancelAndJoin()
+        return messenger.shutdown(
+            LifecycleShutdownTarget.CurrentOwner(lifecycle),
+        ).also {
             terminalWorkerStopped = true
         }
+    }
+
+    suspend fun startReplacementLifecycle(): SessionLifecycleRef =
+        messenger.start(ownerScope, OWNER).also {
+            lifecycle = it
+            terminalWorkerStopped = false
+        }
+
+    suspend fun recoverFencedTerminal(
+        fencedLifecycle: SessionLifecycleRef,
+    ): Boolean = messenger.recoverFencedTerminal(fencedLifecycle)
+
+    suspend fun stopReplacementLifecycle(): LifecycleShutdownOutcome {
+        messenger.beginShutdown(lifecycle)
+        return messenger.shutdown(
+            LifecycleShutdownTarget.CurrentOwner(lifecycle),
+        ).also {
+            terminalWorkerStopped = true
+        }
+    }
 
     suspend fun shutdown() {
         dataStore.failAllUpdates = false
         dataStore.failNextUpdate = false
         loop.stopAdmissions()
         if (!terminalWorkerStopped) {
-            messenger.fenceAndStop(activeSession.attemptRef)
+            messenger.beginShutdown(lifecycle)
+            loopJob.cancelAndJoin()
+            messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
             terminalWorkerStopped = true
         }
         ownerJob.cancelAndJoin()

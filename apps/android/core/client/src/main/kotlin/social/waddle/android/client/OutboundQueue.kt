@@ -192,6 +192,15 @@ class OutboundQueue(
             )
         }
 
+    suspend fun activeAttempt(ownerBareJid: String): DeliveryAttemptRef? =
+        sessionPrefs.deliveryJournal.first().let { journal ->
+            if (journal.activeOwnerBareJid == ownerBareJid) {
+                journal.owners[ownerBareJid]?.activeAttempt
+            } else {
+                null
+            }
+        }
+
     /**
      * Exact durability barrier for one Rust-minted failed-resume handoff.
      *

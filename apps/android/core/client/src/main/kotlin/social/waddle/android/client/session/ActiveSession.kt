@@ -129,24 +129,20 @@ internal class ActiveSession {
         }
     }
 
-    /** Generation-fenced message send used by the durable outbound queue.
-     * The caller claims its row under [expectedGeneration] before invoking
-     * FFI; a replacement attempt therefore cannot inherit the old claim. */
-    suspend fun sendAtAttempt(
+    /**
+     * Capture the generation-specific client while holding the mirror lock,
+     * then release it before any FFI call. Lifecycle admission is owned by
+     * OutboundLifecycleCoordinator; this class never keeps its mutex across
+     * foreign code.
+     */
+    suspend fun clientAtAttempt(
         expectedAttempt: DeliveryAttemptRef,
-        op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
-    ): WaddleSendMessageOutcome = attemptMutex.withLock {
+    ): WaddleClientInterface? = attemptMutex.withLock {
         val liveClient = client
         if (liveClient == null || attemptRef != expectedAttempt) {
-            return@withLock WaddleSendMessageOutcome.NotConnected
+            return@withLock null
         }
-        try {
-            op(liveClient)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            WaddleSendMessageOutcome.TransportError
-        }
+        liveClient
     }
 
     /** Nullable fetch shape: `null` when no session is ready or the call threw. */

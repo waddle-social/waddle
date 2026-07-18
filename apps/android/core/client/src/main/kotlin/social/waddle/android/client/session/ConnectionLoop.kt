@@ -3,9 +3,9 @@ package social.waddle.android.client.session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
@@ -20,16 +20,21 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import social.waddle.android.client.AttemptActivation
 import social.waddle.android.client.ClientFactory
+import social.waddle.android.client.ConnectionAttemptHandle
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.OutboundMessenger
 import social.waddle.android.client.OutboundQueue
 import social.waddle.android.client.ReconnectPolicy
+import social.waddle.android.client.ResumeHandoffOutcome
 import social.waddle.android.client.SaslRetryDisposition
+import social.waddle.android.client.SessionLifecycleRef
 import social.waddle.android.client.SessionReadyKind
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppEventRouter
@@ -55,7 +60,10 @@ import social.waddle.client.ffi.WaddleSaslCondition
  */
 internal data class ConnectionLoopConfiguration(
     val onReady: SessionReadyListener,
-    val onAuthenticationStopped: suspend (SaslRetryDisposition) -> Unit,
+    val onAuthenticationStopped: suspend (
+        SessionLifecycleRef,
+        SaslRetryDisposition,
+    ) -> Unit,
     val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     val connectTimeoutMillis: Long = ConnectionLoop.CONNECT_TIMEOUT_MILLIS,
 )
@@ -89,7 +97,6 @@ internal class ConnectionAttemptClientFactory(
 internal class ConnectionLoop(
     private val attemptClientFactory: ConnectionAttemptClientFactory,
     private val networkSignal: NetworkSignal,
-    private val activeSession: ActiveSession,
     private val resume: ResumePersistence,
     private val router: XmppEventRouter,
     private val messenger: OutboundMessenger,
@@ -121,7 +128,10 @@ internal class ConnectionLoop(
         retryRequests.trySend(Unit)
     }
 
-    suspend fun run(session: WaddleSessionInfo) {
+    suspend fun run(
+        session: WaddleSessionInfo,
+        lifecycle: SessionLifecycleRef,
+    ) {
         var attempt = 0
         while (currentCoroutineContext().isActive && admissionsOpen) {
             waitUntilOnline()
@@ -130,7 +140,7 @@ internal class ConnectionLoop(
             // Reading the durable resource suffix can fail before the client
             // exists; treat that like any other connect failure.
             val end = try {
-                runAttempt(session)
+                runAttempt(session, lifecycle)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {
@@ -142,7 +152,7 @@ internal class ConnectionLoop(
                         condition = end.condition,
                         disposition = end.disposition,
                     )
-                    configuration.onAuthenticationStopped(end.disposition)
+                    configuration.onAuthenticationStopped(lifecycle, end.disposition)
                     return
                 }
                 AttemptEnd.DroppedAfterReady -> attempt = 0
@@ -170,17 +180,25 @@ internal class ConnectionLoop(
      * races the event consumer so a thrown connect failure aborts the
      * attempt immediately instead of waiting out the connect budget.
      */
-    private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
-        val ownerBareJid = social.waddle.android.client.bareJid(session.jid)
-        val resource = attemptClientFactory.resource()
-        val prepared = messenger.prepareAttempt(ownerBareJid)
-        val attempt = activeSession.beginAttempt(prepared.attempt)
-        val bridge = attempt.bridge
+    private suspend fun runAttempt(
+        session: WaddleSessionInfo,
+        lifecycle: SessionLifecycleRef,
+    ): AttemptEnd {
+        var activation: AttemptActivation? = null
         var client: WaddleClientInterface? = null
         var activeAttempt: ActiveAttempt? = null
         try {
-            val liveClient = attemptClientFactory.create(session, resource, prepared)
+            // The teardown guard precedes resource lookup and durable
+            // activation, both of which may suspend.
+            val resource = attemptClientFactory.resource()
+            val prepared = messenger.activateAttempt(lifecycle)
+            activation = prepared
+            val liveClient =
+                attemptClientFactory.create(session, resource, prepared.bootstrap)
             client = liveClient
+            if (!messenger.attachTransport(prepared.handle, liveClient)) {
+                return AttemptEnd.ConnectFailed
+            }
             val connected = withTimeoutOrNull(configuration.connectTimeoutMillis) {
                 try {
                     liveClient.connect()
@@ -197,30 +215,32 @@ internal class ConnectionLoop(
                     client = liveClient,
                     session = session,
                     scope = this,
-                    ownerBareJid = ownerBareJid,
-                    deliveryAttempt = prepared.attempt,
+                    lifecycle = lifecycle,
+                    handle = prepared.handle,
                 )
                 activeAttempt = attemptState
                 consumeEvents(
                     nativeClient = liveClient,
-                    localEvents = bridge.events,
+                    localEvents = prepared.bridge.events,
                     attempt = attemptState,
                 )
             }
         } finally {
-            val finalAttempt = activeAttempt?.deliveryAttempt
-                ?: activeSession.attemptRef
-                ?: prepared.attempt
             withContext(NonCancellable) {
-                activeSession.endAttempt(finalAttempt)
-                messenger.retireAttempt(finalAttempt)
-                // Once event consumption began, its ordered teardown already
-                // disconnected Rust to wake and join the pending pull.
-                if (activeAttempt == null) {
-                    runCatching { client?.disconnect() }
+                val prepared = activation
+                if (prepared != null) {
+                    val disconnected = if (activeAttempt == null) {
+                        messenger.disconnectTransport(prepared.handle)
+                    } else {
+                        activeAttempt.producerQuiesced
+                    }
+                    val closed = boundedClose(client)
+                    messenger.closeAttempt(
+                        prepared.handle,
+                        producerQuiesced = disconnected && closed,
+                    )
                 }
             }
-            (client as? AutoCloseable)?.close()
         }
     }
 
@@ -252,7 +272,9 @@ internal class ConnectionLoop(
                     )
                 is Readiness.Ready -> Unit
             }
-            activeSession.onReady(attempt.client, readiness.attempt)
+            if (!messenger.markReady(attempt.handle, attempt.client, readiness.attempt)) {
+                return@coroutineScope AttemptEnd.ConnectFailed
+            }
             _state.value = ConnectionState.Ready
             configuration.onReady(
                 attempt.scope,
@@ -266,9 +288,9 @@ internal class ConnectionLoop(
             // Fence sends first, then make Rust publish a new lifecycle epoch
             // so `next_event` wakes, and only then cancel/join the child.
             withContext(NonCancellable) {
-                activeSession.endAttempt(attempt.deliveryAttempt)
-                runCatching { nativeClient.disconnect() }
-                puller.cancelNativePoll()
+                val disconnected = messenger.disconnectTransport(attempt.handle)
+                val pullStopped = puller.cancelNativePoll()
+                attempt.producerQuiesced = disconnected && pullStopped
             }
         }
     }
@@ -325,8 +347,8 @@ internal class ConnectionLoop(
     ): NativeControl = when (event) {
         is WaddleClientEvent.ResumeFailed -> handleResumeFailure(event, activeAttempt)
         is WaddleClientEvent.ResumeStateChanged ->
-            handleResumeStateChange(event, activeAttempt.ownerBareJid)
-        else -> handleDomainEvent(event, activeAttempt.ownerBareJid)
+            handleResumeStateChange(event, activeAttempt)
+        else -> handleDomainEvent(event, activeAttempt)
     }
 
     private suspend fun handleResumeFailure(
@@ -337,31 +359,31 @@ internal class ConnectionLoop(
         val affectedSet = affected.toSet()
         if (affected.size != affectedSet.size) return NativeControl.Fenced
         val transition = try {
-            event.transition.toDomain(activeAttempt.ownerBareJid)
+            event.transition.toDomain(activeAttempt.lifecycle.ownerBareJid)
         } catch (_: IllegalArgumentException) {
             return NativeControl.Fenced
         }
         if (
-            transition.old != activeSession.attemptRef ||
-            !messenger.rotateAndAwait(transition, affectedSet)
+            !messenger.matches(activeAttempt.handle, transition.old) ||
+            messenger.rotateAndAwait(activeAttempt.handle, transition, affectedSet) !=
+            ResumeHandoffOutcome.Committed
         ) {
             return NativeControl.Fenced
         }
-        activeAttempt.deliveryAttempt = transition.fresh
         return NativeControl.Consumed
     }
 
     private suspend fun handleResumeStateChange(
         event: WaddleClientEvent.ResumeStateChanged,
-        ownerBareJid: String,
+        activeAttempt: ActiveAttempt,
     ): NativeControl {
         val attempt = try {
-            event.attempt.toDomain(ownerBareJid)
+            event.attempt.toDomain(activeAttempt.lifecycle.ownerBareJid)
         } catch (_: IllegalArgumentException) {
             return NativeControl.Fenced
         }
         if (
-            attempt != activeSession.attemptRef ||
+            !messenger.matches(activeAttempt.handle, attempt) ||
             !resume.persistResumeSnapshot(attempt, event.state)
         ) {
             return NativeControl.Fenced
@@ -371,15 +393,18 @@ internal class ConnectionLoop(
 
     private fun handleDomainEvent(
         event: WaddleClientEvent,
-        ownerBareJid: String,
+        activeAttempt: ActiveAttempt,
     ): NativeControl {
         val domain = try {
-            event.toXmppEvent(ownerBareJid)
+            event.toXmppEvent(activeAttempt.lifecycle.ownerBareJid)
         } catch (_: IllegalArgumentException) {
             return NativeControl.Fenced
         } ?: return NativeControl.Fenced
         val eventAttempt = domain.deliveryAttempt()
-        return if (eventAttempt != null && eventAttempt != activeSession.attemptRef) {
+        return if (
+            eventAttempt != null &&
+            !messenger.matches(activeAttempt.handle, eventAttempt)
+        ) {
             NativeControl.Fenced
         } else {
             NativeControl.Event(domain)
@@ -397,9 +422,12 @@ internal class ConnectionLoop(
         val client: WaddleClientInterface,
         val session: WaddleSessionInfo,
         val scope: CoroutineScope,
-        val ownerBareJid: String,
-        var deliveryAttempt: DeliveryAttemptRef,
-    )
+        val lifecycle: SessionLifecycleRef,
+        val handle: ConnectionAttemptHandle,
+    ) {
+        @Volatile
+        var producerQuiesced: Boolean = false
+    }
 
     private class OrderedEventPuller(
         private val scope: CoroutineScope,
@@ -423,8 +451,13 @@ internal class ConnectionLoop(
             }
         }
 
-        suspend fun cancelNativePoll() {
-            nativePoll?.cancelAndJoin()
+        suspend fun cancelNativePoll(): Boolean {
+            val poll = nativePoll ?: return true
+            poll.cancel()
+            return withTimeoutOrNull(TEARDOWN_TIMEOUT_MILLIS) {
+                poll.join()
+                true
+            } == true
         }
 
         private suspend fun nextOrdered(): OrderedPull {
@@ -520,9 +553,18 @@ internal class ConnectionLoop(
         data object Closed : Readiness
     }
 
+    private suspend fun boundedClose(client: WaddleClientInterface?): Boolean {
+        val closeable = client as? AutoCloseable ?: return true
+        return withTimeoutOrNull(TEARDOWN_TIMEOUT_MILLIS) {
+            runInterruptible(Dispatchers.IO) { closeable.close() }
+            true
+        } == true
+    }
+
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = 15_000L
+        private const val TEARDOWN_TIMEOUT_MILLIS = 5_000L
     }
 }
 

@@ -81,6 +81,12 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
     @Volatile
     var failAllUpdates: Boolean = false
 
+    /**
+     * Runs after the transformed value is committed. Tests use a deferred
+     * pair to observe durable commit and hold the writer without sleeps.
+     */
+    var afterCommitReturns: (suspend () -> Unit)? = null
+
     override val data: Flow<Preferences> = state
 
     override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
@@ -90,7 +96,10 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
                 failNextUpdate = false
                 error("injected preferences write failure")
             }
-            transform(state.value).also { state.value = it }
+            transform(state.value).also {
+                state.value = it
+                afterCommitReturns?.invoke()
+            }
         }
 }
 
@@ -224,6 +233,9 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var disconnectCalls = 0
 
+    /** Runs after disconnect is recorded but before the call returns. */
+    var beforeDisconnectReturns: (suspend () -> Unit)? = null
+
     /** Recorded (roomJid, nick) pairs; set [joinRoomFailure] to reject. */
     val joinRoomCalls = CopyOnWriteArrayList<Pair<String, String>>()
 
@@ -270,6 +282,7 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun disconnect() {
         disconnectCalls += 1
+        beforeDisconnectReturns?.invoke()
     }
 
     override suspend fun nextEvent(): WaddleClientEvent {
