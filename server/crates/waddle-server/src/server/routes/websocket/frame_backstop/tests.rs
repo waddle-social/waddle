@@ -236,6 +236,38 @@ async fn iq_result_timeout_yields_no_response() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stanza_timeout_exports_the_canonical_counter_end_to_end() {
+    // #1136: a synthetic wedge timeout driven through the production
+    // backstop must land on the canonical exported series, proving the
+    // increment site → OTel export chain (the reader seam stands in for
+    // the OTLP exporter; both read the same meter provider).
+    let guard = waddle_xmpp::telemetry::test_support::acquire().await;
+    let stanza = iq_get_stanza(
+        "disco-timeout-metric",
+        "alice@example.com/web",
+        "upload.example.com",
+    );
+    let backstop = StanzaBackstop::capture(&stanza, None);
+
+    let fut = run_with_backstop(backstop, pending::<Vec<String>>());
+    tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
+    let (_, disposition) = responses_and_disposition(fut.await);
+    assert_eq!(disposition, InboundDisposition::Handled);
+
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.stanza.handler.timeout",
+            &[
+                ("kind", "iq"),
+                ("payload_ns", "http://jabber.org/protocol/disco#info"),
+            ],
+        ),
+        Some(1),
+        "a synthetic wedge timeout must export exactly one canonical sample",
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn fast_dispatch_passes_through_untouched() {
     let stanza = iq_get_stanza("disco-2", "alice@example.com/web", "example.com");
     let backstop = StanzaBackstop::capture(&stanza, None);

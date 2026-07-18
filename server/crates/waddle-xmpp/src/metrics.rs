@@ -491,6 +491,61 @@ mod tests {
             Some(2),
         );
     }
+
+    #[tokio::test]
+    async fn stanza_handler_timeout_exports_canonical_counter_contract() {
+        let guard = test_support::acquire().await;
+        record_stanza_handler_timeout("iq", "urn:test:wedged");
+        record_stanza_handler_timeout("iq", "urn:test:wedged");
+        record_stanza_handler_timeout("message", "");
+
+        // #1136: pin the canonical exported series — the name, UCUM unit,
+        // and the two documented attribute axes — so the shape a
+        // Prometheus/Grafana query must target is fixed by test, not
+        // discovered by log archaeology after a wedge.
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.stanza.handler.timeout",
+                &[("kind", "iq"), ("payload_ns", "urn:test:wedged")],
+            ),
+            Some(2),
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.stanza.handler.timeout",
+                &[("kind", "message"), ("payload_ns", "")],
+            ),
+            Some(1),
+        );
+        assert_eq!(
+            guard.metric_unit("xmpp.stanza.handler.timeout").as_deref(),
+            Some("stanza"),
+        );
+
+        // The instrument must stay a monotonic u64 sum with exactly the two
+        // documented attributes per point — no extra axes may creep in.
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        for resource in guard.exported() {
+            for scope in resource.scope_metrics() {
+                for metric in scope.metrics() {
+                    if metric.name() != "xmpp.stanza.handler.timeout" {
+                        continue;
+                    }
+                    let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                        panic!("stanza-handler timeout must export as a u64 sum");
+                    };
+                    assert!(sum.is_monotonic(), "timeout counter must be monotonic");
+                    for point in sum.data_points() {
+                        assert_eq!(
+                            point.attributes().count(),
+                            2,
+                            "timeout attribute schema is exactly kind + payload_ns",
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Note: GitHub API cache hit/miss and error metrics are tracked via structured

@@ -14,7 +14,7 @@ use super::{CallbackId, CarbonKind, GroupchatThreadProjection, MessageRef, Timer
 /// Every effect the state machine can cause.
 ///
 /// The interpreter resolves these against real-world resources (sockets,
-/// `ConnectionRegistry`, `MucRoomRegistry`, `MamStorage`, `SfuServiceActor`,
+/// `ConnectionRegistry`, `RoomRegistryActor`, `MamStorage`, `SfuServiceActor`,
 /// etc.).
 ///
 /// Each variant is a **typed** expression of intent — no `format!()` XML,

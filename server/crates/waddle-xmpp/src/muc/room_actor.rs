@@ -13,7 +13,6 @@ use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
-use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
 
@@ -1410,6 +1409,17 @@ impl kameo::message::Message<GetOccupantByNick> for RoomActor {
             .get_occupant(&msg.nick)
             .map(OccupantInfo::from_occupant)
     }
+}
+
+/// Basic room information — the [`GetInfo`] reply.
+#[derive(Debug, Clone)]
+pub struct RoomInfo {
+    /// Room JID
+    pub room_jid: BareJid,
+    /// Number of occupants
+    pub occupant_count: usize,
+    /// Room name
+    pub name: String,
 }
 
 /// Get basic room information.
