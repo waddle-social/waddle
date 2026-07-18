@@ -190,6 +190,7 @@ impl ClusteringReadiness {
             .store(ready, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(any(test, feature = "clustering"))]
     pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
         self.fatal_fence.clone()
     }

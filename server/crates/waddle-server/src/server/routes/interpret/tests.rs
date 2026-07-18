@@ -4060,11 +4060,13 @@ impl SubjectMutationStore {
             .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(feature = "clustering")]
     fn set_fanout_owned(&self, owned: bool) {
         self.fanout_owned
             .store(owned, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(feature = "clustering")]
     fn block_fanout_checks(&self, count: usize) -> Arc<tokio::sync::Barrier> {
         let barrier = Arc::new(tokio::sync::Barrier::new(count + 1));
         *self
