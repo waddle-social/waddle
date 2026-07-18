@@ -117,6 +117,52 @@ spec:
               metrics = [otelcol.processor.batch.default.input]
             }
           }
+
+          // ---------- Prometheus scrape of LiveKit SFU /metrics ----------
+          // The livekit-sfu Service exposes LiveKit's native Prometheus
+          // listener on the `prometheus` port. Discover endpoints rather
+          // than the Service IP so each SFU pod keeps its own instance label.
+          discovery.kubernetes "livekit_sfu" {
+            role = "endpoints"
+            namespaces {
+              names = ["livekit"]
+            }
+          }
+
+          discovery.relabel "livekit_sfu" {
+            targets = discovery.kubernetes.livekit_sfu.targets
+            rule {
+              source_labels = ["__meta_kubernetes_service_name"]
+              action        = "keep"
+              regex         = "livekit-sfu"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_endpoint_port_name"]
+              action        = "keep"
+              regex         = "prometheus"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "instance"
+            }
+            rule {
+              target_label = "job"
+              replacement  = "livekit-sfu"
+            }
+          }
+
+          prometheus.scrape "livekit_sfu" {
+            targets         = discovery.relabel.livekit_sfu.output
+            forward_to      = [otelcol.receiver.prometheus.livekit_sfu.receiver]
+            metrics_path    = "/metrics"
+            scrape_interval = "30s"
+          }
+
+          otelcol.receiver.prometheus "livekit_sfu" {
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+            }
+          }
       # Inject Grafana Cloud creds from the ExternalSecret. The chart key
       # is `envFrom` (not `extraEnvFrom`); helm silently drops unknown
       # values, so the typo would leave the alloy container with no
@@ -137,7 +183,7 @@ spec:
           targetPort: 4318
           protocol: TCP
     # Alloy needs read access to Service / Endpoint objects across the
-    # cluster for the discovery.kubernetes target above. The chart's
+    # cluster for the discovery.kubernetes targets above. The chart's
     # default RBAC already grants this when `rbac.create=true`.
     rbac:
       create: true
