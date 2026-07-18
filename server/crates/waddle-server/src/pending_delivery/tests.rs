@@ -4,6 +4,7 @@ use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
 use waddle_xmpp::registry::UserRegistryActor;
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use xmpp_parsers::message::{Message, MessageType};
 
 fn bare(s: &str) -> BareJid {
@@ -2153,7 +2154,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
         }
         _ => panic!("expected Message"),
     };
-    let _ = sm_state.record_outbound_with_receipt_at(xml, t1);
+    let _ = sm_state.record_outbound_with_receipt_at(xml, t1, SmUnackedStanzaPurpose::Application);
 
     // Convert to detached session (simulates transport drop).
     let detached = sm_state

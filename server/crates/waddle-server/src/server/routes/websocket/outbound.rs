@@ -10,6 +10,7 @@ use super::{
     timers::TransportTimers,
     transport_xml::stanza_to_xml,
 };
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::SmRequest;
 
 pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
@@ -37,10 +38,14 @@ where
             let mut request_ack_after = false;
             if conn.sm_state.enabled && is_countable_stanza(&xml) {
                 let record_result = match pending_row_receipt_at {
-                    Some(receipt_at) => conn
+                    Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
+                        xml.clone(),
+                        receipt_at,
+                        SmUnackedStanzaPurpose::Application,
+                    ),
+                    None => conn
                         .sm_state
-                        .record_outbound_with_receipt_at(xml.clone(), receipt_at),
-                    None => conn.sm_state.record_outbound(xml.clone()),
+                        .record_outbound(xml.clone(), SmUnackedStanzaPurpose::Application),
                 };
                 request_ack_after = record_result.request_ack;
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound

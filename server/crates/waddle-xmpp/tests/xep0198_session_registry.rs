@@ -14,10 +14,48 @@ use waddle_xmpp::stream_management::persistence::{
     SmPersistenceStorage, SmUnackedStanzaPurpose,
 };
 use waddle_xmpp::stream_management::{
-    DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
+    DetachedSession, DetachedSessionSnapshot, InMemorySmSessionRegistry, SmClaimCompletion,
+    SmSessionRegistry, StreamManagementState,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
+
+#[test]
+fn live_recording_preserves_explicit_resume_barrier_purpose() {
+    let mut state = StreamManagementState::new();
+    state.enable("typed-purpose".to_string(), true, Some(300));
+    let barrier = xmpp_parsers::iq::Iq::Get {
+        from: None,
+        to: None,
+        id: "resume-barrier".to_string(),
+        payload: minidom::Element::builder("ping", waddle_xmpp::xep::xep0199::NS_PING).build(),
+    };
+    let barrier_xml =
+        waddle_xmpp::parser::stanza_to_string(barrier).expect("serialize typed resume-barrier IQ");
+
+    let _ = state.record_outbound(barrier_xml, SmUnackedStanzaPurpose::ResumeBarrier);
+
+    let detached = state
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: "alice".to_string(),
+            jid: "alice@example.com/phone".parse().expect("full jid"),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .expect("enabled resumable state detaches");
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(
+        detached.unacked_stanzas[0].purpose,
+        SmUnackedStanzaPurpose::ResumeBarrier
+    );
+}
 
 fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
     DetachedSession {

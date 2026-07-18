@@ -28,6 +28,8 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
+const APPLICATION_PURPOSE: SmUnackedStanzaPurpose = SmUnackedStanzaPurpose::Application;
+
 struct HangingEnsureClaimStore {
     inner: waddle_xmpp::ownership::InProcessClaimStore,
 }
@@ -1194,12 +1196,14 @@ async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
     // Two outbound stanzas recorded → send-count is 2.
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1260,12 +1264,14 @@ async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1306,12 +1312,14 @@ async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
 
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1423,12 +1431,14 @@ async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
     // Full valid ack first: last_acked == outbound_count == 2.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1476,12 +1486,14 @@ async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
     // Partial ack: last_acked = 1, one stanza still unacked.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='1'/>",
@@ -4633,12 +4645,14 @@ async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o1'/>".to_string());
-    let _ = conn
-        .sm_state
-        .record_outbound("<message xmlns='jabber:client' id='o2'/>".to_string());
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o1'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
+    let _ = conn.sm_state.record_outbound(
+        "<message xmlns='jabber:client' id='o2'/>".to_string(),
+        APPLICATION_PURPOSE,
+    );
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 

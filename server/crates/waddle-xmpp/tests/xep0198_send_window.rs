@@ -22,6 +22,7 @@
 //! and the `connection.rs` loop gate) are exercised by the `waddle-server`
 //! websocket test suites.
 
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::StreamManagementState;
 
 /// Drive one resumable stream through a burst of `total` countable
@@ -33,7 +34,10 @@ use waddle_xmpp::stream_management::StreamManagementState;
 fn drive_paced_burst(state: &mut StreamManagementState, total: u32) -> u32 {
     let mut client_h = 0;
     for n in 1..=total {
-        let _ = state.record_outbound(format!("<message id='{n}'/>"));
+        let _ = state.record_outbound(
+            format!("<message id='{n}'/>"),
+            SmUnackedStanzaPurpose::Application,
+        );
         // A compliant producer stops feeding the queue while paused and
         // waits for the client to ack the window down.
         while state.needs_send_pause() {
@@ -81,7 +85,10 @@ fn unpaced_burst_of_the_same_size_would_evict_and_poison_resume() {
     state.enable("unpaced".to_string(), true, Some(300));
 
     for n in 1..=500 {
-        let _ = state.record_outbound(format!("<message id='{n}'/>"));
+        let _ = state.record_outbound(
+            format!("<message id='{n}'/>"),
+            SmUnackedStanzaPurpose::Application,
+        );
         // No pause honoured, no acks — exactly the incident shape.
     }
 
@@ -105,7 +112,10 @@ fn partial_acks_keep_the_window_open_without_evicting() {
 
     let mut client_h = 0;
     for n in 1..=300 {
-        let _ = state.record_outbound(format!("<message id='{n}'/>"));
+        let _ = state.record_outbound(
+            format!("<message id='{n}'/>"),
+            SmUnackedStanzaPurpose::Application,
+        );
         if state.needs_send_pause() {
             // Ack just enough to drop outstanding to the low watermark.
             client_h = state.outbound_count - 10;
@@ -133,7 +143,10 @@ fn resume_after_paced_burst_replays_exactly_the_unacked_tail_in_order() {
     // Paced burst of 50, but stop acking after h=45 so 46..=50 stay unacked.
     let mut client_h = 0;
     for n in 1..=50 {
-        let _ = state.record_outbound(format!("<message id='{n}'/>"));
+        let _ = state.record_outbound(
+            format!("<message id='{n}'/>"),
+            SmUnackedStanzaPurpose::Application,
+        );
         while state.needs_send_pause() {
             client_h = state.outbound_count;
             state.acknowledge(client_h);
@@ -142,7 +155,10 @@ fn resume_after_paced_burst_replays_exactly_the_unacked_tail_in_order() {
     // Final window may be empty (all acked) — force a known unacked tail by
     // recording five more without acking.
     for n in 51..=55 {
-        let _ = state.record_outbound(format!("<message id='{n}'/>"));
+        let _ = state.record_outbound(
+            format!("<message id='{n}'/>"),
+            SmUnackedStanzaPurpose::Application,
+        );
     }
 
     let replay = state.get_stanzas_to_resend(client_h.max(50));
