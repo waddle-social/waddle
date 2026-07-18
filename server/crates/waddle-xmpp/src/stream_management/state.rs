@@ -207,6 +207,8 @@ impl StreamManagementState {
     /// Record an outbound stanza and add it to the unacked queue.
     ///
     /// This should be called after sending each stanza when SM is enabled.
+    /// The caller must provide the stanza's recovery purpose explicitly so
+    /// internal resume barriers cannot silently enter application delivery.
     /// The stanza is stored for potential resending after stream resumption.
     ///
     /// When the unacked queue is at capacity the oldest stanza is evicted
@@ -215,11 +217,16 @@ impl StreamManagementState {
     /// means a subsequent `<resume/>` from a client whose `h` is older
     /// than the retained window must fail instead of returning a
     /// misleading `<resumed/>` with missing stanzas.
-    pub fn record_outbound(&mut self, stanza_xml: String) -> RecordOutboundResult {
-        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now())
+    pub fn record_outbound(
+        &mut self,
+        stanza_xml: String,
+        purpose: super::persistence::SmUnackedStanzaPurpose,
+    ) -> RecordOutboundResult {
+        self.record_outbound_with_receipt_at(stanza_xml, chrono::Utc::now(), purpose)
     }
 
-    /// Record an outbound stanza with an explicit `original_receipt_at`.
+    /// Record an outbound stanza with an explicit `original_receipt_at` and
+    /// recovery purpose.
     ///
     /// Used by the `pending_delivery` flush path so the SM unacked
     /// queue preserves the row's original receipt time. Without this,
@@ -233,13 +240,14 @@ impl StreamManagementState {
         &mut self,
         stanza_xml: String,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
+        purpose: super::persistence::SmUnackedStanzaPurpose,
     ) -> RecordOutboundResult {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         match self.unacked_queue.push_with_receipt_at(
             self.outbound_count,
             stanza_xml,
             original_receipt_at,
-            super::persistence::SmUnackedStanzaPurpose::Application,
+            purpose,
         ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
@@ -499,7 +507,10 @@ impl StreamManagementState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::persistence::SmUnackedStanzaPurpose;
     use super::*;
+
+    const APPLICATION: SmUnackedStanzaPurpose = SmUnackedStanzaPurpose::Application;
 
     #[test]
     fn test_sm_state_counting() {
@@ -575,9 +586,9 @@ mod tests {
         let mut state = StreamManagementState::new();
         state.enable("test-id".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='2'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='3'/>".to_string(), APPLICATION);
 
         assert_eq!(state.outbound_count, 3);
         assert_eq!(state.queue_len(), 3);
@@ -613,13 +624,13 @@ mod tests {
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='2'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='3'/>".to_string(), APPLICATION);
         assert_eq!(state.queue_len(), 3);
 
         // 4th push evicts seq=1
-        let _ = state.record_outbound("<message id='4'/>".to_string());
+        let _ = state.record_outbound("<message id='4'/>".to_string(), APPLICATION);
         assert_eq!(state.queue_len(), 3);
 
         let after_render = prometheus::render_metrics();
@@ -652,10 +663,10 @@ mod tests {
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
 
-        let _ = state.record_outbound("<message id='1'/>".to_string());
-        let _ = state.record_outbound("<message id='2'/>".to_string());
-        let _ = state.record_outbound("<message id='3'/>".to_string());
-        let _ = state.record_outbound("<message id='4'/>".to_string());
+        let _ = state.record_outbound("<message id='1'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='2'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='3'/>".to_string(), APPLICATION);
+        let _ = state.record_outbound("<message id='4'/>".to_string(), APPLICATION);
 
         assert_eq!(state.replay_gap_through(), Some(1));
         assert!(
@@ -764,17 +775,41 @@ mod tests {
         state.enable("cadence".to_string(), true, Some(300));
 
         // Push 1, 2 — below threshold, no request yet.
-        assert!(!state.record_outbound("<m id='1'/>".to_string()).request_ack);
-        assert!(!state.record_outbound("<m id='2'/>".to_string()).request_ack);
+        assert!(
+            !state
+                .record_outbound("<m id='1'/>".to_string(), APPLICATION)
+                .request_ack
+        );
+        assert!(
+            !state
+                .record_outbound("<m id='2'/>".to_string(), APPLICATION)
+                .request_ack
+        );
         // Push 3 — threshold met, request fires.
-        assert!(state.record_outbound("<m id='3'/>".to_string()).request_ack);
+        assert!(
+            state
+                .record_outbound("<m id='3'/>".to_string(), APPLICATION)
+                .request_ack
+        );
         // Push 4, 5 — request_ack must NOT keep firing on every
         // subsequent stanza; that would spam the client with one
         // `<r/>` per stanza.
-        assert!(!state.record_outbound("<m id='4'/>".to_string()).request_ack);
-        assert!(!state.record_outbound("<m id='5'/>".to_string()).request_ack);
+        assert!(
+            !state
+                .record_outbound("<m id='4'/>".to_string(), APPLICATION)
+                .request_ack
+        );
+        assert!(
+            !state
+                .record_outbound("<m id='5'/>".to_string(), APPLICATION)
+                .request_ack
+        );
         // Push 6 — three more since the last request, next request fires.
-        assert!(state.record_outbound("<m id='6'/>".to_string()).request_ack);
+        assert!(
+            state
+                .record_outbound("<m id='6'/>".to_string(), APPLICATION)
+                .request_ack
+        );
     }
 
     #[test]
@@ -786,7 +821,7 @@ mod tests {
         let mut state = StreamManagementState::with_config(1000, 1);
         // NOTE: `enable` deliberately NOT called.
 
-        let result = state.record_outbound("<m id='1'/>".to_string());
+        let result = state.record_outbound("<m id='1'/>".to_string(), APPLICATION);
         assert!(!result.request_ack);
     }
 
@@ -824,18 +859,18 @@ mod tests {
         // Push 1, 2 — below the post-resume threshold.
         assert!(
             !state
-                .record_outbound("<m id='post-1'/>".to_string())
+                .record_outbound("<m id='post-1'/>".to_string(), APPLICATION)
                 .request_ack
         );
         assert!(
             !state
-                .record_outbound("<m id='post-2'/>".to_string())
+                .record_outbound("<m id='post-2'/>".to_string(), APPLICATION)
                 .request_ack
         );
         // Push 3 — threshold met against the *post-resume* baseline.
         assert!(
             state
-                .record_outbound("<m id='post-3'/>".to_string())
+                .record_outbound("<m id='post-3'/>".to_string(), APPLICATION)
                 .request_ack
         );
     }
@@ -852,14 +887,14 @@ mod tests {
         state.enable("sw".to_string(), true, Some(300));
 
         for n in 0..7 {
-            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            let _ = state.record_outbound(format!("<m id='{n}'/>"), APPLICATION);
             assert!(
                 !state.needs_send_pause(),
                 "below the high watermark the window is open (n={n})"
             );
         }
         // 8th outbound: outstanding == 8 == high watermark → pause.
-        let _ = state.record_outbound("<m id='7'/>".to_string());
+        let _ = state.record_outbound("<m id='7'/>".to_string(), APPLICATION);
         assert!(state.needs_send_pause(), "high watermark engages the pause");
         assert!(!state.send_window_recovered());
 
@@ -889,7 +924,7 @@ mod tests {
         // enable WITHOUT resume.
         state.enable("no-resume".to_string(), false, None);
         for n in 0..30 {
-            let _ = state.record_outbound(format!("<m id='{n}'/>"));
+            let _ = state.record_outbound(format!("<m id='{n}'/>"), APPLICATION);
             assert!(
                 !state.needs_send_pause(),
                 "a non-resumable stream is never send-window paced (n={n})"

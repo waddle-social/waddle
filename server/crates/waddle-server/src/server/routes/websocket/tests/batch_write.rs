@@ -15,6 +15,7 @@ use futures::{stream, Sink, Stream, StreamExt as _};
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::{SmAck, SmRequest, StreamManagementState};
 
 use axum::extract::ws::Message;
@@ -761,7 +762,9 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
     conn.sm_state = StreamManagementState::with_config(10, 100);
     conn.sm_state.enable("resumed".to_string(), true, Some(300));
     for i in 0..9 {
-        let _ = conn.sm_state.record_outbound(countable_message(i));
+        let _ = conn
+            .sm_state
+            .record_outbound(countable_message(i), SmUnackedStanzaPurpose::Application);
     }
     assert!(
         conn.sm_state.needs_send_pause(),

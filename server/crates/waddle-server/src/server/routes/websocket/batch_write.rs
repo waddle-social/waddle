@@ -17,6 +17,7 @@ use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack, is_countable_stanza};
 use super::*;
 use futures::FutureExt as _;
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::SmRequest;
 
 /// How the writer records countable frames into XEP-0198 bookkeeping.
@@ -153,7 +154,9 @@ where
     }
     while let Some(frame) = frames.next() {
         let request_ack = if should_record(conn, &frame, policy) {
-            conn.sm_state.record_outbound(frame.clone()).request_ack
+            conn.sm_state
+                .record_outbound(frame.clone(), SmUnackedStanzaPurpose::Application)
+                .request_ack
         } else {
             false
         };
@@ -378,7 +381,9 @@ pub(super) fn record_remaining_for_replay(
 ) {
     for frame in frames {
         if should_record(conn, &frame, policy) {
-            let _ = conn.sm_state.record_outbound(frame);
+            let _ = conn
+                .sm_state
+                .record_outbound(frame, SmUnackedStanzaPurpose::Application);
         }
     }
 }

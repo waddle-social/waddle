@@ -15,6 +15,7 @@ use jid::Jid;
 use minidom::Element;
 use std::str::FromStr;
 use waddle_xmpp::parser::{element_to_string, message_to_string};
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::{stamp_replay_delay, StreamManagementState};
 use waddle_xmpp::xep::xep0203::{build_delay_element, DelayInfo};
 use waddle_xmpp::xep::NS_DELAY;
@@ -146,7 +147,11 @@ fn first_send_is_recorded_unstamped_and_gains_delay_only_at_replay() {
     state.enable("stream-first-send".to_string(), true, Some(300));
 
     let wire = chat_message_xml("live-1", "live", Vec::new());
-    let _ = state.record_outbound_with_receipt_at(wire.clone(), fixed_receipt());
+    let _ = state.record_outbound_with_receipt_at(
+        wire.clone(),
+        fixed_receipt(),
+        SmUnackedStanzaPurpose::Application,
+    );
 
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 1);
@@ -177,8 +182,16 @@ fn resend_set_carries_each_stanzas_original_receipt_time() {
     let second_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 5, 0).unwrap();
     let first_xml = chat_message_xml("a", "first", Vec::new());
     let second_xml = chat_message_xml("b", "second", Vec::new());
-    let _ = state.record_outbound_with_receipt_at(first_xml.clone(), first_receipt);
-    let _ = state.record_outbound_with_receipt_at(second_xml.clone(), second_receipt);
+    let _ = state.record_outbound_with_receipt_at(
+        first_xml.clone(),
+        first_receipt,
+        SmUnackedStanzaPurpose::Application,
+    );
+    let _ = state.record_outbound_with_receipt_at(
+        second_xml.clone(),
+        second_receipt,
+        SmUnackedStanzaPurpose::Application,
+    );
 
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
