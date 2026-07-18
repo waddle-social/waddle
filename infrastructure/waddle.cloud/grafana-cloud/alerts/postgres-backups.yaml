@@ -1,0 +1,76 @@
+# CNPG Postgres backup-failure alerts (issue #1159 follow-up).
+#
+# This is a Prometheus/Mimir alerting rule group, the "as code" source of
+# truth for the Grafana Cloud alert rules that watch the CloudNativePG
+# backup-health metrics. It is intentionally OUTSIDE gitops/ (Flux) because
+# this cluster has no in-cluster ruler and no prometheus-operator CRDs — the
+# rules evaluate in Grafana Cloud, where the metrics land via the Alloy
+# scrape added in gitops/grafana-alloy/helmrelease.yaml (job="cnpg").
+#
+# Apply (HITL, needs a Grafana Cloud ruler token — see the runbook):
+#   mimirtool rules load --address="$GRAFANA_CLOUD_PROM_URL" \
+#     --id="$GRAFANA_CLOUD_TENANT" infrastructure/waddle.cloud/grafana-cloud/alerts/postgres-backups.yaml
+# or provision the equivalent Grafana-managed rules from this file.
+#
+# Metric-name caveat: confirm the exact CNPG metric names against the
+# deployed operator version before loading —
+#   kubectl -n waddle exec postgresql-1 -- \
+#     curl -s localhost:9187/metrics | grep -E 'backup|archiver'
+# Names below match CloudNativePG 1.25 (chart 0.23.x).
+groups:
+  - name: cnpg-postgres-backups
+    rules:
+      # No successful base backup within ~26h. ScheduledBackups run daily
+      # (02:00 / 02:30 UTC), so >26h stale means at least one run failed or
+      # WAL/base upload to R2 is broken.
+      - alert: CNPGBackupStale
+        expr: |
+          time() - max by (cnpg_cluster) (cnpg_collector_last_available_backup_timestamp) > 26 * 3600
+        for: 15m
+        labels:
+          severity: critical
+          service: postgres
+          component: backup
+        annotations:
+          summary: "CNPG cluster {{ $labels.cnpg_cluster }} has no recent base backup"
+          description: >-
+            No successful CloudNativePG base backup for {{ $labels.cnpg_cluster }}
+            in over 26h. Daily ScheduledBackup to R2 is failing; recoverability
+            window is degrading. See docs/runbooks/postgres-backup-restore.md.
+
+      # Continuous WAL archiving to R2 is failing. Un-archived WAL is retained
+      # on the primary and will eventually fill walStorage and PANIC it, so
+      # this is urgent even while base backups still look recent.
+      - alert: CNPGWALArchiveFailing
+        expr: |
+          increase(cnpg_pg_stat_archiver_failed_count[30m]) > 0
+        for: 15m
+        labels:
+          severity: critical
+          service: postgres
+          component: backup
+        annotations:
+          summary: "CNPG cluster {{ $labels.cnpg_cluster }} is failing to archive WAL to R2"
+          description: >-
+            pg_stat_archiver.failed_count is increasing for {{ $labels.cnpg_cluster }}.
+            WAL is not reaching R2; un-archived WAL accumulates on the primary and
+            will eventually fill walStorage and crash it. Check the barmanObjectStore
+            credentials/bucket. See docs/runbooks/postgres-backup-restore.md.
+
+      # Silence-is-not-success: if the Alloy scrape or the metric pipeline
+      # breaks, the two alerts above have no data to fire on. Alert when the
+      # backup-health series disappears entirely.
+      - alert: CNPGBackupMetricsMissing
+        expr: |
+          absent(cnpg_collector_last_available_backup_timestamp)
+        for: 1h
+        labels:
+          severity: warning
+          service: postgres
+          component: backup
+        annotations:
+          summary: "CNPG backup metrics are missing from Grafana Cloud"
+          description: >-
+            No cnpg_collector_last_available_backup_timestamp samples for over 1h.
+            The Alloy CNPG scrape (job="cnpg") or the OTLP pipeline is broken, so
+            backup-failure alerts cannot fire — investigate the observability path.

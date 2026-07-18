@@ -117,6 +117,66 @@ spec:
               metrics = [otelcol.processor.batch.default.input]
             }
           }
+
+          // ---------- Prometheus scrape of CloudNativePG /metrics ----------
+          // Each CNPG instance pod exposes the built-in metrics exporter on
+          // container port 9187 (no PodMonitor needed — the prometheus
+          // operator CRDs are not installed in this cluster). We scrape it so
+          // the backup-health series
+          // (cnpg_collector_last_available_backup_timestamp,
+          // cnpg_collector_pg_wal_archive_status, ...) reach Grafana Cloud,
+          // where the backup-failure alert rule evaluates (issue #1159 —
+          // see docs/runbooks/postgres-backup-restore.md and
+          // grafana-cloud/alerts/postgres-backups.yaml).
+          discovery.kubernetes "cnpg" {
+            role = "pod"
+            namespaces {
+              names = ["waddle"]
+            }
+          }
+
+          discovery.relabel "cnpg" {
+            targets = discovery.kubernetes.cnpg.targets
+            // Both clusters (postgresql, postgresql-spicedb) carry the
+            // cnpg.io/cluster label; keep only their metrics container port.
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_cnpg_io_cluster"]
+              action        = "keep"
+              regex         = ".+"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_container_port_number"]
+              action        = "keep"
+              regex         = "9187"
+            }
+            // Preserve which cluster/instance each sample came from so the
+            // alert rule can page per cluster.
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_cnpg_io_cluster"]
+              target_label  = "cnpg_cluster"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "instance"
+            }
+            rule {
+              target_label = "job"
+              replacement  = "cnpg"
+            }
+          }
+
+          prometheus.scrape "cnpg" {
+            targets         = discovery.relabel.cnpg.output
+            forward_to      = [otelcol.receiver.prometheus.cnpg.receiver]
+            metrics_path    = "/metrics"
+            scrape_interval = "30s"
+          }
+
+          otelcol.receiver.prometheus "cnpg" {
+            output {
+              metrics = [otelcol.processor.batch.default.input]
+            }
+          }
       # Inject Grafana Cloud creds from the ExternalSecret. The chart key
       # is `envFrom` (not `extraEnvFrom`); helm silently drops unknown
       # values, so the typo would leave the alloy container with no
