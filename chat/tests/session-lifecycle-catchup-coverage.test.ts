@@ -16,7 +16,7 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { SessionLifecycleEvent } from "../src/lib/xmpp/types";
 import type { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 const createdClients = new Set<BrowserXmppClient>();
 

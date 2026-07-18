@@ -33,7 +33,7 @@ import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting } from "../src/lib/telemetry";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {

@@ -7,7 +7,7 @@ import {
 import { useDmReadMarkers } from "../src/dms/read-markers";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 

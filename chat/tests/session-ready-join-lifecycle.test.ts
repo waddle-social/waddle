@@ -22,7 +22,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { SessionLifecycleEvent } from "../src/lib/xmpp/types";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { noopWasmClientCallbacks } from "./helpers/wasm-client-callbacks";
 
 function session(): WaddleSession {

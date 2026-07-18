@@ -28,7 +28,7 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, type LiveDmMessage } from "../src/lib/xmpp-client";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 type ResumeBarrier = {
   xmpp: unknown;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, RoomMemberListUnavailableError } from "../src/lib/xmpp-client";
 import type { XmppErrorEvent } from "../src/lib/xmpp-client";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 type TestXmpp = {
   list_room_members?: (

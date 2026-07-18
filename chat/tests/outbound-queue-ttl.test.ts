@@ -13,7 +13,7 @@ import {
   committedOrThrow,
   createOutboundClaim,
 } from "../src/lib/xmpp-runtime/durable-contract";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 const ACCOUNT = "alice@example.com";
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");

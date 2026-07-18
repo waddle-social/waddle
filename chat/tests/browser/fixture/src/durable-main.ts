@@ -1,6 +1,6 @@
 import type { PersistedQueuedDmMessage } from "@/lib/outbound-queue-store";
 import { committedOrThrow } from "@/lib/xmpp-runtime/durable-contract";
-import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime/indexeddb-durable-store";
 
 function directMessage(id: string): PersistedQueuedDmMessage {
   return {

@@ -14,7 +14,7 @@ import {
   type OutboundOwnerContext,
   type OutboundTerminalIntent,
 } from "../src/lib/xmpp-runtime/durable-contract";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { WasmClientCallbackDouble } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {

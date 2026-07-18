@@ -6,7 +6,7 @@ import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient as BrowserXmppClientBase, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { committedOrThrow } from "../src/lib/xmpp-runtime/durable-contract";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
 import {

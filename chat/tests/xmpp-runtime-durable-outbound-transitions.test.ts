@@ -1,14 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import {
-  type DurableOutcome,
   type OutboundClaimRequest,
   type OutboundOwnerContext,
 } from "../src/lib/xmpp-runtime/durable-contract";
-import type {
-  AccountMutation,
-  RuntimeAccount,
-} from "../src/lib/xmpp-runtime/durable-model";
+import type { RuntimeAccount } from "../src/lib/xmpp-runtime/durable-model";
 import { emptyAccount } from "../src/lib/xmpp-runtime/durable-model";
 import {
   applyTerminalTransition,
@@ -29,8 +25,6 @@ import {
   claimOwnerTransition,
   preparePagehideHandoffTransition,
 } from "../src/lib/xmpp-runtime/durable-owner-sm-transitions";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
-import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 
 const ACCOUNT = "outbound-transitions@example.com";
 const NOW = 1_000;
@@ -511,65 +505,4 @@ describe("durable outbound transitions", () => {
     expect(scan.finalize?.(12).revision).toBe(12);
   });
 
-  test("store wrappers finish UUID, digest, clone, and decode preparation before transact", async () => {
-    const store = new MemoryDurableOutboundStore({ now: () => NOW });
-    const account = emptyAccount(ACCOUNT);
-    let transactCalls = 0;
-    type Transact = <T>(
-      accountKey: string,
-      mutate: (
-        account: RuntimeAccount,
-        authorityNow: number,
-      ) => AccountMutation<T>,
-    ) => Promise<DurableOutcome<T>>;
-    const mutableStore = store as unknown as { transact: Transact };
-    mutableStore.transact = async <T>(
-      accountKey: string,
-      mutate: (
-        account: RuntimeAccount,
-        authorityNow: number,
-      ) => AccountMutation<T>,
-    ): Promise<DurableOutcome<T>> => {
-      transactCalls += 1;
-      expect(accountKey).toBe(ACCOUNT);
-      const mutation = mutate(account, NOW);
-      return {
-        kind: "committed",
-        value: mutation.finalize?.(1) ?? mutation.value,
-      };
-    };
-
-    const source = directMessage("prepared");
-    const persisted = await store.persistReady(ACCOUNT, source);
-    expect(persisted.kind).toBe("committed");
-    expect(transactCalls).toBe(1);
-    expect(account.outbound.prepared?.identity.incarnation).toMatch(
-      /^[0-9a-f-]{36}$/,
-    );
-    expect(account.outbound.prepared?.identity.payloadDigest).toMatch(
-      /^[0-9a-f]{64}$/,
-    );
-    expect(account.outbound.prepared?.message).not.toBe(source);
-
-    const invalidState = {
-      previd: "resume",
-      inboundH: 0,
-      outboundH: -1,
-      unhandledOutboundEntries: [],
-    } as unknown as PersistedSmResumeState;
-    const failedSave = await store.saveSm(
-      {
-        accountKey: ACCOUNT,
-        ownerId: "owner",
-        ownerInstanceId: "instance",
-        ownerGeneration: 1,
-        authorityEpoch: 0,
-      },
-      null,
-      invalidState,
-      NOW,
-    );
-    expect(failedSave.kind).toBe("failed");
-    expect(transactCalls).toBe(1);
-  });
 });

@@ -25,7 +25,7 @@ import {
   type OutboundOwnerContext,
   type OutboundOwnerHint,
 } from "../src/lib/xmpp-runtime/durable-contract";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import type {
   ResumePersistence,
   XmppResumeEntry,

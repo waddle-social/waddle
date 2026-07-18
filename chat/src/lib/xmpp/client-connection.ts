@@ -35,7 +35,7 @@ import {
   type OutboundTerminalIntent,
   outboundLane,
 } from "../xmpp-runtime/durable-contract";
-import { IndexedDbDurableOutboundStore } from "../xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "../xmpp-runtime/indexeddb-durable-store";
 import { barePeerJid } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import type {

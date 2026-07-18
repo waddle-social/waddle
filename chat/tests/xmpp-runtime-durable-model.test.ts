@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import {
+  applyAuthorityClockSample,
   checkedDurableCounterIncrement,
   checkedDurableDeadline,
   emptyAccount,
@@ -69,5 +70,46 @@ describe("durable runtime model invariants", () => {
       ...identity,
       payloadDigest: "digest-2",
     })).toBe(false);
+  });
+
+  test("authority clock samples are monotonic and fence material rollback once", () => {
+    const account = emptyAccount("clock@example.com");
+    account.lastAuthorityTimeMs = 20_000;
+    account.lastWallClockSampleMs = 20_000;
+
+    expect(applyAuthorityClockSample(account, 19_500)).toEqual({
+      authorityNow: 20_000,
+      metadataChanged: true,
+      authorityEpochChanged: false,
+    });
+    expect(account.authorityEpoch).toBe(0);
+
+    expect(applyAuthorityClockSample(account, 10_000)).toEqual({
+      authorityNow: 20_000,
+      metadataChanged: true,
+      authorityEpochChanged: true,
+    });
+    expect(account.authorityEpoch).toBe(1);
+
+    expect(applyAuthorityClockSample(account, 10_000)).toEqual({
+      authorityNow: 20_000,
+      metadataChanged: false,
+      authorityEpochChanged: false,
+    });
+    expect(account.authorityEpoch).toBe(1);
+  });
+
+  test("authority clock validation fails without mutating metadata", () => {
+    const account = emptyAccount("invalid-clock@example.com");
+    account.lastAuthorityTimeMs = 5_000;
+    account.lastWallClockSampleMs = 5_000;
+    const baseline = structuredClone(account);
+
+    for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+      expect(() => applyAuthorityClockSample(account, invalid)).toThrow(
+        "Durable authority clock is invalid",
+      );
+      expect(account).toEqual(baseline);
+    }
   });
 });

@@ -3,7 +3,7 @@ import {
   websocketUrlWithTraceparent,
   withSpan,
 } from "@/lib/telemetry";
-import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime/indexeddb-durable-store";
 import {
   OutboundPersistenceError,
   type DurableOutboundStore,

@@ -22,7 +22,7 @@ import {
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 import type { WasmControlErrorPayload as StreamErrorPayload } from "../src/lib/xmpp/wasm-types";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import {
   noopWasmClientCallbacks,
   type WasmClientCallbacks,

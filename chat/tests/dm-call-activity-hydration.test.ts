@@ -13,7 +13,7 @@ import type {
   ResumePersistence,
 } from "../src/lib/xmpp/resume-persistence";
 import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
-import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 function session(): WaddleSession {
   return {

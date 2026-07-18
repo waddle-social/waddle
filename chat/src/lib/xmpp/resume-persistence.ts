@@ -35,7 +35,7 @@ import type {
   OutboundOwnerHint,
   PagehideHandoffResult,
 } from "@/lib/xmpp-runtime/durable-contract";
-import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime/indexeddb-durable-store";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";

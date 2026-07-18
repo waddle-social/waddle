@@ -1,10 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { IDBFactory } from "fake-indexeddb";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
-import {
-  IndexedDbDurableOutboundStore,
-  MemoryDurableOutboundStore,
-} from "../src/lib/xmpp-runtime-durable-store";
+import { IndexedDbDurableOutboundStore } from "../src/lib/xmpp-runtime/indexeddb-durable-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import {
   committedOrThrow,
   createOutboundClaim,
@@ -261,7 +259,7 @@ async function countRawAccounts(database: IDBDatabase): Promise<number> {
   return count;
 }
 
-describe("IndexedDB durable runtime transaction boundaries", () => {
+describe("IndexedDB durable repository transaction boundaries", () => {
   test("serializes two store instances racing to persist the same row", async () => {
     const indexedDb = new IDBFactory();
     const databaseName = `race-${crypto.randomUUID()}`;

@@ -31,7 +31,7 @@ import {
 import {
   MemoryDurableOutboundStore,
   MemoryDurableOutboundStore as MemoryDurableSmResumeStore,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/memory-durable-store";
 import {
   createLocalStorageResumePersistence as createBrowserLocalStorageResumePersistence,
   nullResumePersistence,

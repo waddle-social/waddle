@@ -20,7 +20,7 @@ import {
 
 const DEFAULT_SM_RESUME_WINDOW_MS = 300_000;
 export const OUTBOUND_OWNER_RETENTION_MS = 8 * 24 * 60 * 60 * 1_000;
-export const AUTHORITY_CLOCK_ROLLBACK_TOLERANCE_MS = 1_000;
+const AUTHORITY_CLOCK_ROLLBACK_TOLERANCE_MS = 1_000;
 
 export function checkedDurableCounterIncrement(
   value: number,
@@ -110,6 +110,38 @@ export type AccountMutation<T> = {
   value: T;
   finalize?: (committedRevision: number) => T;
 };
+
+export type DurableAuthoritySample = {
+  authorityNow: number;
+  metadataChanged: boolean;
+  authorityEpochChanged: boolean;
+};
+
+export function applyAuthorityClockSample(
+  account: RuntimeAccount,
+  wallClockNow: number,
+): DurableAuthoritySample {
+  if (!Number.isSafeInteger(wallClockNow) || wallClockNow < 0) {
+    throw new DOMException("Durable authority clock is invalid", "AbortError");
+  }
+  const previousWallClock = account.lastWallClockSampleMs;
+  const rolledBack = previousWallClock > 0
+    && previousWallClock > AUTHORITY_CLOCK_ROLLBACK_TOLERANCE_MS
+    && wallClockNow
+      < previousWallClock - AUTHORITY_CLOCK_ROLLBACK_TOLERANCE_MS;
+  if (rolledBack) {
+    account.authorityEpoch = checkedDurableCounterIncrement(
+      account.authorityEpoch,
+      "Durable authority epoch",
+    );
+  }
+  account.lastWallClockSampleMs = wallClockNow;
+  return {
+    authorityNow: Math.max(wallClockNow, account.lastAuthorityTimeMs),
+    metadataChanged: rolledBack || wallClockNow !== previousWallClock,
+    authorityEpochChanged: rolledBack,
+  };
+}
 
 export function dictionary<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
