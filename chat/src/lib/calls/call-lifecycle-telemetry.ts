@@ -45,8 +45,22 @@ const QUALITY_SEVERITY: Record<CallConnectionQuality, number> = {
 };
 
 const attempts = new Map<string, Attempt>();
+// Insertion-ordered dedupe window: exactly-once per sid holds for the
+// most recent MAX_EMITTED_SIDS call attempts. Bounded so a hostile
+// stream of inbound proposals cannot grow memory for the tab's
+// lifetime; a sid old enough to be evicted re-emitting is acceptable.
+const MAX_EMITTED_SIDS = 4096;
 const emittedSids = new Set<string>();
 let currentSid: string | null = null;
+
+function markEmitted(sid: string): void {
+  emittedSids.add(sid);
+  if (emittedSids.size <= MAX_EMITTED_SIDS) return;
+  for (const oldest of emittedSids) {
+    emittedSids.delete(oldest);
+    if (emittedSids.size <= MAX_EMITTED_SIDS) break;
+  }
+}
 
 export function durationBucket(durationMs: number): CallDurationBucket {
   if (durationMs <= 0) return "none";
@@ -171,7 +185,7 @@ export function finishCallAttempt(
     connectionQuality: attempt.worstConnectionQuality,
     reconnectCount: reconnectCountBucket(attempt.reconnectCount),
   };
-  emittedSids.add(sid);
+  markEmitted(sid);
   attempts.delete(sid);
   if (currentSid === sid) currentSid = null;
   reportCallLifecycle(payload);
@@ -181,7 +195,7 @@ export function finishCallAttempt(
 /** Emit a declined inbound proposal that never occupied the single call slot. */
 export function reportDeclinedCallAttempt(sid: string, callKind: CallKind = "dm"): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
-  emittedSids.add(sid);
+  markEmitted(sid);
   reportCallLifecycle({
     setupOutcome: "declined",
     endReason: "hangup",
@@ -197,7 +211,7 @@ export function reportDeclinedCallAttempt(sid: string, callKind: CallKind = "dm"
 /** Emit a failed setup that ended before it could occupy the call store. */
 export function reportFailedCallAttempt(sid: string, callKind: CallKind): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
-  emittedSids.add(sid);
+  markEmitted(sid);
   reportCallLifecycle({
     setupOutcome: "failed",
     endReason: "error",
