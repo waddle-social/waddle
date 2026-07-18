@@ -11,10 +11,10 @@ import {
 } from "../src/lib/outbound-queue-store";
 import {
   committedOrThrow,
-  MemoryDurableOutboundStore,
   type OutboundOwnerContext,
   type OutboundTerminalIntent,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/durable-contract";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import { WasmClientCallbackDouble } from "./helpers/wasm-client-callbacks";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {

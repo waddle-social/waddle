@@ -3,11 +3,11 @@ import {
   websocketUrlWithTraceparent,
   withSpan,
 } from "@/lib/telemetry";
+import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
 import {
-  IndexedDbDurableOutboundStore,
   OutboundPersistenceError,
   type DurableOutboundStore,
-} from "@/lib/xmpp-runtime-durable-store";
+} from "@/lib/xmpp-runtime/durable-contract";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";

@@ -4,10 +4,12 @@ import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import {
   IndexedDbDurableOutboundStore,
   MemoryDurableOutboundStore,
+} from "../src/lib/xmpp-runtime-durable-store";
+import {
   committedOrThrow,
   createOutboundClaim,
   type DurableOutboundStore,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/durable-contract";
 import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 
 const ACCOUNT = "contract@example.com";

@@ -34,7 +34,7 @@ import type {
   OutboundOwnerContext,
   OutboundOwnerHint,
   PagehideHandoffResult,
-} from "@/lib/xmpp-runtime-durable-store";
+} from "@/lib/xmpp-runtime/durable-contract";
 import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime-durable-store";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";

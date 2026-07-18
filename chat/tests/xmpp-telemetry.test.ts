@@ -33,10 +33,8 @@ import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
-import {
-  committedOrThrow,
-  MemoryDurableOutboundStore,
-} from "../src/lib/xmpp-runtime-durable-store";
+import { committedOrThrow } from "../src/lib/xmpp-runtime/durable-contract";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import {
   WASM_AUTHENTICATION_CONDITIONS,
   WASM_DRIVER_ERROR_REASONS,

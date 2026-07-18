@@ -10,10 +10,10 @@ import { describe, expect, test } from "bun:test";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import { QUEUE_TTL_MS } from "../src/lib/outbound-queue-store";
 import {
-  MemoryDurableOutboundStore,
   committedOrThrow,
   createOutboundClaim,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/durable-contract";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 
 const ACCOUNT = "alice@example.com";
 const NOW = Date.parse("2026-07-17T12:00:00.000Z");

@@ -18,14 +18,14 @@ import {
 import { listQueuedMessages } from "../src/lib/outbound-queue-store";
 import {
   committedOrThrow,
-  MemoryDurableOutboundStore,
   OUTBOUND_CLAIM_LEASE_MS,
   OutboundPersistenceError,
   type DurableOutboundStore,
   type OutboundOwnerActivation,
   type OutboundOwnerContext,
   type OutboundOwnerHint,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/durable-contract";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import type {
   ResumePersistence,
   XmppResumeEntry,

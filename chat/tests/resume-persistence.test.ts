@@ -25,10 +25,12 @@ import { installXmppPagehideLifecycle } from "../src/lib/xmpp/pagehide-lifecycle
 import { enqueueQueuedMessage, listQueuedDmMessages } from "../src/lib/outbound-queue-store";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
-  MemoryDurableOutboundStore,
-  MemoryDurableOutboundStore as MemoryDurableSmResumeStore,
   OutboundPersistenceError,
   type DurableOutcome,
+} from "../src/lib/xmpp-runtime/durable-contract";
+import {
+  MemoryDurableOutboundStore,
+  MemoryDurableOutboundStore as MemoryDurableSmResumeStore,
 } from "../src/lib/xmpp-runtime-durable-store";
 import {
   createLocalStorageResumePersistence as createBrowserLocalStorageResumePersistence,

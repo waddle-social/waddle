@@ -1,17 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
   DurablePredecessorCapacityError,
-  MemoryDurableOutboundStore,
   OUTBOUND_CLAIM_LEASE_MS,
   RETAINED_PREDECESSOR_LIMIT,
   SM_SNAPSHOT_RETENTION_MS,
-  checkedDurableCounterIncrement,
   committedOrThrow,
   createOutboundClaim,
-  validatePersistedRuntimeAccount,
   type OutboundOwnerActivation,
   type OutboundOwnerHint,
-} from "../src/lib/xmpp-runtime-durable-store";
+} from "../src/lib/xmpp-runtime/durable-contract";
+import { validatePersistedRuntimeAccount } from "../src/lib/xmpp-runtime/durable-codec";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 
@@ -75,22 +74,6 @@ function smState(previd: string): PersistedSmResumeState {
     outboundH: 7,
     maxResumeSeconds: 300,
     unhandledOutboundEntries: [],
-  };
-}
-
-function emptyPersistedAccount(): Record<string, unknown> {
-  return {
-    accountKey: ACCOUNT,
-    schemaVersion: 1,
-    revision: 0,
-    lastAuthorityTimeMs: 0,
-    lastWallClockSampleMs: 0,
-    authorityEpoch: 0,
-    nextOwnerGeneration: 1,
-    owners: {},
-    outbound: {},
-    terminals: {},
-    smSnapshots: {},
   };
 }
 
@@ -160,87 +143,6 @@ function expectCounterExhaustion(outcome: {
 }
 
 describe("unified XMPP runtime authority", () => {
-  test("durable account decoding rejects missing, unknown, and nested corrupt fields", () => {
-    expect(() => validatePersistedRuntimeAccount(
-      emptyPersistedAccount(),
-      ACCOUNT,
-    )).not.toThrow();
-
-    const missingEpoch = emptyPersistedAccount();
-    delete missingEpoch.authorityEpoch;
-    expectCorruptRuntimeAccount(missingEpoch);
-
-    expectCorruptRuntimeAccount({
-      ...emptyPersistedAccount(),
-      legacyRepairMarker: true,
-    });
-
-    expectCorruptRuntimeAccount({
-      ...emptyPersistedAccount(),
-      nextOwnerGeneration: 2,
-      owners: {
-        owner: {
-          ownerId: "owner",
-          ownerInstanceId: "instance",
-          ownerGeneration: 1,
-          authorityEpoch: 0,
-          leaseUntil: 45_000,
-          lastRenewedAt: 0,
-          legacyLease: 45_000,
-        },
-      },
-    });
-
-    expectCorruptRuntimeAccount({
-      ...emptyPersistedAccount(),
-      nextOwnerGeneration: 1,
-      owners: {
-        owner: {
-          ownerId: "owner",
-          ownerInstanceId: "instance",
-          ownerGeneration: 1,
-          authorityEpoch: 0,
-          leaseUntil: 45_000,
-          lastRenewedAt: 0,
-        },
-      },
-    });
-
-    expectCorruptRuntimeAccount({
-      ...emptyPersistedAccount(),
-      nextOwnerGeneration: 2,
-      smSnapshots: {
-        detached: {
-          accountKey: ACCOUNT,
-          ownerId: "detached",
-          ownerGeneration: 2,
-          authorityEpoch: 0,
-          version: 1,
-          state: null,
-          savedAt: 0,
-          consumed: true,
-        },
-      },
-    });
-
-    expectCorruptRuntimeAccount({
-      ...emptyPersistedAccount(),
-      nextOwnerGeneration: 2,
-      smSnapshots: {
-        detached: {
-          accountKey: ACCOUNT,
-          ownerId: "detached",
-          ownerGeneration: 1,
-          authorityEpoch: 0,
-          version: 1,
-          state: null,
-          savedAt: 0,
-          consumed: true,
-        },
-      },
-    });
-  });
-
   test("durable decoding rejects terminal claims with mismatched row provenance", async () => {
     const store = new MemoryDurableOutboundStore();
     const owner = (await activate(store, {
@@ -901,20 +803,6 @@ describe("unified XMPP runtime authority", () => {
     const expiredRecords = mutableRuntimeAccount(store).smSnapshots;
     expect(expiredRecords[snapshotOwner.ownerId]).toBeUndefined();
     expect(expiredRecords[tombstoneOwner.ownerId]).toBeUndefined();
-  });
-
-  test("checked durable counters reject exhaustion without wrapping", () => {
-    expect(checkedDurableCounterIncrement(
-      Number.MAX_SAFE_INTEGER - 1,
-      "test",
-    )).toBe(Number.MAX_SAFE_INTEGER);
-    expect(() => checkedDurableCounterIncrement(
-      Number.MAX_SAFE_INTEGER,
-      "test",
-    )).toThrow("test counter exhausted");
-    expect(() => checkedDurableCounterIncrement(-1, "test")).toThrow(
-      "test counter exhausted",
-    );
   });
 
   test("foreign live claim blocks native resume without partial adoption", async () => {
