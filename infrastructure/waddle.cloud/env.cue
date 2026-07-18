@@ -72,7 +72,12 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.rulesSync]
+		}
+		pullRequest: {
+			derivePaths: true
+			when: pullRequest: true
+			tasks: [_t.rulesLint]
 		}
 	}
 
@@ -130,6 +135,54 @@ schema.#Project & {
 					  --revision="$(git rev-parse --short HEAD)"
 				"""#]
 			inputs: ["gitops/**", "env.cue"]
+		}
+		// Lint every alert-rule file (alerts-as-code, #1324). Runs on
+		// every PR touching rules/** so a broken rule fails the PR,
+		// not the pager.
+		rulesLint: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					mimirtool rules lint rules/mimir/*.yaml
+					lokitool rules lint --rule-files "$(ls rules/loki/*.yaml | paste -sd, -)"
+					echo "All alert rule files lint clean."
+				"""#]
+			inputs: ["rules/**", "env.cue"]
+		}
+		// Sync the rule trees to the Grafana Cloud rulers (main push
+		// only). Sync is authoritative within the `waddle` namespace;
+		// see rules/README.md for the required secrets.
+		rulesSync: schema.#Task & {
+			command: "bash"
+			env: {
+				CI_MIMIR_ADDRESS: schema.#EnvPassthrough & {name: "GRAFANA_CLOUD_MIMIR_ADDRESS"}
+				CI_MIMIR_TENANT:  schema.#EnvPassthrough & {name: "GRAFANA_CLOUD_MIMIR_TENANT_ID"}
+				CI_LOKI_ADDRESS:  schema.#EnvPassthrough & {name: "GRAFANA_CLOUD_LOKI_ADDRESS"}
+				CI_LOKI_TENANT:   schema.#EnvPassthrough & {name: "GRAFANA_CLOUD_LOKI_TENANT_ID"}
+				CI_RULER_TOKEN:   schema.#EnvPassthrough & {name: "GRAFANA_CLOUD_RULER_TOKEN"}
+			}
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${CI_MIMIR_ADDRESS:?missing GRAFANA_CLOUD_MIMIR_ADDRESS secret (see rules/README.md)}"
+					: "${CI_MIMIR_TENANT:?missing GRAFANA_CLOUD_MIMIR_TENANT_ID secret}"
+					: "${CI_LOKI_ADDRESS:?missing GRAFANA_CLOUD_LOKI_ADDRESS secret}"
+					: "${CI_LOKI_TENANT:?missing GRAFANA_CLOUD_LOKI_TENANT_ID secret}"
+					: "${CI_RULER_TOKEN:?missing GRAFANA_CLOUD_RULER_TOKEN secret}"
+					mimirtool rules sync \
+					  --address="${CI_MIMIR_ADDRESS}" \
+					  --id="${CI_MIMIR_TENANT}" \
+					  --key="${CI_RULER_TOKEN}" \
+					  --namespaces=waddle \
+					  rules/mimir/*.yaml
+					lokitool rules sync \
+					  --address="${CI_LOKI_ADDRESS}" \
+					  --id="${CI_LOKI_TENANT}" \
+					  --key="${CI_RULER_TOKEN}" \
+					  --namespaces=waddle \
+					  rules/loki/*.yaml
+					echo "Alert rules synced to Grafana Cloud rulers."
+				"""#]
+			inputs: ["rules/**", "env.cue"]
 		}
 	}
 }

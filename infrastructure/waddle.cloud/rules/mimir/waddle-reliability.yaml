@@ -1,0 +1,86 @@
+namespace: waddle
+groups:
+    - name: waddle-scrape
+      rules:
+        - alert: ScrapeAbsent
+          expr: count(up{job="waddle-server"} == 1) < 2
+          for: 5m
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: Check pod status in the waddle namespace and the grafana-alloy scrape pipeline. 2 replicas are expected; the alloy scrape generates the `up` series.
+            summary: Fewer than 2 waddle-server replicas are being scraped — a pod stopped reporting or the Alloy scrape is broken.
+    - name: waddle-clustering
+      rules:
+        - alert: ClusterHeartbeatStale
+          expr: max(waddle_clustering_node_heartbeat_age_ms_milliseconds) > 60000
+          for: 5m
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists.
+            summary: A cluster node heartbeat is older than 60s (healthy steady-state is ~10s) — node death or lease-write stall.
+    - name: waddle-pending-delivery
+      rules:
+        - alert: PendingDeliveryPoisonPill
+          expr: increase(waddle_pending_delivery_unresolved_poison_pill_total[1h]) > 0
+          labels:
+            severity: critical
+            team: waddle
+          annotations:
+            runbook: Always 0 in healthy history; any increment means a stuck delivery. Inspect the pending_delivery table for the unresolved row and the server logs around its message id.
+            summary: A pending-delivery row could not be resolved (poison pill) — a message is stuck and will not be delivered.
+    - name: waddle-push
+      rules:
+        - alert: PushDeadLettered
+          expr: increase(waddle_push_outbox_dead_lettered_total[1h]) > 0
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Always 0 so far. Check push endpoint reachability and the notification outbox janitor logs.
+            summary: A push notification exhausted retries and was dead-lettered.
+    - name: waddle-delivery
+      rules:
+        - alert: DeliveryDrops
+          expr: increase(waddle_delivery_retry_exhausted_drop_total[1h]) + increase(waddle_delivery_terminal_error_drop_total[1h]) > 10
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Both counters are 0 in healthy history; the threshold allows small connection-churn noise. Sustained drops mean a delivery-path regression.
+            summary: Messages are being dropped after retry exhaustion or terminal delivery errors.
+    - name: waddle-stream-management
+      rules:
+        - alert: SmPauseTimeouts
+          expr: increase(waddle_sm_send_window_pause_timeouts_total[30m]) > 5
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 0 in all history. A burst usually accompanies a network event or a client bug that stops acking.
+            summary: XEP-0198 send-window pauses are timing out — dead peers are piling up instead of acking.
+        - alert: SmUnackedEvictions
+          expr: sum(increase(waddle_sm_unacked_evicted_total[1h])) > 100
+          for: 2h
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'KNOWN-FIRING until issue #1316 lands (bootstrap-flood bursts measured 44-968/h). Tighten to > 0 after #1316. https://github.com/waddle-social/waddle/issues/1316'
+            summary: Sustained eviction of unacked XEP-0198 stanzas — message-loss risk for resuming clients.
+    - name: waddle-broadcast
+      rules:
+        - alert: BroadcastDropsFull
+          expr: increase(waddle_broadcast_dropped_full_total[1h]) > 50
+          for: 1h
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 0 in healthy history. Check for a wedged consumer or a fan-out storm; correlate with connection counts and pod CPU.
+            summary: Broadcast stanzas dropped because recipient outbound channels are full — consumers cannot keep up.

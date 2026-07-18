@@ -440,6 +440,10 @@
               pkgs.oras
               pkgs.fluxcd
               pkgs.yq-go
+              # Alerts-as-code (#1324): rule lint on PRs + ruler sync
+              # on main push need mimirtool and lokitool.
+              pkgs.mimir
+              pkgs.grafana-loki
               # Android app (apps/android): JDK for sdkmanager/Gradle,
               # cargo-ndk for the jniLibs cross-build, gh for the release
               # APK upload task. The Android SDK itself is provisioned by
