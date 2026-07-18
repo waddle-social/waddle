@@ -741,10 +741,16 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     }
                     workers_healthy = false;
                 }
-                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
-                    Janitor::OrphanReaper,
-                    orphan_sweep_heartbeat_outcome(sweep_outcome, workers_healthy),
-                );
+                // A shutdown-cancelled sweep is neither completed nor failed;
+                // skipping the heartbeat keeps routine deploys from
+                // registering failed sweeps (an absent heartbeat during
+                // shutdown is the honest signal).
+                if sweep_outcome != OrphanSweepOutcome::Cancelled {
+                    waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                        Janitor::OrphanReaper,
+                        orphan_sweep_heartbeat_outcome(sweep_outcome, workers_healthy),
+                    );
+                }
                 if stop_after_sweep {
                     break;
                 }
@@ -822,6 +828,11 @@ where
         _ = fatal_fence.cancelled() => OrphanSweepOutcome::Cancelled,
         result = tokio::time::timeout(timeout, sweep) => match result {
             Ok(true) => OrphanSweepOutcome::Completed,
+            // The sweep observed the cancellation token itself before the
+            // biased select arms fired — that's a shutdown, not a failure.
+            Ok(false) if cancel.is_cancelled() || fatal_fence.is_cancelled() => {
+                OrphanSweepOutcome::Cancelled
+            }
             Ok(false) => OrphanSweepOutcome::Failed,
             Err(_) => {
                 fatal_fence.cancel();

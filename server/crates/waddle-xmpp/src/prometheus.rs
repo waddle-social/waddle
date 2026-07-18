@@ -260,9 +260,9 @@ static DND_PROJECTION_READ_ERRORED: AtomicU64 = AtomicU64::new(0);
 // values remain byte-identical.
 //
 // Storage is a fixed `[AtomicU64; N]` array indexed by the typed reason.
-// No mutex, no allocations, no cardinality growth at runtime. Inputs that
-// cannot be mapped into the typed allowlist use the separate
-// `PUSH_SUPPRESSED_UNKNOWN_REASON` catch-all before reaching this boundary.
+// No mutex, no allocations, no cardinality growth at runtime. The sealed
+// `PushSuppressReason` enum makes an unmapped reason a compile error, so
+// no unknown-reason catch-all exists (deleted with #1330's typed plumbing).
 pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &PushSuppressReason::VALUES;
 
 const PUSH_SUPPRESSED_COUNTERS_LEN: usize = PUSH_SUPPRESSED_REASONS.len();
@@ -299,10 +299,6 @@ const _: () = assert!(
     PUSH_SUPPRESSED_REASONS.len() == PUSH_SUPPRESSED_COUNTERS_LEN,
     "PUSH_SUPPRESSED_REASONS and PUSH_SUPPRESSED_COUNTERS must stay the same length"
 );
-
-// Catch-all counter for reason values that cannot be mapped into the typed
-// allowlist. Normal typed suppression cannot increment it.
-static PUSH_SUPPRESSED_UNKNOWN_REASON: AtomicU64 = AtomicU64::new(0);
 
 /// Public read-only view of the metric reason values. The
 /// `waddle-server` test suite uses this to assert that every
@@ -551,13 +547,6 @@ pub(crate) fn increment_push_suppressed(reason: PushSuppressReason) {
     PUSH_SUPPRESSED_COUNTERS[reason.index()].fetch_add(1, Ordering::Relaxed);
 }
 
-/// Increment the frozen legacy catch-all for an upstream reason that could not
-/// be mapped into [`PushSuppressReason`]. Normal typed emission cannot reach
-/// this counter.
-pub(crate) fn increment_push_suppressed_unknown_reason() {
-    PUSH_SUPPRESSED_UNKNOWN_REASON.fetch_add(1, Ordering::Relaxed);
-}
-
 /// Snapshot of every push-suppressed counter for rendering.
 fn render_push_suppressed_lines(out: &mut String) {
     out.push_str("# HELP waddle_push_suppressed_total XEP-0357 push notification candidates suppressed by a XEP/Waddle rule. Labeled by the typed `SuppressedReason` enum.\n");
@@ -570,12 +559,6 @@ fn render_push_suppressed_lines(out: &mut String) {
         out.push_str(&value.to_string());
         out.push('\n');
     }
-    let unknown = PUSH_SUPPRESSED_UNKNOWN_REASON.load(Ordering::Relaxed);
-    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason string not present in the parallel `PUSH_SUPPRESSED_REASONS` wire-contract constant. A non-zero sample indicates the constant has drifted from `SuppressedReason::as_db_value`.\n");
-    out.push_str("# TYPE waddle_push_suppressed_unknown_reason_total counter\n");
-    out.push_str("waddle_push_suppressed_unknown_reason_total ");
-    out.push_str(&unknown.to_string());
-    out.push('\n');
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -614,7 +597,6 @@ pub fn reset_metrics_for_test() {
     for counter in PUSH_SUPPRESSED_COUNTERS.iter() {
         counter.store(0, Ordering::Release);
     }
-    PUSH_SUPPRESSED_UNKNOWN_REASON.store(0, Ordering::Release);
     PUSH_CANDIDATE_CREATED.store(0, Ordering::Release);
     PUSH_CANDIDATE_COALESCED.store(0, Ordering::Release);
     PUSH_OUTBOX_PUBLISHED.store(0, Ordering::Release);

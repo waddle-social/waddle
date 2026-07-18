@@ -146,13 +146,11 @@ pub fn increment_push_suppressed(reason: PushSuppressReason) {
     );
 }
 
-dual_increment!(
-    increment_push_suppressed_unknown_reason,
-    crate::prometheus::increment_push_suppressed_unknown_reason,
-    "xmpp.push.suppressed_unknown_reason",
-    "{notification}",
-    "Push suppression events that could not be mapped to the bounded reason set."
-);
+// No dual helper for the legacy unknown-reason catch-all: the sealed
+// `PushSuppressReason` enum makes an unmapped reason a compile error,
+// so the catch-all is structurally unreachable. Its frozen text
+// counter stays rendered (permanently 0) until the contract PR
+// deletes the family.
 
 dual_increment!(
     increment_pending_delivery_quota_exceeded,
