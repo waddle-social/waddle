@@ -53,11 +53,24 @@ pub(crate) fn client_trace_context_from_query(
     let version = parts.next()?;
     let trace_id = TraceId::from_hex(parts.next()?).ok()?;
     let span_id = SpanId::from_hex(parts.next()?).ok()?;
-    let flags = u8::from_str_radix(parts.next()?, 16).ok()?;
-    // Version 00 has exactly four fields; future versions may append
-    // more, which we accept per the spec's forward-compat rule but
-    // only after a parseable 00-shaped prefix.
-    if version.len() != 2 || version == "ff" {
+    let flags_field = parts.next()?;
+    if flags_field.len() != 2 {
+        return None;
+    }
+    let flags = u8::from_str_radix(flags_field, 16).ok()?;
+    // W3C trace-context: the version is exactly two lowercase hex
+    // digits and 0xff is forbidden; version 00 has exactly four
+    // fields (higher versions may append more, which we accept after
+    // a parseable 00-shaped prefix).
+    if version.len() != 2
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || version == "ff"
+    {
+        return None;
+    }
+    if version == "00" && parts.next().is_some() {
         return None;
     }
     if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
@@ -127,6 +140,13 @@ mod tests {
             Some("traceparent=00-00000000000000000000000000000000-b7ad6b7169203331-01"),
             Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01"),
             Some("traceparent=ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            // Non-hex / uppercase version bytes are rejected outright.
+            Some("traceparent=zz-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            Some("traceparent=0F-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            // Version 00 must have exactly four fields.
+            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra"),
+            // Flags must be exactly two hex digits.
+            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0"),
         ] {
             assert!(
                 client_trace_context_from_query(query).is_none(),

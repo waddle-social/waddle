@@ -9,6 +9,7 @@ import {
   clearLastCallError,
   reduceCallState,
   reportCallError,
+  teardownSetupOutcome,
 } from "../src/lib/calls/call-store";
 import {
   clearDmCallActivities,
@@ -440,6 +441,17 @@ describe("call lifecycle terminal mapping", () => {
   ])("maps pre-active %s to setup outcome %s", (reason, setupOutcome) => {
     expect(callLifecycleTerminalForRemoteEnd(incoming, terminate(reason), reason))
       .toEqual({ setupOutcome });
+  });
+
+  test.each([
+    ["active", "accepted"],
+    ["incoming", "declined"],
+    // A torn-down pending group-call setup is a failed attempt, not a
+    // proposed one — greptile P1 on PR #1415.
+    ["muc-pending", "failed"],
+    ["outgoing", "proposed"],
+  ] as const)("teardown from %s reports setup outcome %s", (phase, setupOutcome) => {
+    expect(teardownSetupOutcome(phase)).toBe(setupOutcome);
   });
 
   test.each([

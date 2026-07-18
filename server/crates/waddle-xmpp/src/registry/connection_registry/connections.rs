@@ -54,7 +54,7 @@ impl ConnectionRegistry {
             debug!("Replaced existing connection registration");
         } else {
             prometheus::increment_connected_users();
-            crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+            crate::metrics::adjust_connections_active(1);
             debug!("Registered new connection");
         }
         carbons_handle
@@ -75,7 +75,7 @@ impl ConnectionRegistry {
             debug!("Replaced existing connection registration");
         } else {
             prometheus::increment_connected_users();
-            crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+            crate::metrics::adjust_connections_active(1);
             debug!("Registered new connection");
         }
         carbons_handle
@@ -106,7 +106,7 @@ impl ConnectionRegistry {
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 vacant.insert(entry);
                 prometheus::increment_connected_users();
-                crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+                crate::metrics::adjust_connections_active(1);
                 debug!("Registered new connection");
                 true
             }
@@ -121,7 +121,7 @@ impl ConnectionRegistry {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
             prometheus::decrement_connected_users();
-            crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered connection");
         } else {
@@ -143,7 +143,7 @@ impl ConnectionRegistry {
         });
         if removed.is_some() {
             prometheus::decrement_connected_users();
-            crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered owned connection");
         } else {
@@ -173,7 +173,7 @@ impl ConnectionRegistry {
         });
         if removed.is_some() {
             prometheus::decrement_connected_users();
-            crate::metrics::record_connection_count(self.connections.len() as i64, "websocket");
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered SM-owned connection at expiry");
         } else {

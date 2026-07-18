@@ -19,6 +19,17 @@ static METER: OnceLock<Meter> = OnceLock::new();
 /// [`adjust_muc_occupant_total`].
 static MUC_OCCUPANT_TOTAL: AtomicI64 = AtomicI64::new(0);
 
+/// Per-pod count of active MUC rooms, published by the room-registry
+/// actor (which serializes its own room-map mutations) after every
+/// insert/remove. Read by the observable rooms gauge.
+static MUC_ROOMS_ACTIVE: AtomicI64 = AtomicI64::new(0);
+
+/// Per-pod count of registered connections, adjusted with ±1 deltas at
+/// exactly the seams that bump the legacy connected-users counter
+/// (register, unregister, and stale-channel eviction). Read by the
+/// observable connections gauge.
+static CONNECTIONS_ACTIVE: AtomicI64 = AtomicI64::new(0);
+
 fn meter() -> &'static Meter {
     METER.get_or_init(|| opentelemetry::global::meter("waddle-xmpp"))
 }
@@ -67,31 +78,50 @@ pub fn muc_presence_events() -> Counter<u64> {
 // Gauges (Current State)
 // ============================================================================
 
-/// Gauge for active XMPP connections.
-pub fn connections_active() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.connections.active")
-        .with_description("Current number of active XMPP connections")
-        .with_unit("connection")
-        .build()
-}
-
-/// Gauge for active MUC rooms.
-pub fn muc_rooms_active() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.muc.rooms.active")
-        .with_description("Current number of active MUC rooms")
-        .with_unit("room")
-        .build()
-}
-
-/// Gauge for MUC occupants.
-pub fn muc_occupants() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.muc.occupants")
-        .with_description("Current number of MUC occupants")
-        .with_unit("user")
-        .build()
+/// The three pod-wide occupancy gauges are **observable**: their values
+/// live in process atomics mutated at the state-change seams, and the
+/// SDK reads the atomics at collection time via callbacks. A callback
+/// read cannot interleave with another writer's `record` the way a
+/// synchronous last-value gauge can (write A computes 1, write B
+/// computes and records 2, write A records 1 → stale forever), so the
+/// exported sample always reflects the latest total.
+///
+/// Registered lazily on the first state change (create-at-increment,
+/// same rule as the macros); the instruments are held here so the
+/// callbacks stay alive for the process lifetime.
+fn ensure_pod_gauges() {
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<i64>; 3]> = OnceLock::new();
+    GAUGES.get_or_init(|| {
+        [
+            meter()
+                .i64_observable_gauge("xmpp.connections.active")
+                .with_description("Current number of active XMPP connections")
+                .with_unit("connection")
+                .with_callback(|observer| {
+                    observer.observe(
+                        CONNECTIONS_ACTIVE.load(Ordering::Relaxed),
+                        &[KeyValue::new("transport", "websocket")],
+                    );
+                })
+                .build(),
+            meter()
+                .i64_observable_gauge("xmpp.muc.rooms.active")
+                .with_description("Current number of active MUC rooms")
+                .with_unit("room")
+                .with_callback(|observer| {
+                    observer.observe(MUC_ROOMS_ACTIVE.load(Ordering::Relaxed), &[]);
+                })
+                .build(),
+            meter()
+                .i64_observable_gauge("xmpp.muc.occupants")
+                .with_description("Current number of MUC occupants")
+                .with_unit("user")
+                .with_callback(|observer| {
+                    observer.observe(MUC_OCCUPANT_TOTAL.load(Ordering::Relaxed), &[]);
+                })
+                .build(),
+        ]
+    });
 }
 
 // ============================================================================
@@ -192,16 +222,22 @@ pub fn record_auth_attempt(mechanism: &str, success: bool) {
     );
 }
 
-/// Record connection count change.
-pub fn record_connection_count(count: i64, transport: &str) {
-    connections_active().record(count, &[KeyValue::new("transport", transport.to_string())]);
+/// Apply a ±1 delta to the per-pod connection count. Call `+1` exactly
+/// where the legacy connected-users counter increments (a genuinely new
+/// registration) and `-1` where it decrements (unregister or
+/// stale-channel eviction), so both stay in lockstep.
+pub fn adjust_connections_active(delta: i64) {
+    CONNECTIONS_ACTIVE.fetch_add(delta, Ordering::Relaxed);
+    ensure_pod_gauges();
 }
 
-/// Publish the current number of active MUC rooms on this pod to the
-/// `xmpp.muc.rooms.active` gauge. No attributes — the room JID is
-/// unbounded and never a metric dimension.
-pub fn record_muc_rooms_active(count: i64) {
-    muc_rooms_active().record(count, &[]);
+/// Publish the current number of active MUC rooms on this pod. Called by
+/// the room-registry actor after every room-map mutation — the actor
+/// serializes those, so a plain store is race-free. No attributes: the
+/// room JID is unbounded and never a metric dimension.
+pub fn publish_muc_rooms_active(count: i64) {
+    MUC_ROOMS_ACTIVE.store(count, Ordering::Relaxed);
+    ensure_pod_gauges();
 }
 
 /// Record stanza processing latency in milliseconds.
@@ -308,24 +344,17 @@ pub fn record_muc_presence(event_type: &str) {
     muc_presence_events().add(1, &[KeyValue::new("event", event_type.to_string())]);
 }
 
-/// Publish the pod-wide MUC occupant total to the `xmpp.muc.occupants`
-/// gauge. The room JID is not an attribute (unbounded); this is the
-/// single per-pod total across every active room.
-pub fn record_muc_occupant_count(count: i64) {
-    muc_occupants().record(count, &[]);
-}
-
-/// Apply a signed occupancy `delta` to the per-pod running total and
-/// republish it to the occupants gauge. Call with `+1` when a join adds
-/// a brand-new occupant, `-1` when a leave removes an occupant's last
-/// session, and `0` for multi-session joins / partial leaves that leave
-/// the occupant set unchanged (pass the pre/post occupant-count diff and
-/// this holds automatically).
+/// Apply a signed occupancy `delta` to the per-pod running total. Call
+/// with `+1` when a join adds a brand-new occupant, `-1` when a leave
+/// removes an occupant's last session, and `0` for multi-session joins /
+/// partial leaves that leave the occupant set unchanged (pass the
+/// pre/post occupant-count diff and this holds automatically). The
+/// observable occupants gauge reads the atomic at collection time, so
+/// concurrent adjustments from independent room actors can never publish
+/// a stale total.
 pub fn adjust_muc_occupant_total(delta: i64) {
-    let total = MUC_OCCUPANT_TOTAL
-        .fetch_add(delta, Ordering::Relaxed)
-        .saturating_add(delta);
-    record_muc_occupant_count(total);
+    MUC_OCCUPANT_TOTAL.fetch_add(delta, Ordering::Relaxed);
+    ensure_pod_gauges();
 }
 
 // ============================================================================
@@ -400,26 +429,26 @@ mod tests {
     #[tokio::test]
     async fn record_muc_rooms_active_emits_gauge() {
         let guard = test_support::acquire().await;
-        record_muc_rooms_active(3);
+        publish_muc_rooms_active(3);
 
         assert!(
             guard
                 .metric_names()
                 .contains(&"xmpp.muc.rooms.active".to_string()),
-            "rooms-active gauge must export after a recording",
+            "rooms-active gauge must export after a publication",
         );
     }
 
     #[tokio::test]
     async fn record_connection_count_emits_transport_gauge() {
         let guard = test_support::acquire().await;
-        record_connection_count(7, "websocket");
+        adjust_connections_active(7);
 
         assert!(
             guard
                 .metric_names()
                 .contains(&"xmpp.connections.active".to_string()),
-            "connections gauge must export after a recording",
+            "connections gauge must export after an adjustment",
         );
     }
 

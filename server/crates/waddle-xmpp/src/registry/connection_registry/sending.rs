@@ -289,6 +289,7 @@ impl ConnectionRegistry {
             .remove_if(jid, |_, entry| entry.sender.is_closed());
         if removed.is_some() {
             prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
@@ -310,6 +311,7 @@ impl ConnectionRegistry {
         });
         if removed.is_some() {
             prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }

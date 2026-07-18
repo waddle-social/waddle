@@ -454,15 +454,8 @@ export function clearCallState(terminal: {
   );
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") {
-    const defaultOutcome: CallSetupOutcome = current.phase === "incoming"
-      ? "declined"
-      : current.phase === "muc-pending"
-        ? "failed"
-        : current.phase === "outgoing"
-          ? "proposed"
-          : "accepted";
     finishCallAttempt(current.sid, {
-      setupOutcome: terminal.setupOutcome ?? defaultOutcome,
+      setupOutcome: terminal.setupOutcome ?? teardownSetupOutcome(current.phase),
       ...(terminal.endReason
         ? { endReason: terminal.endReason }
         : current.phase === "active" ? { endReason: "error" as const } : {}),
@@ -725,6 +718,27 @@ export function clearLastCallError(): void {
  * unreachable-side teardown ("gone", per XEP-0166 §7.4) so the peer
  * UI can label the ended state correctly.
  */
+/**
+ * Setup outcome for a call attempt that is being torn down / cleared
+ * from a given phase. Shared by `clearCallState` and
+ * `tearDownActiveCall` so the two teardown paths cannot drift: a
+ * `muc-pending` group-call setup that gets torn down is a *failed*
+ * attempt (its Muji accept/preparation waiters are cancelled), never
+ * a merely "proposed" one.
+ */
+export function teardownSetupOutcome(phase: CallState["phase"]): CallSetupOutcome {
+  switch (phase) {
+    case "active":
+      return "accepted";
+    case "incoming":
+      return "declined";
+    case "muc-pending":
+      return "failed";
+    default:
+      return "proposed";
+  }
+}
+
 export async function tearDownActiveCall(
   sender: CallWireSender | null,
   reason: "success" | "gone",
@@ -733,9 +747,7 @@ export async function tearDownActiveCall(
   const s = $callState.get();
   if (s.phase !== "idle" && s.phase !== "ended") {
     finishCallAttempt(s.sid, {
-      setupOutcome: s.phase === "active"
-        ? "accepted"
-        : s.phase === "incoming" ? "declined" : "proposed",
+      setupOutcome: teardownSetupOutcome(s.phase),
       ...(s.phase === "active"
         ? { endReason: reason === "success" ? "hangup" as const : "error" as const }
         : {}),
