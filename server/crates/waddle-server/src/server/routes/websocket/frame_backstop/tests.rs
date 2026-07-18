@@ -1,5 +1,7 @@
 use super::*;
 use std::future::pending;
+use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -33,6 +35,72 @@ fn iq_result_stanza(id: &str) -> Stanza {
 fn message_stanza() -> Stanza {
     let to: xmpp_parsers::jid::Jid = "bob@example.com".parse().expect("to jid");
     Stanza::Message(Message::new(Some(to)))
+}
+
+#[derive(Clone)]
+struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn groupchat_dispatch_span_carries_correlation_and_bound_identity_without_body() {
+    let room: xmpp_parsers::jid::Jid = "team@muc.example.com".parse().expect("room jid");
+    let mut message = Message::new(Some(room));
+    message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    message.id = Some(xmpp_parsers::message::Id("dispatch-correlation-1".into()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "sensitive body must not enter telemetry".into(),
+    );
+    let stanza = Stanza::Message(message);
+    let bound: jid::FullJid = "alice@example.com/browser".parse().expect("bound jid");
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(CaptureWriter(Arc::clone(&bytes)))
+        .finish();
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let backstop = StanzaBackstop::capture(&stanza, Some(&bound));
+    run_with_backstop(backstop, async {
+        tracing::info!("dispatch field probe");
+        Vec::new()
+    })
+    .await
+    .expect("dispatch completes");
+
+    let output = String::from_utf8(bytes.lock().expect("capture lock").clone())
+        .expect("captured tracing is UTF-8");
+    for expected in [
+        "\"message_id\":\"dispatch-correlation-1\"",
+        "\"room\":\"team@muc.example.com\"",
+        "\"xmpp.resource\":\"browser\"",
+        "\"user\":\"alice@example.com\"",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+    assert!(
+        !output.contains("sensitive body must not enter telemetry"),
+        "message bodies must never be tracing fields: {output}"
+    );
 }
 
 fn presence_stanza() -> Stanza {

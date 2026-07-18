@@ -7,10 +7,33 @@ use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
 use super::*;
 use kameo::actor::Spawn;
+use std::io;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
+
+#[derive(Clone)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
 
 fn test_registry() -> ConnectionRegistry {
     ConnectionRegistry::new()
@@ -3265,6 +3288,171 @@ async fn dispatch_to_room_drops_when_no_web_socket_state_in_deps() {
     assert!(!outcome.close);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::{Affiliation, Role};
+
+    let metric_guard = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+    let room_jid: jid::BareJid = "trace@muc.example.com".parse().expect("room JID");
+    let alice: jid::FullJid = "alice@example.com/web".parse().expect("alice JID");
+    let bob: jid::FullJid = "bob@example.com/phone".parse().expect("bob JID");
+    let room = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room_jid.clone(),
+            waddle_id: "w-trace".to_string(),
+            channel_id: "c-trace".to_string(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("create room");
+    for (nick, real_jid) in [("alice", alice.clone()), ("bob", bob.clone())] {
+        room.ask(Join {
+            nick: nick.to_string(),
+            real_jid,
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("join room");
+    }
+
+    let (alice_tx, mut alice_rx) = tokio::sync::mpsc::channel(8);
+    let (bob_tx, mut bob_rx) = tokio::sync::mpsc::channel(8);
+    register_into_both_tiers(
+        &state.deps.protocol.connection_registry,
+        &state.deps.protocol.user_registry,
+        &alice,
+        alice_tx,
+    )
+    .await;
+    register_into_both_tiers(
+        &state.deps.protocol.connection_registry,
+        &state.deps.protocol.user_registry,
+        &bob,
+        bob_tx,
+    )
+    .await;
+
+    let deps = Deps {
+        connection_registry: &state.deps.protocol.connection_registry,
+        user_registry: Some(&state.deps.protocol.user_registry),
+        sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
+        mam_storage: Some(&state.deps.protocol.mam_storage),
+        inbox_storage: Some(&state.deps.protocol.inbox_storage),
+        extension_manager: Some(&state.deps.protocol.extension_manager),
+        room_registry: Some(&state.deps.protocol.room_registry),
+        web_socket_state: Some(state.as_ref()),
+        authenticated_session: None,
+        local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        blocking_storage: Some(&state.deps.protocol.blocking_storage),
+        message_dispatcher: Some(&state.deps.protocol.dispatcher),
+        pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
+        ordered_relay_origin: None,
+    };
+    let mut message = Message::new(Some(jid::Jid::from(room_jid.clone())));
+    message.from = Some(jid::Jid::from(alice));
+    message.type_ = XmppMessageType::Groupchat;
+    message.id = Some(xmpp_parsers::message::Id("fanout-production-1".into()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "sensitive production fanout body".to_string(),
+    );
+
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(CaptureWriter(Arc::clone(&bytes)))
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let outcome = interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room: room_jid,
+            message: Box::new(message),
+        }],
+        &deps,
+    )
+    .await;
+
+    assert!(outcome.frames.is_empty());
+    assert!(
+        alice_rx.try_recv().is_ok(),
+        "sender reflection was enqueued"
+    );
+    assert!(
+        bob_rx.try_recv().is_ok(),
+        "recipient reflection was enqueued"
+    );
+    let output = String::from_utf8(bytes.lock().expect("capture lock").clone())
+        .expect("captured tracing is UTF-8");
+    let fanout_span = output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|event| {
+            event
+                .get("span")
+                .filter(|span| {
+                    span.get("name").and_then(serde_json::Value::as_str) == Some("xmpp.muc.fanout")
+                        && span.get("recipients").is_some()
+                })
+                .cloned()
+                .or_else(|| {
+                    event
+                        .get("spans")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|spans| {
+                            spans
+                                .iter()
+                                .find(|span| {
+                                    span.get("name").and_then(serde_json::Value::as_str)
+                                        == Some("xmpp.muc.fanout")
+                                        && span.get("recipients").is_some()
+                                })
+                                .cloned()
+                        })
+                })
+        })
+        .expect("captured event belongs to xmpp.muc.fanout span");
+    assert_eq!(
+        fanout_span
+            .get("message_id")
+            .and_then(serde_json::Value::as_str),
+        Some("fanout-production-1")
+    );
+    assert_eq!(
+        fanout_span.get("room").and_then(serde_json::Value::as_str),
+        Some("trace@muc.example.com")
+    );
+    assert_eq!(
+        fanout_span
+            .get("recipients")
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert!(
+        !output.contains("sensitive production fanout body"),
+        "message bodies must never be tracing fields: {output}"
+    );
+    assert_eq!(
+        metric_guard.histogram_count("xmpp.muc.fanout.latency", &[]),
+        Some(1),
+        "one sample is recorded after both enqueue attempts complete"
+    );
+    assert_eq!(
+        metric_guard
+            .metric_unit("xmpp.muc.fanout.latency")
+            .as_deref(),
+        Some("ms")
+    );
+}
+
 #[tokio::test]
 async fn extension_room_message_dispatches_threaded_muc_message() {
     use waddle_extensions::{
@@ -4060,11 +4248,13 @@ impl SubjectMutationStore {
             .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(feature = "clustering")]
     fn set_fanout_owned(&self, owned: bool) {
         self.fanout_owned
             .store(owned, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(feature = "clustering")]
     fn block_fanout_checks(&self, count: usize) -> Arc<tokio::sync::Barrier> {
         let barrier = Arc::new(tokio::sync::Barrier::new(count + 1));
         *self
