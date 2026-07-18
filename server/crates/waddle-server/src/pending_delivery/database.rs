@@ -538,6 +538,32 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
+    async fn list_claimed_by_session(
+        &self,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+                        archive_stanza_by, archive_stanza_id, transient_xml, \
+                        flushed_in_session, outbound_sequence \
+                 FROM pending_delivery \
+                 WHERE flushed_in_session = ? \
+                 ORDER BY row_id ASC",
+                crate::db_params![session.as_str().to_string()],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+        {
+            out.push(decode_row(&row)?);
+        }
+        Ok(out)
+    }
+
     async fn list_unclaimed_after(
         &self,
         recipient: &BareJid,

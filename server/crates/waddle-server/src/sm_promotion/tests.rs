@@ -106,7 +106,7 @@ fn detached_session_with_unacked(
                     sequence: i as u32 + 1,
                     stanza_xml: xml,
                     original_receipt_at: now,
-                    purpose: Default::default(),
+                    purpose: SmUnackedStanzaPurpose::Application,
                 },
             )
             .collect(),
@@ -146,6 +146,19 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
     async fn list(
         &self,
         _recipient: &BareJid,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        Err(
+            waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                "simulated backend failure".into(),
+            ),
+        )
+    }
+    async fn list_claimed_by_session(
+        &self,
+        _session: &waddle_xmpp::pending_delivery::SmSessionId,
     ) -> Result<
         Vec<waddle_xmpp::pending_delivery::PendingRow>,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
@@ -583,6 +596,56 @@ async fn assert_barrier_link_failure(outbound_sequence: Option<u32>, row_count: 
 #[tokio::test]
 async fn resume_barrier_with_exact_pending_link_is_retained_fail_closed() {
     assert_barrier_link_failure(Some(1), 1).await;
+}
+
+#[tokio::test]
+async fn resume_barrier_with_cross_recipient_pending_link_is_quarantined() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let source = SmSessionId::new("alice-stream-with-bob-owned-link");
+    let bob = bare("bob@example.com");
+    let linked_xml = dm_xml("carol@elsewhere/phone", bob.as_str(), "retain linked row");
+    let Some(Stanza::Message(linked_message)) = parse_stanza(&linked_xml) else {
+        panic!("linked pending payload parses as a message");
+    };
+    let linked_row_id = PendingRowId::fresh();
+    storage
+        .insert(PendingRow {
+            id: linked_row_id.clone(),
+            recipient: bob.clone(),
+            original_receipt_at: Utc::now(),
+            payload: PendingPayload::Transient(Box::new(linked_message)),
+            flushed_in_session: Some(source.clone()),
+            outbound_sequence: Some(1),
+        })
+        .await
+        .expect("seed Bob-owned row linked to Alice's SM session");
+
+    let alice = full("alice@example.com/laptop");
+    let session = session_with_resume_barrier(
+        source.as_str(),
+        alice.clone(),
+        resume_barrier_ping_xml("cross-recipient-barrier-link", &alice),
+    );
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.quarantined, 1);
+    assert_eq!(summary.not_promotable, 0);
+    assert!(summary.promoted_sequences.is_empty());
+    let retained = storage.list(&bob).await.expect("read retained Bob row");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, linked_row_id);
+    assert_eq!(retained[0].flushed_in_session.as_ref(), Some(&source));
+    assert_eq!(retained[0].outbound_sequence, Some(1));
 }
 
 #[tokio::test]
@@ -1070,7 +1133,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
             sequence: 1,
             stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),
             original_receipt_at: receipt_time,
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         }],
         max_resume_time: Some(60),
         detached_at: std::time::Instant::now(),
@@ -1258,7 +1321,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             sequence: 1,
             stanza: Box::new(Stanza::Message(queued)),
             original_receipt_at: now - chrono::Duration::seconds(610),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         })
         .await
         .unwrap();
@@ -1529,6 +1592,91 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry() {
+    // S4 (blocklist-load branch): same retry contract as the storage-
+    // failure branch — fail-closed XEP-0191 skip must not strand the
+    // queue until restart.
+    use async_trait::async_trait;
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
+
+    struct FailingBlocking;
+    #[async_trait]
+    impl BlockingStorage for FailingBlocking {
+        async fn list_blocked_jids(
+            &self,
+            _user: &BareJid,
+        ) -> Result<Vec<BareJid>, BlockingStorageError> {
+            Err(BlockingStorageError::new(std::io::Error::other(
+                "simulated blocklist backend failure",
+            )))
+        }
+    }
+
+    let sm_storage = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(None)
+            .await
+            .unwrap(),
+    );
+    let sm_registry = InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
+    let jid = full("alice@example.com/phone");
+    assert!(sm_registry
+        .store_session(detached_session_with_unacked(
+            "stream-application-blocklist-retry",
+            jid.clone(),
+            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "held")],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+    let removed = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
+    assert_eq!(removed.len(), 1);
+
+    let pending: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let blocking = FailingBlocking;
+    promote_displaced_sessions(
+        removed,
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            user_registry: &user_registry,
+            pending_storage: &pending,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+
+    assert!(sm_storage
+        .get_session(&SmSessionId::new("stream-application-blocklist-retry"))
+        .await
+        .unwrap()
+        .is_some());
+    let drained = sm_registry.drain_expired().await.unwrap();
+    assert_eq!(
+        drained.len(),
+        1,
+        "blocklist-load failure must leave the session drainable for retry"
+    );
+    assert_eq!(drained[0].stream_id, "stream-application-blocklist-retry");
+    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert_eq!(
+        sm_registry
+            .record_promotion_failure("stream-application-blocklist-retry")
+            .await
+            .unwrap(),
+        2,
+        "the second increment proves the failed application-stanza pass consumed one attempt"
+    );
 }
 
 #[tokio::test]
@@ -2208,6 +2356,15 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
     > {
         self.inner.list(recipient).await
     }
+    async fn list_claimed_by_session(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list_claimed_by_session(session).await
+    }
     async fn claim_for_session(
         &self,
         recipient: &BareJid,
@@ -2424,6 +2581,15 @@ impl PendingDeliveryStorage for FlakyPending {
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
         self.inner.list(recipient).await
+    }
+    async fn list_claimed_by_session(
+        &self,
+        session: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::PendingRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.list_claimed_by_session(session).await
     }
     async fn claim_for_session(
         &self,

@@ -57,10 +57,10 @@ pub enum PendingStorageError {
 
 /// Storage contract for `pending_delivery`.
 ///
-/// All operations are per-recipient (bare JID). FIFO ordering within a
-/// recipient is implementation-mandated: `list()` returns rows in
-/// insertion order so the flush wire shape preserves the sender's
-/// order on replay.
+/// Recipient delivery operations use a bare JID. FIFO ordering within a
+/// recipient is implementation-mandated: `list()` returns rows in insertion
+/// order so the flush wire shape preserves the sender's order on replay.
+/// Reconciliation operations explicitly document when they scan globally.
 #[async_trait]
 pub trait PendingDeliveryStorage: Send + Sync {
     /// Insert a new pending row. Returns
@@ -102,6 +102,21 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// callers can implement the Q7c re-flush path; pure flush callers
     /// should filter on `flushed_in_session.is_none()`.
     async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError>;
+
+    /// List every row claimed by the exact SM `session`, across all
+    /// recipients.
+    ///
+    /// This global lookup is the durable inverse of
+    /// [`PendingRow::flushed_in_session`]. Callers that reconcile XEP-0198
+    /// state must not derive it from [`Self::list`], because a corrupt or
+    /// partially-written cross-store relation can associate one session with
+    /// a row owned by a different recipient. Implementations MUST return all
+    /// matching rows, including rows without an `outbound_sequence` and
+    /// multiple rows sharing one sequence, so ambiguity remains detectable.
+    async fn list_claimed_by_session(
+        &self,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError>;
 
     /// List a bounded page of unclaimed rows for `recipient`, FIFO, optionally
     /// starting after `after`.
@@ -564,6 +579,24 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .get(recipient)
             .map(|q| q.iter().cloned().collect())
             .unwrap_or_default())
+    }
+
+    async fn list_claimed_by_session(
+        &self,
+        session: &SmSessionId,
+    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut rows = guard
+            .values()
+            .flat_map(|queue| queue.iter())
+            .filter(|row| row.flushed_in_session.as_ref() == Some(session))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        Ok(rows)
     }
 
     async fn list_unclaimed_after(

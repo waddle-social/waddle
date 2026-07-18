@@ -6,6 +6,7 @@ use chrono::Utc;
 use jid::FullJid;
 use xmpp_parsers::presence::Show;
 
+use super::super::persistence::SmUnackedStanzaPurpose;
 use crate::Stanza;
 
 fn make_test_jid() -> FullJid {
@@ -58,19 +59,19 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
                 sequence: 13,
                 stanza_xml: "<msg1/>".to_string(),
                 original_receipt_at: Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 14,
                 stanza_xml: "<msg2/>".to_string(),
                 original_receipt_at: Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 15,
                 stanza_xml: "<msg3/>".to_string(),
                 original_receipt_at: Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
         ],
         max_resume_time: Some(300),
@@ -96,7 +97,7 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
             sequence,
             stanza_xml,
             original_receipt_at: now,
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         })
         .collect();
     s
@@ -2323,6 +2324,7 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
                 sequence,
                 message_stanza_xml_with_id(format!("m{sequence}")),
                 Utc::now(),
+                SmUnackedStanzaPurpose::Application,
             )
             .unwrap();
     }
@@ -3107,13 +3109,13 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
                 sequence: 6,
                 stanza_xml: realistic_message_stanza("first"),
                 original_receipt_at: Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
                 stanza_xml: realistic_message_stanza("second"),
                 original_receipt_at: Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
         ],
         max_resume_time: Some(120),
@@ -3900,7 +3902,7 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
             sequence: 1,
             stanza: Box::new(Stanza::Message(queued)),
             original_receipt_at: now - chrono::Duration::seconds(130),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         })
         .await
         .unwrap();
@@ -4303,7 +4305,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
                 "secret",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
         DetachedUnackedStanza {
             sequence: 7,
@@ -4314,7 +4316,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
                 "safe",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
     ];
     registry
@@ -4808,6 +4810,7 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
                     session.record_detached_outbound(
                         message_stanza_xml_with_id("race-append".to_string()),
                         Utc::now(),
+                        SmUnackedStanzaPurpose::Application,
                     );
                     Ok(())
                 },
@@ -4872,7 +4875,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
                 "secret",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
         DetachedUnackedStanza {
             sequence: 7,
@@ -4883,7 +4886,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
                 "safe",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
     ];
     registry.store_session(session).await.unwrap();
@@ -5302,7 +5305,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
                 "secret",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
         DetachedUnackedStanza {
             sequence: 7,
@@ -5313,7 +5316,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
                 "safe",
             ),
             original_receipt_at: Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         },
     ];
     registry.store_session(session).await.unwrap();
@@ -5388,7 +5391,7 @@ async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
             "safe",
         ),
         original_receipt_at: Utc::now(),
-        purpose: Default::default(),
+        purpose: SmUnackedStanzaPurpose::Application,
     }];
 
     // The session never went through a successful store_session

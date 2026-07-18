@@ -239,6 +239,7 @@ impl StreamManagementState {
             self.outbound_count,
             stanza_xml,
             original_receipt_at,
+            super::persistence::SmUnackedStanzaPurpose::Application,
         ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {

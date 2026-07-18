@@ -52,26 +52,12 @@ impl UnackedStanza {
     /// with `Utc::now()`. Use [`Self::with_receipt_at`] when the
     /// caller already knows the original receipt time (e.g. when
     /// replaying a `pending_delivery` row).
-    pub fn new(sequence: u32, stanza_xml: String) -> Self {
-        Self::with_receipt_at(sequence, stanza_xml, Utc::now())
+    pub fn new(sequence: u32, stanza_xml: String, purpose: SmUnackedStanzaPurpose) -> Self {
+        Self::with_receipt_at(sequence, stanza_xml, Utc::now(), purpose)
     }
 
     /// Create a new unacked stanza with an explicit receipt time.
     pub fn with_receipt_at(
-        sequence: u32,
-        stanza_xml: String,
-        original_receipt_at: DateTime<Utc>,
-    ) -> Self {
-        Self::with_receipt_at_and_purpose(
-            sequence,
-            stanza_xml,
-            original_receipt_at,
-            SmUnackedStanzaPurpose::Application,
-        )
-    }
-
-    /// Create a replay row with an explicit typed recovery purpose.
-    pub fn with_receipt_at_and_purpose(
         sequence: u32,
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
@@ -122,8 +108,13 @@ impl UnackedQueue {
     /// replay-gap marker) so later `<resume/>` requests with older `h`
     /// values can fail instead of replaying an incomplete window.
     #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
-    pub fn push(&mut self, sequence: u32, stanza_xml: String) -> UnackedPushResult {
-        self.push_with_receipt_at(sequence, stanza_xml, Utc::now())
+    pub fn push(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        purpose: SmUnackedStanzaPurpose,
+    ) -> UnackedPushResult {
+        self.push_with_receipt_at(sequence, stanza_xml, Utc::now(), purpose)
     }
 
     /// Push a stanza with an explicit `original_receipt_at`. Used by
@@ -131,22 +122,6 @@ impl UnackedQueue {
     /// flows into a future XEP-0203 `<delay/>` on Q6 promotion.
     #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
     pub fn push_with_receipt_at(
-        &mut self,
-        sequence: u32,
-        stanza_xml: String,
-        original_receipt_at: DateTime<Utc>,
-    ) -> UnackedPushResult {
-        self.push_with_receipt_at_and_purpose(
-            sequence,
-            stanza_xml,
-            original_receipt_at,
-            SmUnackedStanzaPurpose::Application,
-        )
-    }
-
-    /// Push a stanza with an explicit typed recovery purpose.
-    #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
-    pub fn push_with_receipt_at_and_purpose(
         &mut self,
         sequence: u32,
         stanza_xml: String,
@@ -159,13 +134,12 @@ impl UnackedQueue {
             None
         };
 
-        self.stanzas
-            .push_back(UnackedStanza::with_receipt_at_and_purpose(
-                sequence,
-                stanza_xml,
-                original_receipt_at,
-                purpose,
-            ));
+        self.stanzas.push_back(UnackedStanza::with_receipt_at(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+            purpose,
+        ));
 
         match evicted {
             Some(stanza) => UnackedPushResult::Evicted(stanza),
@@ -225,13 +199,12 @@ impl UnackedQueue {
         self.stanzas.clear();
         for entry in stanzas {
             if self.stanzas.len() < self.max_size {
-                self.stanzas
-                    .push_back(UnackedStanza::with_receipt_at_and_purpose(
-                        entry.sequence,
-                        entry.stanza_xml.clone(),
-                        entry.original_receipt_at,
-                        entry.purpose,
-                    ));
+                self.stanzas.push_back(UnackedStanza::with_receipt_at(
+                    entry.sequence,
+                    entry.stanza_xml.clone(),
+                    entry.original_receipt_at,
+                    entry.purpose,
+                ));
             }
         }
     }
@@ -287,7 +260,11 @@ mod tests {
     use super::*;
 
     fn push_accepted(queue: &mut UnackedQueue, sequence: u32, xml: &str) {
-        match queue.push(sequence, xml.to_string()) {
+        match queue.push(
+            sequence,
+            xml.to_string(),
+            SmUnackedStanzaPurpose::Application,
+        ) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(stanza) => {
                 panic!("unexpected eviction of stanza sequence={}", stanza.sequence)
@@ -360,7 +337,11 @@ mod tests {
         // Adding a 4th should remove the oldest and surface the evicted
         // stanza so `StreamManagementState::record_outbound` can warn
         // about it instead of dropping silently.
-        let result = queue.push(4, "<msg4/>".to_string());
+        let result = queue.push(
+            4,
+            "<msg4/>".to_string(),
+            SmUnackedStanzaPurpose::Application,
+        );
         let evicted = match result {
             UnackedPushResult::Evicted(stanza) => stanza,
             UnackedPushResult::Accepted => panic!("queue at capacity must evict"),
@@ -381,19 +362,19 @@ mod tests {
                 sequence: 5,
                 stanza_xml: "<msg5/>".to_string(),
                 original_receipt_at: now,
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 6,
                 stanza_xml: "<msg6/>".to_string(),
                 original_receipt_at: now,
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
                 stanza_xml: "<msg7/>".to_string(),
                 original_receipt_at: now,
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
         ];
         queue.restore(&stanzas);
@@ -406,17 +387,22 @@ mod tests {
     fn replay_purpose_survives_partial_replay_detach_and_restore() {
         let now = Utc::now();
         let mut queue = UnackedQueue::new(10);
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.id = Some(xmpp_parsers::message::Id("application".to_string()));
+        let message_xml = crate::parser::message_to_string(&message).expect("serialize message");
+        let barrier = xmpp_parsers::iq::Iq::Get {
+            from: None,
+            to: None,
+            id: "resume-barrier".to_string(),
+            payload: minidom::Element::builder("ping", crate::xep::xep0199::NS_PING).build(),
+        };
+        let barrier_xml = crate::parser::stanza_to_string(barrier).expect("serialize ping IQ");
         assert!(matches!(
-            queue.push_with_receipt_at(1, "<message/>".to_string(), now),
+            queue.push_with_receipt_at(1, message_xml, now, SmUnackedStanzaPurpose::Application,),
             UnackedPushResult::Accepted
         ));
         assert!(matches!(
-            queue.push_with_receipt_at_and_purpose(
-                2,
-                "<iq/>".to_string(),
-                now,
-                SmUnackedStanzaPurpose::ResumeBarrier,
-            ),
+            queue.push_with_receipt_at(2, barrier_xml, now, SmUnackedStanzaPurpose::ResumeBarrier,),
             UnackedPushResult::Accepted
         ));
 

@@ -201,6 +201,7 @@ impl DetachedSession {
         &mut self,
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
+        purpose: SmUnackedStanzaPurpose,
     ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
@@ -212,25 +213,11 @@ impl DetachedSession {
             sequence: self.outbound_count,
             stanza_xml,
             original_receipt_at,
-            purpose: SmUnackedStanzaPurpose::Application,
+            purpose,
         });
     }
 
     pub fn record_detached_outbound_at(
-        &mut self,
-        sequence: u32,
-        stanza_xml: String,
-        original_receipt_at: DateTime<Utc>,
-    ) -> Result<(), DetachedReplaySequenceConflict> {
-        self.record_detached_outbound_at_with_purpose(
-            sequence,
-            stanza_xml,
-            original_receipt_at,
-            SmUnackedStanzaPurpose::Application,
-        )
-    }
-
-    pub(crate) fn record_detached_outbound_at_with_purpose(
         &mut self,
         sequence: u32,
         stanza_xml: String,
