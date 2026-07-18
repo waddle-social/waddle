@@ -29,6 +29,7 @@ jobs:
   waddle-cloud-default:
     name: waddle-cloud-default
     runs-on: namespace-profile-linux-x86
+    environment: production
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -64,6 +65,10 @@ jobs:
         curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Setup 1Password
+      run: cuenv exec -- cuenv secrets setup onepassword
+      env:
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
     - name: 'Run pipeline: default'
       run: cuenv ci --pipeline default --path infrastructure/waddle.cloud
       env:
@@ -71,3 +76,5 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUENV_ENVIRONMENT: production
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}

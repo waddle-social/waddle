@@ -3,24 +3,24 @@ groups:
     - name: waddle-scrape
       rules:
         - alert: ScrapeAbsent
-          expr: count(up{job="waddle-server"} == 1) < 2
+          expr: (count(up{job="waddle-server"} == 1) or vector(0)) < 2
           for: 5m
           labels:
             severity: critical
             team: waddle
           annotations:
-            runbook: Check pod status in the waddle namespace and the grafana-alloy scrape pipeline. 2 replicas are expected; the alloy scrape generates the `up` series.
+            runbook: Check pod status in the waddle namespace and the grafana-alloy scrape pipeline. 2 replicas are expected; the alloy scrape generates the `up` series. The `or vector(0)` keeps this firing even when every series vanishes (Alloy down, discovery empty) — total outage must not be the silent case.
             summary: Fewer than 2 waddle-server replicas are being scraped — a pod stopped reporting or the Alloy scrape is broken.
     - name: waddle-clustering
       rules:
         - alert: ClusterHeartbeatStale
-          expr: max(waddle_clustering_node_heartbeat_age_ms_milliseconds) > 60000
+          expr: max(waddle_clustering_node_heartbeat_age_ms_milliseconds or waddle_clustering_node_heartbeat_age_ms_ms or waddle_clustering_node_heartbeat_age_ms) > 60000
           for: 5m
           labels:
             severity: critical
             team: waddle
           annotations:
-            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists.
+            runbook: Identify the stale node via the per-pod series, check its pod and Postgres lease writes. Node-death scenarios (claim leaks, orphaned sessions) follow if this persists. The instrument is `waddle.clustering.node_heartbeat_age_ms` (unit ms); the expression ORs the plausible OTLP-exported spellings — after verifying the live series name in Grafana, prune to the real one. Caveat - the gauge is self-reported, so a fully dead node goes stale rather than large; ScrapeAbsent is the backstop for that case.
             summary: A cluster node heartbeat is older than 60s (healthy steady-state is ~10s) — node death or lease-write stall.
     - name: waddle-pending-delivery
       rules:

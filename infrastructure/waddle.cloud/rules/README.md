@@ -23,15 +23,21 @@ issue #1324):
   in the `default` pipeline). Sync is authoritative: rules deleted
   here are deleted from the ruler (scoped to the `waddle` namespace).
 
-## Required GitHub Actions secrets (operator setup, once)
+## Required credentials (operator setup, once)
 
-| Secret | Meaning |
+`rulesSync` resolves its credentials from **1Password** through cuenv's
+OnePassword contributor (the same mechanism chat CI uses for
+Cloudflare/Faro; the repo-level `OP_SERVICE_ACCOUNT_TOKEN` GitHub
+secret already exists). Create one item in the `waddle-production`
+vault named **`Grafana-Cloud-Alerting`** with these fields:
+
+| Field | Meaning |
 |---|---|
-| `GRAFANA_CLOUD_MIMIR_ADDRESS` | Mimir ruler API base URL for the stack (e.g. `https://mimir-prod-XX.grafana.net`) |
-| `GRAFANA_CLOUD_MIMIR_TENANT_ID` | Mimir tenant (stack metrics instance id) |
-| `GRAFANA_CLOUD_LOKI_ADDRESS` | Loki ruler API base URL |
-| `GRAFANA_CLOUD_LOKI_TENANT_ID` | Loki tenant (stack logs instance id) |
-| `GRAFANA_CLOUD_RULER_TOKEN` | Cloud access-policy token with `rules:read`/`rules:write` on both |
+| `mimir-address` | Mimir ruler API base URL for the stack (e.g. `https://mimir-prod-XX.grafana.net`) |
+| `mimir-tenant-id` | Mimir tenant (stack metrics instance id) |
+| `loki-address` | Loki ruler API base URL |
+| `loki-tenant-id` | Loki tenant (stack logs instance id) |
+| `ruler-token` | Cloud access-policy token with `rules:read`/`rules:write` on both |
 
 ## Adding a rule
 
