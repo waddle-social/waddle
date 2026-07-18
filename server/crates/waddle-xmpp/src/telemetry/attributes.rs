@@ -293,3 +293,336 @@ impl MetricAttribute for StanzaErrorCondition {
         self.as_str()
     }
 }
+
+/// `route` — an HTTP route **template** from the router table
+/// (`/api/auth/token`, `/api/channels/{id}`), never a raw request
+/// path. The value space is bounded by the set of `&'static str`
+/// templates in the router definition; constructing one from anything
+/// but a router-table literal is a review error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpRouteTemplate(&'static str);
+
+impl HttpRouteTemplate {
+    /// Wrap a router-table route template. `template` MUST be the
+    /// matched route pattern registered with the router, not a
+    /// request path.
+    #[must_use]
+    pub const fn new(template: &'static str) -> Self {
+        Self(template)
+    }
+}
+
+impl sealed::Sealed for HttpRouteTemplate {}
+impl MetricAttribute for HttpRouteTemplate {
+    fn key(&self) -> &'static str {
+        "route"
+    }
+    fn value(&self) -> &'static str {
+        self.0
+    }
+}
+
+/// `status_class` — HTTP response status bucketed to its class, so
+/// the status dimension is exactly five values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpStatusClass {
+    Informational,
+    Success,
+    Redirection,
+    ClientError,
+    ServerError,
+}
+
+impl HttpStatusClass {
+    /// Bucket a numeric status code. Out-of-range codes collapse into
+    /// the nearest class boundary (sub-100 → 1xx, 600+ → 5xx) so the
+    /// label set stays closed.
+    #[must_use]
+    pub const fn from_status(status: u16) -> Self {
+        match status {
+            0..=199 => Self::Informational,
+            200..=299 => Self::Success,
+            300..=399 => Self::Redirection,
+            400..=499 => Self::ClientError,
+            _ => Self::ServerError,
+        }
+    }
+}
+
+impl sealed::Sealed for HttpStatusClass {}
+impl MetricAttribute for HttpStatusClass {
+    fn key(&self) -> &'static str {
+        "status_class"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Informational => "1xx",
+            Self::Success => "2xx",
+            Self::Redirection => "3xx",
+            Self::ClientError => "4xx",
+            Self::ServerError => "5xx",
+        }
+    }
+}
+
+/// `stage` — which step of the authentication surface a sample
+/// belongs to (#1328). One variant per rejection choke point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStage {
+    /// OIDC authorization start / redirect handling.
+    OidcAuthorization,
+    /// OIDC IdP callback (code + state redemption).
+    OidcCallback,
+    /// OAuth token exchange (`/api/auth/token`, XMPP code exchange).
+    TokenExchange,
+    /// OIDC userinfo fetch.
+    Userinfo,
+    /// State / CSRF validation.
+    State,
+    /// OAuth device flow (verify / poll / approve).
+    DeviceFlow,
+    /// Native XEP/SASL SCRAM authentication.
+    Scram,
+}
+
+impl sealed::Sealed for AuthStage {}
+impl MetricAttribute for AuthStage {
+    fn key(&self) -> &'static str {
+        "stage"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::OidcAuthorization => "oidc_authorization",
+            Self::OidcCallback => "oidc_callback",
+            Self::TokenExchange => "token_exchange",
+            Self::Userinfo => "userinfo",
+            Self::State => "state",
+            Self::DeviceFlow => "device_flow",
+            Self::Scram => "scram",
+        }
+    }
+}
+
+/// `error_code` — the enumerated authentication failure classes
+/// (#1328). A closed metric-facing set: auth code maps its concrete
+/// errors into these buckets before emitting, so an IdP's free-form
+/// error string can never become a label value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthErrorCode {
+    /// Unknown, reused, or expired `state` (CSRF mismatch included).
+    InvalidState,
+    /// Authorization code missing, unknown, or already redeemed.
+    InvalidCode,
+    /// Token exchange rejected the grant.
+    InvalidGrant,
+    /// Client credentials rejected.
+    InvalidClient,
+    /// Token or handshake artifact expired.
+    Expired,
+    /// Userinfo fetch failed or returned an unusable document.
+    UserinfoFailed,
+    /// The upstream IdP was unreachable or returned a transport error.
+    ProviderUnreachable,
+    /// SCRAM credential verification failed.
+    InvalidCredentials,
+    /// The account is unknown.
+    UnknownUser,
+    /// Structurally malformed request (missing/invalid parameters).
+    Malformed,
+    /// Any rejection not covered by a specific bucket.
+    Other,
+}
+
+impl sealed::Sealed for AuthErrorCode {}
+impl MetricAttribute for AuthErrorCode {
+    fn key(&self) -> &'static str {
+        "error_code"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::InvalidState => "invalid_state",
+            Self::InvalidCode => "invalid_code",
+            Self::InvalidGrant => "invalid_grant",
+            Self::InvalidClient => "invalid_client",
+            Self::Expired => "expired",
+            Self::UserinfoFailed => "userinfo_failed",
+            Self::ProviderUnreachable => "provider_unreachable",
+            Self::InvalidCredentials => "invalid_credentials",
+            Self::UnknownUser => "unknown_user",
+            Self::Malformed => "malformed",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// `event` — call-signaling event kinds (#1319): XEP-0353 Jingle
+/// Message Initiation verbs plus Muji room join/leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSignalEvent {
+    JmiPropose,
+    JmiProceed,
+    JmiReject,
+    JmiRetract,
+    MujiJoin,
+    MujiLeave,
+}
+
+impl sealed::Sealed for CallSignalEvent {}
+impl MetricAttribute for CallSignalEvent {
+    fn key(&self) -> &'static str {
+        "event"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::JmiPropose => "jmi_propose",
+            Self::JmiProceed => "jmi_proceed",
+            Self::JmiReject => "jmi_reject",
+            Self::JmiRetract => "jmi_retract",
+            Self::MujiJoin => "muji_join",
+            Self::MujiLeave => "muji_leave",
+        }
+    }
+}
+
+/// `reason` — why the Muji/SFU token gate refused to mint a LiveKit
+/// JWT (#1319). Closed metric-facing set; the gate maps its concrete
+/// denial into these buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfuDenialReason {
+    /// The requester is not a member/occupant of the room.
+    MembershipDenied,
+    /// The room does not exist.
+    RoomNotFound,
+    /// The requester failed authentication/authorization upstream of
+    /// membership (bad session, missing identity).
+    NotAuthorized,
+    /// The gate itself failed (lookup error, dependency failure).
+    InternalError,
+}
+
+impl sealed::Sealed for SfuDenialReason {}
+impl MetricAttribute for SfuDenialReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::MembershipDenied => "membership_denied",
+            Self::RoomNotFound => "room_not_found",
+            Self::NotAuthorized => "not_authorized",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
+/// `outcome` — LiveKit webhook ingestion outcome (#1319).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookOutcome {
+    /// A fresh, signature-valid event.
+    Received,
+    /// A replay of an already-processed event id.
+    Duplicate,
+    /// Signature verification failed.
+    SignatureFailed,
+}
+
+impl sealed::Sealed for WebhookOutcome {}
+impl MetricAttribute for WebhookOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Duplicate => "duplicate",
+            Self::SignatureFailed => "signature_failed",
+        }
+    }
+}
+
+/// `outcome` — generic success/failure for bounded request-shaped
+/// operations (token mint, TURN credential issuance, provider send).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Success,
+    Failure,
+}
+
+impl sealed::Sealed for RequestOutcome {}
+impl MetricAttribute for RequestOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// `stage` — where in the push-notification pipeline a sample was
+/// taken (#531). One variant per observable pipeline transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushStage {
+    /// A notification candidate was created from committed state.
+    CandidateCreated,
+    /// The candidate was suppressed (see `PushSuppressReason`).
+    Suppressed,
+    /// The candidate was coalesced into an existing notification.
+    Coalesced,
+    /// The XEP-0357 publish reached the push service.
+    Published,
+    /// The downstream provider accepted the notification.
+    ProviderSent,
+    /// The downstream provider rejected the notification.
+    ProviderRejected,
+    /// The downstream provider reported an expired token.
+    ProviderTokenExpired,
+    /// The outbox scheduled a retry.
+    RetryScheduled,
+    /// The outbox dead-lettered the job.
+    DeadLettered,
+}
+
+impl sealed::Sealed for PushStage {}
+impl MetricAttribute for PushStage {
+    fn key(&self) -> &'static str {
+        "stage"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::CandidateCreated => "candidate_created",
+            Self::Suppressed => "suppressed",
+            Self::Coalesced => "coalesced",
+            Self::Published => "published",
+            Self::ProviderSent => "provider_sent",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTokenExpired => "provider_token_expired",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::DeadLettered => "dead_lettered",
+        }
+    }
+}
+
+/// `provider` — which push provider a sample refers to (#531).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushProvider {
+    WebPush,
+    Apns,
+    Fcm,
+}
+
+impl sealed::Sealed for PushProvider {}
+impl MetricAttribute for PushProvider {
+    fn key(&self) -> &'static str {
+        "provider"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::WebPush => "web_push",
+            Self::Apns => "apns",
+            Self::Fcm => "fcm",
+        }
+    }
+}
