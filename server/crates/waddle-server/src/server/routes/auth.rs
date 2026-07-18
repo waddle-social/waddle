@@ -253,6 +253,7 @@ pub(super) fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorR
         | AuthError::TokenExchangeFailed(_)
         | AuthError::UserInfoFailed(_)
         | AuthError::HttpError(_)
+        | AuthError::ProviderUnreachable(_)
         | AuthError::JwtError(_) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -267,6 +268,7 @@ pub(super) fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorR
         AuthError::TokenExchangeFailed(_) => "token_exchange_failed",
         AuthError::UserInfoFailed(_) => "userinfo_failed",
         AuthError::JwtError(_) => "jwt_error",
+        AuthError::ProviderUnreachable(_) => "provider_unreachable",
         _ => "auth_error",
     };
 

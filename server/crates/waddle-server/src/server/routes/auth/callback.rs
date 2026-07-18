@@ -42,6 +42,7 @@ pub(super) async fn callback_handler(
         record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
+    record_auth_success(AuthStage::State);
 
     let provider = match state.providers.get(&pending.provider_id) {
         Some(p) => p,
@@ -207,8 +208,6 @@ pub(super) async fn callback_handler(
             }
         }
     };
-
-    record_auth_success(AuthStage::State);
 
     let linked = match state
         .identity_service

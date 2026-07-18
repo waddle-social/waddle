@@ -170,8 +170,12 @@ async fn verify_room_membership(
                 &full_jid.to_bare(),
                 SfuDenialReason::InternalError,
             );
-            return GateOutcome::Deny(Box::new(internal_server_error_iq_error(
-                "could not verify MUC membership; please retry",
+            // Telemetry records the true cause, but the wire error
+            // stays `forbidden` — the exact shape this path produced
+            // before the telemetry work; changing client-visible
+            // retry semantics is out of scope here.
+            return GateOutcome::Deny(Box::new(forbidden_iq_error(
+                "not an occupant of the requested room — join the MUC first",
             )));
         }
     };

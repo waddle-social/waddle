@@ -111,20 +111,61 @@ describe("call lifecycle mappings", () => {
     ]);
   });
 
-  test("classifies transport loss from observed reconnect state and permits explicit SID reuse", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
+  test("classifies transport loss from observed reconnect state", () => {
     beginCallAttempt("restored-sid", "dm");
     markCallAttemptAccepted("restored-sid");
     expect(finishCallAttemptForTransportDisconnect("restored-sid")?.endReason).toBe("error");
 
-    beginCallAttempt("restored-sid", "dm");
-    markCallAttemptAccepted("restored-sid");
+    beginCallAttempt("reconnecting-sid", "dm");
+    markCallAttemptAccepted("reconnecting-sid");
     observeCallConnectionPhase("reconnecting");
-    expect(finishCallAttemptForTransportDisconnect("restored-sid")?.endReason)
+    expect(finishCallAttemptForTransportDisconnect("reconnecting-sid")?.endReason)
       .toBe("reconnect-exhausted");
+  });
+
+  test("emits once for a replayed SID while a new SID retry emits independently", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    beginCallAttempt("replayed-sid", "dm");
+    finishCallAttempt(
+      "replayed-sid",
+      { setupOutcome: "failed", endReason: "error" },
+    );
+
+    beginCallAttempt("replayed-sid", "dm");
+    markCallAttemptAccepted("replayed-sid");
+    expect(finishCallAttempt("replayed-sid", { endReason: "hangup" })).toBeNull();
+
+    beginCallAttempt("retry-sid", "dm");
+    markCallAttemptAccepted("retry-sid");
+    finishCallAttempt("retry-sid", { endReason: "hangup" });
 
     expect(stub.events).toHaveLength(2);
+    expect(stub.events.map((event) => event.attributes?.setup_outcome)).toEqual([
+      "failed",
+      "accepted",
+    ]);
+  });
+
+  test("retains exactly-once history for the whole session", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    for (let index = 0; index < 2_050; index += 1) {
+      const sid = `session-sid-${index}`;
+      beginCallAttempt(sid, "dm");
+      finishCallAttempt(sid, { setupOutcome: "failed", endReason: "error" });
+    }
+
+    beginCallAttempt("session-sid-0", "dm");
+    expect(
+      finishCallAttempt("session-sid-0", {
+        setupOutcome: "accepted",
+        endReason: "hangup",
+      })
+    ).toBeNull();
+    expect(stub.events).toHaveLength(2_050);
   });
 
   test("does not call a later transport loss exhausted after a successful reconnect", () => {

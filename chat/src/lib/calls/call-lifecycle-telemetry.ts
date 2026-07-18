@@ -46,7 +46,6 @@ const QUALITY_SEVERITY: Record<CallConnectionQuality, number> = {
 
 const attempts = new Map<string, Attempt>();
 const emittedSids = new Set<string>();
-const MAX_EMITTED_SIDS = 256;
 let currentSid: string | null = null;
 
 export function durationBucket(durationMs: number): CallDurationBucket {
@@ -79,9 +78,7 @@ export function reconnectCountBucket(count: number): CallReconnectCountBucket {
 
 export function beginCallAttempt(sid: string, callKind: CallKind): void {
   if (!sid) return;
-  // An explicit begin is a new attempt even when a restored call reuses the
-  // same protocol sid after a prior disconnect in this SPA lifetime.
-  emittedSids.delete(sid);
+  if (emittedSids.has(sid)) return;
   if (currentSid && currentSid !== sid) {
     const current = attempts.get(currentSid);
     finishCallAttempt(currentSid, {
@@ -175,7 +172,6 @@ export function finishCallAttempt(
     reconnectCount: reconnectCountBucket(attempt.reconnectCount),
   };
   emittedSids.add(sid);
-  trimEmittedSids();
   attempts.delete(sid);
   if (currentSid === sid) currentSid = null;
   reportCallLifecycle(payload);
@@ -186,7 +182,6 @@ export function finishCallAttempt(
 export function reportDeclinedCallAttempt(sid: string, callKind: CallKind = "dm"): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
   emittedSids.add(sid);
-  trimEmittedSids();
   reportCallLifecycle({
     setupOutcome: "declined",
     endReason: "hangup",
@@ -203,7 +198,6 @@ export function reportDeclinedCallAttempt(sid: string, callKind: CallKind = "dm"
 export function reportFailedCallAttempt(sid: string, callKind: CallKind): void {
   if (!sid || attempts.has(sid) || emittedSids.has(sid)) return;
   emittedSids.add(sid);
-  trimEmittedSids();
   reportCallLifecycle({
     setupOutcome: "failed",
     endReason: "error",
@@ -214,12 +208,6 @@ export function reportFailedCallAttempt(sid: string, callKind: CallKind): void {
     connectionQuality: "unknown",
     reconnectCount: "none",
   });
-}
-
-function trimEmittedSids(): void {
-  if (emittedSids.size <= MAX_EMITTED_SIDS) return;
-  const oldest = emittedSids.values().next().value;
-  if (oldest) emittedSids.delete(oldest);
 }
 
 function currentAttempt(): Attempt | undefined {

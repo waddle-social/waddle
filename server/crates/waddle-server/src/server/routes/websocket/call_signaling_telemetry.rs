@@ -46,13 +46,7 @@ pub(crate) fn record_sfu_token_denial(room: &BareJid, user: &BareJid, reason: Sf
         reason = reason.value(),
         "SFU token request denied"
     );
-    waddle_xmpp::counter_add!(
-        "waddle.call.sfu_token.denied",
-        "1",
-        "SFU token requests denied by reason.",
-        1,
-        reason,
-    );
+    waddle_xmpp::telemetry::call::increment_sfu_token_denied(reason);
 }
 
 #[cfg(test)]

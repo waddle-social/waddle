@@ -1312,6 +1312,52 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn managed_channel_lookup_failure_is_logged_but_not_counted_as_a_denial() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CaptureWriter(buffer.clone()))
+            .finish(),
+    );
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "lookup-failure@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    state.deps.app_state.db_pool.global_actor().kill();
+    tokio::task::yield_now().await;
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &None,
+    )
+    .await;
+
+    assert_eq!(denied.len(), 1);
+    assert!(denied[0].contains("internal-server-error"), "{denied:?}");
+    assert_eq!(
+        metrics
+            .counter_sum("waddle.muc.admission.denied", &[])
+            .unwrap_or(0),
+        0,
+        "an unresolved managed status must not count as a managed-channel denial"
+    );
+
+    let denial_log = captured_admission_denial_log(&buffer);
+    assert!(
+        denial_log.contains("\"resolver_outcome\":\"managed-channel-lookup-error\""),
+        "{denial_log}"
+    );
+}
+
 /// #1315: a channel-banned (outcast) joiner is rejected with
 /// `<forbidden/>` per XEP-0045 §7.2.8, even in an open room. The
 /// denial must be counted under the `forbidden` condition through the

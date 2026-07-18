@@ -185,6 +185,9 @@ async fn fetch_jwks(client: &Client, jwks_uri: &str) -> Result<JwkSet, AuthError
 
     if !res.status().is_success() {
         let status = res.status();
+        if status.is_server_error() {
+            return Err(AuthError::ProviderUnreachable(status));
+        }
         let body = res.text().await.unwrap_or_default();
         return Err(AuthError::JwtError(format!(
             "jwks endpoint {}: {}",
@@ -462,6 +465,42 @@ mod tests {
         .to_string();
 
         assert!(err.contains("dynamic registration returned empty client_secret"));
+    }
+
+    #[tokio::test]
+    async fn fetch_jwks_distinguishes_provider_outages_from_client_rejections() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/unavailable-jwks"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/missing-jwks"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let unavailable = fetch_jwks(
+            &Client::new(),
+            &format!("{}/unavailable-jwks", mock_server.uri()),
+        )
+        .await
+        .expect_err("a 5xx JWKS response should fail");
+        assert!(matches!(
+            unavailable,
+            AuthError::ProviderUnreachable(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        ));
+
+        let rejected = fetch_jwks(
+            &Client::new(),
+            &format!("{}/missing-jwks", mock_server.uri()),
+        )
+        .await
+        .expect_err("a 4xx JWKS response should fail");
+        assert!(matches!(rejected, AuthError::JwtError(_)));
     }
 
     #[test]

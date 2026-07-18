@@ -151,14 +151,21 @@ pub fn increment_push_outbox_retry_scheduled(reason: PushRetryReason) {
         1,
         reason,
     );
+    super::push_pipeline::increment_retry_scheduled();
 }
-dual_increment!(
-    increment_push_outbox_dead_lettered,
-    crate::prometheus::increment_push_outbox_dead_lettered,
-    "xmpp.push.outbox_dead_lettered",
-    "{notification}",
-    "XEP-0357 notification outbox jobs terminally dead-lettered."
-);
+
+/// Record terminal outbox dead-lettering in the legacy, reliability, and
+/// typed pipeline families.
+pub fn increment_push_outbox_dead_lettered() {
+    crate::prometheus::increment_push_outbox_dead_lettered();
+    crate::counter_add!(
+        "xmpp.push.outbox_dead_lettered",
+        "{notification}",
+        "XEP-0357 notification outbox jobs terminally dead-lettered.",
+        1,
+    );
+    super::push_pipeline::increment_dead_lettered();
+}
 
 /// Record one typed push suppression in both telemetry systems.
 pub fn increment_push_suppressed(reason: PushSuppressReason) {
@@ -170,6 +177,7 @@ pub fn increment_push_suppressed(reason: PushSuppressReason) {
         1,
         reason,
     );
+    super::push_pipeline::increment_suppressed();
 }
 
 // No dual helper for the legacy unknown-reason catch-all: the sealed
@@ -335,6 +343,10 @@ mod tests {
         increment_push_suppressed(PushSuppressReason::Xep0492Never);
         assert_eq!(
             guard.counter_sum("xmpp.push.suppressed", &[("reason", "xep0492_never")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("waddle.push.pipeline", &[("stage", "suppressed")]),
             Some(1)
         );
         assert!(crate::prometheus::render_metrics()
@@ -666,5 +678,12 @@ mod tests {
             Some(1)
         );
         assert!(rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1\n"));
+        for stage in ["suppressed", "retry_scheduled", "dead_lettered"] {
+            assert_eq!(
+                guard.counter_sum("waddle.push.pipeline", &[("stage", stage)]),
+                Some(1),
+                "typed pipeline sample missing or wrong for {stage}"
+            );
+        }
     }
 }

@@ -18,6 +18,11 @@ pub fn increment_candidate_created() {
     increment_pipeline(PushStage::CandidateCreated);
 }
 
+/// Record a candidate suppressed by notification policy.
+pub fn increment_suppressed() {
+    increment_pipeline(PushStage::Suppressed);
+}
+
 /// Record a duplicate candidate coalesced at durable insertion.
 pub fn increment_coalesced() {
     increment_pipeline(PushStage::Coalesced);
@@ -26,6 +31,16 @@ pub fn increment_coalesced() {
 /// Record an XEP-0357 outbox job accepted by the Push Service.
 pub fn increment_published() {
     increment_pipeline(PushStage::Published);
+}
+
+/// Record an outbox job scheduled for another delivery attempt.
+pub fn increment_retry_scheduled() {
+    increment_pipeline(PushStage::RetryScheduled);
+}
+
+/// Record an outbox job terminally dead-lettered.
+pub fn increment_dead_lettered() {
+    increment_pipeline(PushStage::DeadLettered);
 }
 
 fn increment_provider(stage: PushStage, provider: PushProvider) {
@@ -62,33 +77,29 @@ pub fn increment_provider_token_expired(provider: PushProvider) {
 /// retryable.
 pub fn record_web_push_outcome(outcome: &WebPushOutcome) -> Option<PushStage> {
     let stage = match outcome {
-        WebPushOutcome::Delivered { .. } => PushStage::ProviderSent,
-        WebPushOutcome::SubscriptionGone { .. } => PushStage::ProviderTokenExpired,
+        WebPushOutcome::Delivered { .. } => {
+            increment_provider_sent(PushProvider::WebPush);
+            PushStage::ProviderSent
+        }
+        WebPushOutcome::SubscriptionGone { .. } => {
+            increment_provider_token_expired(PushProvider::WebPush);
+            PushStage::ProviderTokenExpired
+        }
         WebPushOutcome::ClockSkew { .. }
         | WebPushOutcome::RateLimited { .. }
         | WebPushOutcome::PayloadTooLarge { .. }
         | WebPushOutcome::BadRequest { status: 1.. }
         | WebPushOutcome::Transient {
             kind: TransientFailure::ServerError { .. },
-        } => PushStage::ProviderRejected,
+        } => {
+            increment_provider_rejected(PushProvider::WebPush);
+            PushStage::ProviderRejected
+        }
         WebPushOutcome::BadRequest { status: 0 }
         | WebPushOutcome::Transient {
             kind: TransientFailure::Network | TransientFailure::Timeout,
         } => return None,
     };
-    match stage {
-        PushStage::ProviderSent => increment_provider_sent(PushProvider::WebPush),
-        PushStage::ProviderRejected => increment_provider_rejected(PushProvider::WebPush),
-        PushStage::ProviderTokenExpired => {
-            increment_provider_token_expired(PushProvider::WebPush);
-        }
-        PushStage::CandidateCreated
-        | PushStage::Suppressed
-        | PushStage::Coalesced
-        | PushStage::Published
-        | PushStage::RetryScheduled
-        | PushStage::DeadLettered => unreachable!("provider classifier returned pipeline stage"),
-    }
     Some(stage)
 }
 

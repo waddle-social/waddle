@@ -64,6 +64,9 @@ pub enum AuthError {
     #[error("HTTP request failed: {0}")]
     HttpError(String),
 
+    #[error("Identity provider unavailable (HTTP {0})")]
+    ProviderUnreachable(reqwest::StatusCode),
+
     #[error("User already exists: {0}")]
     UserAlreadyExists(String),
 

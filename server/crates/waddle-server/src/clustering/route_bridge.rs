@@ -267,32 +267,45 @@ fn route_target_stanza_is_iq(target: &RemoteResourceRouteTarget) -> bool {
     }
 }
 
-fn log_remote_resource_route_outcome(
-    target: &RemoteResourceRouteTarget,
-    outcome: FullJidDeliveryOutcome,
-) {
+/// The few small fields the delivery-outcome log needs, extracted
+/// before the route target (and its full stanza) is moved into the
+/// routing future — logging must never force a stanza deep-clone.
+struct RouteOutcomeLog {
+    kind: &'static str,
+    entity: String,
+    message_id: String,
+}
+
+fn route_outcome_log(target: &RemoteResourceRouteTarget) -> RouteOutcomeLog {
     match target {
-        RemoteResourceRouteTarget::FullJid { target, stanza } => tracing::debug!(
-            jid = %target,
-            message_id = stanza_message_id(&stanza.0),
-            ?outcome,
-            "ordered-relay full-JID delivery outcome"
-        ),
-        RemoteResourceRouteTarget::BareJid { target, stanza } => tracing::debug!(
-            jid = %target,
-            message_id = stanza_message_id(&stanza.0),
-            ?outcome,
-            "ordered-relay bare-JID delivery outcome"
-        ),
+        RemoteResourceRouteTarget::FullJid { target, stanza } => RouteOutcomeLog {
+            kind: "full-JID",
+            entity: target.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
+        RemoteResourceRouteTarget::BareJid { target, stanza } => RouteOutcomeLog {
+            kind: "bare-JID",
+            entity: target.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
         RemoteResourceRouteTarget::MucProxy {
             room_jid, stanza, ..
-        } => tracing::debug!(
-            room = %room_jid,
-            message_id = stanza_message_id(&stanza.0),
-            ?outcome,
-            "ordered-relay MUC proxy delivery outcome"
-        ),
+        } => RouteOutcomeLog {
+            kind: "MUC proxy",
+            entity: room_jid.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
     }
+}
+
+fn log_remote_resource_route_outcome(context: &RouteOutcomeLog, outcome: FullJidDeliveryOutcome) {
+    tracing::debug!(
+        kind = context.kind,
+        entity = %context.entity,
+        message_id = %context.message_id,
+        ?outcome,
+        "ordered-relay delivery outcome"
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1956,27 +1969,27 @@ impl OrderedRelayDeliveryBridge {
         origin_stanza: &Stanza,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<FullJidDeliveryOutcome> {
+        let outcome_log = route_outcome_log(&target);
         if let Some(handoff) = origin.handoff.clone() {
             if handoff.mark_deferred() {
                 let bridge = Arc::clone(&self);
                 let origin_stanza = origin_stanza.clone();
-                let outcome_target = target.clone();
                 tokio::spawn(async move {
                     let outcome = bridge
                         .route_remote_resource_origin_once(remote_origin, target)
                         .await
                         .unwrap_or(FullJidDeliveryOutcome::Dropped);
-                    log_remote_resource_route_outcome(&outcome_target, outcome);
+                    log_remote_resource_route_outcome(&outcome_log, outcome);
                     handoff.complete(replies_for_origin_handoff(&origin_stanza, outcome));
                 });
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
         }
         let outcome = self
-            .route_remote_resource_origin_once(remote_origin, target.clone())
+            .route_remote_resource_origin_once(remote_origin, target)
             .await;
         if let Some(outcome) = outcome {
-            log_remote_resource_route_outcome(&target, outcome);
+            log_remote_resource_route_outcome(&outcome_log, outcome);
         }
         outcome
     }

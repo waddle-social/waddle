@@ -135,7 +135,7 @@ async fn handle_xmpp_frame_impl(
             if !phase.allows_sasl_auth() {
                 let reset_scram_phase = phase.scram_pending_username().is_some();
                 warn!(phase = ?phase, mechanism = %mechanism, "SASL auth received in invalid phase");
-                if mechanism == "SCRAM-SHA-256" {
+                if reset_scram_phase || mechanism == "SCRAM-SHA-256" {
                     record_scram_failure(AuthFailure::ScramOther, None);
                 }
                 if reset_scram_phase {

@@ -869,9 +869,11 @@ export function setXmppResourceForTelemetry(resource: string): void {
  */
 export function websocketUrlWithTraceparent(value: string): string {
   const activeSpanContext = trace.getSpan(context.active())?.spanContext();
-  const spanContext = activeSpanContext && validSpanContext(activeSpanContext)
-    ? activeSpanContext
-    : randomSpanContext();
+  if (activeSpanContext && validSpanContext(activeSpanContext)) {
+    return websocketUrlWithSpanContext(value, activeSpanContext);
+  }
+  if (typeof globalThis.crypto?.getRandomValues !== "function") return value;
+  const spanContext = randomSpanContext();
   return websocketUrlWithSpanContext(value, spanContext);
 }
 
@@ -890,7 +892,7 @@ function randomSpanContext(): { traceId: string; spanId: string; traceFlags: num
 function randomNonZeroHex(byteLength: number): string {
   let value = "";
   do {
-    value = Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (byte) =>
+    value = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(byteLength)), (byte) =>
       byte.toString(16).padStart(2, "0")
     ).join("");
   } while (/^0+$/.test(value));

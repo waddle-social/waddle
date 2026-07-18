@@ -17,7 +17,12 @@ impl ConnectionRegistry {
     /// a failed send, the stanza is retried on the replacement rather than lost.
     #[instrument(
         skip(self, stanza),
-        fields(to = %jid, message_id = stanza_message_id(&stanza))
+        fields(
+            to = %jid,
+            message_id = %crate::telemetry::messages::fanout_span_message_id(
+                stanza_message_id(&stanza)
+            )
+        )
     )]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {

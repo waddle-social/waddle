@@ -129,9 +129,11 @@ fn matched_route_template(request: &Request<Body>) -> Option<&'static str> {
 /// on the connection-scoped span (links, not parenting — the
 /// connection outlives the browser's connect span).
 ///
-/// Strictly parsed W3C version-00 trace parent supplied by the browser.
-/// Keeping this typed until the OpenTelemetry boundary prevents raw query
-/// strings from flowing through connection state or tracing call sites.
+/// Strictly parsed W3C trace parent supplied by the browser. Version `00`
+/// must have exactly four fields; future versions retain the version-00 field
+/// lengths and may append opaque extension fields. Keeping this typed until
+/// the OpenTelemetry boundary prevents raw query strings from flowing through
+/// connection state or tracing call sites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ClientTraceParent {
     trace_id: TraceId,
@@ -155,7 +157,7 @@ impl ClientTraceParent {
     }
 }
 
-/// Returns `None` for absent, malformed, non-version-00, uppercase, short, or
+/// Returns `None` for absent, malformed, version `ff`, uppercase, short, or
 /// all-zero ids. Invalid client input is deliberately ignored rather than
 /// affecting the WebSocket upgrade response.
 pub(crate) fn client_trace_parent_from_query(query: Option<&str>) -> Option<ClientTraceParent> {
@@ -167,8 +169,10 @@ pub(crate) fn client_trace_parent_from_query(query: Option<&str>) -> Option<Clie
     let trace_id_field = parts.next()?;
     let parent_id_field = parts.next()?;
     let flags_field = parts.next()?;
-    if parts.next().is_some()
-        || version != "00"
+    let has_extension = parts.next().is_some();
+    if !is_lower_hex(version, 2)
+        || version == "ff"
+        || (version == "00" && has_extension)
         || !is_lower_hex(trace_id_field, 32)
         || !is_lower_hex(parent_id_field, 16)
         || !is_lower_hex(flags_field, 2)
@@ -379,8 +383,6 @@ mod tests {
             Some("traceparent=00-0AF7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
             Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-B7ad6b7169203331-01"),
             Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0A"),
-            // Version 00 must have exactly four fields.
-            Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra"),
             // Flags must be exactly two hex digits.
             Some("traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0"),
         ] {
@@ -392,12 +394,37 @@ mod tests {
     }
 
     #[test]
-    fn wrong_traceparent_version_is_rejected() {
-        for version in ["01", "fe", "ff"] {
-            let query = format!(
-                "traceparent={version}-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-            );
-            assert!(client_trace_parent_from_query(Some(&query)).is_none());
+    fn higher_traceparent_version_is_accepted() {
+        assert!(client_trace_parent_from_query(Some(
+            "traceparent=01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        ))
+        .is_some());
+    }
+
+    #[test]
+    fn traceparent_version_ff_is_rejected() {
+        assert!(client_trace_parent_from_query(Some(
+            "traceparent=ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn version_zero_traceparent_with_extras_is_rejected() {
+        assert!(client_trace_parent_from_query(Some(
+            "traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra"
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn higher_version_traceparent_with_extras_is_accepted() {
+        for query in [
+            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-vendor-field",
+            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-",
+            "traceparent=02-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01--opaque",
+        ] {
+            assert!(client_trace_parent_from_query(Some(query)).is_some());
         }
     }
 

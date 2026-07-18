@@ -448,6 +448,54 @@ async fn websocket_failed_reauth_during_scram_resets_phase_and_allows_retry() {
 }
 
 #[tokio::test]
+async fn different_auth_mechanism_aborting_scram_records_scram_failure_metrics() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let domain = state.deps.auth_state.xmpp_domain.clone();
+    register_test_native_user(state.as_ref(), "alice", "correct horse battery staple").await;
+    let client_first = BASE64_STANDARD.encode("n,,n=alice,r=fyko+d2lbbFgONRv9qkxdawL");
+    let scram_auth = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "SCRAM-SHA-256",
+            )
+            .append(client_first)
+            .build(),
+    );
+    let different_auth = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(minidom::rxml::xml_ncname!("mechanism").to_owned(), "PLAIN")
+            .append(BASE64_STANDARD.encode("\0alice\0irrelevant"))
+            .build(),
+    );
+    let mut conn = WsConnState::new();
+
+    let first = handle_xmpp_frame(&scram_auth, &domain, state.as_ref(), &mut conn).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(conn.phase.scram_pending_username(), Some("alice"));
+
+    let second = handle_xmpp_frame(&different_auth, &domain, state.as_ref(), &mut conn).await;
+
+    assert_eq!(second, vec![sasl_failure_xml("not-authorized")]);
+    assert!(matches!(conn.phase, ConnectionPhase::Unauthenticated));
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.auth.failures",
+            &[("stage", "scram"), ("error_code", "other")]
+        ),
+        Some(1),
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "xmpp.auth.attempts",
+            &[("mechanism", "SCRAM-SHA-256"), ("result", "failure")]
+        ),
+        Some(1),
+    );
+}
+
+#[tokio::test]
 async fn websocket_resource_bind_returns_client_iq() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;

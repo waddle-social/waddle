@@ -48,6 +48,7 @@
 //! `test`/`test-utils`).
 
 pub mod attributes;
+pub mod call;
 pub mod messages;
 pub mod push_pipeline;
 pub mod reliability;

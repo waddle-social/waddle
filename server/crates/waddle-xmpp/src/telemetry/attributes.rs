@@ -524,6 +524,8 @@ pub enum WebhookOutcome {
     Duplicate,
     /// Signature verification failed.
     SignatureFailed,
+    /// The signature was valid, but the body did not decode as an event.
+    DecodeFailed,
 }
 
 impl sealed::Sealed for WebhookOutcome {}
@@ -536,6 +538,7 @@ impl MetricAttribute for WebhookOutcome {
             Self::Received => "received",
             Self::Duplicate => "duplicate",
             Self::SignatureFailed => "signature_failed",
+            Self::DecodeFailed => "decode_failed",
         }
     }
 }

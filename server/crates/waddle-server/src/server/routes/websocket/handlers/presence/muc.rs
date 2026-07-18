@@ -691,10 +691,10 @@ fn deny_join_admission(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
-    managed_channel: bool,
+    managed_channel_confirmed: bool,
     denial: JoinAdmissionDenial,
 ) -> Vec<String> {
-    if managed_channel {
+    if managed_channel_confirmed {
         info!(
             room = %room_jid,
             user = %sender_jid.to_bare(),
@@ -759,14 +759,23 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             Ok(channel) => channel,
             Err(error) => {
                 warn!(room = %room_jid, error = %error, "Failed to resolve managed MUC channel");
+                let condition =
+                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError;
+                info!(
+                    room = %room_jid,
+                    user = %sender_jid.to_bare(),
+                    condition = condition.as_str(),
+                    resolver_outcome =
+                        ManagedAdmissionResolverOutcome::ManagedChannelLookupError.as_str(),
+                    "managed-channel admission denied"
+                );
                 return deny_join_admission(
                     room_jid,
                     sender_jid,
                     &nick,
-                    true,
+                    false,
                     JoinAdmissionDenial {
-                        condition:
-                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
+                        condition,
                         error_type: ErrorType::Wait,
                         resolver_outcome:
                             ManagedAdmissionResolverOutcome::ManagedChannelLookupError,

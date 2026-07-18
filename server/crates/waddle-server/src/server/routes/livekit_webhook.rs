@@ -125,7 +125,7 @@ async fn livekit_webhook_handler(
             return StatusCode::UNAUTHORIZED;
         }
         Err(WebhookVerifyError::BodyJson(error)) => {
-            record_webhook_outcome(WebhookOutcome::SignatureFailed);
+            record_webhook_outcome(WebhookOutcome::DecodeFailed);
             warn!(error = ?error, "LiveKit webhook body JSON parse failed");
             return StatusCode::BAD_REQUEST;
         }
@@ -440,6 +440,48 @@ mod tests {
         );
         assert!(logs.contains("\"level\":\"DEBUG\""), "{logs}");
         assert!(logs.contains("EV_duplicate_metric"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn signed_undecodable_webhook_records_decode_failure() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = b"{not-json";
+        let headers = signed_webhook_headers(&secret, body);
+
+        let response = livekit_webhook_handler(
+            Extension(state),
+            State(Arc::new(SeenEventIds::default())),
+            headers,
+            Bytes::from_static(body),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.webhook.events",
+                &[("outcome", "decode_failed")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.webhook.events",
+                &[("outcome", "signature_failed")]
+            ),
+            Some(0)
+        );
     }
 
     #[test]

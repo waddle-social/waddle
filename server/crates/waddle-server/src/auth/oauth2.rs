@@ -64,6 +64,9 @@ pub async fn exchange_code(
 
     if !res.status().is_success() {
         let status = res.status();
+        if status.is_server_error() {
+            return Err(AuthError::ProviderUnreachable(status));
+        }
         let body = res.text().await.unwrap_or_default();
         return Err(AuthError::TokenExchangeFailed(format!(
             "token endpoint {}: {}",
@@ -158,6 +161,9 @@ pub async fn fetch_userinfo(
 
     if !res.status().is_success() {
         let status = res.status();
+        if status.is_server_error() {
+            return Err(AuthError::ProviderUnreachable(status));
+        }
         let body = res.text().await.unwrap_or_default();
         return Err(AuthError::UserInfoFailed(format!(
             "userinfo endpoint {}: {}",
@@ -400,5 +406,90 @@ mod tests {
         assert_eq!(payload_json["htm"], "POST");
         assert_eq!(payload_json["htu"], token_endpoint);
         assert!(payload_json["jti"].as_str().is_some_and(|v| !v.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_distinguishes_provider_outages_from_client_rejections() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/unavailable-token"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/rejected-token"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let provider = oidc_provider_for(AuthProviderTokenEndpointAuthMethod::NoAuthentication);
+        let unavailable = exchange_code(
+            &Client::new(),
+            &provider,
+            &format!("{}/unavailable-token", mock_server.uri()),
+            "auth-code",
+            "https://app.example/callback",
+            "pkce-verifier",
+            false,
+        )
+        .await
+        .expect_err("a 5xx token response should fail");
+        assert!(matches!(
+            unavailable,
+            AuthError::ProviderUnreachable(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        ));
+
+        let rejected = exchange_code(
+            &Client::new(),
+            &provider,
+            &format!("{}/rejected-token", mock_server.uri()),
+            "auth-code",
+            "https://app.example/callback",
+            "pkce-verifier",
+            false,
+        )
+        .await
+        .expect_err("a 4xx token response should fail");
+        assert!(matches!(rejected, AuthError::TokenExchangeFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_userinfo_distinguishes_provider_outages_from_client_rejections() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/unavailable-userinfo"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rejected-userinfo"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let unavailable = fetch_userinfo(
+            &Client::new(),
+            &format!("{}/unavailable-userinfo", mock_server.uri()),
+            "access-token",
+        )
+        .await
+        .expect_err("a 5xx userinfo response should fail");
+        assert!(matches!(
+            unavailable,
+            AuthError::ProviderUnreachable(reqwest::StatusCode::BAD_GATEWAY)
+        ));
+
+        let rejected = fetch_userinfo(
+            &Client::new(),
+            &format!("{}/rejected-userinfo", mock_server.uri()),
+            "access-token",
+        )
+        .await
+        .expect_err("a 4xx userinfo response should fail");
+        assert!(matches!(rejected, AuthError::UserInfoFailed(_)));
     }
 }

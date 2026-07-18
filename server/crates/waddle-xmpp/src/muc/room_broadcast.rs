@@ -19,7 +19,7 @@ impl MucRoom {
     /// - All occupants receive the message (including the sender as echo)
     /// - Visitors in moderated rooms cannot send messages
     #[instrument(
-        name = "xmpp.muc.fanout",
+        name = "xmpp.muc.broadcast_build",
         skip(self, message),
         fields(
             room = %self.room_jid,
@@ -73,10 +73,11 @@ impl MucRoom {
         tracing::Span::current().record("recipients", outbound.len());
         crate::metrics::record_muc_message();
         crate::histogram_record!(
-            "waddle.muc.fanout.duration",
+            "xmpp.muc.broadcast_build.duration",
             "ms",
-            "MUC fanout latency: groupchat broadcast accepted until the \
-             per-recipient outbound set is built.",
+            "MUC broadcast-build duration: groupchat broadcast accepted until \
+             the per-recipient outbound set is built. The full delivery \
+             fan-out interval is `xmpp.muc.fanout.latency`.",
             fanout_started.elapsed().as_secs_f64() * 1000.0,
         );
 

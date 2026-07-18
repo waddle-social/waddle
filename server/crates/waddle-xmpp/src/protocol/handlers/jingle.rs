@@ -1010,12 +1010,7 @@ fn record_sfu_token_minted(call_id: &CallId, identity: &Identity) {
         user = %user,
         "LiveKit SFU token minted"
     );
-    crate::counter_add!(
-        "waddle.call.sfu_token.minted",
-        "1",
-        "LiveKit SFU tokens minted.",
-        1,
-    );
+    crate::telemetry::call::increment_sfu_token_minted();
 }
 
 fn record_sfu_token_mint_failure(call_id: &CallId, identity: &Identity, error: &SfuError) {
@@ -1028,13 +1023,7 @@ fn record_sfu_token_mint_failure(call_id: &CallId, identity: &Identity, error: &
         error = %error,
         "LiveKit SFU token mint failed"
     );
-    crate::counter_add!(
-        "waddle.call.sfu_token.denied",
-        "1",
-        "SFU token requests denied by reason.",
-        1,
-        reason,
-    );
+    crate::telemetry::call::increment_sfu_token_denied(reason);
 }
 
 fn record_sfu_token_authorization_denial(room: &BareJid, user: &BareJid) {
@@ -1045,13 +1034,7 @@ fn record_sfu_token_authorization_denial(room: &BareJid, user: &BareJid) {
         reason = reason.value(),
         "SFU token request denied"
     );
-    crate::counter_add!(
-        "waddle.call.sfu_token.denied",
-        "1",
-        "SFU token requests denied by reason.",
-        1,
-        reason,
-    );
+    crate::telemetry::call::increment_sfu_token_denied(reason);
 }
 
 fn revoke_other_dm_participants(

@@ -422,6 +422,22 @@ describe("telemetry module no-op behaviour", () => {
       .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
   });
 
+  test("leaves the WebSocket URL unchanged when Web Crypto is unavailable", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    const value = "wss://xmpp.example/ws?transport=websocket";
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined,
+    });
+
+    try {
+      expect(websocketUrlWithTraceparent(value)).toBe(value);
+    } finally {
+      if (original) Object.defineProperty(globalThis, "crypto", original);
+      else Reflect.deleteProperty(globalThis, "crypto");
+    }
+  });
+
   test("passes a well-formed traceparent into the XMPP WebSocket configuration", async () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);

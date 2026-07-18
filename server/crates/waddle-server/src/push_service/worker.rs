@@ -775,14 +775,16 @@ impl DatabasePushServiceStore {
         };
         let item_id_arc: Arc<str> = Arc::from(item_id);
         let recipient = recipient.clone();
-        let log_context = parsed.cloned();
+        // `Arc` so the per-device fan-out clones a refcount, not the
+        // parsed payload, for the web-arm log context.
+        let log_context = Arc::new(parsed.cloned());
 
         stream::iter(sealed_devices.iter().cloned())
             .map(move |device| {
                 let item_id = Arc::clone(&item_id_arc);
                 let web_provider = web_provider.clone();
                 let recipient = recipient.clone();
-                let log_context = log_context.clone();
+                let log_context = Arc::clone(&log_context);
                 async move {
                     match (&web_provider, device.platform) {
                         (Some((signer, sender, sub, parsed, secrets)), PushDevicePlatform::Web) => {

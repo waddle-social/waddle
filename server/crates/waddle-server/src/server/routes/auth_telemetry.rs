@@ -57,7 +57,9 @@ pub(super) fn classify_auth_failure(failure: AuthFailure<'_>) -> (AuthStage, Aut
                 | AuthError::UserAlreadyExists(_)
                 | AuthError::CryptoError(_)
                 | AuthError::RegistrationDisabled => AuthErrorCode::Other,
-                AuthError::HttpError(_) => AuthErrorCode::ProviderUnreachable,
+                AuthError::HttpError(_) | AuthError::ProviderUnreachable(_) => {
+                    AuthErrorCode::ProviderUnreachable
+                }
                 AuthError::UserNotFound(_) => AuthErrorCode::UnknownUser,
                 AuthError::InvalidUsername(_) => AuthErrorCode::Malformed,
             };
@@ -193,6 +195,10 @@ mod tests {
                 AuthErrorCode::ProviderUnreachable,
             ),
             (
+                AuthError::ProviderUnreachable(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+                AuthErrorCode::ProviderUnreachable,
+            ),
+            (
                 AuthError::UserAlreadyExists("user".to_string()),
                 AuthErrorCode::Other,
             ),
@@ -236,7 +242,7 @@ mod tests {
             ("userinfo_failed", 1),
             ("invalid_credentials", 2),
             ("expired", 1),
-            ("provider_unreachable", 1),
+            ("provider_unreachable", 2),
             ("unknown_user", 1),
         ];
         for (error_code, expected_count) in expected_counts {
