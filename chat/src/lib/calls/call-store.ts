@@ -331,7 +331,11 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  */
 export function applyCallEvent(
   event: CallEvent,
-  options: { sender?: CallWireSender | null; selfOriginated?: boolean } = {},
+  options: {
+    sender?: CallWireSender | null;
+    selfOriginated?: boolean;
+    selfFullJid?: string;
+  } = {},
 ): void {
   // Route inbound Muji session-accept stanzas to the pending
   // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
@@ -376,6 +380,12 @@ export function applyCallEvent(
     && next.phase === "idle"
     && event.kind === "proceed"
     && event.sid === before.sid
+    // A proceed echoed from THIS resource is the local accept — the
+    // attempt continues into session-initiate, so it must not be
+    // finalized here. `selfOriginated` is bare-JID scoped and would
+    // also match a sibling resource's "accepted elsewhere" proceed,
+    // which DOES end this tab's attempt — hence the full-JID check.
+    && event.from !== options.selfFullJid
   ) {
     finishCallAttempt(before.sid, { setupOutcome: "proposed", endReason: "hangup" });
   }

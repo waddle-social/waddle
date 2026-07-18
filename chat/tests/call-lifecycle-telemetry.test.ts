@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   __resetCallLifecycleTelemetryForTesting,
   beginCallAttempt,
+  resumeCallAttempt,
   durationBucket,
   finishCallAttempt,
   finishCallAttemptForTransportDisconnect,
@@ -166,6 +167,35 @@ describe("call lifecycle mappings", () => {
       })
     ).toBeNull();
     expect(stub.events).toHaveLength(2_050);
+  });
+
+  test("a resumed media session re-opens telemetry for an already-emitted sid", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    // First segment ends in a transport loss and emits its terminal.
+    beginCallAttempt("resumed-sid", "dm");
+    markCallAttemptAccepted("resumed-sid");
+    finishCallAttempt("resumed-sid", { setupOutcome: "accepted", endReason: "error" });
+    expect(stub.events).toHaveLength(1);
+
+    // A replayed proposal with the same sid stays deduped...
+    beginCallAttempt("resumed-sid", "dm");
+    expect(
+      finishCallAttempt("resumed-sid", { setupOutcome: "proposed", endReason: "hangup" })
+    ).toBeNull();
+    expect(stub.events).toHaveLength(1);
+
+    // ...but an explicit resume re-opens the sid so the recovered
+    // segment's duration/quality is not dark.
+    resumeCallAttempt("resumed-sid", "dm");
+    markCallAttemptAccepted("resumed-sid");
+    const payload = finishCallAttempt("resumed-sid", {
+      setupOutcome: "accepted",
+      endReason: "hangup",
+    });
+    expect(payload?.setupOutcome).toBe("accepted");
+    expect(stub.events).toHaveLength(2);
   });
 
   test("does not call a later transport loss exhausted after a successful reconnect", () => {

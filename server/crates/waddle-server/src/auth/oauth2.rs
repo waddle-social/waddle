@@ -65,6 +65,9 @@ pub async fn exchange_code(
     if !res.status().is_success() {
         let status = res.status();
         if status.is_server_error() {
+            // Drain the body so the pooled connection is reusable
+            // during a sustained provider outage.
+            let _ = res.text().await;
             return Err(AuthError::ProviderUnreachable(status));
         }
         let body = res.text().await.unwrap_or_default();
@@ -162,6 +165,9 @@ pub async fn fetch_userinfo(
     if !res.status().is_success() {
         let status = res.status();
         if status.is_server_error() {
+            // Drain the body so the pooled connection is reusable
+            // during a sustained provider outage.
+            let _ = res.text().await;
             return Err(AuthError::ProviderUnreachable(status));
         }
         let body = res.text().await.unwrap_or_default();

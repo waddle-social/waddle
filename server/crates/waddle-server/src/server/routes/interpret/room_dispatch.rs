@@ -535,7 +535,10 @@ pub(super) async fn dispatch_to_room(
     let fanout_span = info_span!(
         "xmpp.muc.fanout",
         room = %room_jid,
-        message_id = incoming.id.as_ref().map_or("", |id| id.0.as_str()),
+        // `working` (not `incoming`): id-less client messages get a
+        // server-generated UUID stamped on the prototype above, so the
+        // fanout trace never collapses them onto an empty id.
+        message_id = working.id.as_ref().map_or("", |id| id.0.as_str()),
         recipients = tracing::field::Empty,
     );
     // Run only the post-gate pipeline (canonicalize → archive → inbox

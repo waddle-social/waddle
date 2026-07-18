@@ -19,7 +19,7 @@ import {
 import type { CallMedia } from "./types";
 import { barePeerJid } from "../xmpp/jid";
 import {
-  beginCallAttempt,
+  resumeCallAttempt,
   finishCallAttempt,
   markCallAttemptAccepted,
   reportFailedCallAttempt,
@@ -149,7 +149,7 @@ export function resumeDmCallActivity(options: {
     join: activity.join,
     initiator: selfFullJid,
   });
-  beginCallAttempt(activity.sid, "dm");
+  resumeCallAttempt(activity.sid, "dm");
   markCallAttemptAccepted(activity.sid);
   return true;
 }

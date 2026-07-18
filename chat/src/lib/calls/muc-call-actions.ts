@@ -10,7 +10,7 @@ import {
 } from "./muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "./types";
 import {
-  beginCallAttempt,
+  resumeCallAttempt,
   markCallAttemptAccepted,
   reportFailedCallAttempt,
 } from "./call-lifecycle-telemetry";
@@ -263,7 +263,7 @@ export async function resumeMucCallActivity({
     selfNick,
     selfFullJid,
   });
-  beginCallAttempt(session.sid, "muc");
+  resumeCallAttempt(session.sid, "muc");
   markCallAttemptAccepted(session.sid);
 
   // Best-effort republish of Muji active presence under the current

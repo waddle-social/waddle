@@ -90,6 +90,20 @@ export function reconnectCountBucket(count: number): CallReconnectCountBucket {
   return "multiple";
 }
 
+/**
+ * Re-open lifecycle telemetry for a recovered media session whose sid
+ * already emitted a terminal event (e.g. transport loss before the tab
+ * resumed the call from cached activity). Unlike `beginCallAttempt`,
+ * this deliberately lifts the sid's exactly-once guard: the recovered
+ * segment is a distinct attempt whose duration/quality would otherwise
+ * go dark. Only the resume paths may call it.
+ */
+export function resumeCallAttempt(sid: string, callKind: CallKind): void {
+  if (!sid) return;
+  emittedSids.delete(sid);
+  beginCallAttempt(sid, callKind);
+}
+
 export function beginCallAttempt(sid: string, callKind: CallKind): void {
   if (!sid) return;
   if (emittedSids.has(sid)) return;

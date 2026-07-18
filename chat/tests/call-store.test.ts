@@ -17,7 +17,11 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
-import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
+import {
+  __resetCallLifecycleTelemetryForTesting,
+  finishCallAttempt,
+  markCallAttemptAccepted,
+} from "../src/lib/calls/call-lifecycle-telemetry";
 import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
@@ -220,6 +224,50 @@ describe("call-store reducer", () => {
       }),
     }]);
 
+  });
+
+  test("local accept proceed does not finalize the attempt (session-initiate follows)", () => {
+    clearCallState();
+    __resetCallLifecycleTelemetryForTesting();
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+      },
+    } as never);
+
+    applyCallEvent({
+      kind: "propose",
+      from: "alice@waddle.test/desktop",
+      sid: "local-accept",
+      media: audioVideo,
+    });
+    // The echo of THIS resource's own <proceed/> (local accept): the
+    // attempt must survive so session-initiate can mark it accepted.
+    applyCallEvent(
+      {
+        kind: "proceed",
+        from: "bob@waddle.test/web",
+        sid: "local-accept",
+      },
+      { selfOriginated: true, selfFullJid: "bob@waddle.test/web" },
+    );
+    expect(events).toEqual([]);
+
+    // The attempt is still alive: a later terminal event emits its
+    // lifecycle beacon (accepted via the media path in the real flow).
+    markCallAttemptAccepted("local-accept");
+    finishCallAttempt("local-accept", { endReason: "hangup" });
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "accepted",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
+    }]);
   });
 
   test("beginOutgoingCall transitions to the outgoing phase", () => {

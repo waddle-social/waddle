@@ -2944,6 +2944,7 @@ export class BrowserXmppClient {
         applyCallEvent(event, {
           sender: xmpp as unknown as CallWireSender,
           selfOriginated: isSelfOriginated,
+          selfFullJid: this.fullJid,
         });
       }
       if (!isSelfOriginated) {
