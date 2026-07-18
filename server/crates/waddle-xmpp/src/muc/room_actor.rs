@@ -575,6 +575,21 @@ pub enum RoomActorError {
     OwnershipUnavailable,
 }
 
+impl Drop for RoomActor {
+    fn drop(&mut self) {
+        // Compensate the pod-wide `xmpp.muc.occupants` gauge for any
+        // occupants still present when this actor tears down — owner
+        // destroy, dormancy/seal eviction, and supervision replacement
+        // all bypass `LeaveByRealJid`, so join/leave deltas alone would
+        // inflate the process-lifetime total forever. `Drop` is the one
+        // seam every teardown path shares.
+        let remaining = self.room.occupants.len();
+        if remaining > 0 {
+            crate::metrics::adjust_muc_occupant_total(-(remaining as i64));
+        }
+    }
+}
+
 impl RoomActor {
     /// Create a new `RoomActor` wrapping the given room.
     pub fn new(

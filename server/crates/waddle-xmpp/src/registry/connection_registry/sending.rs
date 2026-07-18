@@ -250,13 +250,14 @@ impl ConnectionRegistry {
             }
         };
 
-        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&outbound.stanza);
+        // Deliberately NOT counted in `waddle.messages.delivered`: the only
+        // production caller is the clustered route bridge on the socket
+        // node, and the message was already counted on the UserActor-owner
+        // node when it entered the relay pump — counting here would double
+        // every cross-node delivery.
         match sender.try_send(outbound) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
-                if let Some(kind) = delivered_kind {
-                    crate::telemetry::messages::record_delivered_message(kind);
-                }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {

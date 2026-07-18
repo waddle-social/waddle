@@ -75,8 +75,8 @@ impl MucRoom {
         crate::histogram_record!(
             "waddle.muc.fanout.duration",
             "ms",
-            "MUC fanout latency: groupchat broadcast accepted until every \
-             per-recipient send is enqueued.",
+            "MUC fanout latency: groupchat broadcast accepted until the \
+             per-recipient outbound set is built.",
             fanout_started.elapsed().as_secs_f64() * 1000.0,
         );
 

@@ -141,7 +141,7 @@ impl StanzaBackstop {
             span.record("message_id", message_id.as_str());
         }
         if let Some(room) = &correlation.room {
-            span.record("room", room.as_str());
+            span.record("room", tracing::field::display(room));
         }
         if let Some(jid) = bound_jid {
             span.record("xmpp.resource", jid.resource().as_str());
@@ -207,7 +207,8 @@ impl StanzaBackstop {
 /// borrowed stanza before it moves into the dispatch future.
 struct MessageCorrelation {
     message_id: Option<String>,
-    room: Option<String>,
+    /// Typed until the span-record boundary, per the typed-payloads rule.
+    room: Option<jid::BareJid>,
 }
 
 impl MessageCorrelation {
@@ -216,7 +217,7 @@ impl MessageCorrelation {
             Stanza::Message(message) => Self {
                 message_id: message.id.as_ref().map(|id| id.0.clone()),
                 room: (message.type_ == xmpp_parsers::message::MessageType::Groupchat)
-                    .then(|| message.to.as_ref().map(|to| to.to_bare().to_string()))
+                    .then(|| message.to.as_ref().map(|to| to.to_bare()))
                     .flatten(),
             },
             _ => Self {
