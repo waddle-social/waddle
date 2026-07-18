@@ -363,9 +363,12 @@ pub async fn prune_promoted_then_reinsert_for_retry(
 pub fn recent_tombstones_for_promotion(
     sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     context: &'static str,
-) -> Vec<waddle_xmpp::stream_management::RecentTombstoneRecord> {
+) -> Result<
+    Vec<waddle_xmpp::stream_management::RecentTombstoneRecord>,
+    waddle_xmpp::stream_management::SmRegistryError,
+> {
     match sm_registry.recent_tombstones() {
-        Ok(records) => records,
+        Ok(records) => Ok(records),
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -373,7 +376,7 @@ pub fn recent_tombstones_for_promotion(
                 "recent-tombstone read failed; proceeding without the \
                  promotion-time tombstone re-check"
             );
-            Vec::new()
+            Err(error)
         }
     }
 }
@@ -394,12 +397,18 @@ pub fn recent_tombstones_for_promotion(
 /// just-inserted rows are removed again. Idempotent and best-effort —
 /// a scrub failure is logged; the row also stays covered by the
 /// interpret-layer scrub retry semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionScrubOutcome {
+    Completed,
+    Failed,
+}
+
 pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
     sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     pre_promotion: &[waddle_xmpp::stream_management::RecentTombstoneRecord],
     context: &'static str,
-) {
+) -> PromotionScrubOutcome {
     let post_promotion = match sm_registry.recent_tombstones() {
         Ok(records) => records,
         Err(error) => {
@@ -409,9 +418,10 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
                 "post-promotion recent-tombstone read failed; a retraction that \
                  raced this promotion window may deliver at next login"
             );
-            return;
+            return PromotionScrubOutcome::Failed;
         }
     };
+    let mut completed = true;
     for record in post_promotion
         .iter()
         .filter(|record| !pre_promotion.contains(record))
@@ -429,6 +439,7 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
             }
             Ok(_) => {}
             Err(error) => {
+                completed = false;
                 tracing::warn!(
                     target = record.key.id(),
                     archive = %record.key.archive_jid(),
@@ -439,6 +450,11 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
                 );
             }
         }
+    }
+    if completed {
+        PromotionScrubOutcome::Completed
+    } else {
+        PromotionScrubOutcome::Failed
     }
 }
 
@@ -457,7 +473,7 @@ pub async fn promote_displaced_sessions(
         {
             Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
             Err(error) => {
-                waddle_xmpp::prometheus::increment_sm_promotion_blocklist_failed();
+                waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
                 if let Err(record_error) = deps
                     .sm_registry
                     .record_promotion_failure(&session.stream_id)
@@ -494,8 +510,12 @@ pub async fn promote_displaced_sessions(
         // session's promotion, so a retraction racing the displacement
         // drain — even one landing mid-batch — still scrubs the
         // in-flight copies.
-        let recent_tombstones =
-            recent_tombstones_for_promotion(deps.sm_registry, "displaced SM promotion");
+        let mut recent_tombstones = Vec::new();
+        if let Ok(records) =
+            recent_tombstones_for_promotion(deps.sm_registry, "displaced SM promotion")
+        {
+            recent_tombstones = records;
+        }
         let summary = promote_session_unacked(
             &session,
             deps.connection_registry,
@@ -517,7 +537,7 @@ pub async fn promote_displaced_sessions(
         )
         .await;
         if summary.has_storage_failure() {
-            waddle_xmpp::prometheus::add_sm_promotion_storage_failed(u64::from(
+            waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(u64::from(
                 summary.storage_failed,
             ));
             if let Err(error) = deps
@@ -618,7 +638,7 @@ async fn promote_one(
     mut ctx: PromotionContext<'_>,
 ) -> PromotedOutcome {
     if waddle_xmpp_core::mam::is_mam_query_response_message(&message) {
-        waddle_xmpp::prometheus::increment_sm_promotion_not_promotable();
+        waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
         return PromotedOutcome::NotPromotable;
     }
 

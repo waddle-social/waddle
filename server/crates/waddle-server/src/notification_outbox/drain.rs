@@ -57,8 +57,8 @@ impl NotificationOutboxStore {
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
-                        waddle_xmpp::prometheus::increment_push_suppressed(
-                            SuppressedReason::Xep0191Blocked.as_db_value(),
+                        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                            SuppressedReason::Xep0191Blocked.telemetry_reason(),
                         );
                         processed += 1;
                     }
@@ -156,7 +156,9 @@ impl NotificationOutboxStore {
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
-                        waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+                        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                            reason.telemetry_reason(),
+                        );
                         processed += 1;
                     }
                     continue;
@@ -250,7 +252,9 @@ impl NotificationOutboxStore {
             let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
             tx.commit().await?;
             if claimed > 0 {
-                waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+                waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                    reason.telemetry_reason(),
+                );
             }
             return Ok(claimed > 0);
         }

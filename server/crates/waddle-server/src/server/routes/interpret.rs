@@ -180,7 +180,9 @@ use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
     resolve_room_claim_fence, ArchiveGroupchatOutcome,
 };
+#[cfg(test)]
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
+pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates_for_sweep;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
@@ -192,7 +194,9 @@ pub use handoff::{
     OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
+#[cfg(test)]
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
+pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates_for_sweep;
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::{
@@ -204,6 +208,12 @@ use routing::{
     deliver_peer_to_live_only, deliver_to_detached, run_fanout_recipient_pass,
     run_headless_recipient_pass, FanoutPassResult,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NotificationRecoverySweepOutcome {
+    pub(crate) completed: usize,
+    pub(crate) had_failure: bool,
+}
 
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;

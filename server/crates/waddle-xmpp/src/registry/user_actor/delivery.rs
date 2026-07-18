@@ -37,7 +37,6 @@ use kameo::message::Context;
 use tokio::sync::mpsc::error::TrySendError;
 
 use super::UserActor;
-use crate::prometheus;
 use crate::registry::connection_registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
 use crate::Stanza;
 
@@ -48,24 +47,24 @@ impl UserActor {
     /// place (mirrors `ConnectionRegistry::try_send_to_with_kind`).
     fn try_deliver(&mut self, jid: &FullJid, outbound: OutboundStanza) -> BroadcastOutcome {
         let Some(entry) = self.connections.get(jid) else {
-            prometheus::increment_broadcast_not_connected();
+            crate::telemetry::reliability::increment_broadcast_not_connected();
             return BroadcastOutcome::NotConnected;
         };
         let delivered_kind = crate::telemetry::messages::delivered_message_kind(&outbound.stanza);
         match entry.sender.try_send(outbound) {
             Ok(()) => {
-                prometheus::increment_broadcast_delivered();
+                crate::telemetry::reliability::increment_broadcast_delivered();
                 if let Some(kind) = delivered_kind {
                     crate::telemetry::messages::record_delivered_message(kind);
                 }
                 BroadcastOutcome::Delivered
             }
             Err(TrySendError::Full(_)) => {
-                prometheus::increment_broadcast_dropped_full();
+                crate::telemetry::reliability::increment_broadcast_dropped_full();
                 BroadcastOutcome::DroppedFull
             }
             Err(TrySendError::Closed(_)) => {
-                prometheus::increment_broadcast_dropped_closed();
+                crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 // The actor serializes register against send, so unlike the
                 // DashMap path there is no concurrent-replacement window: if
                 // the stored entry's channel is closed it is genuinely dead

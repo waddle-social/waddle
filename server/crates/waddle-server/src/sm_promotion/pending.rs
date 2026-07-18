@@ -80,7 +80,7 @@ pub(super) async fn insert_pending(
             // typed StanzaError builder the routing layer uses for
             // intake-time quota overflow so the wire shape is
             // identical.
-            waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
+            waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
             send_quota_bounce(original_message, &recipient, delivery).await;
             PromotedOutcome::Bounced
         }

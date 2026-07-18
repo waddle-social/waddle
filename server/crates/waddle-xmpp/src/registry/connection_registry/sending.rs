@@ -189,7 +189,7 @@ impl ConnectionRegistry {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
-                prometheus::increment_broadcast_not_connected();
+                crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }
         };
@@ -197,14 +197,14 @@ impl ConnectionRegistry {
         let delivered_kind = crate::telemetry::messages::delivered_message_kind(&stanza);
         match sender.try_send(OutboundStanza::new(stanza)) {
             Ok(()) => {
-                prometheus::increment_broadcast_delivered();
+                crate::telemetry::reliability::increment_broadcast_delivered();
                 if let Some(kind) = delivered_kind {
                     crate::telemetry::messages::record_delivered_message(kind);
                 }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                prometheus::increment_broadcast_dropped_full();
+                crate::telemetry::reliability::increment_broadcast_dropped_full();
                 // Keep per-recipient detail at debug only — the
                 // aggregated broadcast log at the call site already
                 // reports a per-send `dropped_full` total, and
@@ -219,7 +219,7 @@ impl ConnectionRegistry {
                 BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                prometheus::increment_broadcast_dropped_closed();
+                crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
                 BroadcastOutcome::DroppedClosed
             }
@@ -245,7 +245,7 @@ impl ConnectionRegistry {
                 entry.value().sender.clone()
             }
             _ => {
-                prometheus::increment_broadcast_not_connected();
+                crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }
         };
@@ -260,15 +260,15 @@ impl ConnectionRegistry {
         // Counting here would double every cross-node delivery.
         match sender.try_send(outbound) {
             Ok(()) => {
-                prometheus::increment_broadcast_delivered();
+                crate::telemetry::reliability::increment_broadcast_delivered();
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                prometheus::increment_broadcast_dropped_full();
+                crate::telemetry::reliability::increment_broadcast_dropped_full();
                 BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                prometheus::increment_broadcast_dropped_closed();
+                crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed_owner(jid, &sender);
                 BroadcastOutcome::DroppedClosed
             }

@@ -245,7 +245,7 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
-    waddle_xmpp::prometheus::increment_sm_send_window_pause();
+    waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
     let deadline = tokio::time::Instant::now() + SEND_WINDOW_PAUSE_DEADLINE;
     // Elicit an ack immediately — nothing more is being written until the
     // window recovers, so the client must be prompted.
@@ -268,7 +268,7 @@ where
         let next = match tokio::time::timeout_at(deadline, reader.next()).await {
             Ok(next) => next,
             Err(_) => {
-                waddle_xmpp::prometheus::increment_sm_send_window_pause_timeout();
+                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
                 warn!(
                     stream_id = conn.sm_state.stream_id.as_deref().unwrap_or("<unset>"),
                     deadline_secs = SEND_WINDOW_PAUSE_DEADLINE.as_secs(),

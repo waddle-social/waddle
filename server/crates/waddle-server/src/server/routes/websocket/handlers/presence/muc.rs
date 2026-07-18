@@ -374,7 +374,7 @@ pub(crate) async fn route_room_presence_to_occupant(
                     retried = true;
                     continue;
                 }
-                waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+                waddle_xmpp::telemetry::reliability::increment_delivery_retry_exhausted_drop();
                 warn!(
                     room = %room_jid,
                     recipient = %recipient,

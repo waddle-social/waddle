@@ -187,7 +187,7 @@ where
                     // logs can flag MAM corruption / unexpected
                     // tombstones.
                     outcome.unresolved += 1;
-                    waddle_xmpp::prometheus::increment_pending_delivery_unresolved_poison_pill();
+                    waddle_xmpp::telemetry::reliability::increment_pending_delivery_unresolved_poison_pill();
                     if let Err(error) = storage.delete_row(&row.id).await {
                         warn!(
                             row_id = %row.id,
@@ -215,7 +215,7 @@ where
                     // `deferred_transient > 0` — or via another
                     // recovering resource.
                     outcome.deferred_transient += 1;
-                    waddle_xmpp::prometheus::increment_pending_delivery_archive_lookup_transient_failure();
+                    waddle_xmpp::telemetry::reliability::increment_pending_delivery_archive_lookup_transient_failure();
                     warn!(
                         row_id = %row.id,
                         error = %error,

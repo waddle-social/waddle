@@ -258,6 +258,31 @@ impl SuppressedReason {
         }
     }
 
+    /// Convert the persisted audit reason into the metric-facing closed set.
+    /// Exhaustive matching keeps the boundary typed and makes new variants a
+    /// compile-time decision for telemetry as well as storage.
+    pub(crate) fn telemetry_reason(self) -> waddle_xmpp::telemetry::attributes::PushSuppressReason {
+        use waddle_xmpp::telemetry::attributes::PushSuppressReason as MetricReason;
+
+        match self {
+            Self::Xep0357Self => MetricReason::Xep0357Self,
+            Self::Xep0357NoRegistration => MetricReason::Xep0357NoRegistration,
+            Self::Xep0357RegistrationDisabled => MetricReason::Xep0357RegistrationDisabled,
+            Self::Xep0492Never => MetricReason::Xep0492Never,
+            Self::Xep0492OnMentionMiss => MetricReason::Xep0492OnMentionMiss,
+            Self::Xep0191Blocked => MetricReason::Xep0191Blocked,
+            Self::Xep0513Noping => MetricReason::Xep0513Noping,
+            Self::Xep0513ActiveMiss => MetricReason::Xep0513ActiveMiss,
+            Self::WaddleDnd => MetricReason::WaddleDnd,
+            Self::ProviderRejected => MetricReason::ProviderRejected,
+            Self::ProviderTokenExpired => MetricReason::ProviderTokenExpired,
+            Self::Xep0357PushServiceDegraded => MetricReason::Xep0357PushServiceDegraded,
+            Self::UnreadZeroAtPublish => MetricReason::UnreadZeroAtPublish,
+            Self::PolicyRetriesExhausted => MetricReason::PolicyRetriesExhausted,
+            Self::Xep0444Reaction => MetricReason::Xep0444Reaction,
+        }
+    }
+
     pub(crate) fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         // Iterate the closed `ALL` set rather than re-listing the
         // variants in a `match` arm — keeps the audit shape, the
@@ -567,36 +592,32 @@ mod tests {
         ));
     }
 
-    /// Wire-contract lockstep guard: every `SuppressedReason` variant
-    /// MUST have its `as_db_value()` listed in
-    /// `waddle_xmpp::prometheus::push_suppressed_reasons()`. The
-    /// prometheus parallel constant lives upstream of this enum (in
-    /// `waddle-xmpp`) and cannot import the typed enum, so the
-    /// invariant is enforced from this side. Drift here means an
-    /// `increment_push_suppressed(...)` call for the missing variant
-    /// would hit the `waddle_push_suppressed_unknown_reason_total`
-    /// catch-all instead of the typed counter — observable but
-    /// incorrect.
+    /// Cross-crate lockstep guard: every persisted `SuppressedReason` maps
+    /// exhaustively to a metric `PushSuppressReason`, and both typed enums
+    /// retain byte-identical values. The Prometheus view is derived from the
+    /// metric enum, so the reverse check also prevents metric-only labels.
     #[test]
-    fn suppressed_reason_wire_contract_matches_prometheus_parallel_constant() {
+    fn suppressed_reason_values_match_the_typed_metric_enum() {
         let wire = waddle_xmpp::prometheus::push_suppressed_reasons();
         for reason in SuppressedReason::ALL.iter().copied() {
             let db = reason.as_db_value();
+            assert_eq!(
+                reason.telemetry_reason().as_str(),
+                db,
+                "typed telemetry mapping drifted for {reason:?}"
+            );
             assert!(
                 wire.contains(&db),
                 "`SuppressedReason::{reason:?}` (db value `{db}`) is missing from \
-                 `waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS`; the parallel \
-                 constant has drifted from the typed enum"
+                 the metric-facing `PushSuppressReason` values"
             );
         }
-        // Reverse direction: any string in the parallel constant that
-        // does NOT round-trip through `SuppressedReason::from_db_value`
-        // is dead weight in the metrics surface.
+        // Reverse direction: any metric label that does not round-trip through
+        // the persisted enum is dead weight in the metrics surface.
         for label in wire.iter().copied() {
             assert!(
                 SuppressedReason::from_db_value(label).is_ok(),
-                "`PUSH_SUPPRESSED_REASONS` entry `{label}` is not a known \
-                 `SuppressedReason::as_db_value()`; the parallel constant has drifted"
+                "metric reason `{label}` is not a known persisted `SuppressedReason` value"
             );
         }
         assert_eq!(
