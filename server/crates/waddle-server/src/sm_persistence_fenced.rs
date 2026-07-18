@@ -136,7 +136,7 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage, SmUnackedStanzaPurpose,
+    SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};

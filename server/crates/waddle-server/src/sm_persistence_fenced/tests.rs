@@ -28,6 +28,7 @@ use crate::db::DatabaseConfig;
 use chrono::TimeZone;
 use std::time::Duration as StdDuration;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
 
