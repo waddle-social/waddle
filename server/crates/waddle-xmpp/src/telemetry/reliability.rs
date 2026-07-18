@@ -407,4 +407,247 @@ mod tests {
             .collect();
         assert_eq!(enum_values, crate::prometheus::PUSH_SUPPRESSED_REASONS);
     }
+
+    /// One dual-emit contract case: drive `emit`, then expect the OTel
+    /// counter `otel` and the legacy text line `legacy` to both read
+    /// `expected`.
+    struct DualEmitCase {
+        otel: &'static str,
+        legacy: &'static str,
+        expected: u64,
+        emit: fn(),
+    }
+
+    /// #1330 acceptance: metric-reader-seam coverage for EVERY migrated
+    /// counter, not a per-family sample. Each helper is driven once and
+    /// both halves of the dual emit are asserted — the exported OTel
+    /// sample under the new `xmpp.*` name and the legacy `waddle_*`
+    /// text line the recording-rule aliases will later map from.
+    #[tokio::test]
+    async fn every_migrated_counter_dual_emits() {
+        let cases: &[DualEmitCase] = &[
+            // Stream-management family.
+            DualEmitCase {
+                otel: "xmpp.sm.unacked_evicted",
+                legacy: "waddle_sm_unacked_evicted_total",
+                expected: 1,
+                emit: increment_sm_unacked_evicted,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.promotion_storage_failed",
+                legacy: "waddle_sm_promotion_storage_failed_total",
+                expected: 3,
+                emit: || add_sm_promotion_storage_failed(3),
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.promotion_not_promotable",
+                legacy: "waddle_sm_promotion_not_promotable_total",
+                expected: 1,
+                emit: increment_sm_promotion_not_promotable,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.promotion_blocklist_failed",
+                legacy: "waddle_sm_promotion_blocklist_failed_total",
+                expected: 1,
+                emit: increment_sm_promotion_blocklist_failed,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.promotion_dead_lettered",
+                legacy: "waddle_sm_promotion_dead_lettered_total",
+                expected: 1,
+                emit: increment_sm_promotion_dead_lettered,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.drain_timeout",
+                legacy: "waddle_sm_drain_timeout_total",
+                expected: 1,
+                emit: increment_sm_drain_timeout,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.resume_window_clamped",
+                legacy: "waddle_sm_resume_window_clamped_total",
+                expected: 1,
+                emit: increment_sm_resume_window_clamped,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.send_window_pauses",
+                legacy: "waddle_sm_send_window_pauses_total",
+                expected: 1,
+                emit: increment_sm_send_window_pause,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.send_window_pause_timeouts",
+                legacy: "waddle_sm_send_window_pause_timeouts_total",
+                expected: 1,
+                emit: increment_sm_send_window_pause_timeout,
+            },
+            DualEmitCase {
+                otel: "xmpp.sm.detached_unacked_evicted",
+                legacy: "waddle_sm_detached_unacked_evicted_total",
+                expected: 1,
+                emit: increment_sm_detached_unacked_evicted,
+            },
+            // Push family (reason-carrying helpers asserted separately below).
+            DualEmitCase {
+                otel: "xmpp.push.candidate_created",
+                legacy: "waddle_push_candidate_created_total",
+                expected: 1,
+                emit: increment_push_candidate_created,
+            },
+            DualEmitCase {
+                otel: "xmpp.push.candidate_coalesced",
+                legacy: "waddle_push_candidate_coalesced_total",
+                expected: 1,
+                emit: increment_push_candidate_coalesced,
+            },
+            DualEmitCase {
+                otel: "xmpp.push.outbox_published",
+                legacy: "waddle_push_outbox_published_total",
+                expected: 1,
+                emit: increment_push_outbox_published,
+            },
+            DualEmitCase {
+                otel: "xmpp.push.outbox_dead_lettered",
+                legacy: "waddle_push_outbox_dead_lettered_total",
+                expected: 1,
+                emit: increment_push_outbox_dead_lettered,
+            },
+            // Pending-delivery family.
+            DualEmitCase {
+                otel: "xmpp.pending_delivery.quota_exceeded",
+                legacy: "waddle_pending_delivery_quota_exceeded_total",
+                expected: 1,
+                emit: increment_pending_delivery_quota_exceeded,
+            },
+            DualEmitCase {
+                otel: "xmpp.pending_delivery.orphan_claims_released",
+                legacy: "waddle_pending_delivery_orphan_claims_released_total",
+                expected: 4,
+                emit: || add_pending_delivery_orphan_claims_released(4),
+            },
+            DualEmitCase {
+                otel: "xmpp.pending_delivery.aged_out",
+                legacy: "waddle_pending_delivery_aged_out_total",
+                expected: 2,
+                emit: || add_pending_delivery_aged_out(2),
+            },
+            DualEmitCase {
+                otel: "xmpp.pending_delivery.unresolved_poison_pill",
+                legacy: "waddle_pending_delivery_unresolved_poison_pill_total",
+                expected: 1,
+                emit: increment_pending_delivery_unresolved_poison_pill,
+            },
+            DualEmitCase {
+                otel: "xmpp.pending_delivery.archive_lookup_transient_failure",
+                legacy: "waddle_pending_delivery_archive_lookup_transient_failure_total",
+                expected: 1,
+                emit: increment_pending_delivery_archive_lookup_transient_failure,
+            },
+            DualEmitCase {
+                otel: "xmpp.pending.flush_batches",
+                legacy: "waddle_pending_flush_batches_total",
+                expected: 2,
+                emit: || add_pending_flush_batches(2),
+            },
+            DualEmitCase {
+                otel: "xmpp.pending.flush_rows_pushed",
+                legacy: "waddle_pending_flush_rows_pushed_total",
+                expected: 5,
+                emit: || add_pending_flush_rows_pushed(5),
+            },
+            // Broadcast family.
+            DualEmitCase {
+                otel: "xmpp.broadcast.delivered",
+                legacy: "waddle_broadcast_delivered_total",
+                expected: 1,
+                emit: increment_broadcast_delivered,
+            },
+            DualEmitCase {
+                otel: "xmpp.broadcast.not_connected",
+                legacy: "waddle_broadcast_not_connected_total",
+                expected: 1,
+                emit: increment_broadcast_not_connected,
+            },
+            DualEmitCase {
+                otel: "xmpp.broadcast.dropped_full",
+                legacy: "waddle_broadcast_dropped_full_total",
+                expected: 1,
+                emit: increment_broadcast_dropped_full,
+            },
+            DualEmitCase {
+                otel: "xmpp.broadcast.dropped_closed",
+                legacy: "waddle_broadcast_dropped_closed_total",
+                expected: 1,
+                emit: increment_broadcast_dropped_closed,
+            },
+            // Delivery-loss family.
+            DualEmitCase {
+                otel: "xmpp.delivery.terminal_error_drop",
+                legacy: "waddle_delivery_terminal_error_drop_total",
+                expected: 1,
+                emit: increment_delivery_terminal_error_drop,
+            },
+            DualEmitCase {
+                otel: "xmpp.delivery.retry_exhausted_drop",
+                legacy: "waddle_delivery_retry_exhausted_drop_total",
+                expected: 1,
+                emit: increment_delivery_retry_exhausted_drop,
+            },
+            DualEmitCase {
+                otel: "xmpp.resolver.affiliation_sync_capacity_drop",
+                legacy: "waddle_resolver_affiliation_sync_capacity_drop_total",
+                expected: 1,
+                emit: increment_resolver_affiliation_sync_capacity_drop,
+            },
+            DualEmitCase {
+                otel: "xmpp.user_actor.reaped",
+                legacy: "waddle_user_actor_reaped_total",
+                expected: 1,
+                emit: increment_user_actor_reaped,
+            },
+            // DND.
+            DualEmitCase {
+                otel: "xmpp.dnd.projection_read_errored",
+                legacy: "waddle_dnd_projection_read_errored_total",
+                expected: 1,
+                emit: increment_dnd_projection_read_errored,
+            },
+        ];
+
+        let guard = setup().await;
+        for case in cases {
+            (case.emit)();
+        }
+        increment_push_outbox_retry_scheduled(super::PushRetryReason::Unknown);
+        increment_push_suppressed(PushSuppressReason::WaddleDnd);
+
+        let rendered = crate::prometheus::render_metrics();
+        for case in cases {
+            assert_eq!(
+                guard.counter_sum(case.otel, &[]),
+                Some(case.expected),
+                "OTel sample missing or wrong for {}",
+                case.otel
+            );
+            assert!(
+                rendered.contains(&format!("{} {}\n", case.legacy, case.expected)),
+                "legacy text line missing or wrong for {}",
+                case.legacy
+            );
+        }
+        // The two reason-carrying helpers keep their label shape on both
+        // halves.
+        assert_eq!(
+            guard.counter_sum("xmpp.push.outbox_retry_scheduled", &[("reason", "unknown")]),
+            Some(1)
+        );
+        assert!(
+            rendered.contains("waddle_push_outbox_retry_scheduled_total{reason=\"unknown\"} 1\n")
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.push.suppressed", &[("reason", "waddle_dnd")]),
+            Some(1)
+        );
+        assert!(rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1\n"));
+    }
 }
