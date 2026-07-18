@@ -6,7 +6,11 @@
  * persistence — all exercised without constructing the full client.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
+import {
+  TypedEventBus,
+  type ClientEvents,
+  type QueueDepthTelemetry,
+} from "../src/lib/xmpp/client-events";
 import {
   OfflineSendQueue,
   ReconnectScheduler,
@@ -34,6 +38,14 @@ import { XmppLifecycleId } from "../src/lib/xmpp/resume-persistence";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp/types";
 
 const SCOPE = "alice@example.com";
+
+function latestQueueDepths(
+  depths: readonly QueueDepthTelemetry[],
+): Partial<Record<QueueDepthTelemetry["kind"], QueueDepthTelemetry>> {
+  return Object.fromEntries(
+    depths.slice(-2).map((depth) => [depth.kind, depth]),
+  );
+}
 
 function messageResumeEntry(id: string): XmppResumeEntry {
   return {
@@ -419,7 +431,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
     const { queue, events } = await createActiveQueue();
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
@@ -480,7 +492,7 @@ describe("OfflineSendQueue drain ordering", () => {
         return opts.id;
       },
     });
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
@@ -488,14 +500,20 @@ describe("OfflineSendQueue drain ordering", () => {
 
     await expect(queue.flushDirect()).rejects.toThrow("socket unavailable");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["dm-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-retry", status: "queued" });
 
     await queue.flushDirect();
     await queue.handleAck("dm-retry");
     expect(attempt).toBe(2);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(latestQueueDepths(depths)).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("a confirmed WASM send stays inflight when its control follow-up disconnects", async () => {
@@ -510,7 +528,7 @@ describe("OfflineSendQueue drain ordering", () => {
         return id;
       },
     });
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const failures: string[] = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageDeliveryFailure", (id) => failures.push(id));
@@ -525,8 +543,12 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(failures).toEqual([]);
     expect(listQueuedMessages(SCOPE).map((message) => message.id))
       .toEqual(["dm-confirmed-control-failure"]);
-    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
-    expect(depths.at(-1)?.oldestAgeMs).toBeGreaterThanOrEqual(0);
+    const latestDepths = latestQueueDepths(depths);
+    expect(latestDepths).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 1 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
+    expect(latestDepths.dm?.oldestAgeMs).toBeGreaterThanOrEqual(0);
   });
 
   test("null and mismatched queued DM attempts roll back before a later acked retry", async () => {
@@ -539,7 +561,7 @@ describe("OfflineSendQueue drain ordering", () => {
         return opts.id;
       },
     });
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     const queuedIds = () => listQueuedMessages(SCOPE).map((message) => message.id);
     events.on("queueDepthChange", (depth) => depths.push(depth));
@@ -548,20 +570,29 @@ describe("OfflineSendQueue drain ordering", () => {
 
     await queue.flushDirect();
     expect(queuedIds()).toEqual(["dm-null-mismatch"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
 
     await expect(queue.flushDirect())
       .rejects.toThrow("XMPP send returned a different stanza id");
     expect(queuedIds()).toEqual(["dm-null-mismatch"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-null-mismatch", status: "queued" });
 
     await queue.flushDirect();
     await queue.handleAck("dm-null-mismatch");
     expect(attempt).toBe(3);
     expect(queuedIds()).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(latestQueueDepths(depths)).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("a rejected queued room attempt stays retryable before a later acked retry", async () => {
@@ -573,7 +604,7 @@ describe("OfflineSendQueue drain ordering", () => {
         return opts.id;
       },
     });
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
@@ -582,14 +613,20 @@ describe("OfflineSendQueue drain ordering", () => {
     await expect(queue.flushRoom("general@muc.example.com"))
       .rejects.toThrow("room socket unavailable");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-rejected"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 1, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-rejected", status: "queued" });
 
     await queue.flushRoom("general@muc.example.com");
     await queue.handleAck("room-rejected");
     expect(attempt).toBe(2);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(latestQueueDepths(depths)).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("null and mismatched queued room attempts roll back and the coalescer later retries", async () => {
@@ -602,7 +639,7 @@ describe("OfflineSendQueue drain ordering", () => {
         return opts.id;
       },
     });
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("queuedMessageStatus", (id, status) => statuses.push({ id, status }));
@@ -610,20 +647,29 @@ describe("OfflineSendQueue drain ordering", () => {
 
     await queue.flushRoom("general@muc.example.com");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 1, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
 
     await expect(queue.flushRoom("general@muc.example.com"))
       .rejects.toThrow("XMPP send returned a different stanza id");
     expect(listQueuedMessages(SCOPE).map((message) => message.id)).toEqual(["room-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 1, inflight: 0 },
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-retry", status: "queued" });
 
     await queue.flushRoom("general@muc.example.com");
     await queue.handleAck("room-retry");
     expect(attempt).toBe(3);
     expect(listQueuedMessages(SCOPE)).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(latestQueueDepths(depths)).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("an ack without an exact generation claim cannot delete a reloaded row", async () => {
@@ -823,7 +869,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("resume reconciliation tracks XEP-0198 replayed stanza ids so acks clear the store", async () => {
     const { queue, events } = await createActiveQueue();
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
     await queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
@@ -852,7 +898,7 @@ describe("OfflineSendQueue drain ordering", () => {
       },
     });
     const failures: string[] = [];
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     events.on("messageDeliveryFailure", (id) => failures.push(id));
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
@@ -869,18 +915,27 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(sent).toEqual([]);
     expect(failures).toEqual([]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
-    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 1 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
 
     await queue.reconcileFreshSession(1, null);
     await queue.flushDirect();
 
     expect(sent).toEqual(["dm-native-fallback"]);
     expect(listQueuedMessages(SCOPE).map((entry) => entry.id)).toEqual(["dm-native-fallback"]);
-    expect(depths.at(-1)).toMatchObject({ persisted: 1, inflight: 1 });
+    expect(latestQueueDepths(depths)).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 1 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
 
     await queue.handleAck("dm-native-fallback");
     expect(listQueuedMessages(SCOPE)).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(latestQueueDepths(depths)).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("a plain fresh bind releases an unattempted resume replay claim to the durable browser queue", async () => {

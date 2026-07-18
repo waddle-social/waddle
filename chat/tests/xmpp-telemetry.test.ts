@@ -30,6 +30,7 @@ import {
   reportStreamManagement,
 } from "../src/lib/telemetry";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
+import type { QueueDepthTelemetry } from "../src/lib/xmpp/client-events";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { ReconnectCatchupEntry } from "../src/lib/xmpp/reconnect-catchup";
@@ -1518,7 +1519,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     });
 
     const enqueued: Array<{ kind: string; reason: string }> = [];
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     client.onSendEnqueued((info) => enqueued.push(info));
     client.onQueueDepthChange((d) => depths.push(d));
 
@@ -1559,7 +1560,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = await clientWithDurableRows([{ id: "dm-fail-1", kind: "dm" }]);
 
     const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
-    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     client.onMessageDeliveryFailed((id, meta) => fails.push({ id, kind: meta.kind }));
     client.onQueueDepthChange((d) => depths.push(d));
 
@@ -1571,6 +1572,15 @@ describe("BrowserXmppClient telemetry hooks", () => {
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
     await beginTelemetryAttempt(client, "dm-fail-1", "dm");
+    const inflightDepths: Partial<
+      Record<QueueDepthTelemetry["kind"], QueueDepthTelemetry>
+    > = Object.fromEntries(depths.slice(-2).map((depth) => [depth.kind, depth]));
+    expect(inflightDepths).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 1 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
+    expect(inflightDepths.dm?.oldestAgeMs).toBeGreaterThanOrEqual(0);
+    depths.length = 0;
 
     const failed = nextMessageFailure(client, "dm-fail-1");
     stubXmpp.emitMessageDeliveryFailed("dm-fail-1");
@@ -1578,18 +1588,20 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
     expect(depths).toHaveLength(4);
-    expect(depths.filter((depth) => depth.kind === "dm")).toEqual([
-      { kind: "dm", persisted: 0, inflight: 0 },
-      { kind: "dm", persisted: 0, inflight: 0 },
-    ]);
+    const dmDepths = depths.filter((depth) => depth.kind === "dm");
+    expect(dmDepths).toHaveLength(2);
+    for (const depth of dmDepths) {
+      expect(depth).toMatchObject({ kind: "dm", persisted: 1, inflight: 0 });
+      expect(depth.oldestAgeMs).toBeGreaterThanOrEqual(0);
+    }
     expect(depths.filter((depth) => depth.kind === "room")).toEqual([
       { kind: "room", persisted: 0, inflight: 0 },
       { kind: "room", persisted: 0, inflight: 0 },
     ]);
     expect(Object.fromEntries(
       depths.slice(-2).map((depth) => [depth.kind, depth]),
-    )).toEqual({
-      dm: { kind: "dm", persisted: 0, inflight: 0 },
+    )).toMatchObject({
+      dm: { kind: "dm", persisted: 1, inflight: 0 },
       room: { kind: "room", persisted: 0, inflight: 0 },
     });
   });
