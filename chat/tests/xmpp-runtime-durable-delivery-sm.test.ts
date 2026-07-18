@@ -3,6 +3,7 @@ import {
   committedOrThrow,
   createOutboundClaim,
   type DurableOutboundStore,
+  type OutboundOwnerActivation,
   type OutboundOwnerHint,
 } from "../src/lib/xmpp-runtime/durable-contract";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";

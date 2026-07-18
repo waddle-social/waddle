@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { IDBFactory } from "fake-indexeddb";
+import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import { committedOrThrow } from "../src/lib/xmpp-runtime/durable-contract";
-import { emptyAccount } from "../src/lib/xmpp-runtime/durable-model";
-import {
-  IndexedDbDurableAccountRepository,
-  IndexedDbDurableOutboundStore,
-} from "../src/lib/xmpp-runtime/indexeddb-durable-store";
+import { IndexedDbDurableOutboundStore } from "../src/lib/xmpp-runtime/indexeddb-durable-store";
 
 const ACCOUNT = "indexeddb-repository@example.com";
 const CLOCK = { now: () => 1_000 };
+
+function directMessage(id: string): PersistedQueuedDmMessage {
+  return {
+    kind: "dm",
+    id,
+    createdAt: "2026-07-18T00:00:00.000Z",
+    peerJid: "recipient@example.com",
+    body: "hello",
+  };
+}
 
 function openRawDatabase(
   indexedDb: IDBFactory,
@@ -125,40 +132,48 @@ describe("IndexedDB durable repository seam", () => {
           transactionCompleted = true;
         });
         patchObjectStore(transaction, (store) => {
+          const get = store.get.bind(store);
+          Object.defineProperty(store, "get", {
+            configurable: true,
+            value: (query: IDBValidKey | IDBKeyRange) => {
+              const request = get(query);
+              request.addEventListener("success", () => {
+                phase = "get-success";
+                queueMicrotask(() => {
+                  phase = "microtask";
+                });
+              }, { once: true });
+              return request;
+            },
+          });
           const put = store.put.bind(store);
           Object.defineProperty(store, "put", {
             configurable: true,
             value: (value: unknown) => {
               putCalls += 1;
-              expect(phase).toBe("callback-returned");
+              expect(phase).toBe("get-success");
               return put(value);
             },
           });
         });
       },
     );
-    const repository = new IndexedDbDurableAccountRepository({
+    const store = new IndexedDbDurableOutboundStore({
+      authorityClock: CLOCK,
       indexedDb,
       databaseName,
     });
 
-    const value = await repository.transact(ACCOUNT, () => {
-      phase = "callback-returned";
-      queueMicrotask(() => {
-        phase = "microtask";
-      });
-      return {
-        account: emptyAccount(ACCOUNT),
-        write: true,
-        value: { committed: true },
-      };
-    });
+    const value = committedOrThrow(
+      "strict-persist",
+      await store.persistReady(ACCOUNT, directMessage("strict")),
+    );
 
-    expect(value).toEqual({ committed: true });
+    expect(value.kind).toBe("inserted");
     expect(observedDurability).toBe("strict");
     expect(putCalls).toBe(1);
     expect(transactionCompleted).toBe(true);
-    await repository.close();
+    await store.close();
   });
 
   test("preserves the first read-boundary exception and writes nothing", async () => {
@@ -175,17 +190,18 @@ describe("IndexedDB durable repository seam", () => {
         });
       });
     });
-    const repository = new IndexedDbDurableAccountRepository({
+    const store = new IndexedDbDurableOutboundStore({
+      authorityClock: CLOCK,
       indexedDb,
       databaseName,
     });
 
-    await expect(repository.transact(ACCOUNT, () => ({
-      account: emptyAccount(ACCOUNT),
-      write: true,
-      value: "unreachable",
-    }))).rejects.toBe(marker);
-    await repository.close();
+    expect(await store.revision(ACCOUNT)).toEqual({
+      kind: "failed",
+      reason: "unavailable",
+      cause: marker,
+    });
+    await store.close();
     expect(await countRawAccounts(indexedDb, databaseName)).toBe(0);
   });
 
@@ -203,40 +219,73 @@ describe("IndexedDB durable repository seam", () => {
         });
       });
     });
-    const repository = new IndexedDbDurableAccountRepository({
+    const store = new IndexedDbDurableOutboundStore({
+      authorityClock: CLOCK,
       indexedDb,
       databaseName,
     });
 
-    await expect(repository.transact(ACCOUNT, () => ({
-      account: emptyAccount(ACCOUNT),
-      write: true,
-      value: "uncommitted",
-    }))).rejects.toBe(marker);
-    await repository.close();
+    expect(await store.persistReady(
+      ACCOUNT,
+      directMessage("put-error"),
+    )).toEqual({
+      kind: "failed",
+      reason: "unavailable",
+      cause: marker,
+    });
+    await store.close();
     expect(await countRawAccounts(indexedDb, databaseName)).toBe(0);
   });
 
-  test("aborts clone and account-key failures with no durable write", async () => {
+  test("fails promptly when a transaction completes without a value", async () => {
     const indexedDb = new IDBFactory();
-    const databaseName = `validation-${crypto.randomUUID()}`;
-    const repository = new IndexedDbDurableAccountRepository({
+    const databaseName = `terminal-${crypto.randomUUID()}`;
+    let putCalls = 0;
+    instrumentFirstRepositoryTransaction(indexedDb, (transaction) => {
+      patchObjectStore(transaction, (objectStore) => {
+        Object.defineProperty(objectStore, "get", {
+          configurable: true,
+          value: () => ({ onsuccess: null, onerror: null }),
+        });
+        const put = objectStore.put.bind(objectStore);
+        Object.defineProperty(objectStore, "put", {
+          configurable: true,
+          value: (value: unknown) => {
+            putCalls += 1;
+            return put(value);
+          },
+        });
+      });
+    });
+    const store = new IndexedDbDurableOutboundStore({
+      authorityClock: CLOCK,
       indexedDb,
       databaseName,
     });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
 
-    await expect(repository.transact(ACCOUNT, () => ({
-      account: emptyAccount(ACCOUNT),
-      write: true,
-      value: { uncloneable: () => undefined },
-    }))).rejects.toMatchObject({ name: "DataCloneError" });
-    await expect(repository.transact(ACCOUNT, () => ({
-      account: emptyAccount("other@example.com"),
-      write: true,
-      value: "mismatched",
-    }))).rejects.toMatchObject({ name: "DataError" });
+    const outcome = await Promise.race([
+      store.revision(ACCOUNT),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error("IndexedDB operation hung after completion"));
+        }, 250);
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
 
-    await repository.close();
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind === "failed") {
+      expect(outcome.reason).toBe("aborted");
+      expect(outcome.cause).toBeInstanceOf(DOMException);
+      expect(outcome.cause).toMatchObject({
+        name: "AbortError",
+        message: "IndexedDB operation did not settle",
+      });
+    }
+    expect(putCalls).toBe(0);
+    await store.close();
     expect(await countRawAccounts(indexedDb, databaseName)).toBe(0);
   });
 

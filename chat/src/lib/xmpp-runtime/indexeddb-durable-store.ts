@@ -1,6 +1,5 @@
 import {
   DurableStoreEngine,
-  systemAuthorityClock,
   type DurableAccountCommit,
   type DurableAccountRepository,
   type DurableAccountTransaction,
@@ -78,8 +77,7 @@ function openDatabase(
   });
 }
 
-/** Repository boundary exported for direct adapter conformance tests. */
-export class IndexedDbDurableAccountRepository
+class IndexedDbDurableAccountRepository
 implements DurableAccountRepository {
   private readonly indexedDb: IDBFactory | undefined;
   private readonly databaseName: string;
@@ -211,7 +209,14 @@ implements DurableAccountRepository {
       };
 
       transaction.oncomplete = () => {
-        if (valueReady) resolve(value as T);
+        if (!valueReady) {
+          reject(new DOMException(
+            "IndexedDB operation did not settle",
+            "AbortError",
+          ));
+          return;
+        }
+        resolve(value as T);
       };
       transaction.onerror = () => {
         // `onabort` owns transaction-error rejection.
@@ -256,6 +261,6 @@ implements DurableAccountRepository {
 export class IndexedDbDurableOutboundStore extends DurableStoreEngine {
   constructor(options: IndexedDbDurableOutboundStoreOptions = {}) {
     const repository = new IndexedDbDurableAccountRepository(options);
-    super(repository, options.authorityClock ?? systemAuthorityClock);
+    super(repository, options.authorityClock);
   }
 }

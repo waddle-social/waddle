@@ -3,13 +3,20 @@ import {
   committedOrThrow,
   type DurableAuthorityClock,
 } from "../src/lib/xmpp-runtime/durable-contract";
-import { emptyAccount } from "../src/lib/xmpp-runtime/durable-model";
-import {
-  MemoryDurableAccountRepository,
-  MemoryDurableOutboundStore,
-} from "../src/lib/xmpp-runtime/memory-durable-store";
+import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 const ACCOUNT = "memory-repository@example.com";
+
+function directMessage(id: string): PersistedQueuedDmMessage {
+  return {
+    kind: "dm",
+    id,
+    createdAt: "2026-07-18T00:00:00.000Z",
+    peerJid: "recipient@example.com",
+    body: "original",
+  };
+}
 
 describe("memory durable repository", () => {
   test("runs the hook inside the serialized tail", async () => {
@@ -69,55 +76,23 @@ describe("memory durable repository", () => {
   });
 
   test("clones persisted accounts and return values before publishing them", async () => {
-    const repository = new MemoryDurableAccountRepository();
-    const account = emptyAccount(ACCOUNT);
-    account.authorityEpoch = 2;
-    const sourceValue = { nested: { value: "original" } };
+    const store = new MemoryDurableOutboundStore({ now: () => 1_000 });
+    const source = directMessage("clone-isolation");
+    const persisted = committedOrThrow(
+      "persist-clone",
+      await store.persistReady(ACCOUNT, source),
+    );
+    if (persisted.kind !== "inserted") throw new Error("expected insert");
 
-    const returned = await repository.transact(ACCOUNT, () => ({
-      account,
-      write: true,
-      value: sourceValue,
-    }));
-    account.authorityEpoch = 99;
-    sourceValue.nested.value = "mutated-source";
-    returned.nested.value = "mutated-return";
+    source.body = "mutated-source";
+    persisted.entry.message.body = "mutated-return";
+    const firstRead = committedOrThrow("first-read", await store.list(ACCOUNT));
+    firstRead[0]!.body = "mutated-first-read";
 
-    let persisted: unknown;
-    await repository.transact(ACCOUNT, (stored) => {
-      persisted = stored;
-      return {
-        account: emptyAccount(ACCOUNT),
-        write: false,
-        value: undefined,
-      };
-    });
-
-    expect(persisted).toMatchObject({
-      accountKey: ACCOUNT,
-      authorityEpoch: 2,
-    });
-  });
-
-  test("rejects account-key mismatch without a write", async () => {
-    const repository = new MemoryDurableAccountRepository();
-
-    await expect(repository.transact(ACCOUNT, () => ({
-      account: emptyAccount("other@example.com"),
-      write: true,
-      value: "should-not-commit",
-    }))).rejects.toMatchObject({ name: "DataError" });
-
-    let persisted: unknown = "not-observed";
-    await repository.transact(ACCOUNT, (stored) => {
-      persisted = stored;
-      return {
-        account: emptyAccount(ACCOUNT),
-        write: false,
-        value: undefined,
-      };
-    });
-    expect(persisted).toBeUndefined();
+    expect(committedOrThrow(
+      "second-read",
+      await store.list(ACCOUNT),
+    )).toEqual([directMessage("clone-isolation")]);
   });
 
   test("close is idempotent and leaves the in-memory adapter usable", async () => {

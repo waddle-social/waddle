@@ -1,6 +1,5 @@
 import {
   DurableStoreEngine,
-  systemAuthorityClock,
   type DurableAccountCommit,
   type DurableAccountRepository,
   type DurableAccountTransaction,
@@ -19,8 +18,7 @@ function assertAccountKey<T>(
   }
 }
 
-/** Repository boundary exported for direct adapter conformance tests. */
-export class MemoryDurableAccountRepository
+class MemoryDurableAccountRepository
 implements DurableAccountRepository {
   private readonly accounts = new Map<string, unknown>();
   private transactionTail: Promise<void> = Promise.resolve();
@@ -61,7 +59,7 @@ implements DurableAccountRepository {
 
 export class MemoryDurableOutboundStore extends DurableStoreEngine {
   constructor(
-    authorityClock: DurableAuthorityClock = systemAuthorityClock,
+    authorityClock?: DurableAuthorityClock,
     beforeTransaction?: () => Promise<void>,
   ) {
     super(

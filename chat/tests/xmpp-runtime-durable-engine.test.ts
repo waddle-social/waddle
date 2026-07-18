@@ -248,6 +248,27 @@ describe("durable store engine", () => {
     )[0]?.body).toBe("hello");
   });
 
+  test("every repository commit retains the exact requested account key", async () => {
+    const repository = new RecordingDurableAccountRepository();
+    const store = new DurableStoreEngine(repository, { now: () => NOW });
+    const firstAccount = "first-engine@example.com";
+    const secondAccount = "second-engine@example.com";
+
+    committedOrThrow("first-key", await store.revision(firstAccount));
+    committedOrThrow(
+      "second-key",
+      await store.persistReady(secondAccount, directMessage("second-key")),
+    );
+
+    expect(repository.commits.map((commit) => ({
+      requested: commit.accountKey,
+      committed: commit.account.accountKey,
+    }))).toEqual([
+      { requested: firstAccount, committed: firstAccount },
+      { requested: secondAccount, committed: secondAccount },
+    ]);
+  });
+
   test("delegates idempotent close calls to the repository", async () => {
     const repository = new RecordingDurableAccountRepository();
     const store = new DurableStoreEngine(repository, { now: () => NOW });

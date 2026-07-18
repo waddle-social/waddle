@@ -5,6 +5,7 @@ import {
   committedOrThrow,
   createOutboundClaim,
   type DurableOutboundStore,
+  type OutboundOwnerActivation,
   type OutboundOwnerHint,
 } from "../src/lib/xmpp-runtime/durable-contract";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
@@ -63,7 +64,9 @@ describe("unified XMPP runtime authority", () => {
   test("queued authority mutation samples time after waiting and rejects an expired owner", async () => {
     let now = 0;
     let blockNext = false;
-    let releaseBlocked: (() => void) | null = null;
+    let releaseBlocked: () => void = () => {
+      throw new Error("queued authority mutation did not reach its hook");
+    };
     const store = new MemoryDurableOutboundStore(
       { now: () => now },
       async () => {
@@ -88,7 +91,7 @@ describe("unified XMPP runtime authority", () => {
     );
     await Promise.resolve();
     now = 45_001;
-    releaseBlocked?.();
+    releaseBlocked();
 
     expect(committedOrThrow(
       "claim-after-queued-expiry",

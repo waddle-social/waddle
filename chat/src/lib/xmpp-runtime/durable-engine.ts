@@ -94,10 +94,6 @@ export interface DurableAccountRepository {
   close(): Promise<void>;
 }
 
-export const systemAuthorityClock: DurableAuthorityClock = {
-  now: () => Date.now(),
-};
-
 function classifyFailure(cause: unknown): DurableFailureReason {
   if (cause instanceof DurablePredecessorCapacityError) return "capacity";
   const name = cause instanceof DOMException || cause instanceof Error
@@ -116,10 +112,14 @@ function failed<T>(cause: unknown): DurableOutcome<T> {
 }
 
 export class DurableStoreEngine implements DurableOutboundStore {
+  private readonly authorityClock: DurableAuthorityClock;
+
   constructor(
     private readonly repository: DurableAccountRepository,
-    private readonly authorityClock: DurableAuthorityClock = systemAuthorityClock,
-  ) {}
+    authorityClock?: DurableAuthorityClock,
+  ) {
+    this.authorityClock = authorityClock ?? { now: () => Date.now() };
+  }
 
   close(): Promise<void> {
     return this.repository.close();
