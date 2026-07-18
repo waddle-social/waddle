@@ -505,6 +505,24 @@ mod tests {
     }
 
     #[test]
+    fn websocket_transport_errors_serialize_without_source_detail() {
+        let payload = JsDriverError {
+            kind: JsControlErrorKind::DriverError,
+            reason: DriverErrorReason::WebSocketTransport,
+            authentication_condition: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(payload).expect("driver error serializes"),
+            json!({
+                "kind": "driver-error",
+                "reason": "websocket-transport-error",
+                "authenticationCondition": null,
+            }),
+        );
+    }
+
+    #[test]
     fn stream_errors_serialize_as_tagged_payloads_with_typed_sm_metadata() {
         let payload = JsStreamError {
             kind: JsControlErrorKind::StreamError,

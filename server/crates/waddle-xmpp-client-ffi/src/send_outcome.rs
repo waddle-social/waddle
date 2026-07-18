@@ -12,9 +12,9 @@ pub(crate) fn send_failure_outcome(error: &ClientError) -> WaddleSendMessageOutc
         | ClientError::TransportFrameTooLarge { .. }
         | ClientError::InvalidTransportFrame
         | ClientError::UnsupportedWebSocketMessage => WaddleSendMessageOutcome::TransportError,
-        ClientError::InvalidWebSocketRequest(_) | ClientError::WebSocket(_) => {
-            WaddleSendMessageOutcome::TransportError
-        }
+        ClientError::InvalidWebSocketRequest(_)
+        | ClientError::WebSocket(_)
+        | ClientError::WebSocketTlsConfig(_) => WaddleSendMessageOutcome::TransportError,
         _ => WaddleSendMessageOutcome::Error,
     }
 }

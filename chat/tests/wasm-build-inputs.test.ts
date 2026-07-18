@@ -52,6 +52,7 @@ import {
 	assertWasmBuildIdentityHandoff,
 	canonicalEncodedRustFlags,
 	createIsolatedWasmBuildPaths,
+	findDriftedWasmArtifacts,
 	pinnedFlakeBuildArgs,
 } from "../scripts/wasm-build-executor.mjs";
 import {
@@ -1130,6 +1131,37 @@ describe("canonical WASM build execution policy", () => {
 		expect(() =>
 			assertWasmArtifactSetsEqual(left, right, contract.executor.artifactCount),
 		).toThrow("waddle_xmpp_client_wasm_bg.wasm");
+	});
+
+	test("committed drift comparison covers compiled bytes and missing canonical artifacts", () => {
+		const root = mkdtempSync(resolve(tmpdir(), "waddle-wasm-committed-drift-"));
+		roots.push(root);
+		const committed = resolve(root, "committed");
+		const canonical = resolve(root, "canonical");
+		mkdirSync(committed);
+		mkdirSync(canonical);
+		for (const artifact of WASM_PACKAGE_ARTIFACTS) {
+			writeFileSync(resolve(committed, artifact), `same:${artifact}`);
+			writeFileSync(resolve(canonical, artifact), `same:${artifact}`);
+		}
+
+		expect(findDriftedWasmArtifacts(committed, canonical)).toEqual([]);
+		writeFileSync(
+			resolve(canonical, "waddle_xmpp_client_wasm_bg.wasm"),
+			"different compiled bytes",
+		);
+		expect(findDriftedWasmArtifacts(committed, canonical)).toEqual([
+			"waddle_xmpp_client_wasm_bg.wasm",
+		]);
+
+		writeFileSync(
+			resolve(canonical, "waddle_xmpp_client_wasm_bg.wasm"),
+			"same:waddle_xmpp_client_wasm_bg.wasm",
+		);
+		unlinkSync(resolve(committed, "waddle_xmpp_client_wasm_bg.js"));
+		expect(findDriftedWasmArtifacts(committed, canonical)).toEqual([
+			"waddle_xmpp_client_wasm_bg.js",
+		]);
 	});
 
 	test("rejects noncanonical build-output trees before byte comparison", () => {

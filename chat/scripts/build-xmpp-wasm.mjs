@@ -19,11 +19,11 @@ import {
 } from "./wasm-build-contract.mjs";
 import { canonicalWasmBuildIdentity } from "./wasm-build-inputs.mjs";
 import {
-	TRACKED_WASM_ARTIFACTS,
 	assertCanonicalWasmBuildId,
 	assertPinnedWasmBuildProcess,
 	assertWasmArtifactSetsEqual,
 	createIsolatedWasmBuildPaths,
+	findDriftedWasmArtifacts,
 	runPinnedWasmBuild,
 } from "./wasm-build-executor.mjs";
 import { finalizeWasmPackage } from "./wasm-package-bindings.mjs";
@@ -160,15 +160,10 @@ try {
 			secondBuild.outDir,
 			contract.executor.artifactCount,
 		);
-		const drifted = TRACKED_WASM_ARTIFACTS.filter((file) => {
-			const committed = resolve(committedOutDir, file);
-			const rebuilt = resolve(firstBuild.outDir, file);
-			return (
-				!existsSync(committed) ||
-				!existsSync(rebuilt) ||
-				!readFileSync(committed).equals(readFileSync(rebuilt))
-			);
-		});
+		const drifted = findDriftedWasmArtifacts(
+			committedOutDir,
+			firstBuild.outDir,
+		);
 		if (drifted.length > 0) {
 			throw new Error(
 				`committed WASM bindings are stale: ${drifted.join(", ")}; run REBUILD_WASM=1 bun run wasm:build`,

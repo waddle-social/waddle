@@ -62,6 +62,9 @@ let _WasmTrackedBindings = [
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.js",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.wasm",
+	"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.wasm.d.ts",
 ]
 
 schema.#Project & {

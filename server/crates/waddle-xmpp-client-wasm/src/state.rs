@@ -157,8 +157,7 @@ fn resume_timestamp(
     const JS_DATE_LIMIT_MS: f64 = 8_640_000_000_000_000.0;
     if !sent_at_epoch_ms.is_finite()
         || sent_at_epoch_ms.fract() != 0.0
-        || sent_at_epoch_ms < 0.0
-        || sent_at_epoch_ms > JS_DATE_LIMIT_MS
+        || !(0.0..=JS_DATE_LIMIT_MS).contains(&sent_at_epoch_ms)
     {
         return Err(ResumeWasmBoundaryError::InvalidTimestamp);
     }

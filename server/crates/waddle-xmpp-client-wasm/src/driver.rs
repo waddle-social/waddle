@@ -193,6 +193,10 @@ fn driver_error_event(error: &ClientError) -> DriverEvent {
             DriverErrorReason::AuthenticationRejected,
             Some(driver_authentication_condition(*condition)),
         ),
+        #[cfg(not(target_arch = "wasm32"))]
+        ClientError::InvalidWebSocketRequest(_)
+        | ClientError::WebSocket(_)
+        | ClientError::WebSocketTlsConfig(_) => (DriverErrorReason::WebSocketTransport, None),
         ClientError::WebSocketConnectTimeout { .. } => {
             (DriverErrorReason::WebSocketConnectTimeout, None)
         }

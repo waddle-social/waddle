@@ -30,11 +30,17 @@ export const WASM_PACKAGE_ARTIFACTS = Object.freeze([
 	"waddle_xmpp_client_wasm_bg.wasm.d.ts",
 ]);
 
-export const TRACKED_WASM_ARTIFACTS = Object.freeze([
-	"package.json",
-	"waddle_xmpp_client_wasm.d.ts",
-	"waddle_xmpp_client_wasm.js",
-]);
+export function findDriftedWasmArtifacts(committedDir, canonicalDir) {
+	return WASM_PACKAGE_ARTIFACTS.filter((file) => {
+		const committed = resolve(committedDir, file);
+		const canonical = resolve(canonicalDir, file);
+		return (
+			!existsSync(committed) ||
+			!existsSync(canonical) ||
+			!readFileSync(committed).equals(readFileSync(canonical))
+		);
+	});
+}
 
 function assertContained(root, path, description) {
 	const relativePath = relative(root, path);

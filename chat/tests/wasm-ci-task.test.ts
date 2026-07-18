@@ -159,11 +159,14 @@ describe("WASM CI task graph", () => {
 		]);
 	});
 
-	test("the combined task tracks exactly the three committed binding paths", () => {
+	test("the combined task tracks exactly the six committed binding paths", () => {
 		expect(cueList("_WasmTrackedBindings")).toEqual([
 			"../server/wasm-pkg/waddle-xmpp-client-wasm/package.json",
 			"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.d.ts",
 			"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm.js",
+			"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.js",
+			"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.wasm",
+			"../server/wasm-pkg/waddle-xmpp-client-wasm/waddle_xmpp_client_wasm_bg.wasm.d.ts",
 		]);
 	});
 
