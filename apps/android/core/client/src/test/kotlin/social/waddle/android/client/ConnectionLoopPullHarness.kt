@@ -7,7 +7,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import social.waddle.android.client.OutboundQueue.EnqueueResult
+import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.QueuedOutboundDraft
@@ -82,7 +82,7 @@ internal class ConnectionLoopPullHarness(
         prefs.activateSession(OWNER, SESSION_ID)
         val previous = queue.beginAttempt(OWNER).attempt
         check(
-            queue.enqueueClaimed(
+            queue.enqueueAndClaimAbsoluteHead(
                 QueuedOutboundDraft.create(
                     ownerBareJid = OWNER,
                     conversationJid = PEER,
@@ -93,7 +93,7 @@ internal class ConnectionLoopPullHarness(
                     source = DeliverySource.Composer,
                 ),
                 previous,
-            ) is EnqueueResult.Stored,
+            ) is LiveAdmissionResult.Claimed,
         )
         check(
             queue.saveSmResume(

@@ -2199,8 +2199,15 @@ export class BrowserXmppClient {
     if (this.roomIsReady(roomJid) && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, mentionJidsByNick: { ...(opts.mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
-      const claim = await this.outboundQueue.persistPendingRoomSend(roomJid, body, sendOpts);
-      this.outboundQueue.beginAttempt(outboundId, "room", claim);
+      const reservation = await this.outboundQueue.persistPendingRoomSend(
+        roomJid,
+        body,
+        sendOpts,
+      );
+      if (reservation.kind === "queued") {
+        return { id: outboundId, state: "queued" };
+      }
+      this.outboundQueue.beginAttempt(outboundId, "room", reservation.claim);
       let id: string | null;
       try {
         id = await this.sendGroupMessageThroughBinding(this.xmpp, roomJid, body, sendOpts);
@@ -2264,8 +2271,15 @@ export class BrowserXmppClient {
     if (this.canUseConnectedSession() && this.xmpp) {
       const outboundId = opts.id ?? crypto.randomUUID();
       const sendOpts = { ...opts, id: outboundId, ...(mucPm ? { mucPm: true } : {}) };
-      const claim = await this.outboundQueue.persistPendingDirectSend(normalizedPeerJid, body, sendOpts);
-      this.outboundQueue.beginAttempt(outboundId, "dm", claim);
+      const reservation = await this.outboundQueue.persistPendingDirectSend(
+        normalizedPeerJid,
+        body,
+        sendOpts,
+      );
+      if (reservation.kind === "queued") {
+        return { id: outboundId, state: "queued" };
+      }
+      this.outboundQueue.beginAttempt(outboundId, "dm", reservation.claim);
       let id: string | null;
       try {
         id = await this.sendDirectMessageThroughBinding(this.xmpp, normalizedPeerJid, body, sendOpts);

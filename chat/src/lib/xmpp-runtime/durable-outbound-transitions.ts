@@ -8,7 +8,7 @@ import {
   type OutboundClaimRequest,
   type OutboundLane,
   type OutboundOwnerContext,
-  type OutboundPersistClaimedResult,
+  type OutboundPersistLaneHeadResult,
   type OutboundPersistResult,
   type OutboundReleaseResult,
   type OutboundRenewResult,
@@ -28,6 +28,7 @@ import {
   cloneValue,
   currentOwner,
   entryFromRow,
+  orderKey,
   orderedRows,
   ownerHasDurableReference,
   pruneUnreferencedPredecessors,
@@ -71,6 +72,39 @@ export function listOutboundTransition(
   return {
     changed: false,
     value: orderedRows(account).map((row) => cloneValue(row.message)),
+  };
+}
+
+function prepareOrderedAppend(
+  account: RuntimeAccount,
+  prepared: PreparedOutboundMessage,
+): PreparedOutboundMessage {
+  const requestedAt = Date.parse(prepared.message.createdAt);
+  if (!Number.isSafeInteger(requestedAt)) return prepared;
+  const occupied = new Set<number>();
+  for (const row of Object.values(account.outbound)) {
+    const persistedAt = Date.parse(row.message.createdAt);
+    if (Number.isSafeInteger(persistedAt)) occupied.add(persistedAt);
+  }
+  if (!occupied.has(requestedAt)) return prepared;
+  let orderedAt = requestedAt;
+  while (occupied.has(orderedAt)) {
+    if (orderedAt >= 8_640_000_000_000_000) {
+      throw new DOMException(
+        "Outbound creation timestamp is exhausted",
+        "AbortError",
+      );
+    }
+    orderedAt += 1;
+  }
+  const message = {
+    ...prepared.message,
+    createdAt: new Date(orderedAt).toISOString(),
+  };
+  return {
+    ...prepared,
+    message,
+    orderKey: orderKey(message),
   };
 }
 
@@ -159,11 +193,12 @@ export function persistReadyTransition(
       value: { kind: "existing", entry: entryFromRow(existing) },
     };
   }
+  const append = prepareOrderedAppend(account, prepared);
   const row: DurableOutboundRow = {
-    identity: prepared.identity,
-    lane: prepared.lane,
-    orderKey: prepared.orderKey,
-    message: prepared.message,
+    identity: append.identity,
+    lane: append.lane,
+    orderKey: append.orderKey,
+    message: append.message,
     state: { kind: "ready" },
   };
   account.outbound[prepared.message.id] = row;
@@ -173,72 +208,98 @@ export function persistReadyTransition(
   };
 }
 
-export function persistClaimedTransition(
+export function persistAndClaimLaneHeadTransition(
   account: RuntimeAccount,
   authorityNow: number,
   prepared: PreparedOutboundMessage,
   request: OutboundClaimRequest,
-): AccountMutation<OutboundPersistClaimedResult> {
+): AccountMutation<OutboundPersistLaneHeadResult> {
   if (!currentOwner(account, request, authorityNow)) {
     return { changed: false, value: { kind: "fenced" } };
   }
-  const existing = account.outbound[prepared.message.id];
-  if (existing) {
-    if (existing.identity.payloadDigest !== prepared.identity.payloadDigest) {
+  let target = account.outbound[prepared.message.id];
+  let changed = false;
+  if (target) {
+    if (target.identity.payloadDigest !== prepared.identity.payloadDigest) {
       return {
         changed: false,
         value: {
           kind: "conflict",
           messageId: prepared.message.id,
-          existingPayloadDigest: existing.identity.payloadDigest,
+          existingPayloadDigest: target.identity.payloadDigest,
           attemptedPayloadDigest: prepared.identity.payloadDigest,
         },
       };
     }
-    if (existing.state.kind === "terminal") {
+    if (target.state.kind === "terminal") {
       return {
         changed: false,
-        value: { kind: "terminal", entry: entryFromRow(existing) },
+        value: { kind: "terminal", entry: entryFromRow(target) },
       };
     }
     if (
-      existing.state.kind === "claimed"
-      && existing.state.claim.leaseUntil > authorityNow
+      target.state.kind === "claimed"
+      && target.state.claim.leaseUntil > authorityNow
     ) {
       return {
         changed: false,
         value: {
           kind: "busy",
-          entry: entryFromRow(existing),
-          leaseUntil: existing.state.claim.leaseUntil,
+          entry: entryFromRow(target),
+          leaseUntil: target.state.claim.leaseUntil,
         },
       };
     }
-    const claim = claimForRow(request, existing.identity, authorityNow);
-    existing.state = { kind: "claimed", claim };
+    if (target.state.kind === "claimed") {
+      target.state = { kind: "ready" };
+      changed = true;
+    }
+  } else {
+    const append = prepareOrderedAppend(account, prepared);
+    target = {
+      identity: append.identity,
+      lane: append.lane,
+      orderKey: append.orderKey,
+      message: append.message,
+      state: { kind: "ready" },
+    };
+    account.outbound[prepared.message.id] = target;
+    changed = true;
+  }
+
+  const head = orderedRows(account).find((row) => (
+    sameLane(row.lane, prepared.lane)
+  ));
+  if (!head) {
+    throw new DOMException(
+      "Persisted outbound lane has no canonical head",
+      "AbortError",
+    );
+  }
+  if (!sameIdentity(head.identity, target.identity)) {
     return {
-      changed: true,
+      changed,
       value: {
-        kind: "claimed",
-        entry: entryFromRow(existing),
-        claim: { ...claim },
+        kind: "queued",
+        entry: entryFromRow(target),
+        blocker: {
+          identity: { ...head.identity },
+          state: head.state.kind,
+          ...(head.state.kind === "claimed"
+            ? { leaseUntil: head.state.claim.leaseUntil }
+            : {}),
+        },
       },
     };
   }
-  const claim = claimForRow(request, prepared.identity, authorityNow);
-  const row: DurableOutboundRow = {
-    identity: prepared.identity,
-    lane: prepared.lane,
-    orderKey: prepared.orderKey,
-    message: prepared.message,
-    state: { kind: "claimed", claim },
-  };
-  account.outbound[prepared.message.id] = row;
+
+  const claim = claimForRow(request, target.identity, authorityNow);
+  target.state = { kind: "claimed", claim };
   return {
     changed: true,
     value: {
       kind: "claimed",
-      entry: entryFromRow(row),
+      entry: entryFromRow(target),
       claim: { ...claim },
     },
   };

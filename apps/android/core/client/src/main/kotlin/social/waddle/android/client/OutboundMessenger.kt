@@ -5,12 +5,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import social.waddle.android.client.OutboundQueue.EnqueueResult
+import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
-import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
@@ -92,32 +92,49 @@ internal class OutboundMessenger(
         }
         val draft = queuedMessage(owner, conversationJid, isGroupchat, body, extras, source)
         val attempt = activeSession.attemptRef
-        val enqueue = persistQueueMutation {
-            if (attempt == null) {
-                journal.enqueueReady(draft)
-            } else {
-                journal.enqueueClaimed(draft, attempt)
-            }
-        } ?: return SendResult(WaddleSendMessageOutcome.Error)
-        val stored = when (enqueue) {
-            is EnqueueResult.Stored -> enqueue.row
-            is EnqueueResult.Conflict,
-            EnqueueResult.CapacityExhausted,
-            EnqueueResult.StaleAttempt,
-            -> return SendResult(WaddleSendMessageOutcome.Error)
-        }
-        val delivery = DeliveryOutcomeRef(stored.identity, stored.source)
         if (attempt == null) {
+            val enqueue = persistQueueMutation {
+                journal.enqueueReady(draft)
+            } ?: return SendResult(WaddleSendMessageOutcome.Error)
+            val stored = when (enqueue) {
+                is EnqueueResult.Stored -> enqueue.row
+                is EnqueueResult.Conflict,
+                EnqueueResult.CapacityExhausted,
+                EnqueueResult.StaleAttempt,
+                -> return SendResult(WaddleSendMessageOutcome.Error)
+            }
             return SendResult(
                 outcome = WaddleSendMessageOutcome.NotConnected,
-                delivery = delivery,
+                delivery = DeliveryOutcomeRef(stored.identity, stored.source),
             )
         }
 
-        val ownership = stored.ownership as? OutboundOwnership.NativeOwned
-            ?: return SendResult(WaddleSendMessageOutcome.Error)
-        val outcome = sendMessage(stored, attempt)
-        return reconcileInitialOutcome(stored, ownership, outcome)
+        val admission = persistQueueMutation {
+            journal.enqueueAndClaimAbsoluteHead(draft, attempt)
+        } ?: return SendResult(WaddleSendMessageOutcome.Error)
+        return when (admission) {
+            is LiveAdmissionResult.Claimed -> {
+                val stored = admission.row
+                val ownership = stored.ownership as? OutboundOwnership.NativeOwned
+                    ?: return SendResult(WaddleSendMessageOutcome.Error)
+                val outcome = sendMessage(stored, attempt)
+                reconcileInitialOutcome(stored, ownership, outcome)
+            }
+            is LiveAdmissionResult.Queued -> {
+                wakeOutboundDrain()
+                SendResult(
+                    outcome = WaddleSendMessageOutcome.NotConnected,
+                    delivery = DeliveryOutcomeRef(
+                        admission.row.identity,
+                        admission.row.source,
+                    ),
+                )
+            }
+            is LiveAdmissionResult.Conflict,
+            LiveAdmissionResult.CapacityExhausted,
+            LiveAdmissionResult.StaleAttempt,
+            -> SendResult(WaddleSendMessageOutcome.Error)
+        }
     }
 
     private fun queuedMessage(
@@ -191,6 +208,20 @@ internal class OutboundMessenger(
         null
     }
 
+    private suspend fun wakeOutboundDrain() {
+        try {
+            drainOutboundQueue()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Throwable) {
+            LOGGER.log(
+                Level.WARNING,
+                "outbound predecessor drain failed; durable work remains queued",
+                failure,
+            )
+        }
+    }
+
     /**
      * Replay owner Ready rows after the startup terminal barrier. Rows already
      * native-owned or terminal are never selected.
@@ -200,8 +231,7 @@ internal class OutboundMessenger(
         awaitStartupTerminalDrain(owner)
         while (true) {
             val attempt = activeSession.attemptRef ?: return
-            val ready = journal.readyHead(owner) ?: return
-            val claimed = journal.claimReady(ready.identity, attempt) ?: continue
+            val claimed = journal.claimAbsoluteReadyHead(owner, attempt) ?: return
             val ownership = claimed.ownership as OutboundOwnership.NativeOwned
             when (val outcome = sendMessage(claimed, attempt)) {
                 is WaddleSendMessageOutcome.Sent -> {

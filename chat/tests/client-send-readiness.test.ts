@@ -466,6 +466,62 @@ describe("client send readiness", () => {
     expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
   });
 
+  test("a connected room composer queues behind the durable room head and advances once", async () => {
+    let client!: BrowserXmppClient;
+    const sent: string[] = [];
+    const roomJid = roomBareJidFor(session(), "c1");
+    const xmpp = {
+      send_groupchat_message: mock(async (
+        _room: string,
+        _body: string,
+        opts: { stanza_id?: string },
+      ) => {
+        const id = opts.stanza_id!;
+        sent.push(id);
+        if (id === "room-new") {
+          (client as unknown as { handleMessageAck: (ackedId: string) => void })
+            .handleMessageAck(id);
+        }
+        return wasmSent(id);
+      }),
+    };
+    client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+    await waitForOutboundHydration(client);
+    const queue = (client as unknown as {
+      outboundQueue: {
+        queueRoomMessage(
+          room: string,
+          body: string,
+          options: { id: string },
+        ): Promise<unknown>;
+        whenQuiescent(): Promise<void>;
+      };
+    }).outboundQueue;
+    await queue.queueRoomMessage(roomJid, "older room", { id: "room-old" });
+
+    expect(await client.sendGroupMessage(
+      "w1",
+      "c1",
+      "new room",
+      { id: "room-new" },
+    )).toEqual({ id: "room-new", state: "queued" });
+    await queue.whenQuiescent();
+    expect(sent).toEqual(["room-old"]);
+
+    const oldAck = nextMessageAck(client, "room-old");
+    (client as unknown as { handleMessageAck: (id: string) => void })
+      .handleMessageAck("room-old");
+    await oldAck;
+    await queue.whenQuiescent();
+
+    expect(sent).toEqual(["room-old", "room-new"]);
+    expect(listQueuedRoomMessages("alice@example.com", roomJid)).toEqual([]);
+  });
+
   test("live MUC rejection, null, and mismatched IDs all roll back before a later acked retry", async () => {
     let attempt = 0;
     const xmpp = {
@@ -1376,6 +1432,117 @@ describe("client send readiness", () => {
 
     expect(result).toEqual({ id: "dm-fast-live", state: "sending" });
     expect(listQueuedDmMessages("alice@example.com", "bob@example.com", "account")).toEqual([]);
+  });
+
+  test("a connected DM composer queues behind the durable ready head and advances once", async () => {
+    let client!: BrowserXmppClient;
+    const sent: string[] = [];
+    const xmpp = {
+      send_chat_message: mock(async (
+        _peer: string,
+        _body: string,
+        opts: { stanza_id?: string },
+      ) => {
+        const id = opts.stanza_id!;
+        sent.push(id);
+        if (id === "dm-new") {
+          (client as unknown as { handleMessageAck: (ackedId: string) => void })
+            .handleMessageAck(id);
+        }
+        return wasmSent(id);
+      }),
+    };
+    client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    await waitForOutboundHydration(client);
+    const queue = (client as unknown as {
+      outboundQueue: {
+        queueDirectMessage(
+          peer: string,
+          body: string,
+          options: { id: string },
+        ): Promise<unknown>;
+        whenQuiescent(): Promise<void>;
+      };
+    }).outboundQueue;
+    await queue.queueDirectMessage(
+      "bob@example.com",
+      "older direct",
+      { id: "dm-old" },
+    );
+
+    expect(await client.sendDirectMessage(
+      "bob@example.com",
+      "new direct",
+      { id: "dm-new" },
+    )).toEqual({ id: "dm-new", state: "queued" });
+    await queue.whenQuiescent();
+    expect(sent).toEqual(["dm-old"]);
+
+    const oldAck = nextMessageAck(client, "dm-old");
+    (client as unknown as { handleMessageAck: (id: string) => void })
+      .handleMessageAck("dm-old");
+    await oldAck;
+    await queue.whenQuiescent();
+
+    expect(sent).toEqual(["dm-old", "dm-new"]);
+    expect(listQueuedDmMessages(
+      "alice@example.com",
+      "bob@example.com",
+      "account",
+    )).toEqual([]);
+  });
+
+  test("a connected DM composer cannot bypass an active native-owned head", async () => {
+    const sent: string[] = [];
+    const xmpp = {
+      send_chat_message: mock(async (
+        _peer: string,
+        _body: string,
+        opts: { stanza_id?: string },
+      ) => {
+        sent.push(opts.stanza_id!);
+        return wasmSent(opts.stanza_id);
+      }),
+    };
+    const client = new BrowserXmppClient(session());
+    (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    await waitForOutboundHydration(client);
+    const queue = (client as unknown as {
+      outboundQueue: {
+        queueDirectMessage(
+          peer: string,
+          body: string,
+          options: { id: string },
+        ): Promise<unknown>;
+        flushDirect(): Promise<void | undefined>;
+        whenQuiescent(): Promise<void>;
+      };
+    }).outboundQueue;
+    await queue.queueDirectMessage(
+      "bob@example.com",
+      "native-owned head",
+      { id: "dm-busy" },
+    );
+    await queue.flushDirect();
+    expect(sent).toEqual(["dm-busy"]);
+
+    expect(await client.sendDirectMessage(
+      "bob@example.com",
+      "must wait",
+      { id: "dm-after-busy" },
+    )).toEqual({ id: "dm-after-busy", state: "queued" });
+    await queue.whenQuiescent();
+    expect(sent).toEqual(["dm-busy"]);
+
+    const oldAck = nextMessageAck(client, "dm-busy");
+    (client as unknown as { handleMessageAck: (id: string) => void })
+      .handleMessageAck("dm-busy");
+    await oldAck;
+    await queue.whenQuiescent();
+    expect(sent).toEqual(["dm-busy", "dm-after-busy"]);
   });
 
   test("live DM rejection, null, and mismatched IDs all roll back before a later retry", async () => {

@@ -6,12 +6,14 @@ import {
   type OutboundOwnerActivation,
   type OutboundOwnerHint,
 } from "../src/lib/xmpp-runtime/durable-contract";
+import { claimForRow } from "../src/lib/xmpp-runtime/durable-model";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 import { recordingDurableStore } from "./durable-account-repository-test-support";
 
 const ACCOUNT = "alice@example.com";
+const NOW = 1_000;
 
 function directMessage(
   id: string,
@@ -71,7 +73,7 @@ describe("unified XMPP runtime authority", () => {
     })).fence;
     const claimed = committedOrThrow(
       "claim-a",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("foreign-live"),
         createOutboundClaim(ownerA, 1, "sending"),
@@ -107,7 +109,7 @@ describe("unified XMPP runtime authority", () => {
   });
 
   test("resume reconciliation preflights the full snapshot before adopting any row", async () => {
-    const store = new MemoryDurableOutboundStore();
+    const { store, repository } = recordingDurableStore({ now: () => NOW });
     const ownerA = (await activate(store, {
       ownerId: "preflight-a",
       ownerInstanceId: "preflight-a-instance",
@@ -120,15 +122,27 @@ describe("unified XMPP runtime authority", () => {
       ACCOUNT,
       directMessage("adoptable", "first", "2026-07-17T00:00:00.000Z"),
     );
-    const foreign = committedOrThrow(
-      "foreign-claim",
-      await store.persistClaimed(
+    const blockedPersisted = committedOrThrow(
+      "foreign-persist",
+      await store.persistReady(
         ACCOUNT,
         directMessage("blocked", "second", "2026-07-17T00:00:01.000Z"),
-        createOutboundClaim(ownerA, 1, "sending"),
       ),
     );
-    if (foreign.kind !== "claimed") throw new Error("expected foreign claim");
+    if (blockedPersisted.kind === "conflict") {
+      throw new Error("foreign fixture conflicted");
+    }
+    const request = createOutboundClaim(ownerA, 1, "sending");
+    const foreignClaim = claimForRow(
+      request,
+      blockedPersisted.entry.identity,
+      NOW,
+    );
+    repository.mutate(ACCOUNT, (account) => {
+      const row = account.outbound.blocked;
+      if (!row) throw new Error("foreign fixture row is missing");
+      row.state = { kind: "claimed", claim: foreignClaim };
+    });
 
     const reconciliation = committedOrThrow(
       "preflight-reconcile",
@@ -156,7 +170,7 @@ describe("unified XMPP runtime authority", () => {
     ]);
     const blocked = scan.entries[1]?.state;
     if (blocked?.kind !== "claimed") throw new Error("expected blocked claim");
-    expect(blocked.claim.claimId).toBe(foreign.claim.claimId);
+    expect(blocked.claim.claimId).toBe(foreignClaim.claimId);
   });
 
   test("terminal intent marks the row before atomic acknowledgement apply", async () => {
@@ -164,7 +178,7 @@ describe("unified XMPP runtime authority", () => {
     const owner = (await activate(store)).fence;
     const persisted = committedOrThrow(
       "persist",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("terminal"),
         createOutboundClaim(owner, 1, "sending"),
@@ -231,7 +245,7 @@ describe("unified XMPP runtime authority", () => {
     })).fence;
     const persisted = committedOrThrow(
       "terminal-handoff-persist",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("terminal-handoff-row"),
         createOutboundClaim(predecessor, 1, "sending"),
@@ -448,7 +462,7 @@ describe("unified XMPP runtime authority", () => {
     const owner = (await activate(store)).fence;
     const persisted = committedOrThrow(
       "persist",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("fallback"),
         createOutboundClaim(owner, 1, "resume-replay"),

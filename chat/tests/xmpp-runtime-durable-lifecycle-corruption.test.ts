@@ -9,12 +9,14 @@ import {
   type OutboundOwnerHint,
 } from "../src/lib/xmpp-runtime/durable-contract";
 import { validatePersistedRuntimeAccount } from "../src/lib/xmpp-runtime/durable-codec";
+import { claimForRow } from "../src/lib/xmpp-runtime/durable-model";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
 import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 import { recordingDurableStore } from "./durable-account-repository-test-support";
 
 const ACCOUNT = "alice@example.com";
+const NOW = 1_000;
 
 function directMessage(
   id: string,
@@ -99,7 +101,7 @@ describe("unified XMPP runtime authority", () => {
     })).fence;
     const claimed = committedOrThrow(
       "malformed-terminal-claim",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("malformed-terminal-row"),
         createOutboundClaim(owner, 1, "sending"),
@@ -233,7 +235,7 @@ describe("unified XMPP runtime authority", () => {
     })).fence;
     const claimed = committedOrThrow(
       "claim-generation-one",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("claim-chain-row"),
         createOutboundClaim(generationOne, 1, "resume-replay"),
@@ -278,7 +280,7 @@ describe("unified XMPP runtime authority", () => {
     })).fence;
     const claimed = committedOrThrow(
       "terminal-chain-claim",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("terminal-chain-row"),
         createOutboundClaim(generationOne, 1, "sending"),
@@ -317,40 +319,49 @@ describe("unified XMPP runtime authority", () => {
   });
 
   test("referenced predecessor saturation fails closed with typed capacity", async () => {
-    const store = new MemoryDurableOutboundStore();
+    const { store, repository } = recordingDurableStore({ now: () => NOW });
     let owner = (await activate(store, {
       ownerId: "capacity-chain",
       ownerInstanceId: "capacity-generation-zero",
     })).fence;
 
-    for (let index = 0; index < RETAINED_PREDECESSOR_LIMIT; index += 1) {
-      const claimed = committedOrThrow(
-        `capacity-claim-${index}`,
-        await store.persistClaimed(
-          ACCOUNT,
-          directMessage(`capacity-row-${index}`),
-          createOutboundClaim(owner, index + 1, "sending"),
-        ),
+    const seedNativeClaim = async (
+      id: string,
+      connectionGeneration: number,
+    ): Promise<void> => {
+      const persisted = committedOrThrow(
+        `capacity-persist-${id}`,
+        await store.persistReady(ACCOUNT, directMessage(id)),
       );
-      if (claimed.kind !== "claimed") throw new Error("expected capacity claim");
+      if (persisted.kind === "conflict") {
+        throw new Error("capacity fixture conflicted");
+      }
+      const request = createOutboundClaim(
+        owner,
+        connectionGeneration,
+        "sending",
+      );
+      repository.mutate(ACCOUNT, (account) => {
+        const row = account.outbound[id];
+        if (!row) throw new Error("capacity fixture row is missing");
+        row.state = {
+          kind: "claimed",
+          claim: claimForRow(request, row.identity, NOW),
+        };
+      });
+    };
+
+    for (let index = 0; index < RETAINED_PREDECESSOR_LIMIT; index += 1) {
+      await seedNativeClaim(`capacity-row-${index}`, index + 1);
       owner = (
         await handoffTo(store, owner, `capacity-generation-${index + 1}`)
       ).fence;
     }
 
-    const finalClaim = committedOrThrow(
-      "capacity-final-claim",
-      await store.persistClaimed(
-        ACCOUNT,
-        directMessage("capacity-final-row"),
-        createOutboundClaim(
-          owner,
-          RETAINED_PREDECESSOR_LIMIT + 1,
-          "sending",
-        ),
-      ),
+    await seedNativeClaim(
+      "capacity-final-row",
+      RETAINED_PREDECESSOR_LIMIT + 1,
     );
-    if (finalClaim.kind !== "claimed") throw new Error("expected final claim");
     const loaded = committedOrThrow(
       "capacity-load",
       await store.loadSm(owner),

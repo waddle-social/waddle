@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -10,6 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.OutboundQueue.EnqueueResult
+import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
 import social.waddle.android.client.prefs.CommittedResumeTransition
 import social.waddle.android.client.prefs.DeliveryAttemptId
@@ -33,7 +35,9 @@ class OutboundQueueTest {
     fun `absolute lane head blocks later ready work until terminal apply`() = runTest {
         val (prefs, queue) = activeQueue()
         val attempt = queue.beginAttempt(OWNER_A).attempt
-        val first = stored(queue.enqueueClaimed(draft(OWNER_A, "m-1"), attempt))
+        val first = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "m-1"), attempt),
+        )
         val second = stored(queue.enqueueReady(draft(OWNER_A, "m-2")))
 
         assertNull(queue.readyHead(OWNER_A))
@@ -53,25 +57,85 @@ class OutboundQueueTest {
     }
 
     @Test
+    fun `live admission stays queued behind ready native and terminal predecessors`() = runTest {
+        val (_, queue) = activeQueue()
+        val attempt = queue.beginAttempt(OWNER_A).attempt
+        val first = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
+
+        val behindReady = queue.enqueueAndClaimAbsoluteHead(
+            draft(OWNER_A, "m-2"),
+            attempt,
+        ) as LiveAdmissionResult.Queued
+        assertEquals(first.identity, behindReady.blocker.identity)
+        assertEquals(OutboundOwnership.Ready, behindReady.blocker.ownership)
+        assertEquals(OutboundOwnership.Ready, behindReady.row.ownership)
+
+        val claimedFirst = checkNotNull(
+            queue.claimAbsoluteReadyHead(OWNER_A, attempt),
+        )
+        val behindNative = queue.enqueueAndClaimAbsoluteHead(
+            draft(OWNER_A, "m-3"),
+            attempt,
+        ) as LiveAdmissionResult.Queued
+        assertEquals(claimedFirst.identity, behindNative.blocker.identity)
+        assertTrue(behindNative.blocker.ownership is OutboundOwnership.NativeOwned)
+
+        assertTrue(
+            queue.recordTerminal(
+                OWNER_A,
+                claimedFirst.clientStanzaId,
+                attempt,
+                DeliveryTerminalKind.ACK,
+            ) is OutboundQueue.TerminalRecordResult.Recorded,
+        )
+        val behindTerminal = queue.enqueueAndClaimAbsoluteHead(
+            draft(OWNER_A, "m-4"),
+            attempt,
+        ) as LiveAdmissionResult.Queued
+        assertEquals(claimedFirst.identity, behindTerminal.blocker.identity)
+        assertTrue(behindTerminal.blocker.ownership is OutboundOwnership.Terminal)
+
+        assertTrue(
+            queue.applyNextTerminal(OWNER_A) is
+                OutboundQueue.TerminalEffect.Acknowledged,
+        )
+        assertEquals(
+            behindReady.row.identity,
+            queue.claimAbsoluteReadyHead(OWNER_A, attempt)?.identity,
+        )
+    }
+
+    @Test
     fun `owner buckets and capacity are isolated`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         val queue = OutboundQueue(prefs, capacityPerOwner = 2)
         prefs.activateSession(OWNER_A, "sess-a")
         val attemptA = queue.beginAttempt(OWNER_A).attempt
-        val rowA1 = stored(queue.enqueueClaimed(draft(OWNER_A, "a-1"), attemptA))
-        val rowA2 = stored(queue.enqueueClaimed(draft(OWNER_A, "a-2"), attemptA))
+        val rowA1 = admitted(
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "a-1"), attemptA),
+        )
+        val rowA2 = admitted(
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "a-2"), attemptA),
+        )
 
         prefs.activateSession(OWNER_B, "sess-b")
         val attemptB = queue.beginAttempt(OWNER_B).attempt
-        val rowB1 = stored(queue.enqueueClaimed(draft(OWNER_B, "b-1"), attemptB))
-        val rowB2 = stored(queue.enqueueClaimed(draft(OWNER_B, "b-2"), attemptB))
-        assertEquals(
-            EnqueueResult.CapacityExhausted,
-            queue.enqueueClaimed(draft(OWNER_B, "b-3"), attemptB),
+        val rowB1 = admitted(
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_B, "b-1"), attemptB),
+        )
+        val rowB2 = admitted(
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_B, "b-2"), attemptB),
         )
         assertEquals(
-            EnqueueResult.StaleAttempt,
-            queue.enqueueClaimed(draft(OWNER_A, "a-stale"), attemptA),
+            LiveAdmissionResult.CapacityExhausted,
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_B, "b-3"), attemptB),
+        )
+        assertEquals(
+            LiveAdmissionResult.StaleAttempt,
+            queue.enqueueAndClaimAbsoluteHead(
+                draft(OWNER_A, "a-stale"),
+                attemptA,
+            ),
         )
         assertEquals(
             OutboundQueue.TerminalRecordResult.Stale,
@@ -93,21 +157,25 @@ class OutboundQueueTest {
         val (_, queue) = activeQueue()
         val attempt = queue.beginAttempt(OWNER_A).attempt
         val originalDraft = draft(OWNER_A, "same-id", body = "first")
-        val original = stored(queue.enqueueClaimed(originalDraft, attempt))
+        val original = claimed(
+            queue.enqueueAndClaimAbsoluteHead(originalDraft, attempt),
+        )
 
-        val duplicate = queue.enqueueClaimed(
+        val duplicate = queue.enqueueAndClaimAbsoluteHead(
             draft(OWNER_A, "same-id", body = "first"),
             attempt,
         )
-        assertTrue(duplicate is EnqueueResult.Stored && duplicate.idempotent)
-        assertEquals(original.identity, (duplicate as EnqueueResult.Stored).row.identity)
+        assertTrue(duplicate is LiveAdmissionResult.Queued && duplicate.idempotent)
+        duplicate as LiveAdmissionResult.Queued
+        assertEquals(original.identity, duplicate.row.identity)
+        assertEquals(original.identity, duplicate.blocker.identity)
 
-        val conflict = queue.enqueueClaimed(
+        val conflict = queue.enqueueAndClaimAbsoluteHead(
             draft(OWNER_A, "same-id", body = "different"),
             attempt,
         )
-        assertTrue(conflict is EnqueueResult.Conflict)
-        conflict as EnqueueResult.Conflict
+        assertTrue(conflict is LiveAdmissionResult.Conflict)
+        conflict as LiveAdmissionResult.Conflict
         assertEquals(original.identity, conflict.existing)
         assertNotEquals(original.payloadDigest, conflict.proposedDigest)
 
@@ -127,27 +195,130 @@ class OutboundQueueTest {
     }
 
     @Test
-    fun `exact CAS compares identity and expected ownership`() = runTest {
+    fun `absolute-head claim and release compare exact identity and ownership`() = runTest {
         val (_, queue) = activeQueue()
         val attempt = queue.beginAttempt(OWNER_A).attempt
-        val ready = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
-        val wrongIdentity = ready.identity.copy(incarnation = DeliveryIncarnation.random())
+        val first = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
+        val second = stored(queue.enqueueReady(draft(OWNER_A, "m-2")))
+        val wrongIdentity = first.identity.copy(incarnation = DeliveryIncarnation.random())
 
-        assertNull(queue.claimReady(wrongIdentity, attempt))
-        val claimed = checkNotNull(queue.claimReady(ready.identity, attempt))
+        val claimed = checkNotNull(queue.claimAbsoluteReadyHead(OWNER_A, attempt))
+        assertEquals(first.identity, claimed.identity)
+        assertEquals(OutboundOwnership.Ready, queue.rows(OWNER_A)[1].ownership)
+        assertEquals(second.identity, queue.rows(OWNER_A)[1].identity)
         val exactOwnership = claimed.ownership as OutboundOwnership.NativeOwned
         val wrongAttempt = attempt.copy(
             attemptId = DeliveryAttemptId("00000000-0000-4000-8000-000000000099"),
         )
         assertFalse(
             queue.release(
-                ready.identity,
+                first.identity,
                 OutboundOwnership.NativeOwned(wrongAttempt, NativeOutboundPhase.FRESH),
             ),
         )
-        assertFalse(queue.transition(wrongIdentity, exactOwnership, OutboundOwnership.Ready))
-        assertTrue(queue.release(ready.identity, exactOwnership))
-        assertEquals(OutboundOwnership.Ready, queue.rows(OWNER_A).single().ownership)
+        assertFalse(queue.release(wrongIdentity, exactOwnership))
+        assertTrue(queue.release(first.identity, exactOwnership))
+        assertEquals(
+            listOf(OutboundOwnership.Ready, OutboundOwnership.Ready),
+            queue.rows(OWNER_A).map { it.ownership },
+        )
+    }
+
+    @Test
+    fun `concurrent absolute-head claims produce exactly one native owner`() = runTest {
+        val (_, queue) = activeQueue()
+        val attempt = queue.beginAttempt(OWNER_A).attempt
+        val ready = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
+
+        val first = async { queue.claimAbsoluteReadyHead(OWNER_A, attempt) }
+        val second = async { queue.claimAbsoluteReadyHead(OWNER_A, attempt) }
+        val claims = listOf(first.await(), second.await()).filterNotNull()
+
+        assertEquals(listOf(ready.identity), claims.map { it.identity })
+        assertTrue(claims.single().ownership is OutboundOwnership.NativeOwned)
+    }
+
+    @Test
+    fun `duplicate delivery sequences fail closed without mutation`() = runTest {
+        val (prefs, queue) = activeQueue()
+        val attempt = queue.beginAttempt(OWNER_A).attempt
+        val first = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
+        val second = stored(queue.enqueueReady(draft(OWNER_A, "m-2")))
+        prefs.updateDeliveryJournal { journal ->
+            val owner = checkNotNull(journal.owners[OWNER_A])
+            DeliveryJournalMutation(
+                journal = journal.copy(
+                    owners = journal.owners + (
+                        OWNER_A to owner.copy(
+                            outboundRows = listOf(
+                                first,
+                                second.copy(sequence = first.sequence),
+                            ),
+                        )
+                    ),
+                ),
+                result = Unit,
+            )
+        }
+        val before = prefs.deliveryJournal.first()
+
+        val failure = runCatching {
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "m-3"), attempt)
+        }.exceptionOrNull()
+
+        assertNotNull(failure)
+        assertEquals(before, prefs.deliveryJournal.first())
+    }
+
+    @Test
+    fun `nonmonotonic next sequence fails closed without claiming`() = runTest {
+        val (prefs, queue) = activeQueue()
+        val attempt = queue.beginAttempt(OWNER_A).attempt
+        val ready = stored(queue.enqueueReady(draft(OWNER_A, "m-1")))
+        prefs.updateDeliveryJournal { journal ->
+            val owner = checkNotNull(journal.owners[OWNER_A])
+            DeliveryJournalMutation(
+                journal = journal.copy(
+                    owners = journal.owners + (
+                        OWNER_A to owner.copy(nextSequence = ready.sequence)
+                    ),
+                ),
+                result = Unit,
+            )
+        }
+        val before = prefs.deliveryJournal.first()
+
+        val failure = runCatching {
+            queue.claimAbsoluteReadyHead(OWNER_A, attempt)
+        }.exceptionOrNull()
+
+        assertNotNull(failure)
+        assertEquals(before, prefs.deliveryJournal.first())
+    }
+
+    @Test
+    fun `exhausted delivery sequence fails closed without allocation`() = runTest {
+        val (prefs, queue) = activeQueue()
+        val attempt = queue.beginAttempt(OWNER_A).attempt
+        prefs.updateDeliveryJournal { journal ->
+            val owner = checkNotNull(journal.owners[OWNER_A])
+            DeliveryJournalMutation(
+                journal = journal.copy(
+                    owners = journal.owners + (
+                        OWNER_A to owner.copy(nextSequence = Long.MAX_VALUE)
+                    ),
+                ),
+                result = Unit,
+            )
+        }
+        val before = prefs.deliveryJournal.first()
+
+        val failure = runCatching {
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "m-1"), attempt)
+        }.exceptionOrNull()
+
+        assertNotNull(failure)
+        assertEquals(before, prefs.deliveryJournal.first())
     }
 
     @Test
@@ -179,8 +350,8 @@ class OutboundQueueTest {
         val (prefs, queue) = activeQueue()
         val old = queue.beginAttempt(OWNER_A).attempt
         queue.saveSmResume(old, version = 1, snapshot = SmResumeSnapshot("previd-1", 3u, 4u))
-        stored(
-            queue.enqueueClaimed(
+        claimed(
+            queue.enqueueAndClaimAbsoluteHead(
                 draft(OWNER_A, "m-1"),
                 old,
                 NativeOutboundPhase.RESUME,
@@ -264,7 +435,7 @@ class OutboundQueueTest {
 
         store.failNextUpdate = true
         val failure = runCatching {
-            queue.enqueueClaimed(draft(OWNER_A, "m-1"), attempt)
+            queue.enqueueAndClaimAbsoluteHead(draft(OWNER_A, "m-1"), attempt)
         }.exceptionOrNull()
 
         assertNotNull(failure)
@@ -293,6 +464,16 @@ class OutboundQueueTest {
 
     private fun stored(result: EnqueueResult): QueuedOutboundMessage =
         (result as EnqueueResult.Stored).row
+
+    private fun claimed(result: LiveAdmissionResult): QueuedOutboundMessage =
+        (result as LiveAdmissionResult.Claimed).row
+
+    private fun admitted(result: LiveAdmissionResult): QueuedOutboundMessage =
+        when (result) {
+            is LiveAdmissionResult.Claimed -> result.row
+            is LiveAdmissionResult.Queued -> result.row
+            else -> error("expected admitted delivery row, received $result")
+        }
 
     private fun DeliveryAttemptRef.next(id: String): DeliveryAttemptRef = copy(
         attemptId = DeliveryAttemptId(id),

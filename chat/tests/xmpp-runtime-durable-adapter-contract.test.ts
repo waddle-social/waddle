@@ -98,6 +98,57 @@ for (const adapter of contractAdapters) {
       }
     });
 
+    test("serializes live admission against lane-head claiming with one owner", async () => {
+      const harness = adapter.create();
+      try {
+        const owner = committedOrThrow(
+          "activate-racing-claim",
+          await harness.store.claimOwner(ACCOUNT, {
+            ownerId: "racing-owner",
+            ownerInstanceId: "racing-instance",
+          }),
+        ).fence;
+        const message = directMessage("racing-claim");
+        expect(committedOrThrow(
+          "persist-racing-ready",
+          await harness.store.persistReady(ACCOUNT, message),
+        ).kind).toBe("inserted");
+
+        const results = await Promise.all([
+          harness.store.persistAndClaimLaneHead(
+            ACCOUNT,
+            message,
+            {
+              ...createOutboundClaim(owner, 1, "sending"),
+              claimId: "live-admission",
+            },
+          ),
+          harness.store.claimHead(
+            ACCOUNT,
+            { kind: "direct" },
+            {
+              ...createOutboundClaim(owner, 1, "sending"),
+              claimId: "lane-drain",
+            },
+          ),
+        ]);
+        const values = results.map((result) => (
+          committedOrThrow("racing-claim", result)
+        ));
+        expect(values.map(({ kind }) => kind).sort()).toEqual([
+          "busy",
+          "claimed",
+        ]);
+        const claimed = values.find((value) => value.kind === "claimed");
+        if (!claimed || claimed.kind !== "claimed") {
+          throw new Error("expected one canonical racing claim");
+        }
+        expect(["live-admission", "lane-drain"]).toContain(claimed.claim.claimId);
+      } finally {
+        await harness.close();
+      }
+    });
+
     test("commits claim, terminal receipt, and row deletion atomically", async () => {
       const harness = adapter.create();
       try {

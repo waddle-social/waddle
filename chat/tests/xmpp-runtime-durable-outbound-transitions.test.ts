@@ -1,16 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
+import type {
+  PersistedQueuedDmMessage,
+  PersistedQueuedRoomMessage,
+} from "../src/lib/outbound-queue-store";
 import {
+  outboundLane,
   type OutboundClaimRequest,
   type OutboundOwnerContext,
 } from "../src/lib/xmpp-runtime/durable-contract";
 import type { RuntimeAccount } from "../src/lib/xmpp-runtime/durable-model";
-import { emptyAccount } from "../src/lib/xmpp-runtime/durable-model";
+import {
+  claimForRow,
+  emptyAccount,
+  entryFromRow,
+} from "../src/lib/xmpp-runtime/durable-model";
 import {
   applyTerminalTransition,
   claimHeadTransition,
   listOutboundTransition,
-  persistClaimedTransition,
+  persistAndClaimLaneHeadTransition,
   persistReadyTransition,
   reconcileResumeClaimsTransition,
   recordTerminalTransition,
@@ -97,7 +105,58 @@ function claimRequest(
   };
 }
 
+function seedNativeClaim(
+  account: RuntimeAccount,
+  outbound: PreparedOutboundMessage,
+  request: OutboundClaimRequest,
+  authorityNow = NOW,
+) {
+  const persisted = persistReadyTransition(account, outbound);
+  if (persisted.value.kind === "conflict") {
+    throw new Error("native claim fixture conflicted");
+  }
+  const row = account.outbound[outbound.identity.messageId];
+  if (!row) throw new Error("native claim fixture is missing");
+  const claim = claimForRow(request, row.identity, authorityNow);
+  row.state = { kind: "claimed", claim };
+  return {
+    entry: entryFromRow(row),
+    claim: { ...claim },
+  };
+}
+
 describe("durable outbound transitions", () => {
+  test("normalizes room ordering lanes to the canonical bare JID", () => {
+    const message: PersistedQueuedRoomMessage = {
+      kind: "room",
+      id: "room-lane",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      roomJid: " Room@Conference.Example/Nick ",
+      body: "canonical lane",
+    };
+
+    expect(outboundLane(message)).toEqual({
+      kind: "room",
+      roomJid: "room@conference.example",
+    });
+  });
+
+  test("preserves insertion order when writes share a clock tick", () => {
+    const account = emptyAccount(ACCOUNT);
+    const createdAt = "2026-07-17T00:00:00.000Z";
+
+    persistReadyTransition(account, prepared("z-first", { createdAt }));
+    persistReadyTransition(account, prepared("a-second", { createdAt }));
+
+    expect(listOutboundTransition(account).value.map(({ id }) => id)).toEqual([
+      "z-first",
+      "a-second",
+    ]);
+    expect(account.outbound["a-second"]?.message.createdAt).toBe(
+      "2026-07-17T00:00:00.001Z",
+    );
+  });
+
   test("preserves revision finalization, clone isolation, existing rows, and conflicts", () => {
     const account = emptyAccount(ACCOUNT);
     account.revision = 7;
@@ -198,17 +257,229 @@ describe("durable outbound transitions", () => {
     ).value.kind).toBe("missing");
   });
 
+  test("live admission persists behind every predecessor state without bypassing the lane", () => {
+    const account = emptyAccount(ACCOUNT);
+    const owner = activate(account);
+    persistReadyTransition(
+      account,
+      prepared("first", { createdAt: "2026-07-17T00:00:01.000Z" }),
+    );
+
+    const secondPrepared = prepared("second", {
+      createdAt: "2026-07-17T00:00:02.000Z",
+    });
+    const queued = persistAndClaimLaneHeadTransition(
+      account,
+      NOW,
+      secondPrepared,
+      claimRequest(owner, "second-claim"),
+    );
+    expect(queued.value).toMatchObject({
+      kind: "queued",
+      entry: { identity: { messageId: "second" }, state: { kind: "ready" } },
+      blocker: {
+        identity: { messageId: "first" },
+        state: "ready",
+      },
+    });
+    expect(account.outbound.second?.state.kind).toBe("ready");
+
+    const duplicate = persistAndClaimLaneHeadTransition(
+      account,
+      NOW,
+      secondPrepared,
+      claimRequest(owner, "duplicate-second-claim"),
+    );
+    expect(duplicate.changed).toBe(false);
+    expect(duplicate.value).toMatchObject({
+      kind: "queued",
+      entry: { identity: { messageId: "second" } },
+      blocker: { identity: { messageId: "first" }, state: "ready" },
+    });
+    expect(persistAndClaimLaneHeadTransition(
+      account,
+      NOW,
+      prepared("second", { digest: "changed-digest" }),
+      claimRequest(owner, "conflicting-second-claim"),
+    ).value.kind).toBe("conflict");
+
+    const firstClaim = claimHeadTransition(
+      account,
+      NOW,
+      { kind: "direct" },
+      claimRequest(owner, "first-claim"),
+    );
+    if (firstClaim.value.kind !== "claimed") {
+      throw new Error("expected first lane claim");
+    }
+    const third = persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 1,
+      prepared("third", { createdAt: "2026-07-17T00:00:03.000Z" }),
+      claimRequest(owner, "third-claim"),
+    );
+    expect(third.value).toMatchObject({
+      kind: "queued",
+      blocker: {
+        identity: { messageId: "first" },
+        state: "claimed",
+        leaseUntil: firstClaim.value.claim.leaseUntil,
+      },
+    });
+
+    const firstState = account.outbound.first?.state;
+    if (firstState?.kind !== "claimed") {
+      throw new Error("expected claimed predecessor");
+    }
+    firstState.claim.leaseUntil = NOW + 2;
+    const fourth = persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 2,
+      prepared("fourth", { createdAt: "2026-07-17T00:00:04.000Z" }),
+      claimRequest(owner, "fourth-claim"),
+    );
+    expect(fourth.value).toMatchObject({
+      kind: "queued",
+      blocker: {
+        identity: { messageId: "first" },
+        state: "claimed",
+        leaseUntil: NOW + 2,
+      },
+    });
+
+    const terminal = recordTerminalTransition(
+      account,
+      NOW + 3,
+      firstClaim.value.entry.identity,
+      "ack",
+      firstState.claim,
+      "first-terminal",
+    );
+    if (terminal.value.kind !== "recorded") {
+      throw new Error("expected first terminal intent");
+    }
+    const fifth = persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 3,
+      prepared("fifth", { createdAt: "2026-07-17T00:00:05.000Z" }),
+      claimRequest(owner, "fifth-claim"),
+    );
+    expect(fifth.value).toMatchObject({
+      kind: "queued",
+      blocker: {
+        identity: { messageId: "first" },
+        state: "terminal",
+      },
+    });
+
+    expect(applyTerminalTransition(
+      account,
+      NOW + 4,
+      owner,
+      terminal.value.intent,
+    ).value.kind).toBe("acked");
+    const next = claimHeadTransition(
+      account,
+      NOW + 4,
+      { kind: "direct" },
+      claimRequest(owner, "next-claim"),
+    );
+    expect(next.value).toMatchObject({
+      kind: "claimed",
+      entry: { identity: { messageId: "second" } },
+    });
+  });
+
+  test("live admission reclaims only an expired target head and isolates room lanes", () => {
+    const account = emptyAccount(ACCOUNT);
+    const owner = activate(account);
+    const first = persistAndClaimLaneHeadTransition(
+      account,
+      NOW,
+      prepared("direct-head"),
+      claimRequest(owner, "direct-head-claim"),
+    );
+    if (first.value.kind !== "claimed") {
+      throw new Error("expected direct head claim");
+    }
+    expect(persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 1,
+      prepared("direct-head"),
+      claimRequest(owner, "active-retry"),
+    ).value.kind).toBe("busy");
+
+    const directState = account.outbound["direct-head"]?.state;
+    if (directState?.kind !== "claimed") {
+      throw new Error("expected direct head ownership");
+    }
+    directState.claim.leaseUntil = NOW + 2;
+    const reclaimed = persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 2,
+      prepared("direct-head"),
+      claimRequest(owner, "expired-retry"),
+    );
+    expect(reclaimed.value).toMatchObject({
+      kind: "claimed",
+      entry: { identity: { messageId: "direct-head" } },
+      claim: { claimId: "expired-retry" },
+    });
+
+    const room = (
+      id: string,
+      roomJid: string,
+      createdAt: string,
+    ): PreparedOutboundMessage => {
+      const value = prepared(id, { createdAt });
+      const message = {
+        kind: "room" as const,
+        id,
+        createdAt,
+        roomJid,
+        body: id,
+      };
+      return {
+        ...value,
+        lane: { kind: "room", roomJid },
+        orderKey: `${createdAt}\u0000${id}`,
+        message,
+      };
+    };
+    const general = persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 2,
+      room("general-first", "general@muc.example.com", "2026-07-17T00:00:01.000Z"),
+      claimRequest(owner, "general-first-claim"),
+    );
+    expect(general.value.kind).toBe("claimed");
+    expect(persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 2,
+      room("general-second", "general@muc.example.com", "2026-07-17T00:00:02.000Z"),
+      claimRequest(owner, "general-second-claim"),
+    ).value).toMatchObject({
+      kind: "queued",
+      blocker: { identity: { messageId: "general-first" } },
+    });
+    expect(persistAndClaimLaneHeadTransition(
+      account,
+      NOW + 2,
+      room("random-first", "random@muc.example.com", "2026-07-17T00:00:03.000Z"),
+      claimRequest(owner, "random-first-claim"),
+    ).value.kind).toBe("claimed");
+  });
+
   test("reconciles native snapshots atomically and never partially adopts", () => {
     const account = emptyAccount(ACCOUNT);
     const owner = activate(account);
     persistReadyTransition(account, prepared("ready"));
-    const retained = persistClaimedTransition(
+    const retained = seedNativeClaim(
       account,
-      NOW,
       prepared("retained"),
       claimRequest(owner, "retained-claim"),
     );
-    expect(retained.value.kind).toBe("claimed");
+    expect(retained.entry.state.kind).toBe("claimed");
 
     const unresolved = reconcileResumeClaimsTransition(account, NOW + 1, {
       owner,
@@ -248,11 +519,11 @@ describe("durable outbound transitions", () => {
     expect(account.outbound.retained?.state.kind).toBe("ready");
 
     const foreign = activate(account, "foreign-owner", "foreign-instance");
-    persistClaimedTransition(
+    seedNativeClaim(
       account,
-      NOW + 2,
       prepared("foreign"),
       claimRequest(foreign, "foreign-claim"),
+      NOW + 2,
     );
     const blocked = reconcileResumeClaimsTransition(account, NOW + 3, {
       owner,
@@ -299,7 +570,7 @@ describe("durable outbound transitions", () => {
   test("fresh-session release preserves fallback and foreign predecessor fences", () => {
     const account = emptyAccount(ACCOUNT);
     const predecessor = activate(account);
-    const predecessorClaim = persistClaimedTransition(
+    const predecessorClaim = persistAndClaimLaneHeadTransition(
       account,
       NOW,
       prepared("predecessor"),
@@ -327,30 +598,30 @@ describe("durable outbound transitions", () => {
       "unused-rotation",
     ).value.fence;
 
-    persistClaimedTransition(
+    seedNativeClaim(
       account,
-      NOW + 2,
       prepared("current-fallback"),
       claimRequest(owner, "current-fallback-claim", "fresh-fallback", 7),
-    );
-    persistClaimedTransition(
-      account,
       NOW + 2,
+    );
+    seedNativeClaim(
+      account,
       prepared("same-owner-other-phase"),
       claimRequest(owner, "other-phase-claim", "sending", 7),
-    );
-    persistClaimedTransition(
-      account,
       NOW + 2,
+    );
+    seedNativeClaim(
+      account,
       prepared("same-owner-other-generation"),
       claimRequest(owner, "other-generation-claim", "fresh-fallback", 6),
+      NOW + 2,
     );
     const foreign = activate(account, "foreign-owner", "foreign-instance");
-    persistClaimedTransition(
+    seedNativeClaim(
       account,
-      NOW + 2,
       prepared("foreign"),
       claimRequest(foreign, "foreign-claim", "sending", 7),
+      NOW + 2,
     );
 
     const beforeFencedRelease = structuredClone(account);
@@ -372,8 +643,8 @@ describe("durable outbound transitions", () => {
     expect(released).toEqual({
       changed: true,
       value: [
-        "same-owner-other-generation",
         "same-owner-other-phase",
+        "same-owner-other-generation",
       ],
     });
     expect(account.outbound["current-fallback"]?.state.kind).toBe("claimed");
@@ -391,7 +662,7 @@ describe("durable outbound transitions", () => {
     const account = emptyAccount(ACCOUNT);
     const owner = activate(account);
 
-    const acked = persistClaimedTransition(
+    const acked = persistAndClaimLaneHeadTransition(
       account,
       NOW,
       prepared("acked"),
@@ -426,7 +697,7 @@ describe("durable outbound transitions", () => {
     ).value.kind).toBe("acked");
     expect(account.outbound.acked).toBeUndefined();
 
-    const replayed = persistClaimedTransition(
+    const replayed = persistAndClaimLaneHeadTransition(
       account,
       NOW + 3,
       prepared("replayed"),
@@ -454,19 +725,18 @@ describe("durable outbound transitions", () => {
       claim: { phase: "fresh-fallback" },
     });
 
-    const sending = persistClaimedTransition(
+    const sending = seedNativeClaim(
       account,
-      NOW + 6,
       prepared("sending"),
       claimRequest(owner, "sending-claim"),
+      NOW + 6,
     );
-    if (sending.value.kind !== "claimed") throw new Error("expected send claim");
     const sendIntent = recordTerminalTransition(
       account,
       NOW + 7,
-      sending.value.entry.identity,
+      sending.entry.identity,
       "native-failure",
-      sending.value.claim,
+      sending.claim,
       "send-intent",
     );
     if (sendIntent.value.kind !== "recorded") throw new Error("expected intent");

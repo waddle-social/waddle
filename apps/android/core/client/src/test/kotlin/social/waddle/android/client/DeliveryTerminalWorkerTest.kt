@@ -10,8 +10,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.OutboundQueue.EnqueueResult
+import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryJournalMutation
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
+import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
@@ -26,9 +30,7 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs, capacityPerOwner = SIGNAL_COUNT)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val rows = (1..SIGNAL_COUNT).map { index ->
-            stored(queue.enqueueClaimed(draft("m-$index"), attempt))
-        }
+        val rows = seedNativeOwnedRows(prefs, queue, attempt, SIGNAL_COUNT)
         val effects = mutableListOf<XmppEvent>()
         val worker = DeliveryTerminalWorker(
             journal = queue,
@@ -75,7 +77,9 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val row = stored(queue.enqueueClaimed(draft("m-1"), attempt))
+        val row = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt),
+        )
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = {},
@@ -122,7 +126,9 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val row = stored(queue.enqueueClaimed(draft("m-1"), attempt))
+        val row = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt),
+        )
         queue.recordTerminal(OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
         val effects = mutableListOf<XmppEvent>()
         val worker = DeliveryTerminalWorker(
@@ -146,7 +152,9 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val row = stored(queue.enqueueClaimed(draft("m-1"), attempt))
+        val row = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt),
+        )
         queue.recordTerminal(OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
         val effects = mutableListOf<XmppEvent>()
         val worker = DeliveryTerminalWorker(
@@ -175,7 +183,9 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val row = stored(queue.enqueueClaimed(draft("m-1"), attempt))
+        val row = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt),
+        )
         queue.recordTerminal(OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
         val effects = mutableListOf<XmppEvent>()
         val first = DeliveryTerminalWorker(
@@ -206,7 +216,9 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(OWNER, "sess-a")
         val queue = OutboundQueue(prefs)
         val attempt = queue.beginAttempt(OWNER).attempt
-        val row = stored(queue.enqueueClaimed(draft("m-1"), attempt))
+        val row = claimed(
+            queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt),
+        )
         queue.recordTerminal(OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
         val effects = mutableListOf<XmppEvent>()
         val worker = DeliveryTerminalWorker(
@@ -250,6 +262,41 @@ class DeliveryTerminalWorkerTest {
 
     private fun stored(result: EnqueueResult): QueuedOutboundMessage =
         (result as EnqueueResult.Stored).row
+
+    private fun claimed(result: LiveAdmissionResult): QueuedOutboundMessage =
+        (result as LiveAdmissionResult.Claimed).row
+
+    private suspend fun seedNativeOwnedRows(
+        prefs: SessionPrefs,
+        queue: OutboundQueue,
+        attempt: DeliveryAttemptRef,
+        count: Int,
+    ): List<QueuedOutboundMessage> {
+        val readyRows = (1..count).map { index ->
+            stored(queue.enqueueReady(draft("m-$index")))
+        }
+        return prefs.updateDeliveryJournal { journal ->
+            val owner = checkNotNull(journal.owners[OWNER])
+            val nativeRows = owner.outboundRows.map { row ->
+                row.copy(
+                    ownership = OutboundOwnership.NativeOwned(
+                        attempt,
+                        NativeOutboundPhase.FRESH,
+                    ),
+                )
+            }
+            DeliveryJournalMutation(
+                journal = journal.copy(
+                    owners = journal.owners + (
+                        OWNER to owner.copy(outboundRows = nativeRows)
+                    ),
+                ),
+                result = nativeRows,
+            )
+        }.also { nativeRows ->
+            check(nativeRows.map { it.identity } == readyRows.map { it.identity })
+        }
+    }
 
     private companion object {
         const val OWNER = "alice@waddle.test"

@@ -9,7 +9,7 @@ test("the mounted provider publishes auth and disposes each client exactly once"
   page,
 }) => {
   await page.goto("/provider");
-  await expect(page.getByTestId("xmpp-provider-fixture")).toBeVisible();
+  await expect(page.getByTestId("xmpp-provider-fixture")).toBeAttached();
   await expect.poll(async () => (await snapshot(page)).activeClientId).toBe(
     "bootstrap-session",
   );

@@ -21,7 +21,7 @@ import {
   type OutboundOwnerActivation,
   type OutboundOwnerContext,
   type OutboundOwnerHint,
-  type OutboundPersistClaimedResult,
+  type OutboundPersistLaneHeadResult,
   type OutboundPersistResult,
   type OutboundReleaseResult,
   type OutboundRenewResult,
@@ -53,7 +53,7 @@ import {
   claimHeadTransition,
   listOutboundTransition,
   listTerminalTransition,
-  persistClaimedTransition,
+  persistAndClaimLaneHeadTransition,
   persistReadyTransition,
   reconcileResumeClaimsTransition,
   recordTerminalTransition,
@@ -156,15 +156,20 @@ export class DurableStoreEngine implements DurableOutboundStore {
     }
   }
 
-  async persistClaimed(
+  async persistAndClaimLaneHead(
     accountKey: string,
     message: PersistedQueuedMessage,
     request: OutboundClaimRequest,
-  ): Promise<DurableOutcome<OutboundPersistClaimedResult>> {
+  ): Promise<DurableOutcome<OutboundPersistLaneHeadResult>> {
     try {
       const prepared = await this.prepareOutboundMessage(accountKey, message);
       return await this.transact(accountKey, (account, authorityNow) => (
-        persistClaimedTransition(account, authorityNow, prepared, request)
+        persistAndClaimLaneHeadTransition(
+          account,
+          authorityNow,
+          prepared,
+          request,
+        )
       ));
     } catch (error) {
       return failed(error);

@@ -99,7 +99,7 @@ describe("durable outbound queue TTL", () => {
     const owner = await activate(store);
     const persisted = committedOrThrow(
       "persist-live-claim",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("dm-live", new Date(NOW - 30 * DAY_MS).toISOString()),
         createOutboundClaim(owner, 1, "sending"),
@@ -121,7 +121,7 @@ describe("durable outbound queue TTL", () => {
     const owner = await activate(store);
     const persisted = committedOrThrow(
       "persist-expiring-claim",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("dm-expired", new Date(NOW - 30 * DAY_MS).toISOString()),
         createOutboundClaim(owner, 1, "sending"),
@@ -143,7 +143,7 @@ describe("durable outbound queue TTL", () => {
     const owner = await activate(store);
     const persisted = committedOrThrow(
       "persist-terminal",
-      await store.persistClaimed(
+      await store.persistAndClaimLaneHead(
         ACCOUNT,
         directMessage("dm-terminal", new Date(NOW - 30 * DAY_MS).toISOString()),
         createOutboundClaim(owner, 1, "sending"),

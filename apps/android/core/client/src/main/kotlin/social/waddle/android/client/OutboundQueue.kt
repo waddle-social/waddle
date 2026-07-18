@@ -1,12 +1,10 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.flow.first
-import java.nio.ByteBuffer
-import java.security.MessageDigest
+import social.waddle.android.client.prefs.CommittedResumeTransition
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
-import social.waddle.android.client.prefs.CommittedResumeTransition
 import social.waddle.android.client.prefs.DeliveryCallbackRef
 import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.DeliveryJournalMutation
@@ -21,9 +19,11 @@ import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.SmResumeSlot
+import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.SmResumeXmlToken
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 
 /**
  * Exact-CAS operations over the owner-scoped delivery journal.
@@ -53,6 +53,27 @@ class OutboundQueue(
 
         data object CapacityExhausted : EnqueueResult
         data object StaleAttempt : EnqueueResult
+    }
+
+    sealed interface LiveAdmissionResult {
+        data class Claimed(
+            val row: QueuedOutboundMessage,
+        ) : LiveAdmissionResult
+
+        data class Queued(
+            val row: QueuedOutboundMessage,
+            val blocker: QueuedOutboundMessage,
+            val idempotent: Boolean,
+        ) : LiveAdmissionResult
+
+        data class Conflict(
+            val existing: DeliveryRowIdentity,
+            val proposedDigest: social.waddle.android.client.prefs.DeliveryPayloadDigest,
+        ) : LiveAdmissionResult
+
+        data object CapacityExhausted : LiveAdmissionResult
+
+        data object StaleAttempt : LiveAdmissionResult
     }
 
     data class AttemptBootstrap(
@@ -338,39 +359,121 @@ class OutboundQueue(
         )
     }
 
-    suspend fun enqueueClaimed(
+    suspend fun enqueueAndClaimAbsoluteHead(
         draft: QueuedOutboundDraft,
         attempt: DeliveryAttemptRef,
         phase: NativeOutboundPhase = NativeOutboundPhase.FRESH,
-    ): EnqueueResult = enqueue(
-        draft = draft,
-        ownership = OutboundOwnership.NativeOwned(attempt, phase),
-        requiredAttempt = attempt,
-    )
+    ): LiveAdmissionResult = sessionPrefs.updateDeliveryJournal { journal ->
+        journal.liveAdmission(draft, attempt, phase)
+    }
+
+    private fun DeliveryJournal.liveAdmission(
+        draft: QueuedOutboundDraft,
+        attempt: DeliveryAttemptRef,
+        phase: NativeOutboundPhase,
+    ): DeliveryJournalMutation<LiveAdmissionResult> {
+        val ownerBareJid = draft.ownerBareJid
+        val owner = owners[ownerBareJid] ?: DeliveryOwnerJournal()
+        if (
+            activeOwnerBareJid != ownerBareJid ||
+            owner.activeAttempt != attempt ||
+            attempt.ownerBareJid != ownerBareJid
+        ) {
+            return DeliveryJournalMutation(
+                this,
+                LiveAdmissionResult.StaleAttempt,
+            )
+        }
+        val currentHead = owner.absoluteHeadOrThrow(ownerBareJid)
+        val retry = owner.retryAdmission(draft, currentHead)
+        if (retry != null) {
+            return DeliveryJournalMutation(this, retry)
+        }
+        if (owner.outboundRows.size >= capacityPerOwner) {
+            return DeliveryJournalMutation(
+                this,
+                LiveAdmissionResult.CapacityExhausted,
+            )
+        }
+        return appendLiveAdmission(owner, draft, currentHead, attempt, phase)
+    }
+
+    private fun DeliveryOwnerJournal.retryAdmission(
+        draft: QueuedOutboundDraft,
+        currentHead: QueuedOutboundMessage?,
+    ): LiveAdmissionResult? {
+        val existing = outboundRows.firstOrNull {
+            it.clientStanzaId == draft.clientStanzaId
+        } ?: return null
+        if (existing.payloadDigest != draft.payloadDigest) {
+            return LiveAdmissionResult.Conflict(
+                existing.identity,
+                draft.payloadDigest,
+            )
+        }
+        val blocker = currentHead
+            ?: error("an existing delivery row requires an absolute head")
+        return LiveAdmissionResult.Queued(
+            row = existing,
+            blocker = blocker,
+            idempotent = true,
+        )
+    }
+
+    private fun DeliveryJournal.appendLiveAdmission(
+        owner: DeliveryOwnerJournal,
+        draft: QueuedOutboundDraft,
+        currentHead: QueuedOutboundMessage?,
+        attempt: DeliveryAttemptRef,
+        phase: NativeOutboundPhase,
+    ): DeliveryJournalMutation<LiveAdmissionResult> {
+        val ownerBareJid = draft.ownerBareJid
+        val sequence = owner.allocateSequenceOrThrow(ownerBareJid)
+        val ready = draft.persisted(
+            sequence,
+            OutboundOwnership.Ready,
+        )
+        val (admitted, result) = if (currentHead == null) {
+            val claimed = ready.copy(
+                ownership = OutboundOwnership.NativeOwned(attempt, phase),
+            )
+            claimed to LiveAdmissionResult.Claimed(claimed)
+        } else {
+            ready to LiveAdmissionResult.Queued(
+                ready,
+                currentHead,
+                false,
+            )
+        }
+        return DeliveryJournalMutation(
+            journal = withOwner(
+                ownerBareJid,
+                owner.copy(
+                    nextSequence = owner.nextSequence + 1,
+                    outboundRows = owner.outboundRows + admitted,
+                ),
+            ),
+            result = result,
+        )
+    }
 
     suspend fun enqueueReady(draft: QueuedOutboundDraft): EnqueueResult =
         enqueue(
             draft = draft,
-            ownership = OutboundOwnership.Ready,
-            requiredAttempt = null,
         )
 
     private suspend fun enqueue(
         draft: QueuedOutboundDraft,
-        ownership: OutboundOwnership,
-        requiredAttempt: DeliveryAttemptRef?,
     ): EnqueueResult = sessionPrefs.updateDeliveryJournal { journal ->
         val ownerBareJid = draft.ownerBareJid
         val owner = journal.owners[ownerBareJid] ?: DeliveryOwnerJournal()
-        if (
-            journal.activeOwnerBareJid != ownerBareJid ||
-            requiredAttempt != null && owner.activeAttempt != requiredAttempt
-        ) {
+        if (journal.activeOwnerBareJid != ownerBareJid) {
             return@updateDeliveryJournal DeliveryJournalMutation(
                 journal,
                 EnqueueResult.StaleAttempt,
             )
         }
+        owner.absoluteHeadOrThrow(ownerBareJid)
         val existing = owner.outboundRows.firstOrNull {
             it.ownerBareJid == ownerBareJid &&
                 it.clientStanzaId == draft.clientStanzaId
@@ -390,7 +493,11 @@ class OutboundQueue(
                 EnqueueResult.CapacityExhausted,
             )
         }
-        val stored = draft.persisted(owner.nextSequence, ownership)
+        val sequence = owner.allocateSequenceOrThrow(ownerBareJid)
+        val stored = draft.persisted(
+            sequence,
+            OutboundOwnership.Ready,
+        )
         val nextOwner = owner.copy(
             nextSequence = owner.nextSequence + 1,
             outboundRows = owner.outboundRows + stored,
@@ -404,31 +511,31 @@ class OutboundQueue(
         )
     }
 
-    suspend fun claimReady(
-        identity: DeliveryRowIdentity,
+    suspend fun claimAbsoluteReadyHead(
+        ownerBareJid: String,
         attempt: DeliveryAttemptRef,
         phase: NativeOutboundPhase = NativeOutboundPhase.FRESH,
     ): QueuedOutboundMessage? = sessionPrefs.updateDeliveryJournal { journal ->
-        val owner = journal.owners[identity.ownerBareJid]
+        val owner = journal.owners[ownerBareJid]
         if (
-            journal.activeOwnerBareJid != identity.ownerBareJid ||
+            journal.activeOwnerBareJid != ownerBareJid ||
             owner?.activeAttempt != attempt ||
-            attempt.ownerBareJid != identity.ownerBareJid
+            attempt.ownerBareJid != ownerBareJid
         ) {
             return@updateDeliveryJournal DeliveryJournalMutation(journal, null)
         }
-        var claimed: QueuedOutboundMessage? = null
+        val head = owner.absoluteHeadOrThrow(ownerBareJid)
+        if (head?.ownership != OutboundOwnership.Ready) {
+            return@updateDeliveryJournal DeliveryJournalMutation(journal, null)
+        }
+        val claimed = head.copy(
+            ownership = OutboundOwnership.NativeOwned(attempt, phase),
+        )
         val rows = owner.outboundRows.map { row ->
-            if (row.identity == identity && row.ownership == OutboundOwnership.Ready) {
-                row.copy(
-                    ownership = OutboundOwnership.NativeOwned(attempt, phase),
-                ).also { claimed = it }
-            } else {
-                row
-            }
+            if (row.identity == head.identity) claimed else row
         }
         DeliveryJournalMutation(
-            journal = journal.withOwner(identity.ownerBareJid, owner.copy(outboundRows = rows)),
+            journal = journal.withOwner(ownerBareJid, owner.copy(outboundRows = rows)),
             result = claimed,
         )
     }
@@ -436,13 +543,12 @@ class OutboundQueue(
     suspend fun release(
         identity: DeliveryRowIdentity,
         expected: OutboundOwnership.NativeOwned,
-    ): Boolean = transition(identity, expected, OutboundOwnership.Ready)
+    ): Boolean = transitionToReady(identity, expected)
 
     /** Exact-CAS ownership renewal/transition. */
-    suspend fun transition(
+    private suspend fun transitionToReady(
         identity: DeliveryRowIdentity,
         expected: OutboundOwnership,
-        next: OutboundOwnership,
     ): Boolean = sessionPrefs.updateDeliveryJournal { journal ->
         val owner = journal.owners[identity.ownerBareJid]
             ?: return@updateDeliveryJournal DeliveryJournalMutation(journal, false)
@@ -453,7 +559,7 @@ class OutboundQueue(
         val rows = owner.outboundRows.map { row ->
             if (row.identity == identity && row.ownership == expected) {
                 changed = true
-                row.copy(ownership = next)
+                row.copy(ownership = OutboundOwnership.Ready)
             } else {
                 row
             }
@@ -610,9 +716,36 @@ class OutboundQueue(
      * No work may bypass an uncertain or not-yet-applied predecessor.
      */
     suspend fun readyHead(ownerBareJid: String): QueuedOutboundMessage? =
-        rows(ownerBareJid)
-            .minByOrNull { it.sequence }
+        sessionPrefs.deliveryJournal.first()
+            .owners[ownerBareJid]
+            ?.absoluteHeadOrThrow(ownerBareJid)
             ?.takeIf { it.ownership == OutboundOwnership.Ready }
+
+    private fun DeliveryOwnerJournal.absoluteHeadOrThrow(
+        ownerBareJid: String,
+    ): QueuedOutboundMessage? {
+        check(outboundRows.all { it.ownerBareJid == ownerBareJid }) {
+            "delivery journal row owner does not match its bucket"
+        }
+        check(outboundRows.map { it.sequence }.toSet().size == outboundRows.size) {
+            "delivery journal contains duplicate delivery sequences"
+        }
+        val maximum = outboundRows.maxOfOrNull { it.sequence }
+        check(maximum == null || nextSequence > maximum) {
+            "next delivery sequence must exceed every persisted row"
+        }
+        return outboundRows.minByOrNull { it.sequence }
+    }
+
+    private fun DeliveryOwnerJournal.allocateSequenceOrThrow(
+        ownerBareJid: String,
+    ): Long {
+        absoluteHeadOrThrow(ownerBareJid)
+        check(nextSequence < Long.MAX_VALUE) {
+            "delivery sequence exhausted"
+        }
+        return nextSequence
+    }
 
     private fun DeliveryJournal.withOwner(
         ownerBareJid: String,
@@ -647,7 +780,9 @@ class OutboundQueue(
                 else -> receipt
             }
         }
-        return if (retained == resumeTransitionReceipts) this else {
+        return if (retained == resumeTransitionReceipts) {
+            this
+        } else {
             copy(resumeTransitionReceipts = retained)
         }
     }

@@ -17,6 +17,7 @@ import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
+import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSessionReadyKind
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -107,6 +108,83 @@ class ConnectionLoopPullTest {
             advanceTimeBy(250)
             runCurrent()
             assertPulls(client, calls = 4, inFlight = 1)
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `retryable head failure queues a connected compose and ack advances once`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            harness.start()
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+            client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val first = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "first retryable",
+            )
+            val firstId = checkNotNull(first.delivery).identity.clientStanzaId
+            assertEquals(WaddleSendMessageOutcome.NotConnected, first.outcome)
+            assertEquals(1, client.sendCalls.size)
+
+            val second = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "second connected compose",
+            )
+            val secondId = checkNotNull(second.delivery).identity.clientStanzaId
+            assertEquals(WaddleSendMessageOutcome.NotConnected, second.outcome)
+            assertEquals(
+                listOf(firstId, firstId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+            assertEquals(
+                listOf(firstId, secondId),
+                harness.queue.rows(OWNER).map { it.clientStanzaId },
+            )
+
+            harness.factory.emitAcked(firstId)
+            runCurrent()
+            assertEquals(
+                listOf(firstId, firstId, secondId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+            assertEquals(1, client.sendOptions.count { it?.stanzaId == secondId })
+
+            harness.factory.emitAcked(secondId)
+            runCurrent()
+            assertTrue(harness.queue.rows(OWNER).isEmpty())
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `live admission storage failure performs no native send`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            harness.start()
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+
+            harness.dataStore.failNextUpdate = true
+            val result = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "must persist before ffi",
+            )
+
+            assertEquals(WaddleSendMessageOutcome.Error, result.outcome)
+            assertTrue(client.sendCalls.isEmpty())
+            assertTrue(harness.queue.rows(OWNER).isEmpty())
         } finally {
             harness.shutdown()
         }

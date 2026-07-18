@@ -132,8 +132,19 @@ export type OutboundPersistResult =
       attemptedPayloadDigest: string;
     };
 
-export type OutboundPersistClaimedResult =
+type OutboundLaneBlocker = {
+  identity: OutboundRowIdentity;
+  state: DurableOutboundEntryState["kind"];
+  leaseUntil?: number;
+};
+
+export type OutboundPersistLaneHeadResult =
   | { kind: "claimed"; entry: DurableOutboundEntry; claim: OutboundClaim }
+  | {
+      kind: "queued";
+      entry: DurableOutboundEntry;
+      blocker: OutboundLaneBlocker;
+    }
   | { kind: "busy"; entry: DurableOutboundEntry; leaseUntil: number }
   | { kind: "terminal"; entry: DurableOutboundEntry }
   | { kind: "fenced" }
@@ -267,11 +278,11 @@ export interface DurableOutboundStore extends DurableSmResumeStore {
     accountKey: string,
     message: PersistedQueuedMessage,
   ): Promise<DurableOutcome<OutboundPersistResult>>;
-  persistClaimed(
+  persistAndClaimLaneHead(
     accountKey: string,
     message: PersistedQueuedMessage,
     claim: OutboundClaimRequest,
-  ): Promise<DurableOutcome<OutboundPersistClaimedResult>>;
+  ): Promise<DurableOutcome<OutboundPersistLaneHeadResult>>;
   claimHead(
     accountKey: string,
     lane: OutboundLane,
@@ -328,9 +339,12 @@ export interface DurableOutboundStore extends DurableSmResumeStore {
 }
 
 export function outboundLane(message: PersistedQueuedMessage): OutboundLane {
-  return message.kind === "dm"
-    ? { kind: "direct" }
-    : { kind: "room", roomJid: message.roomJid };
+  if (message.kind === "dm") return { kind: "direct" };
+  const roomJid = message.roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
+  if (!roomJid) {
+    throw new DOMException("Outbound room lane requires a room JID", "DataError");
+  }
+  return { kind: "room", roomJid };
 }
 
 export function createOutboundClaim(

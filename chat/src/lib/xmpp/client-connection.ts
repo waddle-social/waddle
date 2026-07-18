@@ -64,6 +64,10 @@ export interface OutboundSendResult {
   state: "queued" | "sending";
 }
 
+export type PendingSendReservation =
+  | { kind: "claimed"; claim: OutboundClaim }
+  | { kind: "queued" };
+
 export function browserOffline(): boolean {
   return typeof navigator !== "undefined" && navigator.onLine === false;
 }
@@ -1466,7 +1470,11 @@ export class OfflineSendQueue {
   }
 
   /** Persist an optimistic live room send so a crash before the ack replays it. */
-  async persistPendingRoomSend(roomJid: string, body: string, opts: SendGroupMessageOptions & { id: string }): Promise<OutboundClaim> {
+  async persistPendingRoomSend(
+    roomJid: string,
+    body: string,
+    opts: SendGroupMessageOptions & { id: string },
+  ): Promise<PendingSendReservation> {
     await this.durableHydration;
     const owner = await this.revalidateBeforeOwnerMutation("pre-send-room");
     const message: PersistedQueuedMessage = {
@@ -1488,9 +1496,13 @@ export class OfflineSendQueue {
     const claim = createOutboundClaim(owner, this.requireConnectionGeneration(), "sending");
     const persisted = committedOrThrow(
       "persist-live-room",
-      await this.durableStore.persistClaimed(this.deps.queueScope(), message, claim),
+      await this.durableStore.persistAndClaimLaneHead(
+        this.deps.queueScope(),
+        message,
+        claim,
+      ),
     );
-    if (persisted.kind !== "claimed") {
+    if (persisted.kind !== "claimed" && persisted.kind !== "queued") {
       throw new DOMException(
         persisted.kind === "conflict"
           ? "Outbound stanza id was reused with different payload"
@@ -1501,14 +1513,36 @@ export class OfflineSendQueue {
     this.durableMessages.set(message.id, persisted.entry.message);
     this.durableIdentities.set(message.id, persisted.entry.identity);
     enqueueQueuedMessage(this.deps.queueScope(), persisted.entry.message);
-    this.trackClaim(opts.id, persisted.claim);
     this.publishRevisionHint();
+    if (persisted.kind === "queued") {
+      this.deps.events.emit("queuedMessageStatus", message.id, "queued");
+      this.noteQueuedMessage();
+      this.deps.events.emitSafe("sendEnqueued", {
+        kind: "room",
+        reason: this.deps.enqueueReason(),
+      });
+      if (
+        persisted.blocker.state === "claimed"
+        && persisted.blocker.leaseUntil !== undefined
+      ) {
+        this.scheduleLaneWake(outboundLane(message), persisted.blocker.leaseUntil);
+      } else {
+        this.wakeLane(outboundLane(message));
+      }
+      this.emitQueueDepth();
+      return { kind: "queued" };
+    }
+    this.trackClaim(opts.id, persisted.claim);
     this.emitQueueDepth();
-    return persisted.claim;
+    return { kind: "claimed", claim: persisted.claim };
   }
 
   /** Persist an optimistic live DM send so a crash before the ack replays it. */
-  async persistPendingDirectSend(peerJid: string, body: string, opts: SendDirectMessageOptions & { id: string }): Promise<OutboundClaim> {
+  async persistPendingDirectSend(
+    peerJid: string,
+    body: string,
+    opts: SendDirectMessageOptions & { id: string },
+  ): Promise<PendingSendReservation> {
     await this.durableHydration;
     const owner = await this.revalidateBeforeOwnerMutation("pre-send-direct");
     const message: PersistedQueuedMessage = {
@@ -1529,9 +1563,13 @@ export class OfflineSendQueue {
     const claim = createOutboundClaim(owner, this.requireConnectionGeneration(), "sending");
     const persisted = committedOrThrow(
       "persist-live-direct",
-      await this.durableStore.persistClaimed(this.deps.queueScope(), message, claim),
+      await this.durableStore.persistAndClaimLaneHead(
+        this.deps.queueScope(),
+        message,
+        claim,
+      ),
     );
-    if (persisted.kind !== "claimed") {
+    if (persisted.kind !== "claimed" && persisted.kind !== "queued") {
       throw new DOMException(
         persisted.kind === "conflict"
           ? "Outbound stanza id was reused with different payload"
@@ -1542,10 +1580,28 @@ export class OfflineSendQueue {
     this.durableMessages.set(message.id, persisted.entry.message);
     this.durableIdentities.set(message.id, persisted.entry.identity);
     enqueueQueuedMessage(this.deps.queueScope(), persisted.entry.message);
-    this.trackClaim(opts.id, persisted.claim);
     this.publishRevisionHint();
+    if (persisted.kind === "queued") {
+      this.deps.events.emit("queuedMessageStatus", message.id, "queued");
+      this.noteQueuedMessage();
+      this.deps.events.emitSafe("sendEnqueued", {
+        kind: "dm",
+        reason: this.deps.enqueueReason(),
+      });
+      if (
+        persisted.blocker.state === "claimed"
+        && persisted.blocker.leaseUntil !== undefined
+      ) {
+        this.scheduleLaneWake(outboundLane(message), persisted.blocker.leaseUntil);
+      } else {
+        this.wakeLane(outboundLane(message));
+      }
+      this.emitQueueDepth();
+      return { kind: "queued" };
+    }
+    this.trackClaim(opts.id, persisted.claim);
     this.emitQueueDepth();
-    return persisted.claim;
+    return { kind: "claimed", claim: persisted.claim };
   }
 
   async flushDirect(): Promise<void | undefined> {

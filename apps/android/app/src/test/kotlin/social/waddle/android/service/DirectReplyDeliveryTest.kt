@@ -280,10 +280,10 @@ class DirectReplyDeliveryTest {
         prefs.activateSession(owner, "session-$owner")
         val attempt = queue.beginAttempt(owner).attempt
         val row = (
-            queue.enqueueClaimed(
+            queue.enqueueAndClaimAbsoluteHead(
                 directReplyDraft(owner, body),
                 attempt,
-            ) as OutboundQueue.EnqueueResult.Stored
+            ) as OutboundQueue.LiveAdmissionResult.Claimed
         ).row
         return SeededRow(attempt, row)
     }
