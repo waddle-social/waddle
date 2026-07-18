@@ -198,6 +198,31 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     Err(error) => {
                         sweep_failed = true;
                         waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
+                        // Barrier invariants have not been classified yet:
+                        // `promote_session_unacked` performs that work only
+                        // after blocklist loading. Never let a generic
+                        // XEP-0191 backend outage consume the retry budget and
+                        // delete a session that may require permanent barrier
+                        // reconciliation.
+                        if crate::sm_promotion::session_has_unclassified_barrier(&session) {
+                            warn!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                error = %error,
+                                "SM janitor: blocklist load failed before resume-barrier \
+                                 classification; preserving session without consuming \
+                                 the transient retry budget"
+                            );
+                            if crate::sm_promotion::reinsert_failed_session_for_retry(
+                                &state.deps.protocol.sm_session_registry,
+                                session.clone(),
+                            )
+                            .await
+                            {
+                                promotion_guard.complete();
+                            }
+                            continue;
+                        }
                         let attempts = match state
                             .deps
                             .protocol

@@ -644,6 +644,28 @@ fn quarantined_barrier_never_exhausts_the_transient_dead_letter_budget() {
     assert!(transient.should_dead_letter(5, 5));
 }
 
+#[test]
+fn unclassified_barrier_is_visible_before_blocklist_loading() {
+    let recipient = full("alice@example.com/laptop");
+    let barrier = session_with_resume_barrier(
+        "stream-pre-blocklist-barrier",
+        recipient.clone(),
+        resume_barrier_ping_xml("pre-blocklist-barrier", &recipient),
+    );
+    assert!(session_has_unclassified_barrier(&barrier));
+
+    let application_ping = detached_session_with_unacked(
+        "stream-pre-blocklist-application",
+        recipient.clone(),
+        vec![resume_barrier_ping_xml("application-ping", &recipient)],
+    );
+    assert!(
+        !session_has_unclassified_barrier(&application_ping),
+        "ordinary application pings remain eligible for the existing \
+         blocklist transient-failure policy"
+    );
+}
+
 #[tokio::test]
 async fn dm_with_mam_payload_is_still_promoted_to_pending_delivery() {
     let storage: Arc<dyn PendingDeliveryStorage> =
@@ -1510,15 +1532,13 @@ async fn displaced_promotion_storage_failure_keeps_session_drainable_for_retry()
 }
 
 #[tokio::test]
-async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry() {
-    // S4 (blocklist-load branch): same retry contract as the storage-
-    // failure branch — fail-closed XEP-0191 skip must not strand the
-    // queue until restart.
+async fn displaced_barrier_blocklist_failure_preserves_retry_budget() {
+    // Resume barriers require permanent reconciliation policy. A fail-closed
+    // XEP-0191 lookup failure before classification must neither strand the
+    // queue nor consume its generic transient/dead-letter budget.
     use async_trait::async_trait;
     use waddle_xmpp::pending_delivery::SmSessionId;
-    use waddle_xmpp::stream_management::persistence::{
-        InMemorySmPersistence, SmPersistenceStorage,
-    };
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
     use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
     use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
 
@@ -1535,15 +1555,19 @@ async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry
         }
     }
 
-    let sm_storage = Arc::new(InMemorySmPersistence::new());
+    let sm_storage = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(None)
+            .await
+            .unwrap(),
+    );
     let sm_registry = InMemorySmSessionRegistry::new()
         .with_persistence(Arc::clone(&sm_storage) as Arc<dyn SmPersistenceStorage>);
     let jid = full("alice@example.com/phone");
     assert!(sm_registry
-        .store_session(detached_session_with_unacked(
+        .store_session(session_with_resume_barrier(
             "stream-blocklist-retry",
             jid.clone(),
-            vec![dm_xml("bob@elsewhere/x", "alice@example.com", "held")],
+            resume_barrier_ping_xml("blocklist-retry", &jid),
         ))
         .await
         .unwrap()
@@ -1582,6 +1606,14 @@ async fn displaced_promotion_blocklist_failure_keeps_session_drainable_for_retry
     );
     assert_eq!(drained[0].stream_id, "stream-blocklist-retry");
     assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert_eq!(
+        sm_registry
+            .record_promotion_failure("stream-blocklist-retry")
+            .await
+            .unwrap(),
+        1,
+        "the explicit first increment proves the failed pre-classification pass consumed zero attempts"
+    );
 }
 
 #[tokio::test]

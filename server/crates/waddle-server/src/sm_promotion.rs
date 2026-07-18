@@ -19,6 +19,7 @@
 //! the type/hint matrix) and the resulting [`DmRouting`] gates which
 //! branch fires.
 
+mod barrier;
 mod live;
 mod pending;
 mod stanza;
@@ -36,7 +37,7 @@ use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
 };
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::{PendingPayload, PendingRowId, SmSessionId};
+use waddle_xmpp::pending_delivery::PendingPayload;
 use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, DmRouting, LiveDecision, OnlineResources, PendingDecision,
 };
@@ -45,15 +46,11 @@ use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
 use waddle_xmpp::stream_management::{DetachedSession, TOMBSTONE_CLOCK_SKEW_SLACK};
 use waddle_xmpp::Stanza;
 
+pub(crate) use barrier::session_has_unclassified_barrier;
 use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
-
-enum BarrierPendingLinks {
-    Known(std::collections::HashMap<u32, Vec<PendingRowId>>),
-    Unknown,
-}
 
 /// Walk a session's unacked queue, promoting each stanza per the
 /// locked Q6 = B priority chain. Each promoted `pending_delivery`
@@ -95,49 +92,8 @@ pub async fn promote_session_unacked(
     // a pending-delivery row is an impossible cross-store state. Classify the
     // durable relation before pruning the barrier so an unreadable, duplicate,
     // or present link retains both records for reconciliation.
-    let barrier_pending_links = if session
-        .unacked_stanzas
-        .iter()
-        .any(|entry| entry.is_resume_barrier())
-    {
-        match pending_storage.list(&recipient_bare).await {
-            Ok(rows) => {
-                let source_session_id = SmSessionId::new(session.stream_id.clone());
-                let mut links = std::collections::HashMap::<u32, Vec<PendingRowId>>::new();
-                let mut ambiguous = false;
-                for row in rows
-                    .into_iter()
-                    .filter(|row| row.flushed_in_session.as_ref() == Some(&source_session_id))
-                {
-                    if let Some(sequence) = row.outbound_sequence {
-                        links.entry(sequence).or_default().push(row.id);
-                    } else {
-                        ambiguous = true;
-                        tracing::error!(
-                            stream_id = %session.stream_id,
-                            row_id = %row.id,
-                            "Q6 promotion: source session owns pending row without outbound sequence; resume barrier link is ambiguous"
-                        );
-                    }
-                }
-                if ambiguous {
-                    BarrierPendingLinks::Unknown
-                } else {
-                    BarrierPendingLinks::Known(links)
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    stream_id = %session.stream_id,
-                    %error,
-                    "Q6 promotion: could not classify pending-row links for resume barrier"
-                );
-                BarrierPendingLinks::Unknown
-            }
-        }
-    } else {
-        BarrierPendingLinks::Known(std::collections::HashMap::new())
-    };
+    let barrier_pending_links =
+        barrier::load_pending_links(session, pending_storage, &recipient_bare).await;
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the
@@ -184,43 +140,7 @@ pub async fn promote_session_unacked(
 
     for entry in &session.unacked_stanzas {
         if entry.is_resume_barrier() {
-            let valid_barrier = match parse_stanza(&entry.stanza_xml) {
-                Some(Stanza::Iq(iq)) => {
-                    waddle_xmpp::xep::xep0199::is_ping_from_server_to_full_jid(&iq, &session.jid)
-                }
-                Some(Stanza::Message(_) | Stanza::Presence(_)) | None => false,
-            };
-            let outcome = if !valid_barrier {
-                tracing::error!(
-                    stream_id = %session.stream_id,
-                    sequence = entry.sequence,
-                    "Q6 promotion: replay row is tagged as a resume barrier but is not the internal conformant XEP-0199 ping shape; retaining it"
-                );
-                PromotedOutcome::Quarantined
-            } else {
-                match &barrier_pending_links {
-                    BarrierPendingLinks::Unknown => PromotedOutcome::Quarantined,
-                    BarrierPendingLinks::Known(links) => match links.get(&entry.sequence) {
-                        None => {
-                            debug!(
-                                stream_id = %session.stream_id,
-                                sequence = entry.sequence,
-                                "Q6 promotion: discarded resume barrier without application delivery"
-                            );
-                            PromotedOutcome::NotPromotable
-                        }
-                        Some(rows) => {
-                            tracing::error!(
-                                stream_id = %session.stream_id,
-                                sequence = entry.sequence,
-                                linked_rows = rows.len(),
-                                "Q6 promotion: resume barrier unexpectedly owns pending-delivery row(s); retaining both for reconciliation"
-                            );
-                            PromotedOutcome::Quarantined
-                        }
-                    },
-                }
-            };
+            let outcome = barrier::classify(session, entry, &barrier_pending_links);
             summary.record(entry.sequence, &outcome);
             continue;
         }
@@ -569,6 +489,20 @@ pub async fn promote_displaced_sessions(
             Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
             Err(error) => {
                 waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
+                if session_has_unclassified_barrier(&session) {
+                    tracing::warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        error = %error,
+                        "displaced SM session: blocklist load failed before resume-barrier \
+                         classification; preserving durable rows without consuming the \
+                         transient retry budget"
+                    );
+                    if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
+                        promotion_guard.complete();
+                    }
+                    continue;
+                }
                 if let Err(record_error) = deps
                     .sm_registry
                     .record_promotion_failure(&session.stream_id)

@@ -350,7 +350,7 @@ impl PostgresFencedSmPersistence {
                 sequence BIGINT NOT NULL,
                 stanza_xml TEXT NOT NULL,
                 original_receipt_at_ms BIGINT NOT NULL,
-                purpose TEXT NOT NULL DEFAULT 'application',
+                purpose TEXT NOT NULL,
                 PRIMARY KEY (stream_id, sequence)
             )
             "#,
@@ -374,7 +374,6 @@ impl PostgresFencedSmPersistence {
         // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
         // existing table.
         for column_def in [
-            "purpose TEXT NOT NULL DEFAULT 'application'",
             "origin_stream_id TEXT",
             "inbound_seq BIGINT",
             "pair_sequence BIGINT",
