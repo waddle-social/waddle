@@ -30,9 +30,11 @@ import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
+import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
@@ -374,9 +376,8 @@ class DirectReplyDeliveryTest {
         clientStanzaId = SHARED_STANZA_ID,
         enqueuedAtMillis = 1_000,
         payload = QueuedOutboundPayload(
-            conversationJid = PEER,
-            isGroupchat = false,
-            body = body,
+            target = QueuedOutboundTarget.Chat(PEER),
+            content = QueuedOutboundContent(body),
         ),
         source = DeliverySource.DirectReply(PEER, false),
     )

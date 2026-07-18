@@ -17,9 +17,11 @@ import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
+import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -256,9 +258,8 @@ class DeliveryTerminalWorkerTest {
         clientStanzaId = id,
         enqueuedAtMillis = 1_000,
         payload = QueuedOutboundPayload(
-            conversationJid = "peer@waddle.test",
-            isGroupchat = false,
-            body = "body-$id",
+            target = QueuedOutboundTarget.Chat("peer@waddle.test"),
+            content = QueuedOutboundContent("body-$id"),
         ),
         source = DeliverySource.Composer,
     )

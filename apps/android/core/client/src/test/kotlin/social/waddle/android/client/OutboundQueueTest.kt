@@ -24,9 +24,11 @@ import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.NativeConnectionGeneration
 import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
+import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import java.util.UUID
@@ -458,9 +460,8 @@ class OutboundQueueTest {
         clientStanzaId = id,
         enqueuedAtMillis = 1_000,
         payload = QueuedOutboundPayload(
-            conversationJid = "peer@waddle.test",
-            isGroupchat = false,
-            body = body,
+            target = QueuedOutboundTarget.Chat("peer@waddle.test"),
+            content = QueuedOutboundContent(body),
         ),
         source = DeliverySource.Composer,
     )

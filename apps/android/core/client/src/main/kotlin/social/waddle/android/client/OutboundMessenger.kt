@@ -18,9 +18,13 @@ import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
+import social.waddle.android.client.prefs.QueuedOutboundReply
+import social.waddle.android.client.prefs.QueuedOutboundTarget
+import social.waddle.android.client.prefs.QueuedOutboundThread
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
@@ -196,16 +200,21 @@ internal class OutboundMessenger(
         body: String,
         extras: MessageSendExtras?,
     ): QueuedOutboundPayload = QueuedOutboundPayload(
-        conversationJid = conversationJid,
-        isGroupchat = isGroupchat,
-        body = body,
-        replyToId = extras?.replyToId,
-        replyToAuthorJid = extras?.replyToAuthorJid,
-        replyParentBody = extras?.replyParentBody,
-        threadId = extras?.threadId,
-        threadParent = extras?.threadParent,
-        sharedFiles = extras?.sharedFiles.orEmpty(),
-        mentions = extras?.mentions.orEmpty(),
+        target = QueuedOutboundTarget.from(conversationJid, isGroupchat),
+        content = QueuedOutboundContent(
+            body = body,
+            reply = QueuedOutboundReply(
+                id = extras?.replyToId,
+                authorJid = extras?.replyToAuthorJid,
+                parentBody = extras?.replyParentBody,
+            ),
+            thread = QueuedOutboundThread(
+                id = extras?.threadId,
+                parent = extras?.threadParent,
+            ),
+            sharedFiles = extras?.sharedFiles.orEmpty(),
+            mentions = extras?.mentions.orEmpty(),
+        ),
     )
 
     private suspend fun reconcileInitialOutcome(

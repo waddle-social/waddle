@@ -106,18 +106,59 @@ sealed interface DeliverySource {
     ) : DeliverySource
 }
 
-data class QueuedOutboundPayload(
-    val conversationJid: String,
-    val isGroupchat: Boolean,
+sealed interface QueuedOutboundTarget {
+    val conversationJid: String
+
+    data class Chat(
+        override val conversationJid: String,
+    ) : QueuedOutboundTarget
+
+    data class Groupchat(
+        override val conversationJid: String,
+    ) : QueuedOutboundTarget
+
+    companion object {
+        fun from(conversationJid: String, isGroupchat: Boolean): QueuedOutboundTarget =
+            if (isGroupchat) Groupchat(conversationJid) else Chat(conversationJid)
+    }
+}
+
+data class QueuedOutboundReply(
+    val id: String? = null,
+    val authorJid: String? = null,
+    val parentBody: String? = null,
+)
+
+data class QueuedOutboundThread(
+    val id: String? = null,
+    val parent: String? = null,
+)
+
+data class QueuedOutboundContent(
     val body: String,
-    val replyToId: String? = null,
-    val replyToAuthorJid: String? = null,
-    val replyParentBody: String? = null,
-    val threadId: String? = null,
-    val threadParent: String? = null,
+    val reply: QueuedOutboundReply = QueuedOutboundReply(),
+    val thread: QueuedOutboundThread = QueuedOutboundThread(),
     val sharedFiles: List<SharedFileRef> = emptyList(),
     val mentions: List<MentionRef> = emptyList(),
 )
+
+data class QueuedOutboundPayload(
+    val target: QueuedOutboundTarget,
+    val content: QueuedOutboundContent,
+)
+
+private val QueuedOutboundTarget.isGroupchat: Boolean
+    get() = this is QueuedOutboundTarget.Groupchat
+
+private fun DeliverySource.requireMatchingTarget(target: QueuedOutboundTarget) {
+    if (this !is DeliverySource.DirectReply) return
+    require(
+        conversationJid == target.conversationJid &&
+            isGroupchat == target.isGroupchat,
+    ) {
+        "direct-reply source must match the queued outbound target"
+    }
+}
 
 /**
  * One persisted outbound send in [SessionPrefs]. Ready rows await Kotlin
@@ -170,22 +211,28 @@ data class QueuedOutboundMessage(
 
     val payload: QueuedOutboundPayload
         get() = QueuedOutboundPayload(
-            conversationJid = conversationJid,
-            isGroupchat = isGroupchat,
-            body = body,
-            replyToId = replyToId,
-            replyToAuthorJid = replyToAuthorJid,
-            replyParentBody = replyParentBody,
-            threadId = threadId,
-            threadParent = threadParent,
-            sharedFiles = sharedFiles,
-            mentions = mentions,
+            target = QueuedOutboundTarget.from(conversationJid, isGroupchat),
+            content = QueuedOutboundContent(
+                body = body,
+                reply = QueuedOutboundReply(
+                    id = replyToId,
+                    authorJid = replyToAuthorJid,
+                    parentBody = replyParentBody,
+                ),
+                thread = QueuedOutboundThread(
+                    id = threadId,
+                    parent = threadParent,
+                ),
+                sharedFiles = sharedFiles,
+                mentions = mentions,
+            ),
         )
 
     init {
         require(ownerBareJid.isNotBlank()) { "delivery owner must not be blank" }
         require(clientStanzaId.isNotBlank()) { "client stanza id must not be blank" }
         require(sequence > 0) { "persisted delivery sequence must be positive" }
+        source.requireMatchingTarget(payload.target)
         require(payloadDigest == structuralDigest()) {
             "delivery payload digest does not match the stored payload"
         }
@@ -225,24 +272,24 @@ data class QueuedOutboundMessage(
             }
             field("domain", "waddle.android.delivery")
             field("version", "1")
-            field("target", payload.conversationJid)
-            field("stanza-kind", if (payload.isGroupchat) "groupchat" else "chat")
-            field("body", payload.body)
-            field("reply-id", payload.replyToId)
-            field("reply-author", payload.replyToAuthorJid)
-            field("reply-fallback-body", payload.replyParentBody)
-            field("thread-id", payload.threadId)
-            field("thread-parent", payload.threadParent)
-            field("shared-file-count", payload.sharedFiles.size.toString())
-            payload.sharedFiles.forEachIndexed { index, file ->
+            field("target", payload.target.conversationJid)
+            field("stanza-kind", if (payload.target.isGroupchat) "groupchat" else "chat")
+            field("body", payload.content.body)
+            field("reply-id", payload.content.reply.id)
+            field("reply-author", payload.content.reply.authorJid)
+            field("reply-fallback-body", payload.content.reply.parentBody)
+            field("thread-id", payload.content.thread.id)
+            field("thread-parent", payload.content.thread.parent)
+            field("shared-file-count", payload.content.sharedFiles.size.toString())
+            payload.content.sharedFiles.forEachIndexed { index, file ->
                 field("shared-file[$index].url", file.url)
                 field("shared-file[$index].name", file.name)
                 field("shared-file[$index].media-type", file.mediaType)
                 field("shared-file[$index].size", file.sizeBytes?.toString())
                 field("shared-file[$index].disposition", file.disposition.name)
             }
-            field("mention-count", payload.mentions.size.toString())
-            payload.mentions.forEachIndexed { index, mention ->
+            field("mention-count", payload.content.mentions.size.toString())
+            payload.content.mentions.forEachIndexed { index, mention ->
                 field("mention[$index].uri", mention.uri)
                 field("mention[$index].begin", mention.begin.toString())
                 field("mention[$index].end", mention.end.toString())
@@ -253,31 +300,6 @@ data class QueuedOutboundMessage(
                 },
             )
         }
-
-        fun create(
-            draft: QueuedOutboundDraft,
-            sequence: Long,
-            ownership: OutboundOwnership = OutboundOwnership.Ready,
-        ): QueuedOutboundMessage = QueuedOutboundMessage(
-            ownerBareJid = draft.ownerBareJid,
-            conversationJid = draft.conversationJid,
-            isGroupchat = draft.isGroupchat,
-            body = draft.body,
-            clientStanzaId = draft.clientStanzaId,
-            incarnation = draft.incarnation,
-            payloadDigest = draft.payloadDigest,
-            sequence = sequence,
-            enqueuedAtMillis = draft.enqueuedAtMillis,
-            ownership = ownership,
-            source = draft.source,
-            replyToId = draft.replyToId,
-            replyToAuthorJid = draft.replyToAuthorJid,
-            replyParentBody = draft.replyParentBody,
-            threadId = draft.threadId,
-            threadParent = draft.threadParent,
-            sharedFiles = draft.sharedFiles,
-            mentions = draft.mentions,
-        )
     }
 }
 
@@ -287,21 +309,12 @@ data class QueuedOutboundMessage(
  */
 data class QueuedOutboundDraft(
     val ownerBareJid: String,
-    val conversationJid: String,
-    val isGroupchat: Boolean,
-    val body: String,
+    val payload: QueuedOutboundPayload,
     val clientStanzaId: String,
     val incarnation: DeliveryIncarnation,
     val payloadDigest: DeliveryPayloadDigest,
     val enqueuedAtMillis: Long,
     val source: DeliverySource,
-    val replyToId: String?,
-    val replyToAuthorJid: String?,
-    val replyParentBody: String?,
-    val threadId: String?,
-    val threadParent: String?,
-    val sharedFiles: List<SharedFileRef>,
-    val mentions: List<MentionRef>,
 ) {
     val proposedIdentity: DeliveryRowIdentity
         get() = DeliveryRowIdentity(
@@ -311,16 +324,38 @@ data class QueuedOutboundDraft(
             payloadDigest = payloadDigest,
         )
 
-    fun persisted(sequence: Long, ownership: OutboundOwnership): QueuedOutboundMessage =
-        QueuedOutboundMessage.create(
-            draft = this,
+    init {
+        source.requireMatchingTarget(payload.target)
+    }
+
+    fun persisted(sequence: Long, ownership: OutboundOwnership): QueuedOutboundMessage {
+        val target = payload.target
+        val content = payload.content
+        return QueuedOutboundMessage(
+            ownerBareJid = ownerBareJid,
+            conversationJid = target.conversationJid,
+            isGroupchat = target.isGroupchat,
+            body = content.body,
+            clientStanzaId = clientStanzaId,
+            incarnation = incarnation,
+            payloadDigest = payloadDigest,
             sequence = sequence,
+            enqueuedAtMillis = enqueuedAtMillis,
             ownership = ownership,
+            source = source,
+            replyToId = content.reply.id,
+            replyToAuthorJid = content.reply.authorJid,
+            replyParentBody = content.reply.parentBody,
+            threadId = content.thread.id,
+            threadParent = content.thread.parent,
+            sharedFiles = content.sharedFiles,
+            mentions = content.mentions,
         ).also {
             require(it.payloadDigest == payloadDigest) {
                 "delivery draft digest changed before persistence"
             }
         }
+    }
 
     companion object {
         fun create(
@@ -334,21 +369,12 @@ data class QueuedOutboundDraft(
             val digest = QueuedOutboundMessage.computeStructuralDigest(payload)
             return QueuedOutboundDraft(
                 ownerBareJid = ownerBareJid,
-                conversationJid = payload.conversationJid,
-                isGroupchat = payload.isGroupchat,
-                body = payload.body,
+                payload = payload,
                 clientStanzaId = clientStanzaId,
                 incarnation = incarnation,
                 payloadDigest = digest,
                 enqueuedAtMillis = enqueuedAtMillis,
                 source = source,
-                replyToId = payload.replyToId,
-                replyToAuthorJid = payload.replyToAuthorJid,
-                replyParentBody = payload.replyParentBody,
-                threadId = payload.threadId,
-                threadParent = payload.threadParent,
-                sharedFiles = payload.sharedFiles,
-                mentions = payload.mentions,
             )
         }
     }

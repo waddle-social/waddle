@@ -10,8 +10,10 @@ import kotlinx.coroutines.test.TestScope
 import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundPayload
+import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.toSnapshot
@@ -91,9 +93,8 @@ internal class ConnectionLoopPullHarness(
                     clientStanzaId = stanzaId,
                     enqueuedAtMillis = 1_000,
                     payload = QueuedOutboundPayload(
-                        conversationJid = PEER,
-                        isGroupchat = false,
-                        body = "queued before resume",
+                        target = QueuedOutboundTarget.Chat(PEER),
+                        content = QueuedOutboundContent("queued before resume"),
                     ),
                     source = DeliverySource.Composer,
                 ),
