@@ -10,6 +10,7 @@ import {
   observeCallConnectionQuality,
   observeCallStats,
   packetLossBand,
+  reconnectCountBucket,
   reportDeclinedCallAttempt,
   reportFailedCallAttempt,
   rttBand,
@@ -48,6 +49,9 @@ describe("call lifecycle mappings", () => {
     expect(packetLossBand(0.5)).toBe("under-1pct");
     expect(packetLossBand(5)).toBe("1pct-5pct");
     expect(packetLossBand(5.1)).toBe("over-5pct");
+    expect(reconnectCountBucket(0)).toBe("none");
+    expect(reconnectCountBucket(1)).toBe("once");
+    expect(reconnectCountBucket(2)).toBe("multiple");
   });
 
   test("emits one declined DM setup outcome for an unaccepted attempt", () => {
@@ -55,11 +59,20 @@ describe("call lifecycle mappings", () => {
     __setFaroForTesting(stub as never);
     beginCallAttempt("dm-1", "dm");
 
-    const first = finishCallAttempt("dm-1", { setupOutcome: "declined" }, 1_000);
-    const duplicate = finishCallAttempt("dm-1", { setupOutcome: "failed" }, 2_000);
+    const first = finishCallAttempt(
+      "dm-1",
+      { setupOutcome: "declined", endReason: "peer-left" },
+      1_000,
+    );
+    const duplicate = finishCallAttempt(
+      "dm-1",
+      { setupOutcome: "failed", endReason: "error" },
+      2_000,
+    );
 
     expect(first).toMatchObject({
       setupOutcome: "declined",
+      endReason: "peer-left",
       callKind: "dm",
       durationBucket: "none",
     });
@@ -68,12 +81,13 @@ describe("call lifecycle mappings", () => {
       name: "chat.call.lifecycle",
       attributes: {
         setup_outcome: "declined",
+        end_reason: "peer-left",
         duration_bucket: "none",
         call_kind: "dm",
         rtt_band: "unknown",
         packet_loss_band: "unknown",
         connection_quality: "unknown",
-        reconnect_count: "0",
+        reconnect_count: "none",
       },
     }]);
   });
@@ -88,7 +102,11 @@ describe("call lifecycle mappings", () => {
     finishCallAttempt("active", { endReason: "hangup" });
 
     expect(stub.events.map((event) => event.attributes)).toEqual([
-      expect.objectContaining({ setup_outcome: "declined", call_kind: "dm" }),
+      expect.objectContaining({
+        setup_outcome: "declined",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
       expect.objectContaining({ setup_outcome: "accepted", end_reason: "hangup" }),
     ]);
   });
@@ -125,7 +143,11 @@ describe("call lifecycle mappings", () => {
     finishCallAttempt("first", { endReason: "hangup" }, 91_000);
 
     beginCallAttempt("second", "dm");
-    const second = finishCallAttempt("second", { setupOutcome: "failed" }, 100_000);
+    const second = finishCallAttempt(
+      "second",
+      { setupOutcome: "failed", endReason: "error" },
+      100_000,
+    );
 
     expect(second).toMatchObject({
       durationBucket: "none",
@@ -141,7 +163,11 @@ describe("call lifecycle mappings", () => {
 
     expect(stub.events).toEqual([{
       name: "chat.call.lifecycle",
-      attributes: expect.objectContaining({ setup_outcome: "failed", call_kind: "muc" }),
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "muc",
+      }),
     }]);
   });
 
@@ -171,13 +197,13 @@ describe("call lifecycle mappings", () => {
       rttBand: "over-300ms",
       packetLossBand: "over-5pct",
       connectionQuality: "poor",
-      reconnectCount: 1,
+      reconnectCount: "once",
     });
     expect(stub.events[0]?.attributes).toMatchObject({
       setup_outcome: "accepted",
       end_reason: "hangup",
       call_kind: "muc",
-      reconnect_count: "1",
+      reconnect_count: "once",
     });
   });
 });

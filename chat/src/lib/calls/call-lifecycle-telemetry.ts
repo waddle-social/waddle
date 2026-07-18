@@ -10,16 +10,17 @@ export type CallEndReason = "hangup" | "peer-left" | "error" | "reconnect-exhaus
 export type CallDurationBucket = "none" | "under-1m" | "1m-10m" | "10m-60m" | "over-60m";
 export type CallRttBand = "unknown" | "under-100ms" | "100ms-300ms" | "over-300ms";
 export type CallPacketLossBand = "unknown" | "under-1pct" | "1pct-5pct" | "over-5pct";
+export type CallReconnectCountBucket = "none" | "once" | "multiple";
 
 export type CallLifecyclePayload = {
   setupOutcome: CallSetupOutcome;
-  endReason?: CallEndReason;
+  endReason: CallEndReason;
   durationBucket: CallDurationBucket;
   callKind: CallKind;
   rttBand: CallRttBand;
   packetLossBand: CallPacketLossBand;
   connectionQuality: CallConnectionQuality;
-  reconnectCount: number;
+  reconnectCount: CallReconnectCountBucket;
 };
 
 type Attempt = {
@@ -70,6 +71,12 @@ export function packetLossBand(packetLossPct: number | null): CallPacketLossBand
   return "over-5pct";
 }
 
+export function reconnectCountBucket(count: number): CallReconnectCountBucket {
+  if (count <= 0) return "none";
+  if (count === 1) return "once";
+  return "multiple";
+}
+
 export function beginCallAttempt(sid: string, callKind: CallKind): void {
   if (!sid) return;
   // An explicit begin is a new attempt even when a restored call reuses the
@@ -79,7 +86,7 @@ export function beginCallAttempt(sid: string, callKind: CallKind): void {
     const current = attempts.get(currentSid);
     finishCallAttempt(currentSid, {
       setupOutcome: "proposed",
-      ...(current?.accepted ? { endReason: "error" as const } : {}),
+      endReason: current?.accepted ? "error" : "hangup",
     });
   }
   if (!attempts.has(sid)) {
@@ -151,7 +158,7 @@ export function observeCallConnectionPhase(phase: CallConnectionPhase): void {
 
 export function finishCallAttempt(
   sid: string,
-  terminal: { setupOutcome?: CallSetupOutcome; endReason?: CallEndReason },
+  terminal: { setupOutcome?: CallSetupOutcome; endReason: CallEndReason },
   now: number = Date.now(),
 ): CallLifecyclePayload | null {
   if (emittedSids.has(sid)) return null;
@@ -159,13 +166,13 @@ export function finishCallAttempt(
   if (!attempt) return null;
   const payload: CallLifecyclePayload = {
     setupOutcome: attempt.accepted ? "accepted" : (terminal.setupOutcome ?? "proposed"),
-    ...(terminal.endReason ? { endReason: terminal.endReason } : {}),
+    endReason: terminal.endReason,
     durationBucket: durationBucket(attempt.acceptedAtMs === null ? 0 : now - attempt.acceptedAtMs),
     callKind: attempt.callKind,
     rttBand: rttBand(attempt.maxRttMs),
     packetLossBand: packetLossBand(attempt.maxPacketLossPct),
     connectionQuality: attempt.worstConnectionQuality,
-    reconnectCount: attempt.reconnectCount,
+    reconnectCount: reconnectCountBucket(attempt.reconnectCount),
   };
   emittedSids.add(sid);
   trimEmittedSids();
@@ -182,12 +189,13 @@ export function reportDeclinedCallAttempt(sid: string, callKind: CallKind = "dm"
   trimEmittedSids();
   reportCallLifecycle({
     setupOutcome: "declined",
+    endReason: "hangup",
     durationBucket: "none",
     callKind,
     rttBand: "unknown",
     packetLossBand: "unknown",
     connectionQuality: "unknown",
-    reconnectCount: 0,
+    reconnectCount: "none",
   });
 }
 
@@ -198,12 +206,13 @@ export function reportFailedCallAttempt(sid: string, callKind: CallKind): void {
   trimEmittedSids();
   reportCallLifecycle({
     setupOutcome: "failed",
+    endReason: "error",
     durationBucket: "none",
     callKind,
     rttBand: "unknown",
     packetLossBand: "unknown",
     connectionQuality: "unknown",
-    reconnectCount: 0,
+    reconnectCount: "none",
   });
 }
 

@@ -31,6 +31,8 @@ import type { CallEvent, CallMedia, LiveKitJoin } from "../src/lib/calls/types";
 import { createIncomingCallAlertController } from "../src/shell/audio-alerts";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
+import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 function session(partial: Partial<WaddleSession> = {}): WaddleSession {
   return {
@@ -241,6 +243,8 @@ afterEach(() => {
   // `muc-call-presence.test.ts`) that expect an empty store.
   clearMucCallParticipants();
   clearAllMucCallSessionCacheForTests();
+  __resetCallLifecycleTelemetryForTesting();
+  __setFaroForTesting(null);
 });
 
 describe("DM call outcome feed anchors", () => {
@@ -1327,10 +1331,18 @@ describe("1:1 call event wiring", () => {
   });
 
   test("self-originated sibling reject clears this resource's incoming DM ring", async () => {
+    const telemetryEvents: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          telemetryEvents.push({ name, attributes });
+        },
+      },
+    } as never);
     const sender = mockSender();
     const events = wireClientEvents(sender);
-    $callState.set({
-      phase: "incoming",
+    events.emitCall({
+      kind: "propose",
       from: "bob@waddle.test/desktop",
       sid: "shared-call",
       media: audioVideo,
@@ -1351,6 +1363,51 @@ describe("1:1 call event wiring", () => {
       reason: "reject",
     });
     expect(sender.send_call_reject).not.toHaveBeenCalled();
+    expect(telemetryEvents).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "declined",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
+    }]);
+  });
+
+  test("self-originated sibling finish records a local active-call hangup", async () => {
+    const telemetryEvents: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          telemetryEvents.push({ name, attributes });
+        },
+      },
+    } as never);
+    const events = wireClientEvents();
+    beginOutgoingCall("bob@waddle.test", "shared-active-call", audioVideo);
+    events.emitCall({
+      kind: "session-accept",
+      from: "bob@waddle.test/desktop",
+      sid: "shared-active-call",
+      media: audioVideo,
+      join,
+    });
+    events.emitCall({
+      kind: "finish",
+      from: "alice@waddle.test/phone",
+      to: "bob@waddle.test/desktop",
+      sid: "shared-active-call",
+      reason: "success",
+    });
+    await flushCallSideEffects();
+
+    expect(telemetryEvents).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "accepted",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
+    }]);
   });
 
   test("real on_call propose event applies lower-sid tie-break and surfaces incoming UI", async () => {
@@ -2119,6 +2176,37 @@ describe("MUC group call", () => {
       kind: "muc",
       selfNick: "alice",
     });
+  });
+
+  test("group-call button reports a missing XMPP sender as one failed MUC preflight", async () => {
+    const telemetryEvents: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          telemetryEvents.push({ name, attributes });
+        },
+      },
+    } as never);
+
+    const started = await startMucCallAction({
+      roomJid: "chan@muc.test",
+      media: audioVideo,
+      isBusy: () => false,
+      setStarting: () => undefined,
+      getSender: () => null,
+      getSelfNick: () => "alice",
+    });
+
+    expect(started).toBe(false);
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(telemetryEvents).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "muc",
+      }),
+    }]);
   });
 
   test("BrowserXmppClient.disconnect rejects a pending MUC preparing wait", async () => {
