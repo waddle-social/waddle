@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -14,8 +15,12 @@ import org.junit.Test
 import social.waddle.android.client.ConnectionLoopPullHarness.Companion.OWNER
 import social.waddle.android.client.ConnectionLoopPullHarness.Companion.PEER
 import social.waddle.android.client.prefs.DeliveryAttemptId
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.NativeOutboundPhase
+import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toFfi
+import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
 import social.waddle.client.ffi.WaddleSendMessageOutcome
@@ -73,6 +78,19 @@ class ConnectionLoopPullTest {
             runCurrent()
             assertPulls(client, calls = 2, inFlight = 1)
             assertEquals(fresh, harness.prefs.deliveryJournal.first().owners[OWNER]?.activeAttempt)
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `stale stop preserves fresh resume drain worker and fifo`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            val resume = prepareFreshResume(harness)
+            makeFreshAttemptReadyAfterStaleStop(harness, resume)
+            val drain = admitFreshFifo(harness, resume.client)
+            assertFreshFifoDrain(harness, resume, drain)
         } finally {
             harness.shutdown()
         }
@@ -528,6 +546,125 @@ class ConnectionLoopPullTest {
         }
     }
 
+    private suspend fun TestScope.prepareFreshResume(
+        harness: ConnectionLoopPullHarness,
+    ): FreshResume {
+        harness.prefs.activateSession(OWNER, SESSION_ID)
+        val seededAttempt = harness.queue.beginAttempt(OWNER).attempt
+        assertTrue(
+            harness.queue.saveSmResume(
+                seededAttempt,
+                version = 1,
+                snapshot = testResumeState().toSnapshot(),
+            ),
+        )
+        harness.start()
+        runCurrent()
+        val client = harness.factory.clients.single()
+        val old = harness.factory.configs.single().deliveryAttempt.toDomain(OWNER)
+        val fresh = old.copy(
+            attemptId = DeliveryAttemptId(FRESH_ATTEMPT_ID),
+            nativeGeneration = old.nativeGeneration.next(),
+        )
+        harness.factory.emitResumeFailed(
+            WaddleDeliveryAttemptTransition(old.toFfi(), fresh.toFfi()),
+            affectedStanzaIds = emptyList(),
+        )
+        runCurrent()
+        assertPulls(client, calls = 2, inFlight = 1)
+        assertFreshAttempt(harness, fresh)
+        return FreshResume(client, old, fresh)
+    }
+
+    private suspend fun TestScope.makeFreshAttemptReadyAfterStaleStop(
+        harness: ConnectionLoopPullHarness,
+        resume: FreshResume,
+    ) {
+        assertEquals(
+            DeliveryTerminalWorker.StopResult.Drained,
+            harness.messenger.fenceAndStop(resume.old),
+        )
+        assertFreshAttempt(harness, resume.fresh)
+        harness.factory.emit(
+            WaddleClientEvent.SessionReady(
+                WaddleSessionReadyKind.FRESH,
+                resume.fresh.toFfi(),
+            ),
+        )
+        runCurrent()
+    }
+
+    private suspend fun admitFreshFifo(
+        harness: ConnectionLoopPullHarness,
+        client: FakeWaddleClient,
+    ): FreshDrain {
+        client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+        val predecessor = harness.messenger.sendOrEnqueue(
+            PEER,
+            false,
+            "fresh retryable predecessor",
+        )
+        val predecessorId =
+            checkNotNull(predecessor.delivery).identity.clientStanzaId
+        client.sendOutcomes += WaddleSendMessageOutcome.Error
+        val target = harness.messenger.sendOrEnqueue(
+            PEER,
+            false,
+            "fresh queued target",
+        )
+        val targetDelivery = checkNotNull(target.delivery)
+        assertEquals(WaddleSendMessageOutcome.NotConnected, target.outcome)
+        assertTrue(target.queued)
+        assertEquals(
+            listOf(predecessorId),
+            client.sendOptions.map { it?.stanzaId },
+        )
+        assertEquals(
+            listOf(predecessorId, targetDelivery.identity.clientStanzaId),
+            harness.queue.rows(OWNER).map { it.clientStanzaId },
+        )
+        return FreshDrain(predecessorId, targetDelivery)
+    }
+
+    private suspend fun TestScope.assertFreshFifoDrain(
+        harness: ConnectionLoopPullHarness,
+        resume: FreshResume,
+        drain: FreshDrain,
+    ) {
+        runCurrent()
+        val targetId = drain.target.identity.clientStanzaId
+        assertEquals(
+            listOf(drain.predecessorId, drain.predecessorId, targetId),
+            resume.client.sendOptions.map { it?.stanzaId },
+        )
+        assertEquals(
+            listOf(drain.predecessorId, targetId),
+            resume.client.sendOptions.drop(1).map { it?.stanzaId },
+        )
+        assertEquals(1, resume.client.sendOptions.count { it?.stanzaId == targetId })
+        val remaining = harness.queue.rows(OWNER).single()
+        assertEquals(drain.target.identity, remaining.identity)
+        assertEquals(
+            OutboundOwnership.NativeOwned(
+                attempt = resume.fresh,
+                phase = NativeOutboundPhase.FRESH,
+            ),
+            remaining.ownership,
+        )
+        assertFreshAttempt(harness, resume.fresh)
+    }
+
+    private suspend fun assertFreshAttempt(
+        harness: ConnectionLoopPullHarness,
+        fresh: DeliveryAttemptRef,
+    ) {
+        assertEquals(fresh, harness.activeSession.attemptRef)
+        assertEquals(
+            fresh,
+            harness.prefs.deliveryJournal.first().owners[OWNER]?.activeAttempt,
+        )
+    }
+
     private fun assertPulls(client: FakeWaddleClient, calls: Int, inFlight: Int) {
         assertEquals(calls, client.nextEventCalls.get())
         assertEquals(inFlight, client.inFlightNextEvents.get())
@@ -541,8 +678,20 @@ class ConnectionLoopPullTest {
         assertFalse(client.maxInFlightNextEvents.get() > 1)
     }
 
+    private data class FreshResume(
+        val client: FakeWaddleClient,
+        val old: DeliveryAttemptRef,
+        val fresh: DeliveryAttemptRef,
+    )
+
+    private data class FreshDrain(
+        val predecessorId: String,
+        val target: DeliveryOutcomeRef,
+    )
+
     private companion object {
         const val RESUME_STANZA_ID = "resume-stanza-1"
+        const val SESSION_ID = "sess-1"
         const val FRESH_ATTEMPT_ID = "00000000-0000-4000-8000-000000000002"
         const val STALE_ATTEMPT_ID = "00000000-0000-4000-8000-000000000099"
     }
