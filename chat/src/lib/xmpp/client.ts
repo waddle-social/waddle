@@ -1288,7 +1288,18 @@ export class BrowserXmppClient {
     if (this.connectAdmissionPromise) return this.connectAdmissionPromise;
     const operation = (async () => {
       const disconnect = this.disconnectPromise;
-      if (disconnect) await disconnect;
+      if (disconnect) {
+        try {
+          await disconnect;
+        } finally {
+          if (
+            this.lifecycleState === "active"
+            && this.disconnectPromise === disconnect
+          ) {
+            this.disconnectPromise = null;
+          }
+        }
+      }
       const predecessorAttempt = this.connectAttemptWork;
       if (predecessorAttempt) {
         await predecessorAttempt.catch(() => undefined);
@@ -1610,16 +1621,8 @@ export class BrowserXmppClient {
   private disconnectForLifecycle(): Promise<void> {
     if (this.disconnectPromise) return this.disconnectPromise;
     const operation = this.performDisconnect();
-    const tracked = operation.finally(() => {
-      if (
-        this.lifecycleState === "active"
-        && this.disconnectPromise === tracked
-      ) {
-        this.disconnectPromise = null;
-      }
-    });
-    this.disconnectPromise = tracked;
-    return tracked;
+    this.disconnectPromise = operation;
+    return operation;
   }
 
   private async performDisconnect(): Promise<void> {

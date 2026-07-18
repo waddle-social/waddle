@@ -601,6 +601,23 @@ describe("background connect() must not preempt an armed backoff timer (F5)", ()
 });
 
 describe("disconnect() cancels the pending connect attempt (F3)", () => {
+  test("final disposal reuses the exact completed disconnect", async () => {
+    const { client } = createDeterministicClient();
+    const state = client as unknown as PrivateState;
+    let disconnects = 0;
+    state.performDisconnect = async () => {
+      disconnects += 1;
+      state.xmpp = null;
+      state.connected = false;
+    };
+
+    await client.disconnect();
+    await client.dispose();
+
+    expect(disconnects).toBe(1);
+    expect(state.lifecycleState).toBe("disposed");
+  });
+
   test("a concurrent connect waits for the active disconnect to settle", async () => {
     const { client } = createDeterministicClient();
     const state = client as unknown as PrivateState;
