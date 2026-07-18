@@ -10,9 +10,10 @@
  * `fromArchive` flag below) so the re-fetch cannot corrupt unread or
  * notification state.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, type LiveRoomMessage } from "../src/lib/xmpp-client";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { roomActivityEventFromMessage } from "../src/lib/xmpp/client-mam";
 import type { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 
@@ -30,9 +31,24 @@ function session(jid: string): WaddleSession {
   } as WaddleSession;
 }
 
-function clientState(jid: string): PrivateState {
-  return new BrowserXmppClient(session(jid)) as unknown as PrivateState;
+const createdClients: BrowserXmppClient[] = [];
+
+function createClient(jid: string): BrowserXmppClient {
+  const client = new BrowserXmppClient(session(jid), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
+  return client;
 }
+
+function clientState(jid: string): PrivateState {
+  return createClient(jid) as unknown as PrivateState;
+}
+
+afterEach(async () => {
+  const clients = createdClients.splice(0);
+  await Promise.all(clients.map((client) => client.dispose()));
+});
 
 describe("reconnect catch-up cursor gap-safety", () => {
   test("a live room stanza-id does not advance the archive `after` cursor", () => {

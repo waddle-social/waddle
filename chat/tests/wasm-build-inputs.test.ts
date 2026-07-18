@@ -65,6 +65,57 @@ const BUILD_SCRIPT_PATH = "chat/scripts/build-xmpp-wasm.mjs";
 const FORMAT = "waddle:xmpp-client-wasm:canonical-inputs:v3";
 const REAL_REPO_ROOT = resolve(import.meta.dir, "../..");
 const roots: string[] = [];
+const MINIMAL_RAW_WASM_PACK_DECLARATIONS = `export type WaddleResumeStanzaKind = "message" | "presence" | "iq";
+export interface WaddleResumeXmlName {
+    readonly namespace: string;
+    readonly localName: string;
+}
+export interface WaddleResumeXmlAttribute {
+    readonly name: WaddleResumeXmlName;
+    readonly value: string;
+}
+export type WaddleResumeXmlToken =
+| {
+    readonly kind: "start";
+    readonly name: WaddleResumeXmlName;
+    readonly attributes: WaddleResumeXmlAttribute[];
+}
+| { readonly kind: "text"; readonly value: string }
+| { readonly kind: "end" };
+export interface WaddleResumeStanzaSnapshot {
+    readonly stanzaKind: WaddleResumeStanzaKind;
+    readonly tokens: WaddleResumeXmlToken[];
+}
+export interface WaddleResumeEntrySnapshot {
+    readonly stanza: WaddleResumeStanzaSnapshot;
+    readonly sentAtEpochMs: number;
+}
+export interface WaddleResumeStateSnapshot {
+    readonly previd: string;
+    readonly inboundH: number;
+    readonly outboundH: number;
+    readonly unhandledOutboundEntries: WaddleResumeEntrySnapshot[];
+    readonly maxResumeSeconds?: number;
+}
+export class WaddleClient {
+    get_resume_state(): any;
+    with_resume_state(state: any): void;
+    send_chat_message(peer_jid: string, body: string, options: any): Promise<any>;
+    send_groupchat_message(room_jid: string, body: string, options: any): Promise<any>;
+    set_on_call(cb: Function): void;
+    set_on_connected(cb: Function): void;
+    set_on_disconnected(cb: Function): void;
+    set_on_error(cb: Function): void;
+    set_on_mds_displayed(cb: Function): void;
+    set_on_message(cb: Function): void;
+    set_on_message_delivery_acked(cb: Function): void;
+    set_on_message_delivery_failed(cb: Function): void;
+    set_on_presence(cb: Function): void;
+    set_on_pubsub_event(cb: Function): void;
+    set_on_session_lifecycle(cb: Function): void;
+    set_on_stream_management(cb: Function): void;
+}
+`;
 const cargoMetadataByRoot = new Map<
 	string,
 	ReturnType<typeof baseCargoMetadata>
@@ -1164,7 +1215,7 @@ describe("canonical WASM build execution policy", () => {
 				artifact === "package.json"
 					? `${JSON.stringify({ name: "unfinalized" })}\n`
 					: artifact === "waddle_xmpp_client_wasm.d.ts"
-						? "export class Fixture {}\n"
+						? MINIMAL_RAW_WASM_PACK_DECLARATIONS
 						: `fixture:${artifact}`;
 			writeFileSync(resolve(root, artifact), contents);
 		}
@@ -1200,7 +1251,7 @@ describe("canonical WASM build execution policy", () => {
 				artifact === "package.json"
 					? `${JSON.stringify({ name: "unfinalized" })}\n`
 					: artifact === "waddle_xmpp_client_wasm.d.ts"
-						? "export class Fixture {}\n"
+						? MINIMAL_RAW_WASM_PACK_DECLARATIONS
 						: `fixture:${artifact}`;
 			writeFileSync(resolve(packageDir, artifact), contents);
 		}
@@ -1303,6 +1354,8 @@ describe("canonical WASM build execution policy", () => {
 									name: "@waddle/xmpp-client-wasm",
 									version: wasmPackageVersion("d".repeat(64)),
 								})
+							: artifact === "waddle_xmpp_client_wasm.d.ts"
+								? MINIMAL_RAW_WASM_PACK_DECLARATIONS
 							: `same:${artifact}`,
 					);
 				}

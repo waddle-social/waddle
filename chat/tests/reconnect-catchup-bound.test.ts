@@ -16,9 +16,10 @@
  * These tests poke private state on `BrowserXmppClient` directly — see
  * the comment block in `resume-ordering.test.ts` for the rationale.
  */
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import type { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 
 const MAX_PAGES = 5;
@@ -33,18 +34,48 @@ function session(): WaddleSession {
 }
 
 type PrivateState = {
-  xmpp: unknown;
+  xmpp: unknown | null;
+  connected: boolean;
+  connectEpoch: number;
   catchup: ReconnectCatchup;
+  outboundQueueHydration: Promise<void>;
+  outboundQueue: {
+    beginConnectionGeneration: (generation: number) => number;
+    whenQuiescent: () => Promise<void>;
+  };
   runSessionReady: (xmpp: unknown, lifecycle: { type: "fresh" | "resumed" }) => Promise<void>;
 };
 
-function makeClient() {
-  const client = new BrowserXmppClient(session());
+const createdClients: BrowserXmppClient[] = [];
+
+function createClient(): BrowserXmppClient {
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
+  return client;
+}
+
+async function makeClient() {
+  const client = createClient();
   const state = client as unknown as PrivateState;
+  await state.outboundQueueHydration;
+  await state.outboundQueue.whenQuiescent();
+  state.outboundQueue.beginConnectionGeneration(state.connectEpoch);
   const failures: Array<{ kind: "dm" | "room"; key: string }> = [];
   client.setCatchupFailureHandler((failure) => failures.push(failure));
   return { client, state, failures };
 }
+
+afterEach(async () => {
+  const clients = createdClients.splice(0);
+  for (const client of clients) {
+    const state = client as unknown as PrivateState;
+    state.xmpp = null;
+    state.connected = false;
+  }
+  await Promise.all(clients.map((client) => client.dispose()));
+});
 
 /**
  * A forward (`after`-cursor) page source: never complete, advancing
@@ -72,7 +103,7 @@ function backwardPages() {
 
 describe("#1221 reconnect catch-up is bounded per conversation", () => {
   test("room forward-cursor catch-up stops at the page budget and fails over", async () => {
-    const { state, failures } = makeClient();
+    const { state, failures } = await makeClient();
     const fetch_room_history_page = forwardPages();
     const xmpp = { fetch_room_history_page };
     state.xmpp = xmpp;
@@ -86,7 +117,7 @@ describe("#1221 reconnect catch-up is bounded per conversation", () => {
   });
 
   test("room timestamp catch-up stops at the page budget and fails over", async () => {
-    const { state, failures } = makeClient();
+    const { state, failures } = await makeClient();
     const fetch_room_history_page = backwardPages();
     const xmpp = { fetch_room_history_page };
     state.xmpp = xmpp;
@@ -101,7 +132,7 @@ describe("#1221 reconnect catch-up is bounded per conversation", () => {
   });
 
   test("dm forward-cursor catch-up stops at the page budget and fails over", async () => {
-    const { state, failures } = makeClient();
+    const { state, failures } = await makeClient();
     const fetch_dm_history_page = forwardPages();
     const xmpp = { fetch_dm_history_page };
     state.xmpp = xmpp;
@@ -119,7 +150,7 @@ describe("#1221 reconnect catch-up is bounded per conversation", () => {
     // itself is gap-free), but budget exhaustion means messages beyond
     // the cap were genuinely not replayed — a real archive gap that the
     // wholesale-reload fallback must close.
-    const { state, failures } = makeClient();
+    const { state, failures } = await makeClient();
     const fetch_room_history_page = forwardPages();
     const xmpp = { fetch_room_history_page };
     state.xmpp = xmpp;
@@ -133,7 +164,7 @@ describe("#1221 reconnect catch-up is bounded per conversation", () => {
   });
 
   test("dm timestamp catch-up stops at the page budget and fails over", async () => {
-    const { state, failures } = makeClient();
+    const { state, failures } = await makeClient();
     const fetch_dm_history_page = backwardPages();
     const xmpp = { fetch_dm_history_page };
     state.xmpp = xmpp;

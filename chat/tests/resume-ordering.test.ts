@@ -13,9 +13,10 @@
  * it; when it is `null` (the post-drain state), they dispatch
  * synchronously.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, type LiveDmMessage, type LiveRoomMessage } from "../src/lib/xmpp-client";
+import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 
 type PrivateState = {
   pendingDuringResume: unknown[] | null;
@@ -30,6 +31,21 @@ function session(): WaddleSession {
     xmpp_websocket_url: "wss://example.com/ws",
   } as WaddleSession;
 }
+
+const createdClients: BrowserXmppClient[] = [];
+
+function createClient(): BrowserXmppClient {
+  const client = new BrowserXmppClient(session(), {
+    durableRuntimeStore: new MemoryDurableOutboundStore(),
+  });
+  createdClients.push(client);
+  return client;
+}
+
+afterEach(async () => {
+  const clients = createdClients.splice(0);
+  await Promise.all(clients.map((client) => client.dispose()));
+});
 
 function dmWasmMessage(id: string, body: string, timestamp: string) {
   return {
@@ -67,7 +83,7 @@ function roomWasmMessage(id: string, body: string, timestamp: string) {
 
 describe("resume-time live-message buffering", () => {
   test("DM live messages arriving while the resume buffer is open are deferred", () => {
-    const client = new BrowserXmppClient(session());
+    const client = createClient();
     const state = client as unknown as PrivateState;
     const seen: LiveDmMessage[] = [];
     client.setDirectMessageHandler((message) => { seen.push(message); });
@@ -81,7 +97,7 @@ describe("resume-time live-message buffering", () => {
   });
 
   test("room live messages arriving while the resume buffer is open are deferred", () => {
-    const client = new BrowserXmppClient(session());
+    const client = createClient();
     const state = client as unknown as PrivateState;
     const seen: LiveRoomMessage[] = [];
     client.setMessageHandler((message) => { seen.push(message); });
@@ -97,7 +113,7 @@ describe("resume-time live-message buffering", () => {
   });
 
   test("closing the resume buffer and dispatching it fires handlers in arrival order", () => {
-    const client = new BrowserXmppClient(session());
+    const client = createClient();
     const state = client as unknown as PrivateState & {
       dispatchLiveBodyMessage: (message: unknown) => void;
     };
@@ -119,7 +135,7 @@ describe("resume-time live-message buffering", () => {
   });
 
   test("live messages arriving after the drain bypass the buffer and dispatch immediately", () => {
-    const client = new BrowserXmppClient(session());
+    const client = createClient();
     const state = client as unknown as PrivateState;
     const seen: LiveDmMessage[] = [];
     client.setDirectMessageHandler((message) => { seen.push(message); });
@@ -132,7 +148,7 @@ describe("resume-time live-message buffering", () => {
   });
 
   test("ephemeral events (chat-state) bypass the resume buffer; displayed markers defer (#1165)", () => {
-    const client = new BrowserXmppClient(session());
+    const client = createClient();
     const state = client as unknown as PrivateState;
     const dmSeen: LiveDmMessage[] = [];
     let chatStateFired = 0;
