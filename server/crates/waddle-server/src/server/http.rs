@@ -18,19 +18,16 @@ use crate::server::session_janitors::{
     spawn_user_actor_reaper,
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
-use crate::server::trace::make_request_span;
+use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
 use crate::server::{AppState, XmppConfig};
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::str::FromStr;
 use std::sync::Arc;
-use tower_http::{
-    compression::CompressionLayer,
-    trace::{DefaultOnResponse, TraceLayer},
-};
-use tracing::{info, warn, Level};
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tracing::{info, warn};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::registry::ConnectionRegistry;
 
@@ -395,10 +392,11 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
+        .layer(middleware::from_fn(attach_http_route_template))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_request_span)
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                .on_response(observe_http_response),
         )
         .layer(CompressionLayer::new())
         .layer(configure_cors());
