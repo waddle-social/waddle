@@ -36,7 +36,7 @@ use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
 };
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::PendingPayload;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRowId, SmSessionId};
 use waddle_xmpp::protocol::dm_routing::{
     classify_dm_intake, DmRouting, LiveDecision, OnlineResources, PendingDecision,
 };
@@ -49,6 +49,11 @@ use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles};
 use stanza::{parse_stanza, promote_iq, promote_presence};
 pub use types::{PromotedOutcome, PromotionSummary};
+
+enum BarrierPendingLinks {
+    Known(std::collections::HashMap<u32, Vec<PendingRowId>>),
+    Unknown,
+}
 
 /// Walk a session's unacked queue, promoting each stanza per the
 /// locked Q6 = B priority chain. Each promoted `pending_delivery`
@@ -85,6 +90,54 @@ pub async fn promote_session_unacked(
     // the session wouldn't have been detached in the first place,
     // unless other resources joined after detach).
     let online = build_online_resources(registry, user_registry, &recipient_bare).await;
+
+    // Resume barriers are never application delivery, but a barrier that owns
+    // a pending-delivery row is an impossible cross-store state. Classify the
+    // durable relation before pruning the barrier so an unreadable, duplicate,
+    // or present link retains both records for reconciliation.
+    let barrier_pending_links = if session
+        .unacked_stanzas
+        .iter()
+        .any(|entry| entry.is_resume_barrier())
+    {
+        match pending_storage.list(&recipient_bare).await {
+            Ok(rows) => {
+                let source_session_id = SmSessionId::new(session.stream_id.clone());
+                let mut links = std::collections::HashMap::<u32, Vec<PendingRowId>>::new();
+                let mut ambiguous = false;
+                for row in rows
+                    .into_iter()
+                    .filter(|row| row.flushed_in_session.as_ref() == Some(&source_session_id))
+                {
+                    if let Some(sequence) = row.outbound_sequence {
+                        links.entry(sequence).or_default().push(row.id);
+                    } else {
+                        ambiguous = true;
+                        tracing::error!(
+                            stream_id = %session.stream_id,
+                            row_id = %row.id,
+                            "Q6 promotion: source session owns pending row without outbound sequence; resume barrier link is ambiguous"
+                        );
+                    }
+                }
+                if ambiguous {
+                    BarrierPendingLinks::Unknown
+                } else {
+                    BarrierPendingLinks::Known(links)
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stream_id = %session.stream_id,
+                    %error,
+                    "Q6 promotion: could not classify pending-row links for resume barrier"
+                );
+                BarrierPendingLinks::Unknown
+            }
+        }
+    } else {
+        BarrierPendingLinks::Known(std::collections::HashMap::new())
+    };
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the
@@ -130,6 +183,57 @@ pub async fn promote_session_unacked(
     };
 
     for entry in &session.unacked_stanzas {
+        if entry.is_resume_barrier() {
+            let valid_barrier = match parse_stanza(&entry.stanza_xml) {
+                Some(Stanza::Iq(iq)) => {
+                    let expected_to = jid::Jid::from(session.jid.clone());
+                    let expected_from = session
+                        .jid
+                        .domain()
+                        .as_str()
+                        .parse::<jid::Jid>()
+                        .expect("a FullJid domain is always a valid domain JID");
+                    waddle_xmpp::xep::xep0199::is_ping(&iq)
+                        && iq.to() == Some(&expected_to)
+                        && iq.from() == Some(&expected_from)
+                        && !iq.id().is_empty()
+                }
+                Some(Stanza::Message(_) | Stanza::Presence(_)) | None => false,
+            };
+            let outcome = if !valid_barrier {
+                tracing::error!(
+                    stream_id = %session.stream_id,
+                    sequence = entry.sequence,
+                    "Q6 promotion: replay row is tagged as a resume barrier but is not the internal conformant XEP-0199 ping shape; retaining it"
+                );
+                PromotedOutcome::StorageFailure
+            } else {
+                match &barrier_pending_links {
+                    BarrierPendingLinks::Unknown => PromotedOutcome::StorageFailure,
+                    BarrierPendingLinks::Known(links) => match links.get(&entry.sequence) {
+                        None => {
+                            debug!(
+                                stream_id = %session.stream_id,
+                                sequence = entry.sequence,
+                                "Q6 promotion: discarded resume barrier without application delivery"
+                            );
+                            PromotedOutcome::NotPromotable
+                        }
+                        Some(rows) => {
+                            tracing::error!(
+                                stream_id = %session.stream_id,
+                                sequence = entry.sequence,
+                                linked_rows = rows.len(),
+                                "Q6 promotion: resume barrier unexpectedly owns pending-delivery row(s); retaining both for reconciliation"
+                            );
+                            PromotedOutcome::StorageFailure
+                        }
+                    },
+                }
+            };
+            summary.record(entry.sequence, &outcome);
+            continue;
+        }
         if tombstoned_sequences.contains(&entry.sequence) {
             debug!(
                 stream_id = %session.stream_id,

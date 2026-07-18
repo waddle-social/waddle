@@ -75,6 +75,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         sequence,
         stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
         original_receipt_at: stale_caller_supplied_time(),
+        purpose: SmUnackedStanzaPurpose::Application,
     }
 }
 
@@ -286,10 +287,11 @@ async fn store_session_atomic_also_applies_divergence_a() {
     // backward tolerance against `Utc::now()`'s sub-millisecond precision.
     let before = Utc::now() - chrono::Duration::milliseconds(5);
     let session = fixture_session("stream-atomic");
-    let unacked = vec![
+    let mut unacked = vec![
         fixture_unacked("stream-atomic", 1),
         fixture_unacked("stream-atomic", 2),
     ];
+    unacked[1].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     f.fenced
         .store_session_atomic(session.clone(), unacked)
         .await
@@ -312,6 +314,8 @@ async fn store_session_atomic_also_applies_divergence_a() {
     assert_eq!(queue.len(), 2);
     assert_eq!(queue[0].sequence, 1);
     assert_eq!(queue[1].sequence, 2);
+    assert_eq!(queue[0].purpose, SmUnackedStanzaPurpose::Application);
+    assert_eq!(queue[1].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
 }
 
 #[tokio::test]

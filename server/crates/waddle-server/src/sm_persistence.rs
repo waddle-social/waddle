@@ -17,6 +17,7 @@ use tracing::{debug, info, instrument};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+    SmUnackedStanzaPurpose,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -37,7 +38,7 @@ mod schema;
 
 use codec::{
     decode_session, decode_unacked, decode_unacked_join_row, serialize_presence_payloads,
-    serialize_stanza, show_wire_str,
+    serialize_stanza, show_wire_str, unacked_purpose_wire_str,
 };
 
 /// Per-stream insert/update mutex map. Serializes writes for the same
@@ -342,13 +343,14 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         let xml = serialize_stanza(&stanza.stanza)?;
         let receipt_ms = stanza.original_receipt_at.timestamp_millis();
         self.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 stanza.stream_id.as_str().to_string(),
                 i64::from(stanza.sequence),
                 xml,
                 receipt_ms,
+                unacked_purpose_wire_str(stanza.purpose).to_string(),
             ],
         )
         .await?;
@@ -399,7 +401,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
         let mut rows = self
             .query(
-                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms \
+                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose \
                  FROM sm_unacked WHERE stream_id = ? \
                  ORDER BY sequence ASC",
                 crate::db_params![stream_id.as_str().to_string()],

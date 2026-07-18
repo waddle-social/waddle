@@ -161,11 +161,13 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
                     sequence: 9,
                     stanza_xml: "<message id='m9'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
+                    purpose: Default::default(),
                 },
                 DetachedUnackedStanza {
                     sequence: 10,
                     stanza_xml: "<message id='m10'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
+                    purpose: Default::default(),
                 },
             ],
             max_resume_time: Some(300),

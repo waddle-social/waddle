@@ -47,6 +47,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         sequence,
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: Utc::now(),
+        purpose: SmUnackedStanzaPurpose::Application,
     }
 }
 
@@ -133,9 +134,15 @@ async fn persisted_unacked_round_trips_original_receipt_at() {
         chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("valid millis");
     let mut entry = fixture_unacked("stream-receipt", 1);
     entry.original_receipt_at = receipt_time;
+    entry.purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     store.append_unacked(entry).await.unwrap();
     let listed = store.list_unacked(&sid("stream-receipt")).await.unwrap();
     assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].purpose,
+        SmUnackedStanzaPurpose::ResumeBarrier,
+        "typed replay purpose must survive in-memory persistence"
+    );
     assert_eq!(
         listed[0].original_receipt_at, receipt_time,
         "original_receipt_at must round-trip exactly (not be re-stamped \

@@ -6,6 +6,7 @@ use xmpp_parsers::presence::Show;
 
 use super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
+use crate::stream_management::persistence::SmUnackedStanzaPurpose;
 
 /// One unacknowledged stanza retained on a detached SM session.
 ///
@@ -28,6 +29,22 @@ pub struct DetachedUnackedStanza {
     /// Server-side receipt time of the original stanza. Used by the
     /// Q6 SM-expiry promotion path for the XEP-0203 `<delay/>` stamp.
     pub original_receipt_at: DateTime<Utc>,
+    /// Typed recovery disposition for this replay row.
+    pub purpose: SmUnackedStanzaPurpose,
+}
+
+impl DetachedUnackedStanza {
+    pub fn is_resume_barrier(&self) -> bool {
+        self.purpose == SmUnackedStanzaPurpose::ResumeBarrier
+    }
+}
+
+/// A sequenced replay insert reused an occupied counter for a non-identical
+/// stanza, receipt timestamp, or purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("detached replay sequence {sequence} already has a different identity")]
+pub struct DetachedReplaySequenceConflict {
+    pub sequence: u32,
 }
 
 /// A detached stream management session.
@@ -195,6 +212,7 @@ impl DetachedSession {
             sequence: self.outbound_count,
             stanza_xml,
             original_receipt_at,
+            purpose: SmUnackedStanzaPurpose::Application,
         });
     }
 
@@ -203,15 +221,37 @@ impl DetachedSession {
         sequence: u32,
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
-    ) {
-        self.outbound_count = self.outbound_count.max(sequence);
-        if self
+    ) -> Result<(), DetachedReplaySequenceConflict> {
+        self.record_detached_outbound_at_with_purpose(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+            SmUnackedStanzaPurpose::Application,
+        )
+    }
+
+    pub(crate) fn record_detached_outbound_at_with_purpose(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        purpose: SmUnackedStanzaPurpose,
+    ) -> Result<(), DetachedReplaySequenceConflict> {
+        if let Some(existing) = self
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.sequence == sequence)
+            .find(|entry| entry.sequence == sequence)
         {
-            return;
+            if existing.stanza_xml == stanza_xml
+                && existing.original_receipt_at == original_receipt_at
+                && existing.purpose == purpose
+            {
+                self.outbound_count = self.outbound_count.max(sequence);
+                return Ok(());
+            }
+            return Err(DetachedReplaySequenceConflict { sequence });
         }
+        self.outbound_count = self.outbound_count.max(sequence);
         if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
             self.note_detached_eviction(evicted.sequence);
@@ -221,8 +261,10 @@ impl DetachedSession {
             sequence,
             stanza_xml,
             original_receipt_at,
+            purpose,
         });
         self.unacked_stanzas.sort_by_key(|entry| entry.sequence);
+        Ok(())
     }
 
     /// Surface a detached-queue eviction that was previously silent (issue

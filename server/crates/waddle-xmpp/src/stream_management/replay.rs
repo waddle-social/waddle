@@ -17,6 +17,7 @@ use minidom::Element;
 use std::str::FromStr;
 use tracing::warn;
 
+use super::persistence::SmUnackedStanzaPurpose;
 use crate::parser::element_to_string;
 use crate::xep::xep0203::{build_delay_element, DelayInfo};
 use crate::xep::NS_DELAY;
@@ -41,6 +42,8 @@ pub struct ReplayStanza {
     pub stanza_xml: String,
     /// Server-side receipt time of the original stanza.
     pub original_receipt_at: DateTime<Utc>,
+    /// Typed recovery disposition preserved across partial replay/requeue.
+    pub purpose: SmUnackedStanzaPurpose,
 }
 
 /// Stamp a queued replay stanza with a XEP-0203 `<delay/>` carrying

@@ -141,7 +141,10 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             &stream_id,
             |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
-            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+            |session| {
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                Ok(())
+            },
         )
         .await
     }
@@ -161,7 +164,10 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             &stream_id,
             |session| !session.is_expired() && session.blocklist_interested && session.jid == *jid,
-            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+            |session| {
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                Ok(())
+            },
         )
         .await
     }
@@ -180,7 +186,10 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             &stream_id,
             |session| !session.is_expired() && session.jid == *jid,
-            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+            |session| {
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                Ok(())
+            },
         )
         .await
     }
@@ -242,7 +251,10 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             stream_id,
             |session| !session.is_expired(),
-            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+            |session| {
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                Ok(())
+            },
         )
         .await
     }
@@ -258,7 +270,9 @@ impl InMemorySmSessionRegistry {
             stream_id,
             |session| !session.is_expired(),
             |session| {
-                session.record_detached_outbound_at(sequence, stanza_xml, original_receipt_at);
+                session
+                    .record_detached_outbound_at(sequence, stanza_xml, original_receipt_at)
+                    .map_err(SmRegistryError::from)
             },
         )
         .await
@@ -464,7 +478,10 @@ impl InMemorySmSessionRegistry {
         self.update_detached_session_snapshot(
             &stream_id,
             |session| !session.is_expired() && session.presence_available && session.jid == *jid,
-            |session| session.record_detached_outbound(stanza_xml, original_receipt_at),
+            |session| {
+                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                Ok(())
+            },
         )
         .await
     }

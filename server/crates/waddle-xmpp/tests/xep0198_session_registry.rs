@@ -240,6 +240,7 @@ impl SmPersistenceStorage for MislabelingStore {
                 sequence: 99,
                 stanza: Box::new(chat_stanza(&to, "leaked secret")),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             });
         }
         Ok(groups)
@@ -266,6 +267,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
                 "<message xmlns='jabber:client' id='m12'><body>alice's own</body></message>"
                     .to_string(),
             original_receipt_at: chrono::Utc::now(),
+            purpose: Default::default(),
         });
     registry.store_session(session).await.expect("store");
 
@@ -888,6 +890,7 @@ async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
         stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
             .to_string(),
         original_receipt_at: t1,
+        purpose: Default::default(),
     });
     registry.store_session(session).await.expect("store");
 
@@ -979,6 +982,39 @@ fn late_drain_message_xml(id: &str, body: &str) -> String {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     waddle_xmpp::parser::message_to_string(&message).expect("serialize <message/>")
+}
+
+#[test]
+fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
+    use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
+
+    let mut session = detached_session("stream-exact-replay", "alice@example.com/laptop");
+    let receipt = chrono::Utc::now();
+    let xml = late_drain_message_xml("same", "same");
+
+    session
+        .record_detached_outbound_at(12, xml.clone(), receipt)
+        .expect("first insert");
+    session
+        .record_detached_outbound_at(12, xml.clone(), receipt)
+        .expect("exact retry is idempotent");
+    assert_eq!(session.unacked_stanzas.len(), 1);
+
+    assert!(session
+        .record_detached_outbound_at(
+            12,
+            late_drain_message_xml("different", "different"),
+            receipt,
+        )
+        .is_err());
+    assert!(session
+        .record_detached_outbound_at(12, xml.clone(), receipt + chrono::Duration::seconds(1))
+        .is_err());
+
+    session.unacked_stanzas[0].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
+    assert!(session
+        .record_detached_outbound_at(12, xml, receipt)
+        .is_err());
 }
 
 /// Issue #209 finding #8: stanzas appended via
