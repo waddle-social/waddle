@@ -542,8 +542,8 @@ pub(super) async fn dispatch_to_room(
     // → reflector). The occupancy gate already ran above as an
     // explicit stand-alone call (Copilot review on PR #279); using
     // the full `default_room_dispatcher()` here would re-run it.
-    let dispatch_outcome = fanout_span
-        .in_scope(|| default_room_pipeline_dispatcher().dispatch(&mut working, &ctx));
+    let dispatch_outcome =
+        fanout_span.in_scope(|| default_room_pipeline_dispatcher().dispatch(&mut working, &ctx));
     let observer_message = working.clone();
     let mut dispatch_events = dispatch_outcome.events;
     bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());

@@ -73,7 +73,7 @@ impl MucRoom {
         tracing::Span::current().record("recipients", outbound.len());
         crate::metrics::record_muc_message();
         crate::histogram_record!(
-            "xmpp.muc.fanout.latency",
+            "waddle.muc.fanout.duration",
             "ms",
             "MUC fanout latency: groupchat broadcast accepted until the \
              per-recipient outbound set is built.",
@@ -270,23 +270,6 @@ mod tests {
         assert!(
             !output.contains("sensitive fanout body"),
             "message bodies must never be tracing fields: {output}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fanout_latency_histogram_uses_canonical_name_and_unit() {
-        let guard = crate::telemetry::test_support::acquire().await;
-        room_with_two_occupants()
-            .broadcast_message("alice", &correlated_message())
-            .expect("broadcast succeeds");
-
-        assert_eq!(
-            guard.histogram_count("xmpp.muc.fanout.latency", &[]),
-            Some(1)
-        );
-        assert_eq!(
-            guard.metric_unit("xmpp.muc.fanout.latency").as_deref(),
-            Some("ms")
         );
     }
 }

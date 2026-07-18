@@ -1,7 +1,5 @@
 use axum::http::Uri;
-use opentelemetry::trace::{
-    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
-};
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use opentelemetry_http::HeaderExtractor;
 use tracing::{info_span, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;

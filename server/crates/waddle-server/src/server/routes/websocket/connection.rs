@@ -1027,40 +1027,32 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
 
-    #[derive(Clone)]
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    #[derive(Clone, Debug)]
+    struct CaptureSpanExporter(Arc<Mutex<Vec<SpanData>>>);
 
-    impl io::Write for CaptureWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("capture lock").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
+    impl SpanExporter for CaptureSpanExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.0.lock().expect("capture lock").extend(batch);
             Ok(())
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     #[test]
-    fn connection_span_records_client_trace_id_from_query() {
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(CaptureWriter(Arc::clone(&bytes)))
-            .finish();
+    fn connection_span_records_client_trace_id_and_remote_link_from_query() {
+        let exported = Arc::new(Mutex::new(Vec::new()));
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(CaptureSpanExporter(Arc::clone(&exported)))
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("connection-span-test")),
+        );
 
         tracing::subscriber::with_default(subscriber, || {
             let span = connection_established_span(Some(
@@ -1068,15 +1060,29 @@ mod tests {
             ))
             .expect("valid traceparent creates a connection span");
             let _entered = span.enter();
-            tracing::info!("connection field probe");
         });
 
-        let output = String::from_utf8(bytes.lock().expect("capture lock").clone())
-            .expect("captured tracing is UTF-8");
+        let exported = exported.lock().expect("capture lock");
+        let span = exported
+            .iter()
+            .find(|span| span.name == "xmpp.connection.established")
+            .expect("connection span exported");
         assert!(
-            output.contains("\"client.trace_id\":\"0af7651916cd43dd8448eb211c80319c\""),
-            "connection span must expose the linked client trace id: {output}"
+            span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "client.trace_id"
+                    && attribute.value.to_string() == "0af7651916cd43dd8448eb211c80319c"
+            }),
+            "connection span must expose the linked client trace id: {:?}",
+            span.attributes,
         );
+        assert_eq!(span.links.len(), 1, "connection span has one client link");
+        let linked = &span.links[0].span_context;
+        assert_eq!(
+            linked.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(linked.span_id().to_string(), "b7ad6b7169203331");
+        assert!(linked.is_remote());
     }
 
     #[tokio::test]

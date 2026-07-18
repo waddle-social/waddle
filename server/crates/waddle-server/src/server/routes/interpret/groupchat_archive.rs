@@ -1,6 +1,8 @@
 use super::*;
 use waddle_xmpp::mam::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
+#[cfg(feature = "clustering")]
 use waddle_xmpp::muc::RoomClaimFenceContext;
+#[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
 /// Archive fencing authority resolved for one room write. `Guarded` owns
@@ -9,10 +11,12 @@ use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 /// fence from a genuinely unclustered `Unfenced` deployment.
 pub(super) enum RoomArchiveFence {
     Unfenced,
+    #[cfg(feature = "clustering")]
     Guarded {
         context: RoomClaimFenceContext,
         _identity_guard: CurrentNodeIdentityGuard,
     },
+    #[cfg(feature = "clustering")]
     OwnershipLost,
 }
 
@@ -67,6 +71,7 @@ pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) ->
     }
 }
 
+#[cfg(feature = "clustering")]
 async fn guard_clustered_room_claim_fence(
     fence: Option<RoomClaimFenceContext>,
     node_identity: Option<&SharedNodeIdentity>,
@@ -91,6 +96,7 @@ pub(super) async fn archive_groupchat_message(
     fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    #[cfg(feature = "clustering")]
     if matches!(fence, RoomArchiveFence::OwnershipLost) {
         return ArchiveGroupchatOutcome::OwnershipLost;
     }
@@ -227,12 +233,14 @@ pub(super) async fn finish_archive_groupchat_message(
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
     let store_result = match fence {
+        #[cfg(feature = "clustering")]
         RoomArchiveFence::Guarded { context, .. } => {
             mam_storage
                 .store_message_fenced(room, &archived, context)
                 .await
         }
         RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
+        #[cfg(feature = "clustering")]
         RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
     };
     match store_result {
