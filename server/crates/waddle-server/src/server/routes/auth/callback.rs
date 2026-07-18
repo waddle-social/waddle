@@ -1,6 +1,6 @@
 use super::*;
 
-#[instrument(skip(state))]
+#[instrument(skip(state, query))]
 pub(super) async fn callback_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<CallbackQuery>,
@@ -9,32 +9,48 @@ pub(super) async fn callback_handler(
         let msg = query
             .error_description
             .unwrap_or_else(|| "provider returned an error".to_string());
+        record_auth_failure("unknown", None, AuthFailure::AuthorizationRejected);
         return auth_error_to_response(AuthError::AuthorizationFailed(format!("{}: {}", err, msg)))
             .into_response();
     }
 
-    let (Some(code), Some(state_key)) = (query.code, query.state) else {
+    let Some(state_key) = query.state else {
+        record_auth_failure("unknown", None, AuthFailure::StateMismatch);
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    };
+    let Some(code) = query.code else {
+        record_auth_failure("unknown", None, AuthFailure::CallbackInvalidCode);
         return auth_error_to_response(AuthError::InvalidRequest("missing code/state".to_string()))
             .into_response();
     };
 
     let pending = match state.auth_handshake.take_pending(&state_key).await {
         Ok(Some(pending)) => pending,
-        Ok(None) => return auth_error_to_response(AuthError::InvalidState).into_response(),
-        Err(err) => return auth_error_to_response(err).into_response(),
+        Ok(None) => {
+            record_auth_failure("unknown", None, AuthFailure::StateMismatch);
+            return auth_error_to_response(AuthError::InvalidState).into_response();
+        }
+        Err(err) => return auth_error_response("unknown", AuthStage::State, err),
     };
 
     if pending.is_expired() {
+        record_auth_failure(&pending.provider_id, None, AuthFailure::StateExpired);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
 
     if pending.state != state_key {
+        record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
 
     let provider = match state.providers.get(&pending.provider_id) {
         Some(p) => p,
         None => {
+            record_auth_failure(
+                &pending.provider_id,
+                None,
+                AuthFailure::CallbackInvalidClient,
+            );
             return auth_error_to_response(AuthError::InvalidProvider(pending.provider_id))
                 .into_response();
         }
@@ -53,12 +69,23 @@ pub(super) async fn callback_handler(
             });
             let issuer = match issuer {
                 Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Err(err) => return auth_error_response(&provider.id, AuthStage::OidcCallback, err),
             };
 
             let discovery = match oidc::discover(&state.http_client, issuer).await {
                 Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Err(err) => {
+                    record_auth_failure(
+                        &provider.id,
+                        None,
+                        AuthFailure::from_error(AuthStage::OidcCallback, &err),
+                    );
+                    let response_error = match err {
+                        AuthError::HttpError(detail) => AuthError::AuthorizationFailed(detail),
+                        other => other,
+                    };
+                    return auth_error_to_response(response_error).into_response();
+                }
             };
 
             let token = match oidc::exchange_authorization_code(
@@ -72,8 +99,13 @@ pub(super) async fn callback_handler(
             )
             .await
             {
-                Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Ok(v) => {
+                    record_auth_success(AuthStage::TokenExchange);
+                    v
+                }
+                Err(err) => {
+                    return auth_error_response(&provider.id, AuthStage::TokenExchange, err)
+                }
             };
 
             match oidc::claims_from_token_response(
@@ -85,28 +117,56 @@ pub(super) async fn callback_handler(
             )
             .await
             {
-                Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Ok(outcome) => {
+                    match outcome.userinfo {
+                        oidc::UserinfoFetchOutcome::NotRequested => {}
+                        oidc::UserinfoFetchOutcome::Succeeded => {
+                            record_auth_success(AuthStage::Userinfo);
+                        }
+                        oidc::UserinfoFetchOutcome::Failed(error) => {
+                            record_auth_failure(
+                                &provider.id,
+                                None,
+                                AuthFailure::from_error(AuthStage::Userinfo, &error),
+                            );
+                        }
+                    }
+                    outcome.claims
+                }
+                Err(err) => {
+                    let stage = match &err {
+                        AuthError::InvalidNonce => AuthStage::State,
+                        AuthError::UserInfoFailed(_) => AuthStage::Userinfo,
+                        _ => AuthStage::OidcCallback,
+                    };
+                    return auth_error_response(&provider.id, stage, err);
+                }
             }
         }
         AuthProviderKind::OAuth2 => {
             let token_endpoint = match provider.token_endpoint.as_deref() {
                 Some(v) => v,
                 None => {
-                    return auth_error_to_response(AuthError::InvalidRequest(
-                        "oauth2 provider missing token_endpoint".to_string(),
-                    ))
-                    .into_response();
+                    return auth_error_response(
+                        &provider.id,
+                        AuthStage::TokenExchange,
+                        AuthError::InvalidRequest(
+                            "oauth2 provider missing token_endpoint".to_string(),
+                        ),
+                    );
                 }
             };
 
             let userinfo_endpoint = match provider.userinfo_endpoint.as_deref() {
                 Some(v) => v,
                 None => {
-                    return auth_error_to_response(AuthError::InvalidRequest(
-                        "oauth2 provider missing userinfo_endpoint".to_string(),
-                    ))
-                    .into_response();
+                    return auth_error_response(
+                        &provider.id,
+                        AuthStage::Userinfo,
+                        AuthError::InvalidRequest(
+                            "oauth2 provider missing userinfo_endpoint".to_string(),
+                        ),
+                    );
                 }
             };
 
@@ -121,8 +181,13 @@ pub(super) async fn callback_handler(
             )
             .await
             {
-                Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Ok(v) => {
+                    record_auth_success(AuthStage::TokenExchange);
+                    v
+                }
+                Err(err) => {
+                    return auth_error_response(&provider.id, AuthStage::TokenExchange, err)
+                }
             };
 
             match oidc::claims_from_oauth2_fallback(
@@ -134,11 +199,16 @@ pub(super) async fn callback_handler(
             )
             .await
             {
-                Ok(v) => v,
-                Err(err) => return auth_error_to_response(err).into_response(),
+                Ok(v) => {
+                    record_auth_success(AuthStage::Userinfo);
+                    v
+                }
+                Err(err) => return auth_error_response(&provider.id, AuthStage::Userinfo, err),
             }
         }
     };
+
+    record_auth_success(AuthStage::State);
 
     let linked = match state
         .identity_service
@@ -146,7 +216,7 @@ pub(super) async fn callback_handler(
         .await
     {
         Ok(v) => v,
-        Err(err) => return auth_error_to_response(err).into_response(),
+        Err(err) => return auth_error_response(&provider.id, AuthStage::OidcCallback, err),
     };
 
     // Fire-and-forget the OIDC → PEP profile bridge so login latency
@@ -220,10 +290,11 @@ pub(super) async fn callback_handler(
     )
     .await
     {
-        return auth_error_to_response(AuthError::DatabaseError(format!(
-            "Failed to provision account membership: {err}"
-        )))
-        .into_response();
+        return auth_error_response(
+            &provider.id,
+            AuthStage::OidcCallback,
+            AuthError::DatabaseError(format!("Failed to provision account membership: {err}")),
+        );
     }
 
     let session = Session::new(
@@ -233,7 +304,7 @@ pub(super) async fn callback_handler(
     );
 
     if let Err(err) = state.session_manager.create_session(&session).await {
-        return auth_error_to_response(err).into_response();
+        return auth_error_response(&provider.id, AuthStage::OidcCallback, err);
     }
 
     match pending.flow {
@@ -252,11 +323,14 @@ pub(super) async fn callback_handler(
                         {
                             Ok(parsed) => parsed,
                             Err(err) => {
-                                return auth_error_to_response(AuthError::InvalidRequest(format!(
-                                    "invalid browser redirect target: {}",
-                                    err
-                                )))
-                                .into_response();
+                                return auth_error_response(
+                                    &provider.id,
+                                    AuthStage::OidcCallback,
+                                    AuthError::InvalidRequest(format!(
+                                        "invalid browser redirect target: {}",
+                                        err
+                                    )),
+                                );
                             }
                         },
                     };
@@ -285,6 +359,7 @@ pub(super) async fn callback_handler(
                     .parse()
                     .expect("valid cookie"),
             );
+            record_auth_success(AuthStage::OidcCallback);
             response
         }
         PendingFlow::Device { device_code } => {
@@ -319,24 +394,41 @@ pub(super) async fn callback_handler(
                         entry.session_id = Some(session.id.clone());
                         match state.auth_handshake.update_device(&entry).await {
                             Ok(approved) => approved,
-                            Err(err) => return rollback_session(err).await,
+                            Err(err) => {
+                                record_auth_failure(
+                                    &provider.id,
+                                    None,
+                                    AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                                );
+                                return rollback_session(err).await;
+                            }
                         }
                     }
                 }
                 Ok(None) => false,
-                Err(err) => return rollback_session(err).await,
+                Err(err) => {
+                    record_auth_failure(
+                        &provider.id,
+                        None,
+                        AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                    );
+                    return rollback_session(err).await;
+                }
             };
 
             if !approved {
                 if let Err(err) = state.session_manager.delete_session(&session.id).await {
                     warn!(error = %err, "Failed to roll back session for expired device grant");
                 }
+                record_auth_failure(&provider.id, None, AuthFailure::DeviceExpired);
                 return auth_error_to_response(AuthError::InvalidRequest(
                     "device authorization expired; restart the device login".to_string(),
                 ))
                 .into_response();
             }
 
+            record_auth_success(AuthStage::DeviceFlow);
+            record_auth_success(AuthStage::OidcCallback);
             (
                 StatusCode::OK,
                 axum::response::Html("<html><body><h1>Device authorized</h1><p>You can close this window.</p></body></html>".to_string()),
@@ -367,17 +459,18 @@ pub(super) async fn callback_handler(
                 if let Err(rollback_err) = state.session_manager.delete_session(&session.id).await {
                     warn!(error = %rollback_err, "Failed to roll back session for failed xmpp code insert");
                 }
-                return auth_error_to_response(err).into_response();
+                return auth_error_response(&provider.id, AuthStage::OidcCallback, err);
             }
 
             let mut redirect = match url::Url::parse(&client_redirect_uri) {
                 Ok(v) => v,
                 Err(err) => {
                     error!(error = %err, "Invalid XMPP redirect URI");
-                    return auth_error_to_response(AuthError::InvalidRequest(
-                        "invalid xmpp redirect_uri".to_string(),
-                    ))
-                    .into_response();
+                    return auth_error_response(
+                        &provider.id,
+                        AuthStage::OidcCallback,
+                        AuthError::InvalidRequest("invalid xmpp redirect_uri".to_string()),
+                    );
                 }
             };
 
@@ -389,6 +482,7 @@ pub(super) async fn callback_handler(
                 }
             }
 
+            record_auth_success(AuthStage::OidcCallback);
             Redirect::temporary(redirect.as_str()).into_response()
         }
     }

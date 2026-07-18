@@ -26,6 +26,17 @@ pub struct DynamicClientRegistration {
     pub token_endpoint_auth_method: String,
 }
 
+pub enum UserinfoFetchOutcome {
+    NotRequested,
+    Succeeded,
+    Failed(AuthError),
+}
+
+pub struct OidcClaimsOutcome {
+    pub claims: IdentityClaims,
+    pub userinfo: UserinfoFetchOutcome,
+}
+
 #[derive(Debug, Serialize)]
 struct DynamicRegistrationRequest {
     redirect_uris: Vec<String>,
@@ -45,7 +56,7 @@ pub async fn discover(client: &Client, issuer: &str) -> Result<OidcDiscovery, Au
         .get(&url)
         .send()
         .await
-        .map_err(|e| AuthError::AuthorizationFailed(e.to_string()))?;
+        .map_err(|e| AuthError::HttpError(e.to_string()))?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -129,7 +140,7 @@ pub async fn register_dynamic_client(
         .json(&req)
         .send()
         .await
-        .map_err(|e| AuthError::AuthorizationFailed(e.to_string()))?;
+        .map_err(|e| AuthError::HttpError(e.to_string()))?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -170,7 +181,7 @@ async fn fetch_jwks(client: &Client, jwks_uri: &str) -> Result<JwkSet, AuthError
         .get(jwks_uri)
         .send()
         .await
-        .map_err(|e| AuthError::JwtError(e.to_string()))?;
+        .map_err(|e| AuthError::HttpError(e.to_string()))?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -264,7 +275,7 @@ pub async fn claims_from_token_response(
     discovery: &OidcDiscovery,
     token: &OAuthTokenResponse,
     expected_nonce: Option<&str>,
-) -> Result<IdentityClaims, AuthError> {
+) -> Result<OidcClaimsOutcome, AuthError> {
     let id_token = token.id_token.as_deref().ok_or_else(|| {
         AuthError::InvalidRequest("OIDC provider did not return id_token".to_string())
     })?;
@@ -289,21 +300,27 @@ pub async fn claims_from_token_response(
     let mut merged = id_claims.clone();
 
     // If userinfo endpoint exists, merge extra profile claims on top.
-    if let Some(userinfo_endpoint) = provider
+    let userinfo = if let Some(userinfo_endpoint) = provider
         .userinfo_endpoint
         .as_deref()
         .or(discovery.userinfo_endpoint.as_deref())
     {
-        if let Ok(userinfo) = fetch_userinfo(client, userinfo_endpoint, &token.access_token).await {
-            if let Some(obj) = merged.as_object_mut() {
-                if let Some(userinfo_obj) = userinfo.as_object() {
-                    for (k, v) in userinfo_obj {
-                        obj.insert(k.clone(), v.clone());
+        match fetch_userinfo(client, userinfo_endpoint, &token.access_token).await {
+            Ok(userinfo) => {
+                if let Some(obj) = merged.as_object_mut() {
+                    if let Some(userinfo_obj) = userinfo.as_object() {
+                        for (k, v) in userinfo_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
                     }
                 }
+                UserinfoFetchOutcome::Succeeded
             }
+            Err(error) => UserinfoFetchOutcome::Failed(error),
         }
-    }
+    } else {
+        UserinfoFetchOutcome::NotRequested
+    };
 
     let preferred_username = provider
         .username_claim
@@ -318,15 +335,18 @@ pub async fn claims_from_token_response(
         .and_then(|k| value_string(merged.get(k)))
         .or_else(|| value_string(merged.get("email")));
 
-    Ok(IdentityClaims {
-        subject,
-        issuer: Some(discovery.issuer.clone()),
-        preferred_username,
-        name: value_string(merged.get("name")),
-        email,
-        email_verified: value_bool(merged.get("email_verified")),
-        avatar_url: avatar_url_from_claims(&merged),
-        raw_claims: merged,
+    Ok(OidcClaimsOutcome {
+        claims: IdentityClaims {
+            subject,
+            issuer: Some(discovery.issuer.clone()),
+            preferred_username,
+            name: value_string(merged.get("name")),
+            email,
+            email_verified: value_bool(merged.get("email_verified")),
+            avatar_url: avatar_url_from_claims(&merged),
+            raw_claims: merged,
+        },
+        userinfo,
     })
 }
 

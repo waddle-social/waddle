@@ -1,6 +1,7 @@
 //! OAuth device flow routes.
 
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
+use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::localpart_to_jid;
 use axum::{
     extract::{Form, Query, State},
@@ -13,6 +14,7 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
+use waddle_xmpp::telemetry::attributes::AuthStage;
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
@@ -137,12 +139,13 @@ fn generate_user_code() -> String {
     format!("{}-{}", letters, numbers)
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_start_handler(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<DeviceStartRequest>,
 ) -> impl IntoResponse {
     if state.providers.get(&request.provider).is_none() {
+        record_auth_failure("unknown", None, AuthFailure::DeviceInvalidClient);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -175,6 +178,11 @@ pub async fn device_start_handler(
             }
             Ok(false) => continue,
             Err(err) => {
+                record_auth_failure(
+                    &request.provider,
+                    None,
+                    AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                );
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -185,7 +193,7 @@ pub async fn device_start_handler(
     }
 
     let Some(auth) = auth else {
-        warn!("Device flow could not allocate a unique user_code after retries");
+        record_auth_failure(&request.provider, None, AuthFailure::DeviceOther);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(
@@ -216,7 +224,7 @@ pub async fn device_start_handler(
         .into_response()
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_poll_handler(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<DevicePollRequest>,
@@ -224,6 +232,7 @@ pub async fn device_poll_handler(
     let auth = match state.auth_handshake.get_device(&request.device_code).await {
         Ok(Some(v)) => v,
         Ok(None) => {
+            record_auth_failure("unknown", None, AuthFailure::DeviceInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -234,6 +243,11 @@ pub async fn device_poll_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "unknown",
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -250,6 +264,7 @@ pub async fn device_poll_handler(
         {
             warn!(error = %err, "Failed to remove expired device authorization");
         }
+        record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceExpired);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -274,6 +289,7 @@ pub async fn device_poll_handler(
         }
         DeviceAuthStatus::Approved => {
             let Some(session_id) = auth.session_id.clone() else {
+                record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new(
@@ -307,25 +323,35 @@ pub async fn device_poll_handler(
                     )
                         .into_response()
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "invalid_grant",
-                        "Session no longer exists",
-                    )),
-                )
-                    .into_response(),
-                Err(err) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("server_error", &err.to_string())),
-                )
-                    .into_response(),
+                Ok(None) => {
+                    record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::new(
+                            "invalid_grant",
+                            "Session no longer exists",
+                        )),
+                    )
+                        .into_response()
+                }
+                Err(err) => {
+                    record_auth_failure(
+                        &auth.provider_id,
+                        None,
+                        AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("server_error", &err.to_string())),
+                    )
+                        .into_response()
+                }
             }
         }
     }
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, query))]
 pub async fn device_verify_page_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<VerifyQuery>,
@@ -337,7 +363,7 @@ pub async fn device_verify_page_handler(
     Html(html)
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_verify_submit_handler(
     State(state): State<Arc<AuthState>>,
     Form(request): Form<VerifySubmitRequest>,
@@ -351,6 +377,7 @@ pub async fn device_verify_submit_handler(
     {
         Ok(Some(v)) => v,
         Ok(None) => {
+            record_auth_failure("unknown", None, AuthFailure::DeviceInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new("invalid_user_code", "Invalid user code")),
@@ -358,6 +385,11 @@ pub async fn device_verify_submit_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "unknown",
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -367,6 +399,7 @@ pub async fn device_verify_submit_handler(
     };
 
     if auth.is_expired() {
+        record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceExpired);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -381,6 +414,7 @@ pub async fn device_verify_submit_handler(
     match state.auth_handshake.update_device(&auth).await {
         Ok(true) => {}
         Ok(false) => {
+            record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -391,6 +425,11 @@ pub async fn device_verify_submit_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                &auth.provider_id,
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -405,7 +444,7 @@ pub async fn device_verify_submit_handler(
     let provider = match state.providers.get(&provider_id) {
         Some(v) => v,
         None => {
-            warn!(provider_id = %provider_id, "Provider no longer configured during device flow");
+            record_auth_failure(&provider_id, None, AuthFailure::DeviceInvalidClient);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -422,14 +461,22 @@ pub async fn device_verify_submit_handler(
         .await
     {
         Ok(url) => {
+            record_auth_success(AuthStage::OidcAuthorization);
             info!(provider = %provider.id, "Device flow continuing via provider authorization");
             axum::response::Redirect::temporary(&url).into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new("authorization_failed", &err.to_string())),
-        )
-            .into_response(),
+        Err(err) => {
+            record_auth_failure(
+                &provider.id,
+                None,
+                AuthFailure::from_error(AuthStage::OidcAuthorization, &err),
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new("authorization_failed", &err.to_string())),
+            )
+                .into_response()
+        }
     }
 }
 
