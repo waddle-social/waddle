@@ -230,16 +230,45 @@ impl NotificationOutboxStore {
             match &outcome {
                 NotificationOutboxPublishOutcome::Published { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
+                    tracing::info!(
+                        recipient = %job.recipient_bare_jid(),
+                        conversation = %job.conversation_jid(),
+                        notification_class = job.class().as_db_value(),
+                        push_stage = "published",
+                        "push pipeline transition"
+                    );
                 }
                 NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled(
                         waddle_xmpp::telemetry::attributes::PushRetryReason::Unknown,
                     );
+                    tracing::warn!(
+                        recipient = %job.recipient_bare_jid(),
+                        conversation = %job.conversation_jid(),
+                        notification_class = job.class().as_db_value(),
+                        push_stage = "retry_scheduled",
+                        "push pipeline transition"
+                    );
                 }
                 NotificationOutboxPublishOutcome::Failed { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();
+                    tracing::warn!(
+                        recipient = %job.recipient_bare_jid(),
+                        conversation = %job.conversation_jid(),
+                        notification_class = job.class().as_db_value(),
+                        push_stage = "dead_lettered",
+                        "push pipeline transition"
+                    );
                 }
                 NotificationOutboxPublishOutcome::Suppressed { .. } => {
+                    tracing::info!(
+                        recipient = %job.recipient_bare_jid(),
+                        conversation = %job.conversation_jid(),
+                        notification_class = job.class().as_db_value(),
+                        push_stage = "suppressed",
+                        suppression_reason = SuppressedReason::UnreadZeroAtPublish.as_db_value(),
+                        "push pipeline transition"
+                    );
                     waddle_xmpp::telemetry::reliability::increment_push_suppressed(
                         SuppressedReason::UnreadZeroAtPublish.telemetry_reason(),
                     );

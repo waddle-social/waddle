@@ -125,6 +125,64 @@ async fn candidate_insert_is_idempotent_and_worker_coalesces_distinct_messages()
     assert_eq!(jobs[0].class(), NotificationClass::DirectMessage);
 }
 
+#[tokio::test]
+async fn candidate_without_first_party_registration_is_suppressed_and_observable() {
+    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let store = store().await;
+    let push_store = waddle_xmpp::push::InMemoryPushStore::new();
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let projection = settings_projection().await;
+    let room_policy = StubRoomPolicy::new();
+    let candidate = candidate("archive-no-registration");
+    store
+        .insert_candidate(&candidate)
+        .await
+        .expect("candidate insert");
+
+    assert_eq!(
+        store
+            .drain_pending_candidates_into_outbox(
+                &push_store,
+                &blocking,
+                &projection,
+                drain_deps_with_noop_activity(&room_policy, &NoopDndReader, noop_activity_reader()),
+                &bare("push.example.com"),
+                16,
+            )
+            .await
+            .expect("drain candidate without registration"),
+        1,
+    );
+    assert!(store
+        .pending_outbox_jobs()
+        .await
+        .expect("pending jobs")
+        .is_empty());
+
+    let mut rows = store
+        .query(
+            "SELECT outboxed_at_ms, suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+            waddle_server::db_params!["archive-no-registration"],
+        )
+        .await
+        .expect("candidate audit query");
+    let row = rows
+        .next()
+        .await
+        .expect("candidate audit row")
+        .expect("candidate audit row");
+    assert!(row.get::<Option<i64>>(0).expect("outboxed_at_ms").is_some());
+    assert_eq!(
+        row.get::<Option<String>>(1)
+            .expect("suppressed_reason")
+            .as_deref(),
+        Some("xep0357_no_registration"),
+    );
+    assert!(waddle_xmpp::prometheus::render_metrics()
+        .contains("waddle_push_suppressed_total{reason=\"xep0357_no_registration\"} 1"));
+}
+
 /// T1 race-window regression: a candidate inserted while the
 /// recipient's XEP-0492 setting said "deliver" must still be
 /// suppressed at drain time if the setting flipped to `<never/>`
