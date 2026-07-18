@@ -800,7 +800,7 @@ async fn compound_corrupt_replay_purpose_quarantines_the_whole_joined_session_gr
              VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 "beta".to_string(),
-                i64::from(u32::MAX) + 1,
+                "not-a-sequence".to_string(),
                 "not valid xml <<<".to_string(),
                 i64::MAX,
                 "unknown-purpose".to_string(),
@@ -818,7 +818,7 @@ async fn compound_corrupt_replay_purpose_quarantines_the_whole_joined_session_gr
             .iter()
             .all(|(session, _)| session.stream_id.as_str() != "beta"),
         "an unknown typed purpose must quarantine the whole stream even when \
-         malformed XML, timestamp, and sequence values would also fail decoding"
+         malformed XML, timestamp, and SQL sequence types would also fail decoding"
     );
 }
 

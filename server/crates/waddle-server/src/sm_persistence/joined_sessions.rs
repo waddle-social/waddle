@@ -88,28 +88,15 @@ pub(super) async fn list_all_sessions_with_unacked(
         }
         // Unacked columns: sequence (18), stanza_xml (19),
         // original_receipt_at_ms (20), purpose (21) — shifted +1 by the
-        // presence_payloads session column (17) added for #1206.
-        // NULL when LEFT JOIN had no match. Per-row decode failure
-        // skips that row but keeps the rest of the session's queue.
-        let sequence_opt: Option<i64> = match row.get(18) {
-            Ok(v) => v,
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "list_all_sessions_with_unacked: skipping row with unreadable sequence"
-                );
-                continue;
-            }
-        };
-        let Some(sequence_i64) = sequence_opt else {
-            continue;
-        };
-        let entry = match decode_unacked_join_row(&row, sequence_i64) {
-            Ok(entry) => entry,
+        // presence_payloads session column (17) added for #1206. The decoder
+        // checks purpose first so compound corruption cannot hide an unknown
+        // replay policy behind an earlier sequence/XML/timestamp failure.
+        let entry = match decode_unacked_join_row(&row) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => continue,
             Err(error @ SmPersistenceError::InvalidUnackedPurpose { .. }) => {
                 tracing::warn!(
                     stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),
-                    sequence = sequence_i64,
                     %error,
                     "list_all_sessions_with_unacked: quarantining session whose replay purpose is corrupt"
                 );
@@ -125,7 +112,6 @@ pub(super) async fn list_all_sessions_with_unacked(
             Err(error) => {
                 tracing::debug!(
                     stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),
-                    sequence = sequence_i64,
                     error = %error,
                     "list_all_sessions_with_unacked: skipping unacked row with \
                      decode failure (poison pill)"

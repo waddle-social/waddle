@@ -112,15 +112,6 @@ pub(crate) fn decode_unacked(
     let stream_id: String = row
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let sequence: i64 = row
-        .get(1)
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let stanza_xml: String = row
-        .get(2)
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let receipt_ms: i64 = row
-        .get(3)
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let purpose_raw: String =
         row.get(4)
             .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
@@ -131,6 +122,15 @@ pub(crate) fn decode_unacked(
     // downgraded to a generic row skip before the caller sees the typed
     // quarantine signal.
     let purpose = parse_unacked_purpose(&purpose_raw)?;
+    let sequence: i64 = row
+        .get(1)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let stanza_xml: String = row
+        .get(2)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let receipt_ms: i64 = row
+        .get(3)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
@@ -149,19 +149,44 @@ pub(crate) fn decode_unacked(
 }
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
-/// `stream_id` from column 0 (the session's stream_id),
-/// `stanza_xml` from column 19, and `original_receipt_at_ms`
-/// from column 20 and `purpose` from column 21. Caller already has
-/// `sequence` (column 18).
+/// `stream_id` from column 0 (the session's stream_id), `sequence` from
+/// column 18, `stanza_xml` from column 19, `original_receipt_at_ms` from
+/// column 20, and `purpose` from column 21. Returns `None` for the all-NULL
+/// unacked side of a LEFT JOIN.
 /// The unacked columns sit after the 18 session columns
 /// (0..=17, presence_payloads added at 17 for #1206).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
     row: &crate::db::Row,
-    sequence_i64: i64,
-) -> Result<PersistedUnackedStanza, SmPersistenceError> {
+) -> Result<Option<PersistedUnackedStanza>, SmPersistenceError> {
     let stream_id: String = row
         .get(0)
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let purpose_raw: Option<String> =
+        row.get(21)
+            .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
+                detail: e.to_string(),
+            })?;
+    let Some(purpose_raw) = purpose_raw else {
+        let sequence: Option<i64> =
+            row.get(18)
+                .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
+                    detail: format!("missing purpose alongside unreadable sequence: {e}"),
+                })?;
+        if sequence.is_none() {
+            return Ok(None);
+        }
+        return Err(SmPersistenceError::InvalidUnackedPurpose {
+            detail: "missing value on a joined unacked row".to_string(),
+        });
+    };
+    // The JOIN loader quarantines an entire session only for this typed
+    // purpose error. Parse it before even decoding the sequence column so no
+    // other malformed field can hide an unknown replay policy and restore a
+    // partial queue with a replay hole.
+    let purpose = parse_unacked_purpose(&purpose_raw)?;
+    let sequence_i64: i64 = row
+        .get(18)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
     let stanza_xml: String = row
         .get(19)
@@ -169,16 +194,6 @@ pub(super) fn decode_unacked_join_row(
     let receipt_ms: i64 = row
         .get(20)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    let purpose_raw: String =
-        row.get(21)
-            .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
-                detail: e.to_string(),
-            })?;
-    // The JOIN loader quarantines an entire session only for this typed
-    // purpose error. Parse it first so malformed XML/timestamps/sequences on
-    // the same row cannot hide an unknown replay policy and restore a partial
-    // queue with a replay hole.
-    let purpose = parse_unacked_purpose(&purpose_raw)?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
     let element: xmpp_parsers::minidom::Element = stanza_xml
@@ -187,13 +202,13 @@ pub(super) fn decode_unacked_join_row(
     let stanza = parse_stanza(element)?;
     let sequence =
         u32::try_from(sequence_i64).map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-    Ok(PersistedUnackedStanza {
+    Ok(Some(PersistedUnackedStanza {
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
         purpose,
-    })
+    }))
 }
 
 pub(crate) fn unacked_purpose_wire_str(purpose: SmUnackedStanzaPurpose) -> &'static str {
