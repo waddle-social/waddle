@@ -2392,8 +2392,7 @@ mod tests {
         let call_stanza: Element = call_xml.parse().expect("fixture parses");
         let call = messaging::parse_call_event(&call_stanza).expect("fixture is a call");
         events.push(
-            event_to_ffi(ClientEvent::Call(Box::new(call)), account, &attempt)
-                .expect("call maps"),
+            event_to_ffi(ClientEvent::Call(Box::new(call)), account, &attempt).expect("call maps"),
         );
 
         events.push(
@@ -2407,12 +2406,8 @@ mod tests {
             .expect("resume snapshot maps"),
         );
         events.push(
-            event_to_ffi(
-                ClientEvent::ResumeStateChanged(None),
-                account,
-                &attempt,
-            )
-            .expect("resume clear maps"),
+            event_to_ffi(ClientEvent::ResumeStateChanged(None), account, &attempt)
+                .expect("resume clear maps"),
         );
 
         assert_eq!(events.len(), 8);
@@ -2539,14 +2534,12 @@ mod tests {
         let xml =
             "<message xmlns='jabber:client' from='alice@waddle.test'><body>hi</body></message>";
         let stanza: Element = xml.parse().expect("fixture parses");
-        assert!(
-            event_to_ffi(
-                ClientEvent::UnhandledStanza(stanza),
-                "alice@waddle.test",
-                &delivery_attempt(),
-            )
-            .is_none()
-        );
+        assert!(event_to_ffi(
+            ClientEvent::UnhandledStanza(stanza),
+            "alice@waddle.test",
+            &delivery_attempt(),
+        )
+        .is_none());
     }
 
     #[test]

@@ -97,9 +97,7 @@ impl WaddleClient {
             self.lifecycle_tx.send_replace(epoch);
             epoch
         };
-        if let Err(error) =
-            uuid::Uuid::parse_str(&self.config.delivery_attempt.attempt_id.value)
-        {
+        if let Err(error) = uuid::Uuid::parse_str(&self.config.delivery_attempt.attempt_id.value) {
             self.emit_error(format!("Invalid delivery attempt UUID: {error}"));
             return;
         }
@@ -421,11 +419,8 @@ impl NativeEventPump {
                 ClientEvent::Connection(ConnectionEvent::StreamManagement(
                     StreamManagementEvent::Failed,
                 )) if self.awaiting_resume => {
-                    let Some(next_generation) = self
-                        .attempt
-                        .connection_generation
-                        .value
-                        .checked_add(1)
+                    let Some(next_generation) =
+                        self.attempt.connection_generation.value.checked_add(1)
                     else {
                         self.poisoned = true;
                         return WaddleClientEvent::Error {
@@ -466,8 +461,7 @@ impl NativeEventPump {
                     };
                 }
                 event => {
-                    if let Some(event) =
-                        event_to_ffi(event, &self.account_bare_jid, &self.attempt)
+                    if let Some(event) = event_to_ffi(event, &self.account_bare_jid, &self.attempt)
                     {
                         return event;
                     }

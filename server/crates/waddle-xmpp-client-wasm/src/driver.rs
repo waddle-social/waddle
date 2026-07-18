@@ -185,9 +185,7 @@ fn driver_error_event(error: &ClientError) -> DriverEvent {
         ClientError::InvalidStateTransition { .. } => {
             (DriverErrorReason::InvalidStateTransition, None)
         }
-        ClientError::MissingStreamFeature { .. } => {
-            (DriverErrorReason::MissingStreamFeature, None)
-        }
+        ClientError::MissingStreamFeature { .. } => (DriverErrorReason::MissingStreamFeature, None),
         ClientError::InvalidStreamFeatures => (DriverErrorReason::InvalidStreamFeatures, None),
         ClientError::InvalidSaslFailure => (DriverErrorReason::InvalidSaslFailure, None),
         ClientError::InvalidBindResponse => (DriverErrorReason::InvalidBindResponse, None),
@@ -241,15 +239,21 @@ fn driver_authentication_condition(
     match condition {
         SaslFailureCondition::Aborted => DriverAuthenticationCondition::Aborted,
         SaslFailureCondition::AccountDisabled => DriverAuthenticationCondition::AccountDisabled,
-        SaslFailureCondition::CredentialsExpired => DriverAuthenticationCondition::CredentialsExpired,
-        SaslFailureCondition::EncryptionRequired => DriverAuthenticationCondition::EncryptionRequired,
+        SaslFailureCondition::CredentialsExpired => {
+            DriverAuthenticationCondition::CredentialsExpired
+        }
+        SaslFailureCondition::EncryptionRequired => {
+            DriverAuthenticationCondition::EncryptionRequired
+        }
         SaslFailureCondition::IncorrectEncoding => DriverAuthenticationCondition::IncorrectEncoding,
         SaslFailureCondition::InvalidAuthzid => DriverAuthenticationCondition::InvalidAuthzid,
         SaslFailureCondition::InvalidMechanism => DriverAuthenticationCondition::InvalidMechanism,
         SaslFailureCondition::MalformedRequest => DriverAuthenticationCondition::MalformedRequest,
         SaslFailureCondition::MechanismTooWeak => DriverAuthenticationCondition::MechanismTooWeak,
         SaslFailureCondition::NotAuthorized => DriverAuthenticationCondition::NotAuthorized,
-        SaslFailureCondition::TemporaryAuthFailure => DriverAuthenticationCondition::TemporaryAuthFailure,
+        SaslFailureCondition::TemporaryAuthFailure => {
+            DriverAuthenticationCondition::TemporaryAuthFailure
+        }
         SaslFailureCondition::Unknown => DriverAuthenticationCondition::Unknown,
     }
 }
@@ -1025,11 +1029,7 @@ impl WasmDriverTask {
     }
 
     async fn emit_error(&mut self, error: &ClientError) {
-        let _ = self
-            .event_tx
-            .clone()
-            .send(driver_error_event(error))
-            .await;
+        let _ = self.event_tx.clone().send(driver_error_event(error)).await;
     }
 
     async fn emit_error_reason(&mut self, reason: DriverErrorReason) {

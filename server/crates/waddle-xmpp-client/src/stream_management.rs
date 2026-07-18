@@ -263,9 +263,7 @@ impl ResumeXmlBudget {
     }
 }
 
-fn resume_tokens_from_element(
-    root: &Element,
-) -> Result<Vec<ResumeXmlToken>, ResumeStanzaError> {
+fn resume_tokens_from_element(root: &Element) -> Result<Vec<ResumeXmlToken>, ResumeStanzaError> {
     enum Work<'a> {
         Element(&'a Element, usize),
         Text(&'a str),
@@ -594,11 +592,11 @@ impl SmResumeState {
         stanzas: impl IntoIterator<Item = Element>,
     ) -> ClientResult<Self> {
         let outbound_queue = collect_bounded_resume_queue(stanzas, |element| {
-                let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
-                SmResumeEntry::try_from_element(element, sent_at)
-                    .map(QueuedOutboundStanza::from_entry)
-                    .map_err(ClientError::from)
-            })?;
+            let sent_at = existing_delay_stamp(&element).unwrap_or_else(Utc::now);
+            SmResumeEntry::try_from_element(element, sent_at)
+                .map(QueuedOutboundStanza::from_entry)
+                .map_err(ClientError::from)
+        })?;
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
@@ -1366,24 +1364,26 @@ mod tests {
         state.server_h = u32::MAX - 1;
         state.outbound_count = u32::MAX - 1;
 
-        state.record_sent_stanza(
-            &Element::builder("message", "jabber:client")
-                .attr(
-                    minidom::rxml::xml_ncname!("id").to_owned(),
-                    "last-before-wrap",
-                )
-                .build(),
-        )
-        .expect("countable stanza");
-        state.record_sent_stanza(
-            &Element::builder("message", "jabber:client")
-                .attr(
-                    minidom::rxml::xml_ncname!("id").to_owned(),
-                    "first-after-wrap",
-                )
-                .build(),
-        )
-        .expect("countable stanza");
+        state
+            .record_sent_stanza(
+                &Element::builder("message", "jabber:client")
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        "last-before-wrap",
+                    )
+                    .build(),
+            )
+            .expect("countable stanza");
+        state
+            .record_sent_stanza(
+                &Element::builder("message", "jabber:client")
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        "first-after-wrap",
+                    )
+                    .build(),
+            )
+            .expect("countable stanza");
 
         assert!(!state.handled_count_too_high(0));
         let acked = state.process_ack(0);
@@ -1404,15 +1404,16 @@ mod tests {
         state.start_outbound();
         state.previd = Some("previous-stream".to_string());
         for id in 1..=10 {
-            state.record_sent_stanza(
-                &Element::builder("message", "jabber:client")
-                    .attr(
-                        minidom::rxml::xml_ncname!("id").to_owned(),
-                        format!("msg-{id}"),
-                    )
-                    .build(),
-            )
-            .expect("countable stanza");
+            state
+                .record_sent_stanza(
+                    &Element::builder("message", "jabber:client")
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            format!("msg-{id}"),
+                        )
+                        .build(),
+                )
+                .expect("countable stanza");
         }
 
         let acked = state.process_ack(8);
@@ -1447,12 +1448,13 @@ mod tests {
         let mut state = SmState::new();
         state.start_outbound();
         state.previd = Some("previous-stream".to_string());
-        state.record_sent_stanza(
-            &Element::builder("message", "jabber:client")
-                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
-                .build(),
-        )
-        .expect("countable stanza");
+        state
+            .record_sent_stanza(
+                &Element::builder("message", "jabber:client")
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "unacked")
+                    .build(),
+            )
+            .expect("countable stanza");
 
         let resume_state = state.resume_state().expect("resume state");
         assert!(resume_state.has_unhandled_outbound_stanzas());
@@ -1570,9 +1572,10 @@ mod tests {
     #[test]
     fn resume_snapshot_batch_accepts_exact_entry_limit_and_rejects_limit_plus_one() {
         let snapshot = resume_message_snapshot(Vec::new(), [String::new()]);
-        let exact = ResumeStanza::from_snapshot_batch(
-            std::iter::repeat_n(snapshot.clone(), MAX_SM_RESUME_ENTRIES),
-        )
+        let exact = ResumeStanza::from_snapshot_batch(std::iter::repeat_n(
+            snapshot.clone(),
+            MAX_SM_RESUME_ENTRIES,
+        ))
         .expect("exact entry limit");
         assert_eq!(exact.len(), MAX_SM_RESUME_ENTRIES);
 
@@ -1625,10 +1628,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let first = resume_message_snapshot(attributes(half_attributes), []);
-        let second = resume_message_snapshot(
-            attributes(MAX_RESUME_XML_ATTRIBUTES - half_attributes),
-            [],
-        );
+        let second =
+            resume_message_snapshot(attributes(MAX_RESUME_XML_ATTRIBUTES - half_attributes), []);
         ResumeStanza::from_snapshot_batch([first.clone(), second.clone()])
             .expect("exact aggregate attribute budget");
         let mut attribute_overflow = second;
@@ -1810,9 +1811,7 @@ mod tests {
         ResumeStanza::from_snapshot(snapshot).expect("exact attributes restore");
 
         assert_eq!(
-            ResumeStanza::try_from_element(stanza_with_attributes(
-                MAX_RESUME_XML_ATTRIBUTES + 1
-            )),
+            ResumeStanza::try_from_element(stanza_with_attributes(MAX_RESUME_XML_ATTRIBUTES + 1)),
             Err(ResumeStanzaError::AttributeLimit)
         );
     }

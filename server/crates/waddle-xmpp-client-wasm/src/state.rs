@@ -446,10 +446,9 @@ mod tests {
         let input: JsResumeEntryInput =
             serde_json::from_value(resume_entry_json(timestamp_ms)).expect("typed input");
         let state = resume_state_from_entries(vec![input]).expect("entry converts");
-        let output = serde_json::to_value(
-            JsResumeState::try_from(state).expect("resume state converts"),
-        )
-        .expect("output serializes");
+        let output =
+            serde_json::to_value(JsResumeState::try_from(state).expect("resume state converts"))
+                .expect("output serializes");
 
         assert_eq!(
             output["unhandledOutboundEntries"][0]["sentAtEpochMs"].as_f64(),
@@ -505,12 +504,14 @@ mod tests {
         let mut oversized = base.stanza.clone();
         let root = oversized.tokens[0].clone();
         oversized.tokens = vec![root];
-        oversized.tokens.extend((0..16_383).map(|_| {
-            waddle_xmpp_client::ResumeXmlToken::Text {
+        oversized.tokens.extend(
+            (0..16_383).map(|_| waddle_xmpp_client::ResumeXmlToken::Text {
                 value: waddle_xmpp_client::ResumeXmlValue::new(""),
-            }
-        }));
-        oversized.tokens.push(waddle_xmpp_client::ResumeXmlToken::End);
+            }),
+        );
+        oversized
+            .tokens
+            .push(waddle_xmpp_client::ResumeXmlToken::End);
         assert!(resume_state_from_entries(vec![JsResumeEntryInput {
             stanza: oversized,
             sent_at_epoch_ms: 0.0,
@@ -564,23 +565,14 @@ mod tests {
                 .expect("timestamp in JS Date and chrono intersection");
         }
 
-        for timestamp in [
-            -1.0,
-            1.5,
-            f64::NAN,
-            f64::INFINITY,
-            9_007_199_254_740_992.0,
-        ] {
+        for timestamp in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
             assert!(matches!(
                 resume_state_from_entries(vec![resume_entry(snapshot.clone(), timestamp)]),
                 Err(ResumeWasmBoundaryError::InvalidTimestamp)
             ));
         }
         assert!(matches!(
-            resume_state_from_entries(vec![resume_entry(
-                snapshot,
-                chrono_max_ms as f64 + 1.0,
-            )]),
+            resume_state_from_entries(vec![resume_entry(snapshot, chrono_max_ms as f64 + 1.0,)]),
             Err(ResumeWasmBoundaryError::TimestampOutOfRange)
         ));
     }
@@ -679,10 +671,7 @@ mod tests {
         let second = resume_entry(message_snapshot(Vec::new(), []), 0.0);
         resume_state_from_entries(vec![first.clone(), second])
             .expect("exact aggregate UTF-8 budget");
-        let byte_overflow = resume_entry(
-            message_snapshot(Vec::new(), ["x".to_owned()]),
-            0.0,
-        );
+        let byte_overflow = resume_entry(message_snapshot(Vec::new(), ["x".to_owned()]), 0.0);
         assert!(matches!(
             resume_state_from_entries(vec![first, byte_overflow]),
             Err(ResumeWasmBoundaryError::ResumeStanza(
@@ -793,7 +782,6 @@ impl DriverErrorReason {
         Self::PushRegistration,
         Self::StanzaError,
     ];
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -829,7 +817,6 @@ impl DriverAuthenticationCondition {
         Self::TemporaryAuthFailure,
         Self::Unknown,
     ];
-
 }
 
 pub(crate) fn client_driver_event(event: ClientEvent) -> DriverEvent {

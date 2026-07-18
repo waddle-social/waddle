@@ -57,8 +57,8 @@ use waddle_xmpp_client::xep::{
 use waddle_xmpp_client::{
     AccessToken, ArchivedMessage, ClientConfig, ClientError, ClientEvent, ClientRequest,
     ClientResource, ConnectionConfig, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent,
-    OAuthBearerConfig, SaslFailureCondition, StanzaId, StreamErrorCondition, StreamErrorDetail, StreamManagementEvent,
-    WasmTransportEvent, WasmWebSocket, WebSocketConfig, XmppRuntime,
+    OAuthBearerConfig, SaslFailureCondition, StanzaId, StreamErrorCondition, StreamErrorDetail,
+    StreamManagementEvent, WasmTransportEvent, WasmWebSocket, WebSocketConfig, XmppRuntime,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, spawn_local};

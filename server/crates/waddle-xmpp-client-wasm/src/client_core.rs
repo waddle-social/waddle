@@ -33,8 +33,9 @@ impl WaddleClient {
             Some(state) => JsResumeState::try_from(state.clone())
                 .map_err(|error| js_error(error.to_string()))
                 .and_then(|state| {
-                    to_js_value(&state)
-                        .map_err(|error| js_error(format!("failed to serialize resume state: {error:?}")))
+                    to_js_value(&state).map_err(|error| {
+                        js_error(format!("failed to serialize resume state: {error:?}"))
+                    })
                 }),
             None => Ok(JsValue::NULL),
         }

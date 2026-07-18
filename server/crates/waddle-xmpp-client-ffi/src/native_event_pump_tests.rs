@@ -70,7 +70,9 @@ async fn failed_resume_returns_one_transition_before_later_fresh_event() {
         )))
         .expect("SM failure queued");
     sender
-        .send(ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding())))
+        .send(ClientEvent::Lifecycle(LifecycleEvent::SessionReady(
+            binding(),
+        )))
         .expect("fresh readiness queued");
 
     let first = pump.next_event().await;
@@ -151,8 +153,7 @@ async fn resumed_readiness_preserves_the_original_attempt() {
 
 #[tokio::test]
 async fn disconnect_wakes_a_poll_even_before_a_pump_exists() {
-    let client =
-        WaddleClient::new_for_test(config(), Arc::new(std::sync::Mutex::new(Vec::new())));
+    let client = WaddleClient::new_for_test(config(), Arc::new(std::sync::Mutex::new(Vec::new())));
     let polling_client = Arc::clone(&client);
     let poll = tokio::spawn(async move { polling_client.next_event().await });
     tokio::task::yield_now().await;
