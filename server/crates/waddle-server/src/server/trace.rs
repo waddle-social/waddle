@@ -191,7 +191,130 @@ fn redacted_request_uri(uri: &Uri) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        fmt,
+        sync::{Arc, Mutex},
+    };
+
+    use axum::{routing::get, Router};
+    use tower::ServiceExt;
+    use tower_http::trace::TraceLayer;
+    use tracing::{
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+        Subscriber,
+    };
+    use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer};
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct HttpSpanCapture {
+        fields: Arc<Mutex<BTreeMap<String, String>>>,
+    }
+
+    impl HttpSpanCapture {
+        fn record(&self, values: impl FnOnce(&mut HttpSpanVisitor<'_>)) {
+            let mut fields = self.fields.lock().expect("HTTP span capture lock");
+            values(&mut HttpSpanVisitor {
+                fields: &mut fields,
+            });
+        }
+    }
+
+    struct HttpSpanVisitor<'a> {
+        fields: &'a mut BTreeMap<String, String>,
+    }
+
+    impl Visit for HttpSpanVisitor<'_> {
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S> Layer<S> for HttpSpanCapture
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(&self, attributes: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+            if attributes.metadata().name() == "http_request" {
+                self.record(|visitor| attributes.record(visitor));
+            }
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+            let is_http_request = ctx
+                .span(id)
+                .is_some_and(|span| span.metadata().name() == "http_request");
+            if is_http_request {
+                self.record(|visitor| values.record(visitor));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_span_records_route_status_and_redacted_uri() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let capture = HttpSpanCapture::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let app = Router::new()
+            .route(
+                "/api/calendar/community/{token}/events.ics",
+                get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+            )
+            .layer(axum::middleware::from_fn(attach_http_route_template))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(make_request_span)
+                    .on_response(observe_http_response),
+            );
+        let sensitive_token = "sensitive-calendar-token";
+        let raw_uri = format!("/api/calendar/community/{sensitive_token}/events.ics");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&raw_uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let fields = capture.fields.lock().expect("HTTP span capture lock");
+        assert_eq!(
+            fields.get("http.route").map(String::as_str),
+            Some("/api/calendar/community/{token}/events.ics"),
+        );
+        assert_eq!(
+            fields.get("http.status_code").map(String::as_str),
+            Some("401"),
+        );
+        assert_eq!(
+            fields.get("uri").map(String::as_str),
+            Some("/api/calendar/community/:token/events.ics"),
+        );
+        assert!(
+            fields
+                .values()
+                .all(|value| !value.contains(sensitive_token)),
+            "request span must not expose the raw calendar token: {fields:?}",
+        );
+    }
 
     #[test]
     fn calendar_feed_token_is_redacted_from_request_uri() {

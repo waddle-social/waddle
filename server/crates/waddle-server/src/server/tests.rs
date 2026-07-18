@@ -582,6 +582,7 @@ async fn http_request_metrics_use_route_template_and_status_class() {
     let raw_path = "/api/files/nonexistent/private-filename.txt";
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(raw_path)
@@ -613,6 +614,29 @@ async fn http_request_metrics_use_route_template_and_status_class() {
     assert_eq!(
         metrics.metric_unit("http.server.request.duration"),
         Some("s".to_string()),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header(header::ORIGIN, "https://waddle.chat")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        metrics.histogram_count(
+            "http.server.request.duration",
+            &[("route", "/health"), ("status_class", "2xx")],
+        ),
+        Some(1),
+        "CORS preflights must be observed like every other matched request",
     );
 }
 

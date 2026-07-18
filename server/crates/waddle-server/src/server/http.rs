@@ -392,14 +392,17 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .merge(well_known_router)
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
+        .layer(CompressionLayer::new())
+        .layer(configure_cors())
+        // These two observability layers stay outside CORS so preflight
+        // responses are measured and receive the same span attributes as
+        // requests that reach a route handler.
         .layer(middleware::from_fn(attach_http_route_template))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_request_span)
                 .on_response(observe_http_response),
-        )
-        .layer(CompressionLayer::new())
-        .layer(configure_cors());
+        );
     Ok(router)
 }
 
