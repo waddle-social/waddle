@@ -138,6 +138,22 @@ impl MetricsTestGuard {
         total
     }
 
+    /// Shape of the named `u64` counter: whether every exported batch is
+    /// monotonic, and the attribute count of each exported data point.
+    /// `None` when the instrument never exported as a u64 sum.
+    pub fn counter_shape(&self, name: &str) -> Option<(bool, Vec<usize>)> {
+        let mut shape: Option<(bool, Vec<usize>)> = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                return;
+            };
+            let (monotonic, attribute_counts) = shape.get_or_insert((true, Vec::new()));
+            *monotonic &= sum.is_monotonic();
+            attribute_counts.extend(sum.data_points().map(|point| point.attributes().count()));
+        });
+        shape
+    }
+
     /// Visit every exported batch of the named metric.
     fn each_metric(&self, name: &str, mut visit: impl FnMut(&Metric)) {
         for resource in self.exported() {

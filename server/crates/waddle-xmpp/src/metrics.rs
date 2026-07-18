@@ -179,11 +179,18 @@ pub fn actor_request_timeouts() -> Counter<u64> {
 /// counts inbound stanzas whose handler exceeded the per-connection
 /// frame-loop budget, keyed by stanza kind and payload namespace, so the
 /// namespace distribution reveals *which* handler family wedged.
+///
+/// The unit is the UCUM annotation `{stanza}` — annotations are dropped by
+/// OTLP→Prometheus name normalization, so the Grafana/Mimir series is
+/// `xmpp_stanza_handler_timeout_total`. (#1136: with the previous bare
+/// `stanza` unit the normalizer suffixed it into the name, producing
+/// `xmpp_stanza_handler_timeout_stanza_total` — which is why the expected
+/// query never found the signal.)
 pub fn stanza_handler_timeouts() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.stanza.handler.timeout")
         .with_description("Inbound stanza handlers that exceeded the per-connection wedge backstop")
-        .with_unit("stanza")
+        .with_unit("{stanza}")
         .build()
 }
 
@@ -499,10 +506,12 @@ mod tests {
         record_stanza_handler_timeout("iq", "urn:test:wedged");
         record_stanza_handler_timeout("message", "");
 
-        // #1136: pin the canonical exported series — the name, UCUM unit,
-        // and the two documented attribute axes — so the shape a
-        // Prometheus/Grafana query must target is fixed by test, not
-        // discovered by log archaeology after a wedge.
+        // #1136: pin the canonical exported series — the name, the UCUM
+        // annotation unit, and the two documented attribute axes — so the
+        // shape a Prometheus/Grafana query must target is fixed by test,
+        // not discovered by log archaeology after a wedge. With `{stanza}`
+        // (dropped by Prometheus name normalization) the backend series is
+        // `xmpp_stanza_handler_timeout_total`.
         assert_eq!(
             guard.counter_sum(
                 "xmpp.stanza.handler.timeout",
@@ -519,32 +528,19 @@ mod tests {
         );
         assert_eq!(
             guard.metric_unit("xmpp.stanza.handler.timeout").as_deref(),
-            Some("stanza"),
+            Some("{stanza}"),
         );
 
-        // The instrument must stay a monotonic u64 sum with exactly the two
-        // documented attributes per point — no extra axes may creep in.
-        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
-        for resource in guard.exported() {
-            for scope in resource.scope_metrics() {
-                for metric in scope.metrics() {
-                    if metric.name() != "xmpp.stanza.handler.timeout" {
-                        continue;
-                    }
-                    let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
-                        panic!("stanza-handler timeout must export as a u64 sum");
-                    };
-                    assert!(sum.is_monotonic(), "timeout counter must be monotonic");
-                    for point in sum.data_points() {
-                        assert_eq!(
-                            point.attributes().count(),
-                            2,
-                            "timeout attribute schema is exactly kind + payload_ns",
-                        );
-                    }
-                }
-            }
-        }
+        // A monotonic u64 sum with exactly the two documented attributes
+        // per point — no extra axes may creep in.
+        let (monotonic, attribute_counts) = guard
+            .counter_shape("xmpp.stanza.handler.timeout")
+            .expect("timeout counter must export as a u64 sum");
+        assert!(monotonic, "timeout counter must be monotonic");
+        assert!(
+            attribute_counts.iter().all(|&count| count == 2),
+            "timeout attribute schema is exactly kind + payload_ns: {attribute_counts:?}",
+        );
     }
 }
 
