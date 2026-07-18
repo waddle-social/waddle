@@ -2,8 +2,6 @@ use std::time::Instant;
 
 use tracing::warn;
 
-use crate::prometheus;
-
 use super::unacked_queue::sequence_gt;
 use super::{
     DetachedSession, UnackedPushResult, UnackedQueue, DEFAULT_ACK_REQUEST_THRESHOLD,
@@ -245,7 +243,7 @@ impl StreamManagementState {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(evicted) => {
                 self.mark_replay_gap_through(evicted.sequence);
-                prometheus::increment_sm_unacked_evicted();
+                crate::telemetry::reliability::increment_sm_unacked_evicted();
                 self.note_eviction_for_throttled_warn(evicted.sequence);
             }
         }

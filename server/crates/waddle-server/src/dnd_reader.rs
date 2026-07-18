@@ -76,7 +76,7 @@ impl DndReader for PepDndReader {
                     error = %error,
                     "dnd_projection read failed; defaulting recipient to Inactive"
                 );
-                waddle_xmpp::prometheus::increment_dnd_projection_read_errored();
+                waddle_xmpp::telemetry::reliability::increment_dnd_projection_read_errored();
                 return Ok(DndState::Inactive);
             }
         };

@@ -223,7 +223,7 @@ async fn handle_xmpp_websocket(
             if rising_edge {
                 conn.send_window_pause_deadline =
                     Some(tokio::time::Instant::now() + SEND_WINDOW_LOOP_PAUSE_DEADLINE);
-                waddle_xmpp::prometheus::increment_sm_send_window_pause();
+                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause();
             }
             // Prompt an ack on the rising edge, and AGAIN whenever the client
             // has acked since our last prompt but not yet recovered the
@@ -580,7 +580,7 @@ async fn handle_xmpp_websocket(
                     None => std::future::pending().await,
                 }
             }, if send_window_paused => {
-                waddle_xmpp::prometheus::increment_sm_send_window_pause_timeout();
+                waddle_xmpp::telemetry::reliability::increment_sm_send_window_pause_timeout();
                 warn!(
                     jid = ?conn.phase.bound_jid(),
                     deadline_secs = SEND_WINDOW_LOOP_PAUSE_DEADLINE.as_secs(),

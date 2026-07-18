@@ -585,7 +585,7 @@ async fn deliver_one_via_actor(
         // backstop / closed-channel eviction, not by a transient full
         // window.
         Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
-            waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+            waddle_xmpp::telemetry::reliability::increment_delivery_retry_exhausted_drop();
             warn!(
                 jid = %target,
                 retries = DROPPED_FULL_RETRY_DELAYS.len(),
@@ -617,7 +617,7 @@ async fn deliver_one_via_actor(
         // the other broadcast drop reasons (the one drop path `try_deliver`
         // does not itself account for).
         Err((ActorSendFailure::MaybeEnqueued, error)) => {
-            waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+            waddle_xmpp::telemetry::reliability::increment_delivery_terminal_error_drop();
             warn!(
                 jid = %target,
                 %error,
@@ -773,7 +773,7 @@ pub(super) async fn deliver_peer_to_live_only(
                 FullJidDeliveryOutcome::Unavailable
             }
             ActorSendFailure::MaybeEnqueued => {
-                waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+                waddle_xmpp::telemetry::reliability::increment_delivery_terminal_error_drop();
                 warn!(
                     jid = %target,
                     error = %error,

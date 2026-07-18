@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::OnceLock;
 
+use crate::telemetry::attributes::PushSuppressReason;
+
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
 static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -252,36 +254,16 @@ static DND_PROJECTION_READ_ERRORED: AtomicU64 = AtomicU64::new(0);
 // time a XEP-0357 push candidate is suppressed at either T0 emission
 // or the T1 drain. Labeled by the typed `SuppressedReason` enum.
 //
-// **Wire contract**: [`PUSH_SUPPRESSED_REASONS`] is the source-of-truth
-// parallel constant of every label string the caller is allowed to
-// pass. It MUST stay in lockstep with `SuppressedReason::as_db_value`
-// in `waddle_server::notification_outbox` (i.e. every entry in
-// `SuppressedReason::ALL.iter().map(as_db_value)` MUST appear here,
-// in declaration order). The `waddle-server` test suite enforces this
-// invariant — `waddle-xmpp` is upstream and cannot import the enum.
+// **Wire contract**: [`PUSH_SUPPRESSED_REASONS`] is compiled directly
+// from [`PushSuppressReason::VALUES`]. `waddle-server` exhaustively maps
+// its persisted audit enum into that metric enum and tests that its DB
+// values remain byte-identical.
 //
-// Storage is a fixed `[AtomicU64; N]` array indexed by the position
-// of the reason string in `PUSH_SUPPRESSED_REASONS`. No mutex, no
-// allocations, no cardinality growth at runtime. An unknown label
-// (contract drift) increments `PUSH_SUPPRESSED_UNKNOWN_REASON` and
-// emits a `warn!` so the failure is observable.
-pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &[
-    "xep0357_self",
-    "xep0357_no_registration",
-    "xep0357_registration_disabled",
-    "xep0492_never",
-    "xep0492_on_mention_miss",
-    "xep0191_blocked",
-    "xep0513_noping",
-    "xep0513_active_miss",
-    "waddle_dnd",
-    "provider_rejected",
-    "provider_token_expired",
-    "xep0357_push_service_degraded",
-    "unread_zero_at_publish",
-    "policy_retries_exhausted",
-    "xep0444_reaction",
-];
+// Storage is a fixed `[AtomicU64; N]` array indexed by the typed reason.
+// No mutex, no allocations, no cardinality growth at runtime. The sealed
+// `PushSuppressReason` enum makes an unmapped reason a compile error, so
+// no unknown-reason catch-all exists (deleted with #1330's typed plumbing).
+pub(crate) const PUSH_SUPPRESSED_REASONS: &[&str] = &PushSuppressReason::VALUES;
 
 const PUSH_SUPPRESSED_COUNTERS_LEN: usize = PUSH_SUPPRESSED_REASONS.len();
 
@@ -318,25 +300,11 @@ const _: () = assert!(
     "PUSH_SUPPRESSED_REASONS and PUSH_SUPPRESSED_COUNTERS must stay the same length"
 );
 
-// Catch-all gauge for caller/contract drift: any
-// `increment_push_suppressed` call site passing a value that is NOT
-// in `PUSH_SUPPRESSED_REASONS` increments this and emits a `warn!`.
-// A non-zero sample at scrape time means the parallel constant has
-// drifted from `SuppressedReason::as_db_value` and needs a same-PR
-// fix.
-static PUSH_SUPPRESSED_UNKNOWN_REASON: AtomicU64 = AtomicU64::new(0);
-
-/// Public read-only view of the parallel reason list. The
+/// Public read-only view of the metric reason values. The
 /// `waddle-server` test suite uses this to assert that every
 /// `SuppressedReason::as_db_value()` appears in the wire contract.
 pub fn push_suppressed_reasons() -> &'static [&'static str] {
     PUSH_SUPPRESSED_REASONS
-}
-
-/// Returns the index of `reason` in `PUSH_SUPPRESSED_REASONS`, or
-/// `None` if the reason is not a recognized wire-contract value.
-fn push_suppressed_index(reason: &str) -> Option<usize> {
-    PUSH_SUPPRESSED_REASONS.iter().position(|r| *r == reason)
 }
 
 /// Serializes unit tests that mutate process-global metrics.
@@ -402,31 +370,31 @@ pub fn record_message_processed() {
     CURRENT_SECOND_MESSAGES.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_broadcast_delivered() {
+pub(crate) fn increment_broadcast_delivered() {
     BROADCAST_DELIVERED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_broadcast_not_connected() {
+pub(crate) fn increment_broadcast_not_connected() {
     BROADCAST_NOT_CONNECTED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_broadcast_dropped_full() {
+pub(crate) fn increment_broadcast_dropped_full() {
     BROADCAST_DROPPED_FULL.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_broadcast_dropped_closed() {
+pub(crate) fn increment_broadcast_dropped_closed() {
     BROADCAST_DROPPED_CLOSED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_delivery_terminal_error_drop() {
+pub(crate) fn increment_delivery_terminal_error_drop() {
     DELIVERY_TERMINAL_ERROR_DROP.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_delivery_retry_exhausted_drop() {
+pub(crate) fn increment_delivery_retry_exhausted_drop() {
     DELIVERY_RETRY_EXHAUSTED_DROP.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_resolver_affiliation_sync_capacity_drop() {
+pub(crate) fn increment_resolver_affiliation_sync_capacity_drop() {
     RESOLVER_AFFILIATION_SYNC_CAPACITY_DROP.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -440,92 +408,92 @@ pub fn delivery_retry_exhausted_drop_count() -> u64 {
     DELIVERY_RETRY_EXHAUSTED_DROP.load(Ordering::Relaxed)
 }
 
-pub fn increment_user_actor_reaped() {
+pub(crate) fn increment_user_actor_reaped() {
     USER_ACTOR_REAPED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_sm_unacked_evicted() {
+pub(crate) fn increment_sm_unacked_evicted() {
     SM_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_pending_delivery_quota_exceeded() {
+pub(crate) fn increment_pending_delivery_quota_exceeded() {
     PENDING_DELIVERY_QUOTA_EXCEEDED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn add_pending_delivery_orphan_claims_released(n: u64) {
+pub(crate) fn add_pending_delivery_orphan_claims_released(n: u64) {
     PENDING_DELIVERY_ORPHAN_CLAIMS_RELEASED.fetch_add(n, Ordering::Relaxed);
 }
 
-pub fn add_pending_delivery_aged_out(n: u64) {
+pub(crate) fn add_pending_delivery_aged_out(n: u64) {
     PENDING_DELIVERY_AGED_OUT.fetch_add(n, Ordering::Relaxed);
 }
 
-pub fn increment_pending_delivery_unresolved_poison_pill() {
+pub(crate) fn increment_pending_delivery_unresolved_poison_pill() {
     PENDING_DELIVERY_UNRESOLVED_POISON_PILL.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_pending_delivery_archive_lookup_transient_failure() {
+pub(crate) fn increment_pending_delivery_archive_lookup_transient_failure() {
     PENDING_DELIVERY_ARCHIVE_LOOKUP_TRANSIENT_FAILURE.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn add_sm_promotion_storage_failed(n: u64) {
+pub(crate) fn add_sm_promotion_storage_failed(n: u64) {
     SM_PROMOTION_STORAGE_FAILED.fetch_add(n, Ordering::Relaxed);
 }
 
-pub fn increment_sm_promotion_not_promotable() {
+pub(crate) fn increment_sm_promotion_not_promotable() {
     SM_PROMOTION_NOT_PROMOTABLE.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_sm_promotion_blocklist_failed() {
+pub(crate) fn increment_sm_promotion_blocklist_failed() {
     SM_PROMOTION_BLOCKLIST_FAILED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_sm_promotion_dead_lettered() {
+pub(crate) fn increment_sm_promotion_dead_lettered() {
     SM_PROMOTION_DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_sm_drain_timeout() {
+pub(crate) fn increment_sm_drain_timeout() {
     SM_DRAIN_TIMEOUT.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn increment_sm_resume_window_clamped() {
+pub(crate) fn increment_sm_resume_window_clamped() {
     SM_RESUME_WINDOW_CLAMPED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment `waddle_sm_send_window_pauses_total` — a wire-write path
 /// engaged the XEP-0198 send-window pause (issue #1219).
-pub fn increment_sm_send_window_pause() {
+pub(crate) fn increment_sm_send_window_pause() {
     SM_SEND_WINDOW_PAUSES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment `waddle_sm_send_window_pause_timeouts_total` — a send-window
 /// pause outlived its deadline with no recovering ack (issue #1219).
-pub fn increment_sm_send_window_pause_timeout() {
+pub(crate) fn increment_sm_send_window_pause_timeout() {
     SM_SEND_WINDOW_PAUSE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment `waddle_sm_detached_unacked_evicted_total` — a detached
 /// session's unacked queue evicted an entry at capacity while awaiting
 /// resume (issue #1219; previously silent).
-pub fn increment_sm_detached_unacked_evicted() {
+pub(crate) fn increment_sm_detached_unacked_evicted() {
     SM_DETACHED_UNACKED_EVICTED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Add to `waddle_pending_flush_batches_total` — batches drained by the
 /// batched offline flush (issue #1220).
-pub fn add_pending_flush_batches(n: u64) {
+pub(crate) fn add_pending_flush_batches(n: u64) {
     PENDING_FLUSH_BATCHES.fetch_add(n, Ordering::Relaxed);
 }
 
 /// Add to `waddle_pending_flush_rows_pushed_total` — replay stanzas pushed
 /// to recovering resources by the offline flush (issue #1220).
-pub fn add_pending_flush_rows_pushed(n: u64) {
+pub(crate) fn add_pending_flush_rows_pushed(n: u64) {
     PENDING_FLUSH_ROWS_PUSHED.fetch_add(n, Ordering::Relaxed);
 }
 
 /// Increment the `waddle_push_candidate_created_total` counter. Call
 /// from the `Inserted` arm of `notification_outbox::insert_candidate`.
-pub fn increment_push_candidate_created() {
+pub(crate) fn increment_push_candidate_created() {
     PUSH_CANDIDATE_CREATED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -534,14 +502,14 @@ pub fn increment_push_candidate_created() {
 /// `notification_outbox::insert_candidate` — a candidate row already
 /// existed for this `(recipient, conversation, thread, stanza_id,
 /// class)` tuple.
-pub fn increment_push_candidate_coalesced() {
+pub(crate) fn increment_push_candidate_coalesced() {
     PUSH_CANDIDATE_COALESCED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment the `waddle_push_outbox_published_total` counter. Call
 /// from the `Published` outcome of `publish_claimed_job` — the
 /// XEP-0357 publish made it past the Push Service boundary.
-pub fn increment_push_outbox_published() {
+pub(crate) fn increment_push_outbox_published() {
     PUSH_OUTBOX_PUBLISHED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -549,7 +517,7 @@ pub fn increment_push_outbox_published() {
 /// Call from the `RetryScheduled` outcome of
 /// `retry_or_fail_outcome_for_claimed_job` — the job failed
 /// transiently and a future retry is queued.
-pub fn increment_push_outbox_retry_scheduled() {
+pub(crate) fn increment_push_outbox_retry_scheduled() {
     PUSH_OUTBOX_RETRY_SCHEDULED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -557,7 +525,7 @@ pub fn increment_push_outbox_retry_scheduled() {
 /// Call from the `Failed` outcome of
 /// `retry_or_fail_outcome_for_claimed_job` — the job hit the
 /// permanent-failure threshold and was flipped to `failed` status.
-pub fn increment_push_outbox_dead_lettered() {
+pub(crate) fn increment_push_outbox_dead_lettered() {
     PUSH_OUTBOX_DEAD_LETTERED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -567,39 +535,16 @@ pub fn increment_push_outbox_dead_lettered() {
 /// the projection read fails and the recipient is defaulted to
 /// `Inactive` — i.e. a user who was in DND silently becomes
 /// un-DND'd at the push gate. Non-zero rate is alert-worthy.
-pub fn increment_dnd_projection_read_errored() {
+pub(crate) fn increment_dnd_projection_read_errored() {
     DND_PROJECTION_READ_ERRORED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment the `waddle_push_suppressed_total{reason}` counter.
 ///
-/// `reason` is a wire-contract value drawn from
-/// [`PUSH_SUPPRESSED_REASONS`], populated in lockstep with
-/// `SuppressedReason::as_db_value` over in
-/// `waddle_server::notification_outbox` (the `waddle-server` test
-/// suite enforces the bijection; `waddle-xmpp` is upstream of the
-/// enum). The bound is `&'static str` so no dynamic labels exist at
-/// runtime; cardinality is bounded by the parallel constant.
-///
-/// Lookup is a linear scan over `PUSH_SUPPRESSED_REASONS` (small N,
-/// closed set) followed by an `AtomicU64::fetch_add` on a fixed slot
-/// — no mutex, no allocation, no async-hot-path stalls. A value not
-/// present in the parallel constant is a contract-drift bug: the
-/// catch-all [`PUSH_SUPPRESSED_UNKNOWN_REASON`] counter is bumped and
-/// a `warn!` fires so the drift is observable both in metrics and in
-/// logs.
-pub fn increment_push_suppressed(reason: &'static str) {
-    if let Some(idx) = push_suppressed_index(reason) {
-        PUSH_SUPPRESSED_COUNTERS[idx].fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    PUSH_SUPPRESSED_UNKNOWN_REASON.fetch_add(1, Ordering::Relaxed);
-    tracing::warn!(
-        reason,
-        "push suppressed counter received an unknown reason; \
-         waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS has drifted \
-         from waddle_server::notification_outbox::SuppressedReason"
-    );
+/// The typed reason indexes a fixed atomic slot directly: no allocation,
+/// lookup, or unbounded label can enter the legacy renderer.
+pub(crate) fn increment_push_suppressed(reason: PushSuppressReason) {
+    PUSH_SUPPRESSED_COUNTERS[reason.index()].fetch_add(1, Ordering::Relaxed);
 }
 
 /// Snapshot of every push-suppressed counter for rendering.
@@ -614,12 +559,15 @@ fn render_push_suppressed_lines(out: &mut String) {
         out.push_str(&value.to_string());
         out.push('\n');
     }
-    let unknown = PUSH_SUPPRESSED_UNKNOWN_REASON.load(Ordering::Relaxed);
-    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason string not present in the parallel `PUSH_SUPPRESSED_REASONS` wire-contract constant. A non-zero sample indicates the constant has drifted from `SuppressedReason::as_db_value`.\n");
+    // Frozen at 0 through the expand phase: the sealed
+    // `PushSuppressReason` enum makes an unmapped reason a compile
+    // error, so nothing can increment this series any more — but the
+    // expand release must not change the text renderer's output shape.
+    // Absence-sensitive queries keep answering until the contract PR
+    // deletes the family wholesale.
+    out.push_str("# HELP waddle_push_suppressed_unknown_reason_total Push suppression events that arrived with a reason outside the typed allowlist. Structurally unreachable since the reason set became a sealed enum; frozen at 0 until the family's contract-phase deletion.\n");
     out.push_str("# TYPE waddle_push_suppressed_unknown_reason_total counter\n");
-    out.push_str("waddle_push_suppressed_unknown_reason_total ");
-    out.push_str(&unknown.to_string());
-    out.push('\n');
+    out.push_str("waddle_push_suppressed_unknown_reason_total 0\n");
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -658,7 +606,6 @@ pub fn reset_metrics_for_test() {
     for counter in PUSH_SUPPRESSED_COUNTERS.iter() {
         counter.store(0, Ordering::Release);
     }
-    PUSH_SUPPRESSED_UNKNOWN_REASON.store(0, Ordering::Release);
     PUSH_CANDIDATE_CREATED.store(0, Ordering::Release);
     PUSH_CANDIDATE_COALESCED.store(0, Ordering::Release);
     PUSH_OUTBOX_PUBLISHED.store(0, Ordering::Release);

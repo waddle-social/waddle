@@ -229,17 +229,19 @@ impl NotificationOutboxStore {
             // [`NotificationOutboxPublishOutcome`].
             match &outcome {
                 NotificationOutboxPublishOutcome::Published { .. } => {
-                    waddle_xmpp::prometheus::increment_push_outbox_published();
+                    waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
                 }
                 NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
-                    waddle_xmpp::prometheus::increment_push_outbox_retry_scheduled();
+                    waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled(
+                        waddle_xmpp::telemetry::attributes::PushRetryReason::Unknown,
+                    );
                 }
                 NotificationOutboxPublishOutcome::Failed { .. } => {
-                    waddle_xmpp::prometheus::increment_push_outbox_dead_lettered();
+                    waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();
                 }
                 NotificationOutboxPublishOutcome::Suppressed { .. } => {
-                    waddle_xmpp::prometheus::increment_push_suppressed(
-                        SuppressedReason::UnreadZeroAtPublish.as_db_value(),
+                    waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                        SuppressedReason::UnreadZeroAtPublish.telemetry_reason(),
                     );
                 }
             }

@@ -120,6 +120,164 @@ impl MetricAttribute for SweepOutcome {
     }
 }
 
+/// `reason` — why an XEP-0357 push notification was suppressed.
+///
+/// This is the metric-facing closed set. `waddle-server` converts its
+/// persisted `SuppressedReason` audit value into this enum before emitting,
+/// so metric labels never cross the crate boundary as strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushSuppressReason {
+    /// The notification would target its sender.
+    Xep0357Self,
+    /// The recipient has no push registration.
+    Xep0357NoRegistration,
+    /// The recipient's push registration is disabled.
+    Xep0357RegistrationDisabled,
+    /// XEP-0492 resolved to `<never/>`.
+    Xep0492Never,
+    /// XEP-0492 `<on-mention/>` did not match.
+    Xep0492OnMentionMiss,
+    /// XEP-0191 blocked the sender or conversation.
+    Xep0191Blocked,
+    /// XEP-0513 `<noping/>` opted out of notification.
+    Xep0513Noping,
+    /// XEP-0513 `<active/>` did not match.
+    Xep0513ActiveMiss,
+    /// Waddle DND is active for the recipient.
+    WaddleDnd,
+    /// The downstream push provider rejected the notification.
+    ProviderRejected,
+    /// The downstream push provider reported an expired token.
+    ProviderTokenExpired,
+    /// The XEP-0357 push service is degraded.
+    Xep0357PushServiceDegraded,
+    /// The unread count reached zero before publish.
+    UnreadZeroAtPublish,
+    /// Policy evaluation exhausted its retry budget.
+    PolicyRetriesExhausted,
+    /// The message is an XEP-0444 reaction-only notification.
+    Xep0444Reaction,
+}
+
+impl PushSuppressReason {
+    /// Every allowed value, in stable legacy-renderer order.
+    pub const ALL: [Self; 15] = [
+        Self::Xep0357Self,
+        Self::Xep0357NoRegistration,
+        Self::Xep0357RegistrationDisabled,
+        Self::Xep0492Never,
+        Self::Xep0492OnMentionMiss,
+        Self::Xep0191Blocked,
+        Self::Xep0513Noping,
+        Self::Xep0513ActiveMiss,
+        Self::WaddleDnd,
+        Self::ProviderRejected,
+        Self::ProviderTokenExpired,
+        Self::Xep0357PushServiceDegraded,
+        Self::UnreadZeroAtPublish,
+        Self::PolicyRetriesExhausted,
+        Self::Xep0444Reaction,
+    ];
+
+    /// Every allowed label value, in stable legacy-renderer order.
+    pub const VALUES: [&'static str; 15] = [
+        Self::Xep0357Self.as_str(),
+        Self::Xep0357NoRegistration.as_str(),
+        Self::Xep0357RegistrationDisabled.as_str(),
+        Self::Xep0492Never.as_str(),
+        Self::Xep0492OnMentionMiss.as_str(),
+        Self::Xep0191Blocked.as_str(),
+        Self::Xep0513Noping.as_str(),
+        Self::Xep0513ActiveMiss.as_str(),
+        Self::WaddleDnd.as_str(),
+        Self::ProviderRejected.as_str(),
+        Self::ProviderTokenExpired.as_str(),
+        Self::Xep0357PushServiceDegraded.as_str(),
+        Self::UnreadZeroAtPublish.as_str(),
+        Self::PolicyRetriesExhausted.as_str(),
+        Self::Xep0444Reaction.as_str(),
+    ];
+
+    /// The byte-stable legacy label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xep0357Self => "xep0357_self",
+            Self::Xep0357NoRegistration => "xep0357_no_registration",
+            Self::Xep0357RegistrationDisabled => "xep0357_registration_disabled",
+            Self::Xep0492Never => "xep0492_never",
+            Self::Xep0492OnMentionMiss => "xep0492_on_mention_miss",
+            Self::Xep0191Blocked => "xep0191_blocked",
+            Self::Xep0513Noping => "xep0513_noping",
+            Self::Xep0513ActiveMiss => "xep0513_active_miss",
+            Self::WaddleDnd => "waddle_dnd",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTokenExpired => "provider_token_expired",
+            Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
+            Self::UnreadZeroAtPublish => "unread_zero_at_publish",
+            Self::PolicyRetriesExhausted => "policy_retries_exhausted",
+            Self::Xep0444Reaction => "xep0444_reaction",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Xep0357Self => 0,
+            Self::Xep0357NoRegistration => 1,
+            Self::Xep0357RegistrationDisabled => 2,
+            Self::Xep0492Never => 3,
+            Self::Xep0492OnMentionMiss => 4,
+            Self::Xep0191Blocked => 5,
+            Self::Xep0513Noping => 6,
+            Self::Xep0513ActiveMiss => 7,
+            Self::WaddleDnd => 8,
+            Self::ProviderRejected => 9,
+            Self::ProviderTokenExpired => 10,
+            Self::Xep0357PushServiceDegraded => 11,
+            Self::UnreadZeroAtPublish => 12,
+            Self::PolicyRetriesExhausted => 13,
+            Self::Xep0444Reaction => 14,
+        }
+    }
+}
+
+impl sealed::Sealed for PushSuppressReason {}
+impl MetricAttribute for PushSuppressReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `reason` — why an XEP-0357 push outbox job was scheduled for retry.
+///
+/// The legacy text family only ever rendered
+/// `waddle_push_outbox_retry_scheduled_total{reason="unknown"}`, so the
+/// OTel successor carries the same closed label shape through the alias
+/// cutover. Gains real variants if the outbox ever classifies retry
+/// causes; until then `Unknown` is the whole set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushRetryReason {
+    /// The retry cause was not classified.
+    Unknown,
+}
+
+impl sealed::Sealed for PushRetryReason {}
+impl MetricAttribute for PushRetryReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// `condition` — the RFC 6120 §8.3.3 defined stanza-error conditions,
 /// reusing the crate's existing typed enum (its `as_str()` already
 /// yields the hyphenated wire names). Re-exported here so metric call

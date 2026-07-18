@@ -142,12 +142,18 @@ pub(crate) async fn mirror_register_outcome(
 /// `Some(token)` prunes only if the actor still holds that session (mirrors
 /// `unregister_if_owner`), `None` prunes unconditionally (mirrors a plain
 /// `unregister`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MirrorUnregisterOutcome {
+    Completed,
+    Failed,
+}
+
 pub(crate) async fn mirror_unregister(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: &FullJid,
     owner: Option<Arc<AtomicBool>>,
-) {
-    if let Err(error) = user_registry
+) -> MirrorUnregisterOutcome {
+    match user_registry
         .tell(UnregisterUserResource {
             jid: jid.clone(),
             owner,
@@ -155,13 +161,17 @@ pub(crate) async fn mirror_unregister(
         .mailbox_timeout(MIRROR_TIMEOUT)
         .await
     {
-        warn!(
-            jid = %jid,
-            %error,
-            "dual-registration: failed to enqueue unregister mirror into \
-             user_registry actor; the actor tree may retain a stale resource \
-             until the next successful mirror"
-        );
+        Ok(()) => MirrorUnregisterOutcome::Completed,
+        Err(error) => {
+            warn!(
+                jid = %jid,
+                %error,
+                "dual-registration: failed to enqueue unregister mirror into \
+                 user_registry actor; the actor tree may retain a stale resource \
+                 until the next successful mirror"
+            );
+            MirrorUnregisterOutcome::Failed
+        }
     }
 }
 

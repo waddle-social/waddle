@@ -866,8 +866,8 @@ mod tests {
         );
         // Mirror the T0 emission contract: tick the metric, do NOT
         // persist a candidate row.
-        waddle_xmpp::prometheus::increment_push_suppressed(
-            SuppressedReason::Xep0492Never.as_db_value(),
+        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+            SuppressedReason::Xep0492Never.telemetry_reason(),
         );
 
         // Push surface invariants: no candidate row, no outbox job.
@@ -960,8 +960,8 @@ mod tests {
             ),
             "T0 MUST suppress <on-mention/> miss with typed Xep0492OnMentionMiss; got {outcome:?}"
         );
-        waddle_xmpp::prometheus::increment_push_suppressed(
-            SuppressedReason::Xep0492OnMentionMiss.as_db_value(),
+        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+            SuppressedReason::Xep0492OnMentionMiss.telemetry_reason(),
         );
 
         assert_eq!(

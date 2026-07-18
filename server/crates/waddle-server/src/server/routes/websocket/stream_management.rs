@@ -578,7 +578,7 @@ async fn handle_sm_enable(
     let max_resume_secs = max_resume_secs_from_env();
     let max = match enable.max {
         Some(m) if m > max_resume_secs => {
-            waddle_xmpp::prometheus::increment_sm_resume_window_clamped();
+            waddle_xmpp::telemetry::reliability::increment_sm_resume_window_clamped();
             max_resume_secs
         }
         Some(m) => m,

@@ -238,7 +238,8 @@ impl ResolverAffiliationSyncScheduler {
             return ResolverAffiliationSyncSchedule::Stale;
         }
         if state.workers.len() >= state.max_workers {
-            waddle_xmpp::prometheus::increment_resolver_affiliation_sync_capacity_drop();
+            waddle_xmpp::telemetry::reliability::increment_resolver_affiliation_sync_capacity_drop(
+            );
             return ResolverAffiliationSyncSchedule::AtCapacity;
         }
         let effective_admission_revision =

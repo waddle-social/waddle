@@ -465,7 +465,9 @@ async fn insert_groupchat_notification_candidate(
                 %reason,
                 "ProjectGroupchatInbox: T0 push gate suppressed groupchat candidate; no candidate row persisted"
             );
-            waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+            waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                reason.telemetry_reason(),
+            );
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
@@ -536,10 +538,20 @@ async fn mark_groupchat_notification_recovery_completed(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn reconcile_groupchat_notification_candidates(
     state: &WebSocketState,
     batch_size: usize,
 ) -> usize {
+    reconcile_groupchat_notification_candidates_for_sweep(state, batch_size)
+        .await
+        .completed
+}
+
+pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
+    state: &WebSocketState,
+    batch_size: usize,
+) -> super::NotificationRecoverySweepOutcome {
     let batch_size = batch_size.clamp(1, 1_000);
     let recoveries = match state
         .deps
@@ -554,10 +566,14 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
                 error = %error,
                 "Groupchat notification candidate recovery could not read inbox recovery rows"
             );
-            return 0;
+            return super::NotificationRecoverySweepOutcome {
+                completed: 0,
+                had_failure: true,
+            };
         }
     };
     let mut completed = 0usize;
+    let mut had_failure = false;
     for recovery in recoveries {
         let archive_room = recovery.key.archive_stanza_id.by.to_bare();
         let archived = match state
@@ -578,12 +594,15 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
                     stanza_id = %recovery.key.archive_stanza_id,
                     "Groupchat notification candidate recovery completed because the committed MAM row is missing"
                 );
-                if mark_recovery_completed_from_state(state, &recovery.key).await {
-                    completed += 1;
+                match mark_recovery_completed_from_state(state, &recovery.key).await {
+                    RecoveryCompletionOutcome::Marked => completed += 1,
+                    RecoveryCompletionOutcome::NotMarked => {}
+                    RecoveryCompletionOutcome::Failed => had_failure = true,
                 }
                 continue;
             }
             Err(error) => {
+                had_failure = true;
                 warn!(
                     recipient = %recovery.key.recipient,
                     room = %recovery.key.room,
@@ -626,19 +645,34 @@ pub(crate) async fn reconcile_groupchat_notification_candidates(
             sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
         })
         .await;
-        if outcome == GroupchatNotificationCandidateQueueOutcome::Completed
-            && mark_recovery_completed_from_state(state, &recovery.key).await
-        {
-            completed += 1;
+        match outcome {
+            GroupchatNotificationCandidateQueueOutcome::Completed => {
+                match mark_recovery_completed_from_state(state, &recovery.key).await {
+                    RecoveryCompletionOutcome::Marked => completed += 1,
+                    RecoveryCompletionOutcome::NotMarked => {}
+                    RecoveryCompletionOutcome::Failed => had_failure = true,
+                }
+            }
+            GroupchatNotificationCandidateQueueOutcome::RetryLater => had_failure = true,
         }
     }
-    completed
+    super::NotificationRecoverySweepOutcome {
+        completed,
+        had_failure,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryCompletionOutcome {
+    Marked,
+    NotMarked,
+    Failed,
 }
 
 async fn mark_recovery_completed_from_state(
     state: &WebSocketState,
     key: &waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey,
-) -> bool {
+) -> RecoveryCompletionOutcome {
     match state
         .deps
         .protocol
@@ -646,7 +680,8 @@ async fn mark_recovery_completed_from_state(
         .mark_groupchat_notification_recovery_completed(key)
         .await
     {
-        Ok(marked) => marked > 0,
+        Ok(marked) if marked > 0 => RecoveryCompletionOutcome::Marked,
+        Ok(_) => RecoveryCompletionOutcome::NotMarked,
         Err(error) => {
             warn!(
                 recipient = %key.recipient,
@@ -655,7 +690,7 @@ async fn mark_recovery_completed_from_state(
                 error = %error,
                 "Groupchat notification recovery completion marker failed"
             );
-            false
+            RecoveryCompletionOutcome::Failed
         }
     }
 }
