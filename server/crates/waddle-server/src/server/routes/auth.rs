@@ -19,11 +19,14 @@ use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership::{reconcile_user_membership, BootstrapMembershipConfig};
+use crate::server::routes::auth_telemetry::{
+    record_auth_failure, record_auth_success, AuthFailure,
+};
 use crate::server::AppState;
 use axum::{
     extract::{Query, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Json, Redirect},
+    response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
     Router,
 };
@@ -37,6 +40,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
+use waddle_xmpp::telemetry::attributes::AuthStage;
 
 mod callback;
 mod handshake;
@@ -269,6 +273,40 @@ pub(super) fn auth_error_to_response(err: AuthError) -> (StatusCode, Json<ErrorR
     (status, Json(ErrorResponse::new(code, &err.to_string())))
 }
 
+pub(super) fn auth_error_response(provider: &str, stage: AuthStage, err: AuthError) -> Response {
+    record_auth_failure(provider, None, AuthFailure::from_error(stage, &err));
+    match err {
+        AuthError::HttpError(detail) => {
+            let (code, message) = match stage {
+                AuthStage::OidcAuthorization => (
+                    "authorization_failed",
+                    format!("Authorization failed: {detail}"),
+                ),
+                AuthStage::OidcCallback => {
+                    ("jwt_error", format!("JWT validation failed: {detail}"))
+                }
+                AuthStage::TokenExchange => (
+                    "token_exchange_failed",
+                    format!("Token exchange failed: {detail}"),
+                ),
+                AuthStage::Userinfo => (
+                    "userinfo_failed",
+                    format!("User info fetch failed: {detail}"),
+                ),
+                AuthStage::State | AuthStage::DeviceFlow | AuthStage::Scram => {
+                    ("auth_error", format!("HTTP request failed: {detail}"))
+                }
+            };
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new(code, &message)),
+            )
+                .into_response()
+        }
+        other => auth_error_to_response(other).into_response(),
+    }
+}
+
 async fn load_avatar_url(
     actor: &kameo::actor::ActorRef<crate::db::actor::DbActor>,
     user_jid: &str,
@@ -343,7 +381,7 @@ pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl
     (StatusCode::OK, Json(state.providers.list()))
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, query))]
 pub async fn start_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<StartQuery>,
@@ -351,6 +389,7 @@ pub async fn start_handler(
     let provider = match state.providers.get(&query.provider) {
         Some(p) => p,
         None => {
+            record_auth_failure("unknown", None, AuthFailure::AuthorizationInvalidClient);
             return auth_error_to_response(AuthError::InvalidProvider(query.provider))
                 .into_response();
         }
@@ -361,7 +400,9 @@ pub async fn start_handler(
             let session_transport =
                 match BrowserSessionTransport::from_query(&query.session_transport) {
                     Ok(value) => value,
-                    Err(err) => return auth_error_to_response(err).into_response(),
+                    Err(err) => {
+                        return auth_error_response(&provider.id, AuthStage::OidcAuthorization, err)
+                    }
                 };
             PendingFlow::Browser {
                 next: query.next,
@@ -370,6 +411,7 @@ pub async fn start_handler(
         }
         "device" => {
             let Some(device_code) = query.device_code else {
+                record_auth_failure(&provider.id, None, AuthFailure::DeviceMalformed);
                 return auth_error_to_response(AuthError::InvalidRequest(
                     "device flow requires device_code".to_string(),
                 ))
@@ -379,10 +421,11 @@ pub async fn start_handler(
         }
         "xmpp" => {
             let Some(client_redirect_uri) = query.redirect_uri else {
-                return auth_error_to_response(AuthError::InvalidRequest(
-                    "xmpp flow requires redirect_uri".to_string(),
-                ))
-                .into_response();
+                return auth_error_response(
+                    &provider.id,
+                    AuthStage::OidcAuthorization,
+                    AuthError::InvalidRequest("xmpp flow requires redirect_uri".to_string()),
+                );
             };
             PendingFlow::Xmpp {
                 client_redirect_uri,
@@ -391,16 +434,20 @@ pub async fn start_handler(
             }
         }
         _ => {
-            return auth_error_to_response(AuthError::InvalidRequest(
-                "flow must be browser|device|xmpp".to_string(),
-            ))
-            .into_response();
+            return auth_error_response(
+                &provider.id,
+                AuthStage::OidcAuthorization,
+                AuthError::InvalidRequest("flow must be browser|device|xmpp".to_string()),
+            );
         }
     };
 
     match state.start_authorization(provider, flow).await {
-        Ok(url) => Redirect::temporary(&url).into_response(),
-        Err(err) => auth_error_to_response(err).into_response(),
+        Ok(url) => {
+            record_auth_success(AuthStage::OidcAuthorization);
+            Redirect::temporary(&url).into_response()
+        }
+        Err(err) => auth_error_response(&provider.id, AuthStage::OidcAuthorization, err),
     }
 }
 

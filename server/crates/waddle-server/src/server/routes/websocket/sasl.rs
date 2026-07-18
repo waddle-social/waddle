@@ -1,4 +1,8 @@
 use super::transport_xml::{element_to_xml, sasl_failure_xml, sasl_success_xml};
+use crate::server::routes::auth_telemetry::{
+    record_auth_failure, record_auth_success, AuthFailure,
+};
+use waddle_xmpp::telemetry::attributes::AuthStage;
 
 /// Count the failed attempt on `xmpp.auth.attempts` (#1320) and build
 /// the SASL failure frame. Every failure return in this module routes
@@ -6,6 +10,20 @@ use super::transport_xml::{element_to_xml, sasl_failure_xml, sasl_success_xml};
 /// malformed first message) are not invisible to the counter.
 fn sasl_failure_counted(mechanism: &'static str) -> String {
     waddle_xmpp::metrics::record_auth_attempt(mechanism, false);
+    sasl_failure_xml("not-authorized")
+}
+
+fn scram_bare_identifier(username: &str, domain: &str) -> Option<BareJid> {
+    format!("{username}@{domain}").parse().ok()
+}
+
+pub(super) fn record_scram_failure(failure: AuthFailure<'_>, bare_identifier: Option<&BareJid>) {
+    record_auth_failure("native", bare_identifier, failure);
+    waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", false);
+}
+
+fn scram_failure_counted(failure: AuthFailure<'_>, bare_identifier: Option<&BareJid>) -> String {
+    record_scram_failure(failure, bare_identifier);
     sasl_failure_xml("not-authorized")
 }
 use super::*;
@@ -103,17 +121,15 @@ pub(super) async fn handle_sasl_scram_client_first(
 
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to decode base64 client-first");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            return vec![scram_failure_counted(AuthFailure::ScramMalformed, None)];
         }
     };
 
     let client_first = match String::from_utf8(decoded) {
         Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: invalid UTF-8 in client-first");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            return vec![scram_failure_counted(AuthFailure::ScramMalformed, None)];
         }
     };
 
@@ -123,9 +139,8 @@ pub(super) async fn handle_sasl_scram_client_first(
         let mut tmp = ScramServer::new();
         match tmp.process_client_first(&client_first) {
             Ok(result) => result.username,
-            Err(e) => {
-                warn!(error = %e, "SCRAM: failed to parse client-first");
-                return vec![sasl_failure_counted("SCRAM-SHA-256")];
+            Err(_) => {
+                return vec![scram_failure_counted(AuthFailure::ScramMalformed, None)];
             }
         }
     };
@@ -140,12 +155,18 @@ pub(super) async fn handle_sasl_scram_client_first(
     {
         Ok(Some(creds)) => creds,
         Ok(None) => {
-            warn!(username = %username, "SCRAM: user not found");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+            let bare_identifier = scram_bare_identifier(&username, domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramUnknownUser,
+                bare_identifier.as_ref(),
+            )];
         }
-        Err(e) => {
-            warn!(error = %e, username = %username, "SCRAM: credential lookup failed");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            let bare_identifier = scram_bare_identifier(&username, domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramOther,
+                bare_identifier.as_ref(),
+            )];
         }
     };
 
@@ -154,9 +175,12 @@ pub(super) async fn handle_sasl_scram_client_first(
     let mut scram_server = ScramServer::with_salt_b64(creds.salt_b64, creds.iterations);
     let server_first = match scram_server.process_client_first(&client_first) {
         Ok(result) => result,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to process client-first with stored params");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            let bare_identifier = scram_bare_identifier(&username, domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramOther,
+                bare_identifier.as_ref(),
+            )];
         }
     };
 
@@ -190,32 +214,34 @@ pub(super) fn handle_sasl_scram_response(
 ) -> Vec<String> {
     let decoded = match BASE64_STANDARD.decode(b64_data.trim()) {
         Ok(data) => data,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: failed to decode base64 client-final");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            let bare_identifier = scram_bare_identifier(scram.username(), domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramMalformed,
+                bare_identifier.as_ref(),
+            )];
         }
     };
 
     let client_final = match String::from_utf8(decoded) {
         Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: invalid UTF-8 in client-final");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            let bare_identifier = scram_bare_identifier(scram.username(), domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramMalformed,
+                bare_identifier.as_ref(),
+            )];
         }
     };
 
     let server_final = match scram.process_client_final(&client_final) {
-        Ok(result) => {
-            waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
-            result
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                username = %scram.username(),
-                "SCRAM-SHA-256 authentication failed"
-            );
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Ok(result) => result,
+        Err(_) => {
+            let bare_identifier = scram_bare_identifier(scram.username(), domain);
+            return vec![scram_failure_counted(
+                AuthFailure::ScramInvalidCredentials,
+                bare_identifier.as_ref(),
+            )];
         }
     };
 
@@ -223,17 +249,15 @@ pub(super) fn handle_sasl_scram_response(
     let bare_jid_str = format!("{}@{}", scram.username(), domain);
     let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
         Ok(jid) => jid,
-        Err(e) => {
-            warn!(error = %e, jid = %bare_jid_str, "SCRAM: JID construction failed");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
         }
     };
 
     let bare_jid: BareJid = match bare_jid_str.parse() {
         Ok(jid) => jid,
-        Err(e) => {
-            warn!(error = %e, "SCRAM: bare JID parse failed");
-            return vec![sasl_failure_counted("SCRAM-SHA-256")];
+        Err(_) => {
+            return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
         }
     };
 
@@ -241,6 +265,8 @@ pub(super) fn handle_sasl_scram_response(
         jid = %bare_jid_str,
         "SASL SCRAM-SHA-256 authentication successful",
     );
+    waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
+    record_auth_success(AuthStage::Scram);
 
     let session = Session::new(&bare_jid.to_string(), scram.username(), scram.username());
 

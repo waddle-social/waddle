@@ -60,7 +60,7 @@ pub async fn exchange_code(
     let res = request
         .send()
         .await
-        .map_err(|e| AuthError::TokenExchangeFailed(e.to_string()))?;
+        .map_err(|e| AuthError::HttpError(e.to_string()))?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -154,7 +154,7 @@ pub async fn fetch_userinfo(
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|e| AuthError::UserInfoFailed(e.to_string()))?;
+        .map_err(|e| AuthError::HttpError(e.to_string()))?;
 
     if !res.status().is_success() {
         let status = res.status();
