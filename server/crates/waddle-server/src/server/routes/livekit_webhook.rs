@@ -35,6 +35,7 @@ use waddle_sfu::{
     verify_webhook_signature, CallId, LiveKitWebhookEvent, ParticipantEnvelope, SfuReconciler,
     WebhookVerifyError, RECONCILE_GRACE_SECONDS,
 };
+use waddle_xmpp::telemetry::attributes::WebhookOutcome;
 
 use super::muc_muji_clear::clear_muji_presence_for_departure;
 use super::websocket::{note_participant_left_by_call_id, WebSocketState};
@@ -111,25 +112,31 @@ async fn livekit_webhook_handler(
         Ok(event) => event,
         Err(WebhookVerifyError::MissingAuthorization)
         | Err(WebhookVerifyError::MalformedAuthorization) => {
+            record_webhook_outcome(WebhookOutcome::SignatureFailed);
             return StatusCode::UNAUTHORIZED;
         }
         Err(WebhookVerifyError::Jwt(error)) => {
+            record_webhook_outcome(WebhookOutcome::SignatureFailed);
             warn!(error = ?error, "LiveKit webhook JWT validation failed");
             return StatusCode::UNAUTHORIZED;
         }
         Err(WebhookVerifyError::MissingBodyHash) | Err(WebhookVerifyError::BodyHashMismatch) => {
+            record_webhook_outcome(WebhookOutcome::SignatureFailed);
             return StatusCode::UNAUTHORIZED;
         }
         Err(WebhookVerifyError::BodyJson(error)) => {
+            record_webhook_outcome(WebhookOutcome::SignatureFailed);
             warn!(error = ?error, "LiveKit webhook body JSON parse failed");
             return StatusCode::BAD_REQUEST;
         }
     };
 
     if !seen.observe(event.event_id()) {
+        record_webhook_outcome(WebhookOutcome::Duplicate);
         debug!(event_id = ?event.event_id(), "LiveKit webhook duplicate; dropping");
         return StatusCode::OK;
     }
+    record_webhook_outcome(WebhookOutcome::Received);
 
     match &event {
         LiveKitWebhookEvent::ParticipantLeft(env)
@@ -171,6 +178,16 @@ async fn livekit_webhook_handler(
     }
 
     StatusCode::OK
+}
+
+fn record_webhook_outcome(outcome: WebhookOutcome) {
+    waddle_xmpp::counter_add!(
+        "waddle.call.webhook.events",
+        "1",
+        "LiveKit webhook ingestion events by outcome.",
+        1,
+        outcome,
+    );
 }
 
 /// How often the reconciliation backstop polls LiveKit for the true
@@ -290,8 +307,63 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state_with_calls, create_test_websocket_state_with_sfu, RecordingSfu,
     };
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use std::io;
     use waddle_sfu::{Identity, MediaCapabilities};
     use waddle_xmpp::protocol::ConnectionPhase;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn signed_webhook_headers(secret: &[u8], body: &[u8]) -> HeaderMap {
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let claims = json!({
+            "sha256": BASE64_STANDARD.encode(hasher.finalize()),
+            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+            "iat": chrono::Utc::now().timestamp(),
+        });
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .expect("sign test webhook");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("valid auth header"),
+        );
+        headers
+    }
 
     #[test]
     fn seen_event_ids_deduplicates_repeat_observations() {
@@ -300,6 +372,74 @@ mod tests {
         assert!(!seen.observe(Some("EV_1")));
         assert!(seen.observe(Some("EV_2")));
         assert!(!seen.observe(Some("EV_2")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_webhook_emits_debug_log_and_counter() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let state = create_test_websocket_state_with_calls().await;
+        let secret = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .expect("call fixture has SFU")
+            .webhook_secret()
+            .as_bytes()
+            .to_vec();
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_joined",
+            "id": "EV_duplicate_metric",
+            "room": { "name": "general@muc.example.com" },
+            "participant": { "identity": "alice@example.com/web" }
+        }))
+        .expect("serialize webhook body");
+        let headers = signed_webhook_headers(&secret, &body);
+        let seen = Arc::new(SeenEventIds::default());
+
+        let first = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(seen.clone()),
+            headers.clone(),
+            Bytes::from(body.clone()),
+        )
+        .await
+        .into_response();
+        let duplicate =
+            livekit_webhook_handler(Extension(state), State(seen), headers, Bytes::from(body))
+                .await
+                .into_response();
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.webhook.events", &[("outcome", "received")]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.webhook.events", &[("outcome", "duplicate")]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.webhook.events"),
+            Some("1".to_string())
+        );
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        assert!(
+            logs.contains("LiveKit webhook duplicate; dropping"),
+            "{logs}"
+        );
+        assert!(logs.contains("\"level\":\"DEBUG\""), "{logs}");
+        assert!(logs.contains("EV_duplicate_metric"), "{logs}");
     }
 
     #[test]

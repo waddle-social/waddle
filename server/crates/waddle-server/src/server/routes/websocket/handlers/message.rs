@@ -3,12 +3,17 @@ use waddle_xmpp::{
     parser::stanza_to_string,
     protocol::handlers::errors::bad_request_reply,
     protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
-    xep::{NS_DELAY, NS_INBOX, NS_WADDLE_INBOX},
+    telemetry::attributes::CallSignalEvent,
+    xep::xep0353::NS_JINGLE_MESSAGE,
+    xep::{has_hint, Hint, NS_DELAY, NS_INBOX, NS_WADDLE_INBOX},
     Stanza,
 };
 
 use super::super::{
-    interpret_loop::build_interpret_deps, replay::drive_interpret_loop, WebSocketState,
+    call_signaling_telemetry::{record_call_signal, CallSignalTarget},
+    interpret_loop::build_interpret_deps,
+    replay::drive_interpret_loop,
+    WebSocketState,
 };
 use crate::auth::Session;
 use waddle_xmpp::protocol::ConnectionPhase;
@@ -135,6 +140,7 @@ pub async fn handle_message(
             }
         };
     }
+    record_jmi_signal(&incoming, &bound_jid.to_bare());
     if let Some(frames) = handle_muc_direct_message(&incoming, state, &bound_jid).await {
         return frames;
     }
@@ -148,6 +154,35 @@ pub async fn handle_message(
     // only from TransportReady/Tick in the connection loop), and
     // `close` was already ignored on this path — only frames matter.
     drive_interpret_loop(events, sm, &deps).await.frames
+}
+
+fn record_jmi_signal(message: &xmpp_parsers::message::Message, user: &jid::BareJid) {
+    let Some(event) = classify_jmi_signal(message) else {
+        return;
+    };
+    let peer = message.to.as_ref().map(jid::Jid::to_bare);
+    record_call_signal(event, user, peer.as_ref().map(CallSignalTarget::Peer));
+}
+
+fn classify_jmi_signal(message: &xmpp_parsers::message::Message) -> Option<CallSignalEvent> {
+    if message.type_ != xmpp_parsers::message::MessageType::Chat || !has_hint(message, Hint::Store)
+    {
+        return None;
+    }
+
+    let event = message.payloads.iter().find_map(|payload| {
+        if payload.ns() != NS_JINGLE_MESSAGE || payload.attr("id").is_none_or(str::is_empty) {
+            return None;
+        }
+        match payload.name() {
+            "propose" => Some(CallSignalEvent::JmiPropose),
+            "proceed" => Some(CallSignalEvent::JmiProceed),
+            "reject" => Some(CallSignalEvent::JmiReject),
+            "retract" => Some(CallSignalEvent::JmiRetract),
+            _ => None,
+        }
+    });
+    event
 }
 
 fn strip_client_authored_delay(message: &mut xmpp_parsers::message::Message) {
@@ -178,7 +213,7 @@ fn remove_framework_envelopes(message: &mut xmpp_parsers::message::Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmpp_parsers::message::Message;
+    use xmpp_parsers::message::{Message, MessageType};
     use xmpp_parsers::minidom::Element;
 
     #[test]
@@ -201,5 +236,50 @@ mod tests {
             .payloads
             .iter()
             .any(|payload| payload.ns().starts_with("urn:waddle:")));
+    }
+
+    #[test]
+    fn classifies_conformant_jmi_chat_signal() {
+        let mut message = Message::new(Some(
+            "bob@example.com/phone"
+                .parse::<jid::Jid>()
+                .expect("valid JID"),
+        ));
+        message.payloads.push(
+            Element::builder("proceed", NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+                .build(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_hint_element(Hint::Store));
+
+        assert_eq!(
+            classify_jmi_signal(&message),
+            Some(CallSignalEvent::JmiProceed)
+        );
+    }
+
+    #[test]
+    fn ignores_non_chat_or_malformed_jmi_signal() {
+        let mut message = Message::new(Some(
+            "bob@example.com/phone"
+                .parse::<jid::Jid>()
+                .expect("valid JID"),
+        ));
+        message.type_ = MessageType::Groupchat;
+        message.payloads.push(
+            Element::builder("proceed", NS_JINGLE_MESSAGE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "call-1")
+                .build(),
+        );
+        message
+            .payloads
+            .push(waddle_xmpp::xep::build_hint_element(Hint::Store));
+        assert_eq!(classify_jmi_signal(&message), None);
+
+        message.type_ = MessageType::Chat;
+        message.payloads[0] = Element::builder("proceed", NS_JINGLE_MESSAGE).build();
+        assert_eq!(classify_jmi_signal(&message), None);
     }
 }

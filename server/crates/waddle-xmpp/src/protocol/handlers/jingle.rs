@@ -27,6 +27,7 @@ use waddle_sfu::{CallId, Identity, MediaCapabilities, SfuError, SfuService};
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::handlers::session_initiate_rate_limit::SessionInitiateRateLimit;
 use crate::protocol::traits::IqHandler;
+use crate::telemetry::attributes::{MetricAttribute, SfuDenialReason};
 use crate::xep::xep0166::NS_JINGLE;
 use crate::xep::xep0272::{find_muji, Muji};
 use crate::xep::xep_waddle_livekit_transport::{
@@ -452,6 +453,9 @@ impl JingleHandler {
             // authenticated session. Non-initiate actions should not
             // carry it, so we ignore it there per the XEP.
             if let Err(e) = resolve_muji_initiator(&jingle, ctx) {
+                if let Some(room_jid) = muji.room.as_ref() {
+                    record_sfu_token_authorization_denial(room_jid, &ctx.full_jid.to_bare());
+                }
                 return e.into_reply(iq);
             }
         }
@@ -847,7 +851,7 @@ enum RewriteError {
     UnsupportedTransport,
     InvalidWaddleTransport(TransportParseError),
     ClientSuppliedIssuedTransport,
-    SfuFailed(SfuError),
+    SfuFailed,
 }
 
 impl RewriteError {
@@ -881,8 +885,7 @@ impl RewriteError {
                 DefinedCondition::BadRequest,
                 "Waddle LiveKit transport credentials must be server-issued",
             ),
-            Self::SfuFailed(inner) => {
-                tracing::error!(error = %inner, "SFU operation failed during Jingle handling");
+            Self::SfuFailed => {
                 error_reply(iq, DefinedCondition::InternalServerError, "internal error")
             }
         }
@@ -973,13 +976,20 @@ fn rewrite_contents_transport(
     if contents.is_empty() {
         return Ok(());
     }
-    let token = sfu
-        .issue_join_token(
-            call_id,
-            peer_identity,
-            MediaCapabilities::full_participant(),
-        )
-        .map_err(RewriteError::SfuFailed)?;
+    let token = match sfu.issue_join_token(
+        call_id,
+        peer_identity,
+        MediaCapabilities::full_participant(),
+    ) {
+        Ok(token) => {
+            record_sfu_token_minted(call_id, peer_identity);
+            token
+        }
+        Err(error) => {
+            record_sfu_token_mint_failure(call_id, peer_identity, &error);
+            return Err(RewriteError::SfuFailed);
+        }
+    };
     let issued = WaddleLiveKitTransport::Issued(IssuedTransport {
         url: token.url,
         room: token.room,
@@ -991,6 +1001,57 @@ fn rewrite_contents_transport(
         content.transport = Some(Transport::Unknown(issued_elem.clone()));
     }
     Ok(())
+}
+
+fn record_sfu_token_minted(call_id: &CallId, identity: &Identity) {
+    let user = identity.as_jid().to_bare();
+    tracing::info!(
+        room = %call_id.as_str(),
+        user = %user,
+        "LiveKit SFU token minted"
+    );
+    crate::counter_add!(
+        "waddle.call.sfu_token.minted",
+        "1",
+        "LiveKit SFU tokens minted.",
+        1,
+    );
+}
+
+fn record_sfu_token_mint_failure(call_id: &CallId, identity: &Identity, error: &SfuError) {
+    let user = identity.as_jid().to_bare();
+    let reason = SfuDenialReason::InternalError;
+    tracing::warn!(
+        room = %call_id.as_str(),
+        user = %user,
+        reason = reason.value(),
+        error = %error,
+        "LiveKit SFU token mint failed"
+    );
+    crate::counter_add!(
+        "waddle.call.sfu_token.denied",
+        "1",
+        "SFU token requests denied by reason.",
+        1,
+        reason,
+    );
+}
+
+fn record_sfu_token_authorization_denial(room: &BareJid, user: &BareJid) {
+    let reason = SfuDenialReason::NotAuthorized;
+    tracing::warn!(
+        room = %room,
+        user = %user,
+        reason = reason.value(),
+        "SFU token request denied"
+    );
+    crate::counter_add!(
+        "waddle.call.sfu_token.denied",
+        "1",
+        "SFU token requests denied by reason.",
+        1,
+        reason,
+    );
 }
 
 fn revoke_other_dm_participants(
@@ -1083,6 +1144,7 @@ mod tests {
     use crate::xep::xep0167::opus_audio_description;
     use chrono::Duration;
     use jid::FullJid;
+    use std::io;
     use waddle_sfu::{
         ApiKey, ApiSecret, LiveKitSfu, SfuConfig, TurnHost, TurnSharedSecret, WebsocketUrl,
     };
@@ -1121,6 +1183,31 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     fn session_initiate_iq(initiator: &str, responder: &str, sid: &str) -> Iq {
         let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
         content.description = Some(xmpp_parsers::jingle::Description::Rtp(
@@ -1156,6 +1243,27 @@ mod tests {
             to: Some(to.parse().unwrap()),
             id: "a1".into(),
             payload: jingle.into(),
+        }
+    }
+
+    fn muji_session_initiate_iq(room: &str) -> Iq {
+        let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
+        content.description = Some(xmpp_parsers::jingle::Description::Rtp(
+            opus_audio_description(),
+        ));
+        content.transport = Some(Transport::Unknown(
+            WaddleLiveKitTransport::Request.to_element(),
+        ));
+        let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("muji-observe".into()));
+        jingle.initiator = Some("alice@waddle.test/desktop".parse().unwrap());
+        jingle.contents.push(content);
+        let mut payload: Element = jingle.into();
+        payload.append_child(Muji::for_room(room.parse().expect("valid room JID")).to_element());
+        Iq::Set {
+            from: Some("alice@waddle.test/desktop".parse().unwrap()),
+            to: Some("calls.waddle.test".parse().unwrap()),
+            id: "muji-observe".into(),
+            payload,
         }
     }
 
@@ -1225,6 +1333,88 @@ mod tests {
             }
             WaddleLiveKitTransport::Request => panic!("server must populate the transport"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn muji_token_mint_emits_info_with_bare_jid_and_counter() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+
+        let events = handler.handle(
+            &muji_session_initiate_iq("general@muc.waddle.test"),
+            &ctx(&jid),
+        );
+
+        assert!(
+            !events.is_empty(),
+            "successful Muji token mint must produce the focus response"
+        );
+        assert_eq!(
+            metrics.counter_sum("waddle.call.sfu_token.minted", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.sfu_token.minted"),
+            Some("1".to_string())
+        );
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        assert!(logs.contains("general@muc.waddle.test"), "{logs}");
+        assert!(logs.contains("alice@waddle.test"), "{logs}");
+        assert!(logs.contains("\"level\":\"INFO\""), "{logs}");
+        assert!(logs.contains("LiveKit SFU token minted"), "{logs}");
+        assert!(!logs.contains("alice@waddle.test/desktop"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn muji_spoofed_initiator_emits_not_authorized_denial() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let mut iq = muji_session_initiate_iq("general@muc.waddle.test");
+        let Iq::Set { payload, .. } = &mut iq else {
+            panic!("expected IQ set");
+        };
+        payload.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("initiator").to_owned(),
+            "mallory@waddle.test/laptop",
+        );
+        let jid = test_ctx_jid();
+        let handler = JingleHandler::new(fixture_sfu());
+
+        let events = handler.handle(&iq, &ctx(&jid));
+
+        assert_error_condition(&events, DefinedCondition::Forbidden);
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.sfu_token.denied",
+                &[("reason", "not_authorized")]
+            ),
+            Some(1)
+        );
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        assert!(logs.contains("\"level\":\"WARN\""), "{logs}");
+        assert!(logs.contains("general@muc.waddle.test"), "{logs}");
+        assert!(logs.contains("alice@waddle.test"), "{logs}");
+        assert!(!logs.contains("alice@waddle.test/desktop"), "{logs}");
+        assert!(!logs.contains("mallory@waddle.test/laptop"), "{logs}");
     }
 
     #[test]
