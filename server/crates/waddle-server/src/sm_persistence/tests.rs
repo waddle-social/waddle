@@ -774,7 +774,7 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
 }
 
 #[tokio::test]
-async fn corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
+async fn compound_corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     storage
         .upsert_session(fixture_session("alpha"))
@@ -793,8 +793,6 @@ async fn corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
         .await
         .unwrap();
 
-    let poison = fixture_unacked("beta", 2);
-    let poison_xml = serialize_stanza(&poison.stanza).unwrap();
     storage
         .execute(
             "INSERT INTO sm_unacked \
@@ -802,9 +800,9 @@ async fn corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
              VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 "beta".to_string(),
-                2i64,
-                poison_xml,
-                poison.original_receipt_at.timestamp_millis(),
+                i64::from(u32::MAX) + 1,
+                "not valid xml <<<".to_string(),
+                i64::MAX,
                 "unknown-purpose".to_string(),
             ],
         )
@@ -819,7 +817,8 @@ async fn corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
         grouped
             .iter()
             .all(|(session, _)| session.stream_id.as_str() != "beta"),
-        "an unknown typed purpose must quarantine the whole stream, including earlier rows"
+        "an unknown typed purpose must quarantine the whole stream even when \
+         malformed XML, timestamp, and sequence values would also fail decoding"
     );
 }
 

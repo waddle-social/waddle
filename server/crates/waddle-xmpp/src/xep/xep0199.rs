@@ -2,7 +2,7 @@
 //!
 //! Provides helpers for validating ping IQs and building responses.
 
-use jid::{BareJid, Jid};
+use jid::{BareJid, FullJid, Jid};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -33,6 +33,26 @@ pub fn is_ping(iq: &Iq) -> bool {
         Iq::Get { payload, .. } => ping_payload_is_valid(payload),
         _ => false,
     }
+}
+
+/// Check for the exact server-to-resource XEP-0199 request shape used as a
+/// typed stream-management liveness probe.
+///
+/// The sender must be the recipient's server domain, the target must be the
+/// exact full JID, and the IQ id must be non-empty. Payload conformance is
+/// delegated to [`is_ping`].
+pub fn is_ping_from_server_to_full_jid(iq: &Iq, recipient: &FullJid) -> bool {
+    let expected_from: Jid = recipient
+        .domain()
+        .as_str()
+        .parse()
+        .expect("a FullJid domain is always a valid domain JID");
+    let expected_to = Jid::from(recipient.clone());
+
+    is_ping(iq)
+        && iq.from() == Some(&expected_from)
+        && iq.to() == Some(&expected_to)
+        && !iq.id().is_empty()
 }
 
 /// Build an empty result IQ for a ping request.

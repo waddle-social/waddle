@@ -186,17 +186,7 @@ pub async fn promote_session_unacked(
         if entry.is_resume_barrier() {
             let valid_barrier = match parse_stanza(&entry.stanza_xml) {
                 Some(Stanza::Iq(iq)) => {
-                    let expected_to = jid::Jid::from(session.jid.clone());
-                    let expected_from = session
-                        .jid
-                        .domain()
-                        .as_str()
-                        .parse::<jid::Jid>()
-                        .expect("a FullJid domain is always a valid domain JID");
-                    waddle_xmpp::xep::xep0199::is_ping(&iq)
-                        && iq.to() == Some(&expected_to)
-                        && iq.from() == Some(&expected_from)
-                        && !iq.id().is_empty()
+                    waddle_xmpp::xep::xep0199::is_ping_from_server_to_full_jid(&iq, &session.jid)
                 }
                 Some(Stanza::Message(_) | Stanza::Presence(_)) | None => false,
             };
@@ -206,10 +196,10 @@ pub async fn promote_session_unacked(
                     sequence = entry.sequence,
                     "Q6 promotion: replay row is tagged as a resume barrier but is not the internal conformant XEP-0199 ping shape; retaining it"
                 );
-                PromotedOutcome::StorageFailure
+                PromotedOutcome::Quarantined
             } else {
                 match &barrier_pending_links {
-                    BarrierPendingLinks::Unknown => PromotedOutcome::StorageFailure,
+                    BarrierPendingLinks::Unknown => PromotedOutcome::Quarantined,
                     BarrierPendingLinks::Known(links) => match links.get(&entry.sequence) {
                         None => {
                             debug!(
@@ -226,7 +216,7 @@ pub async fn promote_session_unacked(
                                 linked_rows = rows.len(),
                                 "Q6 promotion: resume barrier unexpectedly owns pending-delivery row(s); retaining both for reconciliation"
                             );
-                            PromotedOutcome::StorageFailure
+                            PromotedOutcome::Quarantined
                         }
                     },
                 }
@@ -287,6 +277,7 @@ pub async fn promote_session_unacked(
         unparseable = summary.unparseable,
         scrubbed = summary.scrubbed,
         storage_failed = summary.storage_failed,
+        quarantined = summary.quarantined,
         "Q6 promotion: session summary"
     );
     summary
@@ -647,6 +638,21 @@ pub async fn promote_displaced_sessions(
             "displaced SM promotion",
         )
         .await;
+        if summary.has_quarantined() {
+            tracing::error!(
+                jid = %session.jid,
+                stream_id = %session.stream_id,
+                quarantined = summary.quarantined,
+                "displaced SM session: promotion found unreconciled durable invariants; \
+                 preserving durable rows without consuming the transient retry budget"
+            );
+            if prune_promoted_then_reinsert_for_retry(deps.sm_registry, session.clone(), &summary)
+                .await
+            {
+                promotion_guard.complete();
+            }
+            continue;
+        }
         if summary.has_storage_failure() {
             waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(u64::from(
                 summary.storage_failed,
@@ -701,6 +707,7 @@ pub async fn promote_displaced_sessions(
             not_promotable = summary.not_promotable,
             unparseable = summary.unparseable,
             scrubbed = summary.scrubbed,
+            quarantined = summary.quarantined,
             "displaced SM session: Q6 promotion completed"
         );
     }

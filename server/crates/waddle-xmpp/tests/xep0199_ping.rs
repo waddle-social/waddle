@@ -5,7 +5,7 @@ use waddle_xmpp::disco::{server_features, Feature};
 use waddle_xmpp::protocol::event::{OutboundEvent, StanzaContext};
 use waddle_xmpp::protocol::handlers::ping::PingHandler;
 use waddle_xmpp::protocol::IqHandler;
-use waddle_xmpp::xep::{is_ping, NS_PING};
+use waddle_xmpp::xep::{is_ping, is_ping_from_server_to_full_jid, NS_PING};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
@@ -46,6 +46,62 @@ fn xep0199_only_empty_iq_get_ping_is_accepted() {
 
     assert!(is_ping(&valid));
     assert!(!is_ping(&malformed));
+}
+
+#[test]
+fn xep0199_server_to_full_jid_probe_requires_the_exact_request_shape() {
+    let recipient = session_jid();
+    let ping = || Element::builder("ping", NS_PING).build();
+    let valid = Iq::Get {
+        from: Some("waddle.social".parse().expect("valid domain JID")),
+        to: Some("alice@waddle.social/web".parse().expect("valid full JID")),
+        id: "resume-barrier".to_string(),
+        payload: ping(),
+    };
+    assert!(is_ping_from_server_to_full_jid(&valid, &recipient));
+
+    let wrong_type = Iq::Set {
+        from: valid.from().cloned(),
+        to: valid.to().cloned(),
+        id: valid.id().to_string(),
+        payload: ping(),
+    };
+    let wrong_from = Iq::Get {
+        from: Some("other.example".parse().expect("valid domain JID")),
+        to: valid.to().cloned(),
+        id: valid.id().to_string(),
+        payload: ping(),
+    };
+    let wrong_to = Iq::Get {
+        from: valid.from().cloned(),
+        to: Some("alice@waddle.social/phone".parse().expect("valid full JID")),
+        id: valid.id().to_string(),
+        payload: ping(),
+    };
+    let empty_id = Iq::Get {
+        from: valid.from().cloned(),
+        to: valid.to().cloned(),
+        id: String::new(),
+        payload: ping(),
+    };
+    let malformed_payload = Iq::Get {
+        from: valid.from().cloned(),
+        to: valid.to().cloned(),
+        id: valid.id().to_string(),
+        payload: Element::builder("ping", NS_PING)
+            .append(Element::builder("extra", NS_PING).build())
+            .build(),
+    };
+
+    for invalid in [
+        wrong_type,
+        wrong_from,
+        wrong_to,
+        empty_id,
+        malformed_payload,
+    ] {
+        assert!(!is_ping_from_server_to_full_jid(&invalid, &recipient));
+    }
 }
 
 #[test]
