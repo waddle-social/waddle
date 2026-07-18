@@ -19,12 +19,16 @@ import {
   reconcileResumeClaimsTransition,
   recordTerminalTransition,
   releaseClaimTransition,
+  releaseForFreshSessionTransition,
   renewClaimTransition,
   revisionTransition,
   scanAndPruneTransition,
   type PreparedOutboundMessage,
 } from "../src/lib/xmpp-runtime/durable-outbound-transitions";
-import { claimOwnerTransition } from "../src/lib/xmpp-runtime/durable-owner-sm-transitions";
+import {
+  claimOwnerTransition,
+  preparePagehideHandoffTransition,
+} from "../src/lib/xmpp-runtime/durable-owner-sm-transitions";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime-durable-store";
 import type { PersistedSmResumeState } from "../src/lib/xmpp/sm-resume-types";
 
@@ -269,6 +273,124 @@ describe("durable outbound transitions", () => {
       blockedIds: ["foreign"],
     });
     expect(account.outbound.foreign?.state.kind).toBe("claimed");
+  });
+
+  test("reconcile preflights every prepared claim identifier before mutation", () => {
+    const account = emptyAccount(ACCOUNT);
+    const owner = activate(account);
+    persistReadyTransition(account, prepared("earlier"));
+    persistReadyTransition(account, prepared("later"));
+    const before = structuredClone(account);
+    const serializedBefore = JSON.stringify(before);
+
+    let failure: unknown;
+    try {
+      reconcileResumeClaimsTransition(account, NOW + 1, {
+        owner,
+        connectionGeneration: 2,
+        authoritativeMessageIds: ["earlier", "later"],
+        phase: "resume-replay",
+        claimIds: new Map([["earlier", "earlier-resume-claim"]]),
+      });
+    } catch (cause) {
+      failure = cause;
+    }
+
+    expect(failure).toBeInstanceOf(DOMException);
+    expect(failure).toMatchObject({ name: "AbortError" });
+    expect(account).toEqual(before);
+    expect(JSON.stringify(account)).toBe(serializedBefore);
+  });
+
+  test("fresh-session release preserves fallback and foreign predecessor fences", () => {
+    const account = emptyAccount(ACCOUNT);
+    const predecessor = activate(account);
+    const predecessorClaim = persistClaimedTransition(
+      account,
+      NOW,
+      prepared("predecessor"),
+      claimRequest(predecessor, "predecessor-claim"),
+    );
+    expect(predecessorClaim.value.kind).toBe("claimed");
+
+    const handoff = preparePagehideHandoffTransition(
+      account,
+      NOW + 1,
+      predecessor,
+      null,
+      "handoff-token",
+      null,
+    );
+    expect(handoff.value.kind).toBe("applied");
+    const owner = claimOwnerTransition(
+      account,
+      NOW + 2,
+      {
+        ownerId: predecessor.ownerId,
+        ownerInstanceId: "successor-instance",
+        handoffToken: "handoff-token",
+      },
+      "unused-rotation",
+    ).value.fence;
+
+    persistClaimedTransition(
+      account,
+      NOW + 2,
+      prepared("current-fallback"),
+      claimRequest(owner, "current-fallback-claim", "fresh-fallback", 7),
+    );
+    persistClaimedTransition(
+      account,
+      NOW + 2,
+      prepared("same-owner-other-generation"),
+      claimRequest(owner, "other-generation-claim", "fresh-fallback", 6),
+    );
+    persistClaimedTransition(
+      account,
+      NOW + 2,
+      prepared("same-owner-other-phase"),
+      claimRequest(owner, "other-phase-claim", "sending", 7),
+    );
+    const foreign = activate(account, "foreign-owner", "foreign-instance");
+    persistClaimedTransition(
+      account,
+      NOW + 2,
+      prepared("foreign"),
+      claimRequest(foreign, "foreign-claim", "sending", 7),
+    );
+
+    const beforeFencedRelease = structuredClone(account);
+    const fenced = releaseForFreshSessionTransition(
+      account,
+      NOW + 3,
+      { ...owner, ownerGeneration: owner.ownerGeneration + 1 },
+      7,
+    );
+    expect(fenced).toEqual({ changed: false, value: null });
+    expect(account).toEqual(beforeFencedRelease);
+
+    const released = releaseForFreshSessionTransition(
+      account,
+      NOW + 3,
+      owner,
+      7,
+    );
+    expect(released).toEqual({
+      changed: true,
+      value: [
+        "same-owner-other-generation",
+        "same-owner-other-phase",
+      ],
+    });
+    expect(account.outbound["current-fallback"]?.state.kind).toBe("claimed");
+    expect(account.outbound["same-owner-other-generation"]?.state.kind).toBe(
+      "ready",
+    );
+    expect(account.outbound["same-owner-other-phase"]?.state.kind).toBe(
+      "ready",
+    );
+    expect(account.outbound.foreign?.state.kind).toBe("claimed");
+    expect(account.outbound.predecessor?.state.kind).toBe("claimed");
   });
 
   test("records terminal intent once and applies ack, fallback, and release paths", () => {
