@@ -27,6 +27,8 @@ on:
     - chat/scripts/build-and-publish-wasm.mjs/**
     - chat/scripts/build-xmpp-wasm.mjs
     - chat/scripts/build-xmpp-wasm.mjs/**
+    - chat/scripts/check-startup-build.ts
+    - chat/scripts/check-startup-build.ts/**
     - chat/scripts/generate-service-worker.mjs
     - chat/scripts/generate-service-worker.mjs/**
     - chat/scripts/resolve-commit-sha.mjs
@@ -36,6 +38,7 @@ on:
     - chat/src/styles/global/tokens.css
     - chat/src/styles/global/tokens.css/**
     - chat/tests/**
+    - chat/tests/browser/**
     - chat/tsconfig.json
     - chat/tsconfig.json/**
     - chat/wrangler.jsonc
