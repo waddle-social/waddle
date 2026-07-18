@@ -243,6 +243,7 @@ fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
             sequence: 5,
             stanza_xml: "<message id='m5'/>".to_string(),
             original_receipt_at: chrono::Utc::now(),
+            purpose: Default::default(),
         }],
         max_resume_time: Some(300),
         detached_at: std::time::Instant::now(),
@@ -271,6 +272,7 @@ fn seeded_detached_session_for_persistence(stream_id: &str, jid: &FullJid) -> De
             sequence: 5,
             stanza_xml: "<message xmlns='jabber:client' id='m5'/>".to_string(),
             original_receipt_at: chrono::Utc::now(),
+            purpose: Default::default(),
         }],
         ..seeded_detached_session(stream_id, jid)
     }

@@ -520,11 +520,13 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
     };
     for sequence in 1..=(waddle_xmpp::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1)
     {
-        detached.record_detached_outbound_at(
-            sequence,
-            message_frame_xml_with_id(format!("m{sequence}")),
-            chrono::Utc::now(),
-        );
+        detached
+            .record_detached_outbound_at(
+                sequence,
+                message_frame_xml_with_id(format!("m{sequence}")),
+                chrono::Utc::now(),
+            )
+            .expect("unique detached replay sequence");
     }
     assert_eq!(detached.replay_gap_through, Some(1));
     state
@@ -1354,16 +1356,19 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
                 sequence: u32::MAX,
                 stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
                 stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 2,
                 stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
         ],
         max_resume_time: Some(300),
@@ -1652,11 +1657,13 @@ async fn sm_resume_restores_session_and_replays_unacked() {
                 sequence: 9,
                 stanza_xml: "<message id='m9'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 10,
                 stanza_xml: "<message id='m10'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
         ],
         max_resume_time: Some(300),
@@ -1736,6 +1743,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
                 sequence: 1,
                 stanza_xml: "<message id='m1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             }],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),
@@ -3111,11 +3119,13 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
                 sequence: 1,
                 stanza_xml: "<message id='m1'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 2,
                 stanza_xml: "<message id='m2'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             },
         ],
         max_resume_time: Some(300),
@@ -3596,11 +3606,13 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
                     sequence: 1,
                     stanza_xml: queued_message_xml,
                     original_receipt_at: original_receipt,
+                    purpose: Default::default(),
                 },
                 DetachedUnackedStanza {
                     sequence: 2,
                     stanza_xml: queued_iq_xml,
                     original_receipt_at: original_receipt,
+                    purpose: Default::default(),
                 },
             ],
             max_resume_time: Some(300),
@@ -4235,16 +4247,19 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
                     sequence: u32::MAX,
                     stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
+                    purpose: Default::default(),
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: 1,
                     stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
+                    purpose: Default::default(),
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: 2,
                     stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
+                    purpose: Default::default(),
                 },
             ],
             max_resume_time: Some(300),
@@ -4695,6 +4710,7 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
                 sequence: 4,
                 stanza_xml: "<message xmlns='jabber:client' id='m4'/>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
+                purpose: Default::default(),
             }],
             max_resume_time: Some(300),
             detached_at: std::time::Instant::now(),

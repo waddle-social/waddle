@@ -43,6 +43,7 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
         sequence,
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: fixed_time(),
+        purpose: SmUnackedStanzaPurpose::Application,
     }
 }
 
@@ -185,6 +186,90 @@ async fn list_unacked_orders_ascending_by_sequence() {
         .unwrap();
     let seqs: Vec<u32> = rows.iter().map(|r| r.sequence).collect();
     assert_eq!(seqs, vec![1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn unacked_purpose_round_trips_and_legacy_insert_defaults_to_application() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut barrier = fixture_unacked("purpose-stream", 1);
+    barrier.purpose = SmUnackedStanzaPurpose::ResumeBarrier;
+    storage.append_unacked(barrier).await.unwrap();
+
+    let legacy = fixture_unacked("purpose-stream", 2);
+    let legacy_xml = serialize_stanza(&legacy.stanza).unwrap();
+    storage
+        .execute(
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                "purpose-stream".to_string(),
+                2i64,
+                legacy_xml,
+                legacy.original_receipt_at.timestamp_millis(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let rows = storage
+        .list_unacked(&SmSessionId::new("purpose-stream"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
+    assert_eq!(rows[1].purpose, SmUnackedStanzaPurpose::Application);
+}
+
+#[tokio::test]
+async fn legacy_sm_unacked_schema_is_backfilled_with_application_purpose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy-sm-purpose.sqlite");
+    let url = format!("sqlite://{}", path.to_str().expect("UTF-8 path"));
+    let legacy = fixture_unacked("legacy-purpose-stream", 1);
+    let legacy_xml = serialize_stanza(&legacy.stanza).unwrap();
+
+    {
+        let db = crate::db::Database::from_config(
+            "legacy_sm_purpose",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .unwrap();
+        let conn = db.guard().await.unwrap();
+        conn.execute(
+            "CREATE TABLE sm_unacked (
+                stream_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                stanza_xml TEXT NOT NULL,
+                original_receipt_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (stream_id, sequence)
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sm_unacked \
+             (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                legacy.stream_id.as_str().to_string(),
+                i64::from(legacy.sequence),
+                legacy_xml,
+                legacy.original_receipt_at.timestamp_millis(),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
+    let rows = storage
+        .list_unacked(&SmSessionId::new("legacy-purpose-stream"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::Application);
 }
 
 #[tokio::test]
@@ -380,11 +465,12 @@ async fn list_all_sessions_with_unacked_uses_single_join_query() {
 async fn store_session_atomic_round_trips_via_transaction() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     let session = fixture_session("atomic-stream");
-    let unacked = vec![
+    let mut unacked = vec![
         fixture_unacked("atomic-stream", 1),
         fixture_unacked("atomic-stream", 2),
         fixture_unacked("atomic-stream", 3),
     ];
+    unacked[1].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     storage
         .store_session_atomic(session, unacked)
         .await
@@ -406,6 +492,18 @@ async fn store_session_atomic_round_trips_via_transaction() {
     assert_eq!(listed.len(), 3);
     assert_eq!(listed[0].sequence, 1);
     assert_eq!(listed[2].sequence, 3);
+    assert_eq!(listed[0].purpose, SmUnackedStanzaPurpose::Application);
+    assert_eq!(listed[1].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (_, joined_queue) = grouped
+        .iter()
+        .find(|(session, _)| session.stream_id.as_str() == "atomic-stream")
+        .expect("atomic session in joined cold-start read");
+    assert_eq!(
+        joined_queue[1].purpose,
+        SmUnackedStanzaPurpose::ResumeBarrier
+    );
 }
 
 /// #1206: the production store path is `store_session` → the OVERRIDDEN
@@ -673,6 +771,56 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
         .find(|(s, _)| s.stream_id.as_str() == "beta")
         .map(|(_, u)| u);
     assert_eq!(beta_unacked.map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn corrupt_replay_purpose_quarantines_the_whole_joined_session_group() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("alpha"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("alpha", 1))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("beta"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+
+    let poison = fixture_unacked("beta", 2);
+    let poison_xml = serialize_stanza(&poison.stanza).unwrap();
+    storage
+        .execute(
+            "INSERT INTO sm_unacked \
+             (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                "beta".to_string(),
+                2i64,
+                poison_xml,
+                poison.original_receipt_at.timestamp_millis(),
+                "unknown-purpose".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    assert!(grouped
+        .iter()
+        .any(|(session, queue)| session.stream_id.as_str() == "alpha" && queue.len() == 1));
+    assert!(
+        grouped
+            .iter()
+            .all(|(session, _)| session.stream_id.as_str() != "beta"),
+        "an unknown typed purpose must quarantine the whole stream, including earlier rows"
+    );
 }
 
 /// Regression for #1157: a session row that fails to decode while

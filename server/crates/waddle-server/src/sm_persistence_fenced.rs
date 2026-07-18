@@ -136,12 +136,13 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage,
+    SmPersistenceStorage, SmUnackedStanzaPurpose,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
     decode_session, decode_unacked, serialize_presence_payloads, serialize_stanza, show_wire_str,
+    unacked_purpose_wire_str,
 };
 
 const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -349,6 +350,7 @@ impl PostgresFencedSmPersistence {
                 sequence BIGINT NOT NULL,
                 stanza_xml TEXT NOT NULL,
                 original_receipt_at_ms BIGINT NOT NULL,
+                purpose TEXT NOT NULL DEFAULT 'application',
                 PRIMARY KEY (stream_id, sequence)
             )
             "#,
@@ -372,6 +374,7 @@ impl PostgresFencedSmPersistence {
         // landed, and `CREATE TABLE IF NOT EXISTS` is a no-op against an
         // existing table.
         for column_def in [
+            "purpose TEXT NOT NULL DEFAULT 'application'",
             "origin_stream_id TEXT",
             "inbound_seq BIGINT",
             "pair_sequence BIGINT",
@@ -797,13 +800,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
         tx.execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 stream_id.as_str().to_string(),
                 i64::from(stanza.sequence),
                 xml,
                 receipt_ms,
+                unacked_purpose_wire_str(stanza.purpose).to_string(),
             ],
         )
         .await
@@ -877,7 +881,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         // resumption is allowed to proceed.
         let mut rows = self
             .guard_query(
-                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms \
+                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose \
                  FROM sm_unacked WHERE stream_id = ? \
                  ORDER BY sequence ASC",
                 crate::db_params![stream_id.as_str().to_string()],
@@ -1050,13 +1054,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             let xml = serialize_stanza(&stanza.stanza)?;
             let receipt_ms = stanza.original_receipt_at.timestamp_millis();
             tx.execute(
-                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+                 VALUES (?, ?, ?, ?, ?)",
                 crate::db_params![
                     stream_id.as_str().to_string(),
                     i64::from(stanza.sequence),
                     xml,
                     receipt_ms,
+                    unacked_purpose_wire_str(stanza.purpose).to_string(),
                 ],
             )
             .await

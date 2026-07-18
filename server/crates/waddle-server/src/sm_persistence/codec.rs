@@ -121,6 +121,11 @@ pub(crate) fn decode_unacked(
     let receipt_ms: i64 = row
         .get(3)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let purpose_raw: String =
+        row.get(4)
+            .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
+                detail: e.to_string(),
+            })?;
 
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
@@ -134,13 +139,15 @@ pub(crate) fn decode_unacked(
         sequence: sequence.max(0) as u32,
         stanza: Box::new(stanza),
         original_receipt_at,
+        purpose: parse_unacked_purpose(&purpose_raw)?,
     })
 }
 
 /// Decode an unacked-stanza row from a JOIN result. Reads
 /// `stream_id` from column 0 (the session's stream_id),
 /// `stanza_xml` from column 19, and `original_receipt_at_ms`
-/// from column 20. Caller already has `sequence` (column 18).
+/// from column 20 and `purpose` from column 21. Caller already has
+/// `sequence` (column 18).
 /// The unacked columns sit after the 18 session columns
 /// (0..=17, presence_payloads added at 17 for #1206).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
@@ -157,6 +164,11 @@ pub(super) fn decode_unacked_join_row(
     let receipt_ms: i64 = row
         .get(20)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let purpose_raw: String =
+        row.get(21)
+            .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
+                detail: e.to_string(),
+            })?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
     let element: xmpp_parsers::minidom::Element = stanza_xml
@@ -170,7 +182,25 @@ pub(super) fn decode_unacked_join_row(
         sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
+        purpose: parse_unacked_purpose(&purpose_raw)?,
     })
+}
+
+pub(crate) fn unacked_purpose_wire_str(purpose: SmUnackedStanzaPurpose) -> &'static str {
+    match purpose {
+        SmUnackedStanzaPurpose::Application => "application",
+        SmUnackedStanzaPurpose::ResumeBarrier => "resume_barrier",
+    }
+}
+
+fn parse_unacked_purpose(raw: &str) -> Result<SmUnackedStanzaPurpose, SmPersistenceError> {
+    match raw {
+        "application" => Ok(SmUnackedStanzaPurpose::Application),
+        "resume_barrier" => Ok(SmUnackedStanzaPurpose::ResumeBarrier),
+        other => Err(SmPersistenceError::InvalidUnackedPurpose {
+            detail: format!("unknown value '{other}'"),
+        }),
+    }
 }
 
 pub(crate) fn show_wire_str(show: &Show) -> &'static str {

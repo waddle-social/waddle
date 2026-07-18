@@ -48,6 +48,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
     sequence: u32,
     stanza_xml: &str,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
+    purpose: super::super::persistence::SmUnackedStanzaPurpose,
 ) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
     let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
         SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
@@ -76,6 +77,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
         sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
+        purpose,
     })
 }
 
@@ -134,6 +136,7 @@ pub(super) fn persisted_to_detached(
                 sequence: row.sequence,
                 stanza_xml: xml,
                 original_receipt_at: row.original_receipt_at,
+                purpose: row.purpose,
             })
         })
         .collect::<Result<_, SmRegistryError>>()?;

@@ -11,7 +11,7 @@ pub(super) async fn list_all_sessions_with_unacked(
                     s.carbons_enabled, s.roster_interested, s.blocklist_interested, s.presence_available, \
                     s.presence_show, s.presence_status, s.presence_priority, \
                     s.replay_gap_through, s.presence_payloads, \
-                    u.sequence, u.stanza_xml, u.original_receipt_at_ms \
+                    u.sequence, u.stanza_xml, u.original_receipt_at_ms, u.purpose \
              FROM sm_sessions s \
              LEFT JOIN sm_unacked u ON s.stream_id = u.stream_id \
              ORDER BY s.stream_id ASC, u.sequence ASC",
@@ -87,7 +87,7 @@ pub(super) async fn list_all_sessions_with_unacked(
             continue;
         }
         // Unacked columns: sequence (18), stanza_xml (19),
-        // original_receipt_at_ms (20) — shifted +1 by the
+        // original_receipt_at_ms (20), purpose (21) — shifted +1 by the
         // presence_payloads session column (17) added for #1206.
         // NULL when LEFT JOIN had no match. Per-row decode failure
         // skips that row but keeps the rest of the session's queue.
@@ -106,6 +106,22 @@ pub(super) async fn list_all_sessions_with_unacked(
         };
         let entry = match decode_unacked_join_row(&row, sequence_i64) {
             Ok(entry) => entry,
+            Err(error @ SmPersistenceError::InvalidUnackedPurpose { .. }) => {
+                tracing::warn!(
+                    stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),
+                    sequence = sequence_i64,
+                    %error,
+                    "list_all_sessions_with_unacked: quarantining session whose replay purpose is corrupt"
+                );
+                if out.last().is_some_and(|(session, _)| {
+                    Some(session.stream_id.as_str()) == current_stream_id.as_deref()
+                }) {
+                    out.pop();
+                }
+                skipping_current_group = true;
+                poison_sessions += 1;
+                continue;
+            }
             Err(error) => {
                 tracing::debug!(
                     stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),

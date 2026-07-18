@@ -6,11 +6,14 @@ use jid::{BareJid, FullJid};
 use kameo::actor::{ActorRef, Spawn};
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
-use waddle_xmpp::pending_delivery::QuotaPolicy;
+use waddle_xmpp::pending_delivery::{
+    PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
+};
 use waddle_xmpp::protocol::session_state::Blocklist;
 use waddle_xmpp::registry::{
     ConnectionRegistry, OutboundStanza, RegisterUserResource, UserRegistryActor,
 };
+use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
@@ -22,6 +25,19 @@ fn full(s: &str) -> FullJid {
 
 fn bare(s: &str) -> BareJid {
     s.parse().unwrap()
+}
+
+fn resume_barrier_ping_xml(id: &str, to: &FullJid) -> String {
+    let iq = xmpp_parsers::iq::Iq::Get {
+        from: Some(to.domain().as_str().parse().expect("valid domain JID")),
+        to: Some(jid::Jid::from(to.clone())),
+        id: id.to_string(),
+        payload: minidom::Element::builder("ping", waddle_xmpp::xep::xep0199::NS_PING).build(),
+    };
+    let element = Stanza::Iq(Box::new(iq)).to_element();
+    let mut buffer = Vec::new();
+    element.write_to(&mut buffer).expect("serialize ping IQ");
+    String::from_utf8(buffer).expect("serialized ping IQ is UTF-8")
 }
 
 /// A fresh, empty actor-authoritative registry for `promote_session_unacked`
@@ -90,6 +106,7 @@ fn detached_session_with_unacked(
                     sequence: i as u32 + 1,
                     stanza_xml: xml,
                     original_receipt_at: now,
+                    purpose: Default::default(),
                 },
             )
             .collect(),
@@ -107,7 +124,7 @@ fn detached_session_with_unacked(
     }
 }
 
-/// PendingDeliveryStorage whose `insert` always fails — simulates a
+/// PendingDeliveryStorage whose reads and writes always fail — simulates a
 /// down offline-storage backend for promotion-failure tests.
 struct AlwaysFailingPending;
 
@@ -133,7 +150,11 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
         Vec<waddle_xmpp::pending_delivery::PendingRow>,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
-        Ok(vec![])
+        Err(
+            waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                "simulated backend failure".into(),
+            ),
+        )
     }
     async fn claim_for_session(
         &self,
@@ -386,6 +407,213 @@ async fn promotes_to_pending_delivery_when_no_alt_resource() {
     assert_eq!(summary.redelivered, 0);
     assert_eq!(summary.bounced, 0);
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+}
+
+fn session_with_resume_barrier(
+    stream_id: &str,
+    recipient: FullJid,
+    stanza_xml: String,
+) -> DetachedSession {
+    let mut session = detached_session_with_unacked(stream_id, recipient, Vec::new());
+    session.outbound_count = 1;
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            sequence: 1,
+            stanza_xml,
+            original_receipt_at: Utc::now(),
+            purpose: SmUnackedStanzaPurpose::ResumeBarrier,
+        });
+    session
+}
+
+#[tokio::test]
+async fn resume_barrier_is_pruned_without_live_or_pending_delivery() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let recipient = full("alice@example.com/laptop");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    dual_register(&registry, &user_registry, recipient.clone(), sender).await;
+    let session = session_with_resume_barrier(
+        "stream-resume-barrier",
+        recipient.clone(),
+        resume_barrier_ping_xml("resume-barrier-1", &recipient),
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.not_promotable, 1);
+    assert_eq!(summary.redelivered, 0);
+    assert_eq!(summary.queued, 0);
+    assert_eq!(summary.promoted_sequences, vec![1]);
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn application_ping_keeps_legacy_live_delivery_behavior() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let recipient = full("alice@example.com/laptop");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    dual_register(&registry, &user_registry, recipient.clone(), sender).await;
+    let session = detached_session_with_unacked(
+        "stream-application-ping",
+        recipient.clone(),
+        vec![resume_barrier_ping_xml("application-ping", &recipient)],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.redelivered, 1);
+    assert_eq!(summary.not_promotable, 0);
+    assert_eq!(summary.promoted_sequences, vec![1]);
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn mistagged_resume_barrier_is_retained_fail_closed() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let mut session = detached_session_with_unacked(
+        "stream-mistagged-barrier",
+        full("alice@example.com/laptop"),
+        vec![dm_xml("bob@elsewhere/x", "alice@example.com", "keep me")],
+    );
+    session.unacked_stanzas[0].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
+
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.storage_failed, 1);
+    assert!(summary.promoted_sequences.is_empty());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+}
+
+async fn assert_barrier_link_failure(outbound_sequence: Option<u32>, row_count: usize) {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let recipient = bare("alice@example.com");
+    let source = SmSessionId::new("stream-corrupt-barrier-link");
+    let linked_xml = dm_xml("bob@elsewhere/x", "alice@example.com", "retain linked row");
+    let Some(Stanza::Message(linked_message)) = parse_stanza(&linked_xml) else {
+        panic!("linked pending payload parses as a message");
+    };
+    let mut row_ids = Vec::new();
+    for _ in 0..row_count {
+        let row_id = PendingRowId::fresh();
+        storage
+            .insert(PendingRow {
+                id: row_id.clone(),
+                recipient: recipient.clone(),
+                original_receipt_at: Utc::now(),
+                payload: PendingPayload::Transient(Box::new(linked_message.clone())),
+                flushed_in_session: Some(source.clone()),
+                outbound_sequence,
+            })
+            .await
+            .expect("seed impossible barrier-linked pending row");
+        row_ids.push(row_id);
+    }
+
+    let recipient_full = full("alice@example.com/laptop");
+    let session = session_with_resume_barrier(
+        source.as_str(),
+        recipient_full.clone(),
+        resume_barrier_ping_xml("resume-barrier-linked", &recipient_full),
+    );
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.storage_failed, 1);
+    assert!(summary.promoted_sequences.is_empty());
+    let retained = storage.list(&recipient).await.expect("read retained row");
+    assert_eq!(retained.len(), row_count);
+    assert!(retained.iter().all(|row| row_ids.contains(&row.id)));
+    assert!(retained
+        .iter()
+        .all(|row| row.flushed_in_session.as_ref() == Some(&source)));
+    assert!(retained
+        .iter()
+        .all(|row| row.outbound_sequence == outbound_sequence));
+}
+
+#[tokio::test]
+async fn resume_barrier_with_exact_pending_link_is_retained_fail_closed() {
+    assert_barrier_link_failure(Some(1), 1).await;
+}
+
+#[tokio::test]
+async fn resume_barrier_with_unsequenced_source_row_is_retained_fail_closed() {
+    assert_barrier_link_failure(None, 1).await;
+}
+
+#[tokio::test]
+async fn resume_barrier_with_duplicate_pending_links_is_retained_fail_closed() {
+    assert_barrier_link_failure(Some(1), 2).await;
+}
+
+#[tokio::test]
+async fn resume_barrier_with_unreadable_pending_links_is_retained_fail_closed() {
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+    let recipient = full("alice@example.com/laptop");
+    let session = session_with_resume_barrier(
+        "stream-unreadable-barrier-links",
+        recipient.clone(),
+        resume_barrier_ping_xml("resume-barrier-list-failure", &recipient),
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.storage_failed, 1);
+    assert!(summary.promoted_sequences.is_empty());
 }
 
 #[tokio::test]
@@ -792,6 +1020,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
             sequence: 1,
             stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),
             original_receipt_at: receipt_time,
+            purpose: Default::default(),
         }],
         max_resume_time: Some(60),
         detached_at: std::time::Instant::now(),
@@ -979,6 +1208,7 @@ async fn restart_outlasting_resume_window_promotes_queue_into_pending_delivery()
             sequence: 1,
             stanza: Box::new(Stanza::Message(queued)),
             original_receipt_at: now - chrono::Duration::seconds(610),
+            purpose: Default::default(),
         })
         .await
         .unwrap();

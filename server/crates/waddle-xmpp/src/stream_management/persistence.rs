@@ -70,6 +70,9 @@ pub enum SmPersistenceError {
     #[error("SM persistence error: {0}")]
     Other(String),
 
+    #[error("invalid SM unacked-stanza purpose: {detail}")]
+    InvalidUnackedPurpose { detail: String },
+
     /// A row for an exact typed stream id exists but cannot be decoded into
     /// the typed persistence model. Recovery may quarantine that stream's
     /// durable session and unacked queue; ordinary backend errors must never
@@ -185,6 +188,19 @@ pub struct PersistedSession {
     pub presence_payloads: Vec<minidom::Element>,
 }
 
+/// Recovery purpose of one durable SM replay row.
+///
+/// Resume barriers are ordinary, countable XEP-0199 IQ stanzas on the wire,
+/// but they are server-internal causal markers rather than application
+/// delivery. If a recovered session expires, Q6 discards these rows instead
+/// of promoting them into offline delivery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SmUnackedStanzaPurpose {
+    #[default]
+    Application,
+    ResumeBarrier,
+}
+
 /// One row in the `sm_unacked` table — a stanza sent to a session
 /// that has not yet been acknowledged.
 ///
@@ -205,6 +221,8 @@ pub struct PersistedUnackedStanza {
     /// promotion path can stamp the `<delay/>` per XEP-0203 §4.1 +
     /// XEP-0198 §5 line 364 with the correct timestamp.
     pub original_receipt_at: chrono::DateTime<chrono::Utc>,
+    /// Typed recovery disposition for this replay row.
+    pub purpose: SmUnackedStanzaPurpose,
 }
 
 /// Persistent storage contract for XEP-0198 SM session state.

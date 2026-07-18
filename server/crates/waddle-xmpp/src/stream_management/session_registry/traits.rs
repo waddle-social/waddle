@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use super::DetachedSession;
+use super::{DetachedReplaySequenceConflict, DetachedSession};
 
 /// Error type for SM session registry operations.
 #[derive(Debug, Error)]
@@ -14,6 +14,9 @@ pub enum SmRegistryError {
 
     #[error("Registry at capacity")]
     AtCapacity,
+
+    #[error(transparent)]
+    DetachedReplaySequenceConflict(#[from] DetachedReplaySequenceConflict),
 
     #[error("Internal error: {0}")]
     Internal(String),

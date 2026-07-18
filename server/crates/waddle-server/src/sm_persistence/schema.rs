@@ -66,6 +66,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
                 sequence {bigint} NOT NULL,
                 stanza_xml TEXT NOT NULL,
                 original_receipt_at_ms {bigint} NOT NULL,
+                purpose TEXT NOT NULL DEFAULT 'application',
                 PRIMARY KEY (stream_id, sequence)
             )
             "#
@@ -117,6 +118,12 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // key), so the dedup key collapses to `(stream_id, origin_stream_id,
     // inbound_seq)`.
     add_column_if_missing(storage, "sm_unacked", "origin_stream_id TEXT").await?;
+    add_column_if_missing(
+        storage,
+        "sm_unacked",
+        "purpose TEXT NOT NULL DEFAULT 'application'",
+    )
+    .await?;
     add_column_if_missing(storage, "sm_unacked", &format!("inbound_seq {bigint}")).await?;
     add_column_if_missing(storage, "sm_unacked", &format!("pair_sequence {bigint}")).await?;
     storage

@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use super::persistence::SmUnackedStanzaPurpose;
 use chrono::{DateTime, Utc};
 
 /// An unacknowledged stanza waiting for client acknowledgment.
@@ -24,6 +25,8 @@ pub struct UnackedStanza {
     /// Used by the Q6 SM-expiry promotion path for the XEP-0203
     /// `<delay/>` stamp on offline replays (issue #209 PR #361).
     pub original_receipt_at: DateTime<Utc>,
+    /// Typed recovery disposition preserved through detach and replay.
+    pub purpose: SmUnackedStanzaPurpose,
 }
 
 /// Outcome of a `push` onto the unacked queue.
@@ -59,11 +62,27 @@ impl UnackedStanza {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> Self {
+        Self::with_receipt_at_and_purpose(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+            SmUnackedStanzaPurpose::Application,
+        )
+    }
+
+    /// Create a replay row with an explicit typed recovery purpose.
+    pub fn with_receipt_at_and_purpose(
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        purpose: SmUnackedStanzaPurpose,
+    ) -> Self {
         Self {
             sequence,
             stanza_xml,
             sent_at: Instant::now(),
             original_receipt_at,
+            purpose,
         }
     }
 
@@ -117,17 +136,36 @@ impl UnackedQueue {
         stanza_xml: String,
         original_receipt_at: DateTime<Utc>,
     ) -> UnackedPushResult {
+        self.push_with_receipt_at_and_purpose(
+            sequence,
+            stanza_xml,
+            original_receipt_at,
+            SmUnackedStanzaPurpose::Application,
+        )
+    }
+
+    /// Push a stanza with an explicit typed recovery purpose.
+    #[must_use = "eviction must be observed so missing-after-resume drops are not silent"]
+    pub fn push_with_receipt_at_and_purpose(
+        &mut self,
+        sequence: u32,
+        stanza_xml: String,
+        original_receipt_at: DateTime<Utc>,
+        purpose: SmUnackedStanzaPurpose,
+    ) -> UnackedPushResult {
         let evicted = if self.stanzas.len() >= self.max_size {
             self.stanzas.pop_front()
         } else {
             None
         };
 
-        self.stanzas.push_back(UnackedStanza::with_receipt_at(
-            sequence,
-            stanza_xml,
-            original_receipt_at,
-        ));
+        self.stanzas
+            .push_back(UnackedStanza::with_receipt_at_and_purpose(
+                sequence,
+                stanza_xml,
+                original_receipt_at,
+                purpose,
+            ));
 
         match evicted {
             Some(stanza) => UnackedPushResult::Evicted(stanza),
@@ -160,6 +198,7 @@ impl UnackedQueue {
             .map(|s| super::ReplayStanza {
                 stanza_xml: s.stanza_xml.clone(),
                 original_receipt_at: s.original_receipt_at,
+                purpose: s.purpose,
             })
             .collect()
     }
@@ -175,6 +214,7 @@ impl UnackedQueue {
                 sequence: s.sequence,
                 stanza_xml: s.stanza_xml.clone(),
                 original_receipt_at: s.original_receipt_at,
+                purpose: s.purpose,
             })
             .collect()
     }
@@ -185,11 +225,13 @@ impl UnackedQueue {
         self.stanzas.clear();
         for entry in stanzas {
             if self.stanzas.len() < self.max_size {
-                self.stanzas.push_back(UnackedStanza::with_receipt_at(
-                    entry.sequence,
-                    entry.stanza_xml.clone(),
-                    entry.original_receipt_at,
-                ));
+                self.stanzas
+                    .push_back(UnackedStanza::with_receipt_at_and_purpose(
+                        entry.sequence,
+                        entry.stanza_xml.clone(),
+                        entry.original_receipt_at,
+                        entry.purpose,
+                    ));
             }
         }
     }
@@ -339,22 +381,61 @@ mod tests {
                 sequence: 5,
                 stanza_xml: "<msg5/>".to_string(),
                 original_receipt_at: now,
+                purpose: Default::default(),
             },
             DetachedUnackedStanza {
                 sequence: 6,
                 stanza_xml: "<msg6/>".to_string(),
                 original_receipt_at: now,
+                purpose: Default::default(),
             },
             DetachedUnackedStanza {
                 sequence: 7,
                 stanza_xml: "<msg7/>".to_string(),
                 original_receipt_at: now,
+                purpose: Default::default(),
             },
         ];
         queue.restore(&stanzas);
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(5));
         assert_eq!(queue.newest_sequence(), Some(7));
+    }
+
+    #[test]
+    fn replay_purpose_survives_partial_replay_detach_and_restore() {
+        let now = Utc::now();
+        let mut queue = UnackedQueue::new(10);
+        assert!(matches!(
+            queue.push_with_receipt_at(1, "<message/>".to_string(), now),
+            UnackedPushResult::Accepted
+        ));
+        assert!(matches!(
+            queue.push_with_receipt_at_and_purpose(
+                2,
+                "<iq/>".to_string(),
+                now,
+                SmUnackedStanzaPurpose::ResumeBarrier,
+            ),
+            UnackedPushResult::Accepted
+        ));
+
+        let suffix = queue.get_unacked_after(1);
+        assert_eq!(suffix.len(), 1);
+        assert_eq!(suffix[0].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
+
+        let detached = queue.get_all_unacked();
+        assert_eq!(detached[0].purpose, SmUnackedStanzaPurpose::Application);
+        assert_eq!(detached[1].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
+
+        let mut restored = UnackedQueue::new(10);
+        restored.restore(&detached);
+        let restored_suffix = restored.get_unacked_after(1);
+        assert_eq!(restored_suffix.len(), 1);
+        assert_eq!(
+            restored_suffix[0].purpose,
+            SmUnackedStanzaPurpose::ResumeBarrier
+        );
     }
 
     #[test]

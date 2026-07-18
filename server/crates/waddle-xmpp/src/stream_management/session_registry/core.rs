@@ -1960,6 +1960,7 @@ impl InMemorySmSessionRegistry {
                 entry.sequence,
                 &entry.stanza_xml,
                 entry.original_receipt_at,
+                entry.purpose,
             )?);
         }
         storage
@@ -2056,7 +2057,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         predicate: impl Fn(&DetachedSession) -> bool,
-        mutate: impl FnOnce(&mut DetachedSession),
+        mutate: impl FnOnce(&mut DetachedSession) -> Result<(), SmRegistryError>,
     ) -> Result<bool, SmRegistryError> {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
@@ -2087,7 +2088,7 @@ impl InMemorySmSessionRegistry {
         let Some(mut updated) = current else {
             return Ok(false);
         };
-        mutate(&mut updated);
+        mutate(&mut updated)?;
 
         // Durable snapshot first, then publish the same typed state in memory.
         // The stream lock serializes this full-snapshot write with other appends
