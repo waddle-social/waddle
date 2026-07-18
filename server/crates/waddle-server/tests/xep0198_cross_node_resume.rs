@@ -35,8 +35,9 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 use waddle_xmpp::stream_management::{
-    CrossNodeResumeOutcome, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
-    RemoteResumeAskOutcome, RemoteResumeAsker, SmClaimCompletion, SmSessionRegistry,
+    persistence::SmUnackedStanzaPurpose, CrossNodeResumeOutcome, DetachedSession,
+    DetachedUnackedStanza, InMemorySmSessionRegistry, RemoteResumeAskOutcome, RemoteResumeAsker,
+    SmClaimCompletion, SmSessionRegistry,
 };
 
 /// Serializes every test in this file: they share the mutable control-plane
@@ -154,14 +155,14 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
                 sequence: 6,
                 stanza_xml: "<message xmlns='jabber:client'><body>six</body></message>".to_string(),
                 original_receipt_at: chrono::Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
                 stanza_xml: "<message xmlns='jabber:client'><body>seven</body></message>"
                     .to_string(),
                 original_receipt_at: chrono::Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             },
         ],
         max_resume_time: Some(300),

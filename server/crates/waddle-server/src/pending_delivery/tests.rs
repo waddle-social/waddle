@@ -552,6 +552,85 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
 
 #[tokio::test]
+async fn db_storage_lists_all_exact_session_claims_across_recipients() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .expect("open in-memory storage");
+    let session = SmSessionId::new("shared-session");
+    let other_session = SmSessionId::new("other-session");
+    let alice_sequenced = transient_row("alice@example.com", "alice sequenced");
+    let alice_unsequenced = transient_row("alice@example.com", "alice unsequenced");
+    let bob_duplicate = transient_row("bob@example.com", "bob duplicate sequence");
+    let carol_other = transient_row("carol@example.com", "other session");
+    let alice_sequenced_id = alice_sequenced.id.clone();
+    let alice_unsequenced_id = alice_unsequenced.id.clone();
+    let bob_duplicate_id = bob_duplicate.id.clone();
+    let carol_other_id = carol_other.id.clone();
+
+    for row in [
+        alice_sequenced,
+        alice_unsequenced,
+        bob_duplicate,
+        carol_other,
+    ] {
+        storage.insert(row).await.expect("seed pending row");
+    }
+    assert_eq!(
+        storage
+            .claim_for_session(&bare("alice@example.com"), &session)
+            .await
+            .expect("claim Alice rows")
+            .len(),
+        2
+    );
+    assert_eq!(
+        storage
+            .claim_for_session(&bare("bob@example.com"), &session)
+            .await
+            .expect("claim Bob row")
+            .len(),
+        1
+    );
+    storage
+        .claim_for_session(&bare("carol@example.com"), &other_session)
+        .await
+        .expect("claim unrelated row");
+    storage
+        .record_pushed_at(&alice_sequenced_id, 7)
+        .await
+        .expect("sequence Alice row");
+    storage
+        .record_pushed_at(&bob_duplicate_id, 7)
+        .await
+        .expect("sequence Bob row");
+
+    let rows = storage
+        .list_claimed_by_session(&session)
+        .await
+        .expect("list exact global session claims");
+
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().any(|row| row.id == alice_sequenced_id));
+    assert!(rows.iter().any(|row| row.id == alice_unsequenced_id));
+    assert!(rows.iter().any(|row| row.id == bob_duplicate_id));
+    assert!(rows.iter().all(|row| row.id != carol_other_id));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.outbound_sequence == Some(7))
+            .count(),
+        2,
+        "duplicate sequence links must remain visible"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.outbound_sequence.is_none())
+            .count(),
+        1,
+        "unsequenced links must remain visible"
+    );
+}
+
+#[tokio::test]
 async fn db_storage_claim_batch_first_caller_wins_across_sessions() {
     // Issue #1220 review: the SQL claim's outer `flushed_in_session IS NULL`
     // guard makes it first-caller-wins even under concurrent claims of the
@@ -1849,6 +1928,12 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
         }
         async fn list(&self, recipient: &BareJid) -> Result<Vec<PendingRow>, PendingStorageError> {
             self.inner.list(recipient).await
+        }
+        async fn list_claimed_by_session(
+            &self,
+            session: &waddle_xmpp::pending_delivery::SmSessionId,
+        ) -> Result<Vec<PendingRow>, PendingStorageError> {
+            self.inner.list_claimed_by_session(session).await
         }
         async fn claim_for_session(
             &self,

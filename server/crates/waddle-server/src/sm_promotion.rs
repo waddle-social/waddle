@@ -92,8 +92,7 @@ pub async fn promote_session_unacked(
     // a pending-delivery row is an impossible cross-store state. Classify the
     // durable relation before pruning the barrier so an unreadable, duplicate,
     // or present link retains both records for reconciliation.
-    let barrier_pending_links =
-        barrier::load_pending_links(session, pending_storage, &recipient_bare).await;
+    let barrier_pending_links = barrier::load_pending_links(session, pending_storage).await;
 
     // Round-2 review R2: select the sequences a recently applied
     // tombstone matches, using the same shared matcher as the

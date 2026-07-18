@@ -194,9 +194,8 @@ pub struct PersistedSession {
 /// but they are server-internal causal markers rather than application
 /// delivery. If a recovered session expires, Q6 discards these rows instead
 /// of promoting them into offline delivery.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmUnackedStanzaPurpose {
-    #[default]
     Application,
     ResumeBarrier,
 }

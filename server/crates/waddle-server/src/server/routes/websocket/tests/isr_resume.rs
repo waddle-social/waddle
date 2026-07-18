@@ -28,7 +28,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use waddle_xmpp::isr::{InMemoryIsrTokenStore, IsrTokenStore, ISR_NS, ISR_PINNED_MECHANISM};
 use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::stream_management::{DetachedSession, SmResume, SmSessionRegistry};
+use waddle_xmpp::stream_management::{
+    persistence::SmUnackedStanzaPurpose, DetachedSession, SmResume, SmSessionRegistry,
+};
 
 struct ControlledPersistIsrTokenStore {
     inner: waddle_xmpp::isr::InMemoryIsrTokenStore,
@@ -243,7 +245,7 @@ fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
             sequence: 5,
             stanza_xml: "<message id='m5'/>".to_string(),
             original_receipt_at: chrono::Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         }],
         max_resume_time: Some(300),
         detached_at: std::time::Instant::now(),
@@ -272,7 +274,7 @@ fn seeded_detached_session_for_persistence(stream_id: &str, jid: &FullJid) -> De
             sequence: 5,
             stanza_xml: "<message xmlns='jabber:client' id='m5'/>".to_string(),
             original_receipt_at: chrono::Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         }],
         ..seeded_detached_session(stream_id, jid)
     }

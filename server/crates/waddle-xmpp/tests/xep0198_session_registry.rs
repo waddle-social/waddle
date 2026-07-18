@@ -11,7 +11,7 @@ use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
-    SmPersistenceStorage,
+    SmPersistenceStorage, SmUnackedStanzaPurpose,
 };
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
@@ -240,7 +240,7 @@ impl SmPersistenceStorage for MislabelingStore {
                 sequence: 99,
                 stanza: Box::new(chat_stanza(&to, "leaked secret")),
                 original_receipt_at: chrono::Utc::now(),
-                purpose: Default::default(),
+                purpose: SmUnackedStanzaPurpose::Application,
             });
         }
         Ok(groups)
@@ -267,7 +267,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
                 "<message xmlns='jabber:client' id='m12'><body>alice's own</body></message>"
                     .to_string(),
             original_receipt_at: chrono::Utc::now(),
-            purpose: Default::default(),
+            purpose: SmUnackedStanzaPurpose::Application,
         });
     registry.store_session(session).await.expect("store");
 
@@ -890,7 +890,7 @@ async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
         stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
             .to_string(),
         original_receipt_at: t1,
-        purpose: Default::default(),
+        purpose: SmUnackedStanzaPurpose::Application,
     });
     registry.store_session(session).await.expect("store");
 
@@ -986,17 +986,25 @@ fn late_drain_message_xml(id: &str, body: &str) -> String {
 
 #[test]
 fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
-    use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
-
     let mut session = detached_session("stream-exact-replay", "alice@example.com/laptop");
     let receipt = chrono::Utc::now();
     let xml = late_drain_message_xml("same", "same");
 
     session
-        .record_detached_outbound_at(12, xml.clone(), receipt)
+        .record_detached_outbound_at(
+            12,
+            xml.clone(),
+            receipt,
+            SmUnackedStanzaPurpose::Application,
+        )
         .expect("first insert");
     session
-        .record_detached_outbound_at(12, xml.clone(), receipt)
+        .record_detached_outbound_at(
+            12,
+            xml.clone(),
+            receipt,
+            SmUnackedStanzaPurpose::Application,
+        )
         .expect("exact retry is idempotent");
     assert_eq!(session.unacked_stanzas.len(), 1);
 
@@ -1005,15 +1013,21 @@ fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
             12,
             late_drain_message_xml("different", "different"),
             receipt,
+            SmUnackedStanzaPurpose::Application,
         )
         .is_err());
     assert!(session
-        .record_detached_outbound_at(12, xml.clone(), receipt + chrono::Duration::seconds(1))
+        .record_detached_outbound_at(
+            12,
+            xml.clone(),
+            receipt + chrono::Duration::seconds(1),
+            SmUnackedStanzaPurpose::Application,
+        )
         .is_err());
 
     session.unacked_stanzas[0].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     assert!(session
-        .record_detached_outbound_at(12, xml, receipt)
+        .record_detached_outbound_at(12, xml, receipt, SmUnackedStanzaPurpose::Application)
         .is_err());
 }
 

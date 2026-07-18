@@ -5,6 +5,7 @@ use xmpp_parsers::presence::Show;
 use super::core::InMemorySmSessionRegistry;
 use super::session::DetachedSession;
 use super::SmRegistryError;
+use crate::stream_management::persistence::SmUnackedStanzaPurpose;
 use crate::Stanza;
 
 /// Outcome of probing whether a full JID still owns resumable XEP-0198 state.
@@ -142,7 +143,11 @@ impl InMemorySmSessionRegistry {
             &stream_id,
             |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
             |session| {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                session.record_detached_outbound(
+                    stanza_xml,
+                    original_receipt_at,
+                    SmUnackedStanzaPurpose::Application,
+                );
                 Ok(())
             },
         )
@@ -165,7 +170,11 @@ impl InMemorySmSessionRegistry {
             &stream_id,
             |session| !session.is_expired() && session.blocklist_interested && session.jid == *jid,
             |session| {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                session.record_detached_outbound(
+                    stanza_xml,
+                    original_receipt_at,
+                    SmUnackedStanzaPurpose::Application,
+                );
                 Ok(())
             },
         )
@@ -187,7 +196,11 @@ impl InMemorySmSessionRegistry {
             &stream_id,
             |session| !session.is_expired() && session.jid == *jid,
             |session| {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                session.record_detached_outbound(
+                    stanza_xml,
+                    original_receipt_at,
+                    SmUnackedStanzaPurpose::Application,
+                );
                 Ok(())
             },
         )
@@ -252,7 +265,11 @@ impl InMemorySmSessionRegistry {
             stream_id,
             |session| !session.is_expired(),
             |session| {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                session.record_detached_outbound(
+                    stanza_xml,
+                    original_receipt_at,
+                    SmUnackedStanzaPurpose::Application,
+                );
                 Ok(())
             },
         )
@@ -271,7 +288,12 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired(),
             |session| {
                 session
-                    .record_detached_outbound_at(sequence, stanza_xml, original_receipt_at)
+                    .record_detached_outbound_at(
+                        sequence,
+                        stanza_xml,
+                        original_receipt_at,
+                        SmUnackedStanzaPurpose::Application,
+                    )
                     .map_err(SmRegistryError::from)
             },
         )
@@ -479,7 +501,11 @@ impl InMemorySmSessionRegistry {
             &stream_id,
             |session| !session.is_expired() && session.presence_available && session.jid == *jid,
             |session| {
-                session.record_detached_outbound(stanza_xml, original_receipt_at);
+                session.record_detached_outbound(
+                    stanza_xml,
+                    original_receipt_at,
+                    SmUnackedStanzaPurpose::Application,
+                );
                 Ok(())
             },
         )

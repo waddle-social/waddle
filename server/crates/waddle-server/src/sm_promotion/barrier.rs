@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jid::BareJid;
 use tracing::debug;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::{PendingRowId, SmSessionId};
@@ -33,21 +32,20 @@ pub(crate) fn session_has_unclassified_barrier(session: &DetachedSession) -> boo
 pub(super) async fn load_pending_links(
     session: &DetachedSession,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
-    recipient: &BareJid,
 ) -> PendingLinks {
     if !session_has_unclassified_barrier(session) {
         return PendingLinks::Known(HashMap::new());
     }
 
-    match pending_storage.list(recipient).await {
+    let source_session_id = SmSessionId::new(session.stream_id.clone());
+    match pending_storage
+        .list_claimed_by_session(&source_session_id)
+        .await
+    {
         Ok(rows) => {
-            let source_session_id = SmSessionId::new(session.stream_id.clone());
             let mut links = HashMap::<u32, Vec<PendingRowId>>::new();
             let mut ambiguous = false;
-            for row in rows
-                .into_iter()
-                .filter(|row| row.flushed_in_session.as_ref() == Some(&source_session_id))
-            {
+            for row in rows {
                 if let Some(sequence) = row.outbound_sequence {
                     links.entry(sequence).or_default().push(row.id);
                 } else {

@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use waddle_xmpp::{
     protocol::{Blocklist, ConnectionPhase, InboundEvent, InboundFrame, StanzaDispatcher},
     registry::OutboundStanza,
-    stream_management::SM_NS,
+    stream_management::{persistence::SmUnackedStanzaPurpose, SM_NS},
     Stanza,
 };
 use xmpp_parsers::message::MessageType as XmppMessageType;
@@ -161,13 +161,13 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
                     sequence: 9,
                     stanza_xml: "<message id='m9'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
-                    purpose: Default::default(),
+                    purpose: SmUnackedStanzaPurpose::Application,
                 },
                 DetachedUnackedStanza {
                     sequence: 10,
                     stanza_xml: "<message id='m10'/>".to_string(),
                     original_receipt_at: chrono::Utc::now(),
-                    purpose: Default::default(),
+                    purpose: SmUnackedStanzaPurpose::Application,
                 },
             ],
             max_resume_time: Some(300),
