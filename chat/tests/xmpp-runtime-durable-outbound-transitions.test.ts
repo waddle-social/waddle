@@ -342,14 +342,14 @@ describe("durable outbound transitions", () => {
     persistClaimedTransition(
       account,
       NOW + 2,
-      prepared("same-owner-other-generation"),
-      claimRequest(owner, "other-generation-claim", "fresh-fallback", 6),
+      prepared("same-owner-other-phase"),
+      claimRequest(owner, "other-phase-claim", "sending", 7),
     );
     persistClaimedTransition(
       account,
       NOW + 2,
-      prepared("same-owner-other-phase"),
-      claimRequest(owner, "other-phase-claim", "sending", 7),
+      prepared("same-owner-other-generation"),
+      claimRequest(owner, "other-generation-claim", "fresh-fallback", 6),
     );
     const foreign = activate(account, "foreign-owner", "foreign-instance");
     persistClaimedTransition(
