@@ -252,9 +252,12 @@ impl ConnectionRegistry {
 
         // Deliberately NOT counted in `waddle.messages.delivered`: the only
         // production caller is the clustered route bridge on the socket
-        // node, and the message was already counted on the UserActor-owner
-        // node when it entered the relay pump — counting here would double
-        // every cross-node delivery.
+        // node, and cross-node deliveries are counted exactly once on the
+        // UserActor-owner node — pump-relayed frames at relay-channel
+        // entry (`try_deliver`/`try_send_to`), direct remote-resource
+        // frames on the socket node's Delivered acknowledgment in
+        // `deliver_registered_remote_resource_with_registration`.
+        // Counting here would double every cross-node delivery.
         match sender.try_send(outbound) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
