@@ -576,6 +576,71 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
+async fn http_request_metrics_use_route_template_and_status_class() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let app = test_app().await;
+    let raw_path = "/api/files/nonexistent/private-filename.txt";
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(raw_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        metrics.histogram_count(
+            "http.server.request.duration",
+            &[
+                ("route", "/api/files/{slot_id}/{filename}"),
+                ("status_class", "4xx"),
+            ],
+        ),
+        Some(1),
+    );
+    assert_eq!(
+        metrics.histogram_count(
+            "http.server.request.duration",
+            &[("route", raw_path), ("status_class", "4xx")],
+        ),
+        Some(0),
+        "raw request paths must never become metric labels",
+    );
+    assert_eq!(
+        metrics.metric_unit("http.server.request.duration"),
+        Some("s".to_string()),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header(header::ORIGIN, "https://waddle.chat")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        metrics.histogram_count(
+            "http.server.request.duration",
+            &[("route", "/health"), ("status_class", "2xx")],
+        ),
+        Some(1),
+        "CORS preflights must be observed like every other matched request",
+    );
+}
+
+#[tokio::test]
 async fn test_healthz_alias_endpoint() {
     let app = test_app().await;
 
