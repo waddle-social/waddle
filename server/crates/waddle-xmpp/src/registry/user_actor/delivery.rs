@@ -51,9 +51,13 @@ impl UserActor {
             prometheus::increment_broadcast_not_connected();
             return BroadcastOutcome::NotConnected;
         };
+        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&outbound.stanza);
         match entry.sender.try_send(outbound) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
+                if let Some(kind) = delivered_kind {
+                    crate::telemetry::messages::record_delivered_message(kind);
+                }
                 BroadcastOutcome::Delivered
             }
             Err(TrySendError::Full(_)) => {

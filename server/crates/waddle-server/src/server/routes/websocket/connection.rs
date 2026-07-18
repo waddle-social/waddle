@@ -34,6 +34,7 @@ pub fn router(state: Arc<WebSocketState>) -> Router {
 /// Upgrades HTTP connection to WebSocket and handles XMPP framing.
 async fn xmpp_websocket_handler(
     ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
     // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
@@ -50,6 +51,29 @@ async fn xmpp_websocket_handler(
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     info!("XMPP WebSocket connection request");
+
+    // #1326 phase A: the browser cannot set headers on a WebSocket
+    // upgrade, so the client's connect trace arrives as a
+    // `traceparent` query parameter. Emit a short-lived
+    // `xmpp.connection.established` span carrying an OTel span LINK to
+    // the client's context plus `client.trace_id`, so the browser's
+    // `xmpp.connect` span and this server session join in Tempo.
+    //
+    // Deliberately NOT instrumenting the whole connection future: a
+    // span wrapping a connection that lives for hours would only
+    // export at close and would pull every `xmpp.stanza.dispatch`
+    // span on the session into one giant trace (Tempo truncates
+    // those). Dispatch spans stay independent roots, correlated via
+    // their `xmpp.resource`/`user` attributes instead.
+    if let Some(client_context) = crate::server::trace::client_trace_context_from_query(uri.query())
+    {
+        let established_span = tracing::info_span!(
+            "xmpp.connection.established",
+            client.trace_id = %client_context.trace_id(),
+        );
+        tracing_opentelemetry::OpenTelemetrySpanExt::add_link(&established_span, client_context);
+        let _enter = established_span.enter();
+    }
 
     ws.protocols(["xmpp"])
         .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))

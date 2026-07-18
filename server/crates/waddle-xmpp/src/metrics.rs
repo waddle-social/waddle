@@ -6,9 +6,29 @@
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::KeyValue;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
 static METER: OnceLock<Meter> = OnceLock::new();
+
+/// Per-pod running total of MUC occupants (nicks) across every active
+/// room on this process. Occupancy changes happen inside independent
+/// per-room actors, so the pod-wide gauge value cannot be read cheaply
+/// from any single room; instead each occupancy change contributes a
+/// signed delta here and republishes the resulting total. See
+/// [`adjust_muc_occupant_total`].
+static MUC_OCCUPANT_TOTAL: AtomicI64 = AtomicI64::new(0);
+
+/// Per-pod count of active MUC rooms, published by the room-registry
+/// actor (which serializes its own room-map mutations) after every
+/// insert/remove. Read by the observable rooms gauge.
+static MUC_ROOMS_ACTIVE: AtomicI64 = AtomicI64::new(0);
+
+/// Per-pod count of registered connections, adjusted with ±1 deltas at
+/// exactly the seams that bump the legacy connected-users counter
+/// (register, unregister, and stale-channel eviction). Read by the
+/// observable connections gauge.
+static CONNECTIONS_ACTIVE: AtomicI64 = AtomicI64::new(0);
 
 fn meter() -> &'static Meter {
     METER.get_or_init(|| opentelemetry::global::meter("waddle-xmpp"))
@@ -58,31 +78,50 @@ pub fn muc_presence_events() -> Counter<u64> {
 // Gauges (Current State)
 // ============================================================================
 
-/// Gauge for active XMPP connections.
-pub fn connections_active() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.connections.active")
-        .with_description("Current number of active XMPP connections")
-        .with_unit("connection")
-        .build()
-}
-
-/// Gauge for active MUC rooms.
-pub fn muc_rooms_active() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.muc.rooms.active")
-        .with_description("Current number of active MUC rooms")
-        .with_unit("room")
-        .build()
-}
-
-/// Gauge for MUC occupants.
-pub fn muc_occupants() -> Gauge<i64> {
-    meter()
-        .i64_gauge("xmpp.muc.occupants")
-        .with_description("Current number of MUC occupants")
-        .with_unit("user")
-        .build()
+/// The three pod-wide occupancy gauges are **observable**: their values
+/// live in process atomics mutated at the state-change seams, and the
+/// SDK reads the atomics at collection time via callbacks. A callback
+/// read cannot interleave with another writer's `record` the way a
+/// synchronous last-value gauge can (write A computes 1, write B
+/// computes and records 2, write A records 1 → stale forever), so the
+/// exported sample always reflects the latest total.
+///
+/// Registered lazily on the first state change (create-at-increment,
+/// same rule as the macros); the instruments are held here so the
+/// callbacks stay alive for the process lifetime.
+fn ensure_pod_gauges() {
+    static GAUGES: OnceLock<[opentelemetry::metrics::ObservableGauge<i64>; 3]> = OnceLock::new();
+    GAUGES.get_or_init(|| {
+        [
+            meter()
+                .i64_observable_gauge("xmpp.connections.active")
+                .with_description("Current number of active XMPP connections")
+                .with_unit("connection")
+                .with_callback(|observer| {
+                    observer.observe(
+                        CONNECTIONS_ACTIVE.load(Ordering::Relaxed),
+                        &[KeyValue::new("transport", "websocket")],
+                    );
+                })
+                .build(),
+            meter()
+                .i64_observable_gauge("xmpp.muc.rooms.active")
+                .with_description("Current number of active MUC rooms")
+                .with_unit("room")
+                .with_callback(|observer| {
+                    observer.observe(MUC_ROOMS_ACTIVE.load(Ordering::Relaxed), &[]);
+                })
+                .build(),
+            meter()
+                .i64_observable_gauge("xmpp.muc.occupants")
+                .with_description("Current number of MUC occupants")
+                .with_unit("user")
+                .with_callback(|observer| {
+                    observer.observe(MUC_OCCUPANT_TOTAL.load(Ordering::Relaxed), &[]);
+                })
+                .build(),
+        ]
+    });
 }
 
 // ============================================================================
@@ -183,9 +222,22 @@ pub fn record_auth_attempt(mechanism: &str, success: bool) {
     );
 }
 
-/// Record connection count change.
-pub fn record_connection_count(count: i64, transport: &str) {
-    connections_active().record(count, &[KeyValue::new("transport", transport.to_string())]);
+/// Apply a ±1 delta to the per-pod connection count. Call `+1` exactly
+/// where the legacy connected-users counter increments (a genuinely new
+/// registration) and `-1` where it decrements (unregister or
+/// stale-channel eviction), so both stay in lockstep.
+pub fn adjust_connections_active(delta: i64) {
+    CONNECTIONS_ACTIVE.fetch_add(delta, Ordering::Relaxed);
+    ensure_pod_gauges();
+}
+
+/// Publish the current number of active MUC rooms on this pod. Called by
+/// the room-registry actor after every room-map mutation — the actor
+/// serializes those, so a plain store is race-free. No attributes: the
+/// room JID is unbounded and never a metric dimension.
+pub fn publish_muc_rooms_active(count: i64) {
+    MUC_ROOMS_ACTIVE.store(count, Ordering::Relaxed);
+    ensure_pod_gauges();
 }
 
 /// Record stanza processing latency in milliseconds.
@@ -278,20 +330,31 @@ pub fn record_actor_restart(actor: &str, reason: &str) {
     );
 }
 
-/// Record a MUC presence event (join or leave).
-pub fn record_muc_presence(event_type: &str, room: &str) {
-    muc_presence_events().add(
-        1,
-        &[
-            KeyValue::new("event", event_type.to_string()),
-            KeyValue::new("room", room.to_string()),
-        ],
-    );
+/// Record one MUC groupchat message accepted for room fanout.
+pub fn record_muc_message() {
+    muc_messages().add(1, &[]);
 }
 
-/// Update the MUC occupants gauge.
-pub fn record_muc_occupant_count(count: i64, room: &str) {
-    muc_occupants().record(count, &[KeyValue::new("room", room.to_string())]);
+/// Record a MUC presence event (join or leave).
+///
+/// `event_type` is a bounded label (`"join"` / `"leave"`); the room JID
+/// is deliberately not an attribute — it is unbounded and belongs on
+/// spans/logs per the cardinality budget (`telemetry` module docs).
+pub fn record_muc_presence(event_type: &str) {
+    muc_presence_events().add(1, &[KeyValue::new("event", event_type.to_string())]);
+}
+
+/// Apply a signed occupancy `delta` to the per-pod running total. Call
+/// with `+1` when a join adds a brand-new occupant, `-1` when a leave
+/// removes an occupant's last session, and `0` for multi-session joins /
+/// partial leaves that leave the occupant set unchanged (pass the
+/// pre/post occupant-count diff and this holds automatically). The
+/// observable occupants gauge reads the atomic at collection time, so
+/// concurrent adjustments from independent room actors can never publish
+/// a stale total.
+pub fn adjust_muc_occupant_total(delta: i64) {
+    MUC_OCCUPANT_TOTAL.fetch_add(delta, Ordering::Relaxed);
+    ensure_pod_gauges();
 }
 
 // ============================================================================
@@ -321,6 +384,112 @@ pub fn record_extension_enrichment(latency_ms: f64, embeds: u64) {
     extension_enrichment_latency().record(latency_ms, &[]);
     if embeds > 0 {
         extension_embeds_added().add(embeds, &[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::test_support;
+
+    #[tokio::test]
+    async fn record_muc_presence_emits_bounded_event_label() {
+        let guard = test_support::acquire().await;
+        record_muc_presence("join");
+        record_muc_presence("join");
+        record_muc_presence("leave");
+
+        assert_eq!(
+            guard.counter_sum("xmpp.muc.presence", &[("event", "join")]),
+            Some(2),
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.muc.presence", &[("event", "leave")]),
+            Some(1),
+        );
+    }
+
+    #[tokio::test]
+    async fn adjust_muc_occupant_total_publishes_running_total_gauge() {
+        let guard = test_support::acquire().await;
+        // A brand-new occupant, then a multi-session join (delta 0), then
+        // a leave that removed the last session.
+        adjust_muc_occupant_total(1);
+        adjust_muc_occupant_total(0);
+        adjust_muc_occupant_total(-1);
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.muc.occupants".to_string()),
+            "occupants gauge must export after an adjustment",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_muc_rooms_active_emits_gauge() {
+        let guard = test_support::acquire().await;
+        publish_muc_rooms_active(3);
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.muc.rooms.active".to_string()),
+            "rooms-active gauge must export after a publication",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_connection_count_emits_transport_gauge() {
+        let guard = test_support::acquire().await;
+        adjust_connections_active(7);
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.connections.active".to_string()),
+            "connections gauge must export after an adjustment",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_auth_attempt_labels_outcome() {
+        let guard = test_support::acquire().await;
+        record_auth_attempt("SCRAM-SHA-256", true);
+        record_auth_attempt("SCRAM-SHA-256", false);
+
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.auth.attempts",
+                &[("mechanism", "SCRAM-SHA-256"), ("result", "success")],
+            ),
+            Some(1),
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.auth.attempts",
+                &[("mechanism", "SCRAM-SHA-256"), ("result", "failure")],
+            ),
+            Some(1),
+        );
+    }
+
+    #[tokio::test]
+    async fn record_extension_enrichment_counts_only_added_embeds() {
+        let guard = test_support::acquire().await;
+        // A zero-embed pass records latency but must not touch the embed
+        // counter; a two-embed pass adds two.
+        record_extension_enrichment(1.5, 0);
+        record_extension_enrichment(2.0, 2);
+
+        assert_eq!(
+            guard.counter_sum("xmpp.extensions.embeds.added", &[]),
+            Some(2),
+        );
+        assert_eq!(
+            guard.histogram_count("xmpp.extensions.enrichment.latency", &[]),
+            Some(2),
+        );
     }
 }
 

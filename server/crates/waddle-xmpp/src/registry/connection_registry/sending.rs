@@ -194,9 +194,13 @@ impl ConnectionRegistry {
             }
         };
 
+        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&stanza);
         match sender.try_send(OutboundStanza::new(stanza)) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
+                if let Some(kind) = delivered_kind {
+                    crate::telemetry::messages::record_delivered_message(kind);
+                }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -246,6 +250,14 @@ impl ConnectionRegistry {
             }
         };
 
+        // Deliberately NOT counted in `waddle.messages.delivered`: the only
+        // production caller is the clustered route bridge on the socket
+        // node, and cross-node deliveries are counted exactly once on the
+        // UserActor-owner node — pump-relayed frames at relay-channel
+        // entry (`try_deliver`/`try_send_to`), direct remote-resource
+        // frames on the socket node's Delivered acknowledgment in
+        // `deliver_registered_remote_resource_with_registration`.
+        // Counting here would double every cross-node delivery.
         match sender.try_send(outbound) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
@@ -277,6 +289,7 @@ impl ConnectionRegistry {
             .remove_if(jid, |_, entry| entry.sender.is_closed());
         if removed.is_some() {
             prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
@@ -298,6 +311,7 @@ impl ConnectionRegistry {
         });
         if removed.is_some() {
             prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }

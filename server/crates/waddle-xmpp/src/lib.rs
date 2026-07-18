@@ -45,6 +45,7 @@ pub mod registry;
 pub mod roster;
 pub mod routing;
 pub mod stream_management;
+pub mod telemetry;
 pub mod tombstone;
 pub mod xep;
 

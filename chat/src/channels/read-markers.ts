@@ -6,6 +6,7 @@ import { findMessageById } from "@/lib/message-ids";
 import { roomKey, setLastSeen } from "@/lib/last-seen-store";
 import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { useReadReceiptPreference } from "@/preferences/read-receipts";
+import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
 const NS_STANZA_ID = "urn:xmpp:sid:0";
 
@@ -77,7 +78,12 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
     if (sendDisplayedMarkers.value) {
       void client
         .sendDisplayed(spaceId, channelId, stanzaId, thread)
-        .catch(() => undefined);
+        .catch(() => reportDisplayedMarkerFailure({
+          direction: "send",
+          kind: "room",
+          reason: "send-failed",
+          roundTripMs: elapsedSince(target.createdAt),
+        }));
     }
     // XEP-0490 §3 publish — MUC stanza-id by= room JID. Only fires
     // when the room actually stamped the message (XEP-0359 §3.4
@@ -100,4 +106,9 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
     markDisplayed,
     persistLastSeen,
   };
+}
+
+function elapsedSince(createdAt: string): number | null {
+  const startedAt = Date.parse(createdAt);
+  return Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null;
 }

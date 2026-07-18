@@ -828,15 +828,26 @@ async fn interpret_with_depth(
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
-    if deps.extension_manager.is_none() {
+    // Observability (#1320): time the enrichment pass and count the
+    // embeds it adds as the payload-count delta before/after.
+    let started = std::time::Instant::now();
+    let payloads_before = message.payloads.len();
+    let enriched = if deps.extension_manager.is_none() {
         debug!(
             "RequestEnrichment: no extension_manager in Deps; \
              feeding original message back unchanged"
         );
-        return message;
-    }
-    debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
-    message
+        message
+    } else {
+        debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
+        message
+    };
+    let embeds_added = enriched.payloads.len().saturating_sub(payloads_before) as u64;
+    waddle_xmpp::metrics::record_extension_enrichment(
+        started.elapsed().as_secs_f64() * 1000.0,
+        embeds_added,
+    );
+    enriched
 }
 
 #[cfg(test)]

@@ -1,4 +1,13 @@
 use super::transport_xml::{element_to_xml, sasl_failure_xml, sasl_success_xml};
+
+/// Count the failed attempt on `xmpp.auth.attempts` (#1320) and build
+/// the SASL failure frame. Every failure return in this module routes
+/// through here so early-step rejections (bad base64, unknown user,
+/// malformed first message) are not invisible to the counter.
+fn sasl_failure_counted(mechanism: &'static str) -> String {
+    waddle_xmpp::metrics::record_auth_attempt(mechanism, false);
+    sasl_failure_xml("not-authorized")
+}
 use super::*;
 
 /// Handle SASL OAUTHBEARER authentication.
@@ -14,7 +23,7 @@ pub(super) async fn handle_sasl_oauthbearer(
         Ok(data) => data,
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to decode base64 data");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("OAUTHBEARER")];
         }
     };
 
@@ -22,11 +31,11 @@ pub(super) async fn handle_sasl_oauthbearer(
         Ok(OAuthBearerResult::Credentials(credentials)) => credentials.token,
         Ok(OAuthBearerResult::DiscoveryRequest) => {
             warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("OAUTHBEARER")];
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("OAUTHBEARER")];
         }
     };
 
@@ -48,7 +57,7 @@ pub(super) async fn handle_sasl_oauthbearer(
                             error = %e,
                             "SASL OAUTHBEARER: failed to build JID from session localpart",
                         );
-                        return vec![sasl_failure_xml("not-authorized")];
+                        return vec![sasl_failure_counted("OAUTHBEARER")];
                     }
                 };
 
@@ -56,7 +65,7 @@ pub(super) async fn handle_sasl_oauthbearer(
                 Ok(jid) => jid,
                 Err(e) => {
                     warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
-                    return vec![sasl_failure_xml("not-authorized")];
+                    return vec![sasl_failure_counted("OAUTHBEARER")];
                 }
             };
 
@@ -69,11 +78,12 @@ pub(super) async fn handle_sasl_oauthbearer(
             *authenticated_session = Some(session);
             *phase = ConnectionPhase::authenticated(&full_jid);
 
+            waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", true);
             vec![sasl_success_xml()]
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER authentication failed");
-            vec![sasl_failure_xml("not-authorized")]
+            vec![sasl_failure_counted("OAUTHBEARER")]
         }
     }
 }
@@ -95,7 +105,7 @@ pub(super) async fn handle_sasl_scram_client_first(
         Ok(data) => data,
         Err(e) => {
             warn!(error = %e, "SCRAM: failed to decode base64 client-first");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -103,7 +113,7 @@ pub(super) async fn handle_sasl_scram_client_first(
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "SCRAM: invalid UTF-8 in client-first");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -115,7 +125,7 @@ pub(super) async fn handle_sasl_scram_client_first(
             Ok(result) => result.username,
             Err(e) => {
                 warn!(error = %e, "SCRAM: failed to parse client-first");
-                return vec![sasl_failure_xml("not-authorized")];
+                return vec![sasl_failure_counted("SCRAM-SHA-256")];
             }
         }
     };
@@ -131,11 +141,11 @@ pub(super) async fn handle_sasl_scram_client_first(
         Ok(Some(creds)) => creds,
         Ok(None) => {
             warn!(username = %username, "SCRAM: user not found");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
         Err(e) => {
             warn!(error = %e, username = %username, "SCRAM: credential lookup failed");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -146,7 +156,7 @@ pub(super) async fn handle_sasl_scram_client_first(
         Ok(result) => result,
         Err(e) => {
             warn!(error = %e, "SCRAM: failed to process client-first with stored params");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -182,7 +192,7 @@ pub(super) fn handle_sasl_scram_response(
         Ok(data) => data,
         Err(e) => {
             warn!(error = %e, "SCRAM: failed to decode base64 client-final");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -190,19 +200,22 @@ pub(super) fn handle_sasl_scram_response(
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "SCRAM: invalid UTF-8 in client-final");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
     let server_final = match scram.process_client_final(&client_final) {
-        Ok(result) => result,
+        Ok(result) => {
+            waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
+            result
+        }
         Err(e) => {
             warn!(
                 error = %e,
                 username = %scram.username(),
                 "SCRAM-SHA-256 authentication failed"
             );
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -212,7 +225,7 @@ pub(super) fn handle_sasl_scram_response(
         Ok(jid) => jid,
         Err(e) => {
             warn!(error = %e, jid = %bare_jid_str, "SCRAM: JID construction failed");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 
@@ -220,7 +233,7 @@ pub(super) fn handle_sasl_scram_response(
         Ok(jid) => jid,
         Err(e) => {
             warn!(error = %e, "SCRAM: bare JID parse failed");
-            return vec![sasl_failure_xml("not-authorized")];
+            return vec![sasl_failure_counted("SCRAM-SHA-256")];
         }
     };
 

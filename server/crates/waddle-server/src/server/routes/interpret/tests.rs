@@ -2464,6 +2464,7 @@ async fn enrichment_request_without_extension_manager_fails_open_with_original_m
     // legacy fail-open contract (see `enrich_message` in the
     // legacy `message.rs` path).
     use waddle_xmpp::protocol::event::CallbackId;
+    let guard = waddle_xmpp::telemetry::test_support::acquire().await;
     let registry = ConnectionRegistry::new();
     let deps = Deps::registry_only(&registry);
 
@@ -2489,6 +2490,14 @@ async fn enrichment_request_without_extension_manager_fails_open_with_original_m
         }
         other => panic!("expected EnrichmentComplete, got {other:?}"),
     }
+
+    // #1320: every enrichment pass times itself, even the fail-open
+    // no-op path that adds zero embeds.
+    assert_eq!(
+        guard.histogram_count("xmpp.extensions.enrichment.latency", &[]),
+        Some(1),
+        "enrichment must record one latency sample per pass",
+    );
 }
 
 #[tokio::test]

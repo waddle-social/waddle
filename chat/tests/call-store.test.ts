@@ -4,16 +4,19 @@ import {
   $lastCallError,
   applyCallEvent,
   beginOutgoingCall,
+  callLifecycleTerminalForRemoteEnd,
   clearCallState,
   clearLastCallError,
   reduceCallState,
   reportCallError,
+  teardownSetupOutcome,
 } from "../src/lib/calls/call-store";
 import {
   clearDmCallActivities,
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
-import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const join: LiveKitJoin = {
@@ -407,6 +410,60 @@ describe("call-store reducer", () => {
   });
 });
 
+describe("call lifecycle terminal mapping", () => {
+  const incoming: CallState = {
+    phase: "incoming",
+    from: "alice@waddle.test/desktop",
+    sid: "c1",
+    media: audioVideo,
+  };
+  const active: CallState = {
+    phase: "active",
+    peer: "alice@waddle.test/desktop",
+    sid: "c1",
+    media: audioVideo,
+    join,
+    kind: "dm",
+  };
+  const terminate = (reason: string): CallEvent => ({
+    kind: "session-terminate",
+    from: "alice@waddle.test/desktop",
+    sid: "c1",
+    reason,
+  });
+
+  test.each([
+    ["failed-transport", "failed"],
+    ["incompatible-parameters", "failed"],
+    ["timeout", "timeout"],
+    ["decline", "declined"],
+    ["success", "proposed"],
+  ])("maps pre-active %s to setup outcome %s", (reason, setupOutcome) => {
+    expect(callLifecycleTerminalForRemoteEnd(incoming, terminate(reason), reason))
+      .toEqual({ setupOutcome });
+  });
+
+  test.each([
+    ["active", "accepted"],
+    ["incoming", "declined"],
+    // A torn-down pending group-call setup is a failed attempt, not a
+    // proposed one — greptile P1 on PR #1415.
+    ["muc-pending", "failed"],
+    ["outgoing", "proposed"],
+  ] as const)("teardown from %s reports setup outcome %s", (phase, setupOutcome) => {
+    expect(teardownSetupOutcome(phase)).toBe(setupOutcome);
+  });
+
+  test.each([
+    ["failed-transport", "error"],
+    ["timeout", "error"],
+    ["success", "peer-left"],
+  ])("maps active %s to end reason %s", (reason, endReason) => {
+    expect(callLifecycleTerminalForRemoteEnd(active, terminate(reason), reason))
+      .toEqual({ endReason });
+  });
+});
+
 describe("clearLastCallError", () => {
   test("clears the error without touching $callState", () => {
     // Pre-transition rejection scenario: a `beginMucCall` failure
@@ -414,11 +471,24 @@ describe("clearLastCallError", () => {
     // overkill here (it would emit a redundant state set);
     // `clearLastCallError` is the targeted helper.
     clearCallState();
+    const errors: Array<{ type?: string; context?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushError: (_error: Error, options?: { type?: string; context?: Record<string, string> }) => {
+          errors.push(options ?? {});
+        },
+      },
+    } as never);
     reportCallError(new Error("muc-call: transport missing @url"));
     expect($lastCallError.get()).toBe("muc-call: transport missing @url");
     const phaseBefore = $callState.get().phase;
     clearLastCallError();
     expect($lastCallError.get()).toBeNull();
     expect($callState.get().phase).toBe(phaseBefore);
+    expect(errors[0]).toEqual({
+      type: "call.operation",
+      context: expect.objectContaining({ recoverable: "true", detail: "call-operation" }),
+    });
+    __setFaroForTesting(null);
   });
 });

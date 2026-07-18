@@ -18,12 +18,21 @@ impl MucRoom {
     /// - The message is sent from the room JID with sender's nick as resource
     /// - All occupants receive the message (including the sender as echo)
     /// - Visitors in moderated rooms cannot send messages
-    #[instrument(skip(self, message), fields(room = %self.room_jid))]
+    #[instrument(
+        name = "xmpp.muc.fanout",
+        skip(self, message),
+        fields(
+            room = %self.room_jid,
+            message_id = message.id.as_ref().map(|id| id.0.as_str()).unwrap_or_default(),
+            recipients = tracing::field::Empty,
+        )
+    )]
     pub fn broadcast_message(
         &self,
         sender_nick: &str,
         message: &Message,
     ) -> Result<Vec<OutboundMucMessage>, XmppError> {
+        let fanout_started = std::time::Instant::now();
         let sender = self.occupants.get(sender_nick).ok_or_else(|| {
             XmppError::forbidden(Some(format!(
                 "You are not an occupant of {}",
@@ -60,6 +69,16 @@ impl MucRoom {
                 outbound.push(OutboundMucMessage::new(recipient_jid, broadcast_msg));
             }
         }
+
+        tracing::Span::current().record("recipients", outbound.len());
+        crate::metrics::record_muc_message();
+        crate::histogram_record!(
+            "waddle.muc.fanout.duration",
+            "ms",
+            "MUC fanout latency: groupchat broadcast accepted until the \
+             per-recipient outbound set is built.",
+            fanout_started.elapsed().as_secs_f64() * 1000.0,
+        );
 
         debug!(
             message_count = outbound.len(),

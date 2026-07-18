@@ -7,6 +7,7 @@ import { dmKey, setLastSeen } from "@/lib/last-seen-store";
 import { latestRemoteMessageIdFor } from "@/lib/timeline-state";
 import { useReadReceiptPreference } from "@/preferences/read-receipts";
 import { dmThreadRefFromMessage } from "@/dms/threading";
+import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
 // XEP-0333 chat-marker outbound state for the DM side. Mirrors
 // useChannelReadMarkers; uses the exact conversation identity as the
@@ -48,7 +49,12 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
       const scope = conversationScope?.(peerJid);
       void client
         .sendDmDisplayed(peerJid, targetId, dmThreadRefFromMessage(target), scope)
-        .catch(() => undefined);
+        .catch(() => reportDisplayedMarkerFailure({
+          direction: "send",
+          kind: "dm",
+          reason: "send-failed",
+          roundTripMs: elapsedSince(target.createdAt),
+        }));
     }
     // XEP-0490 §3 publish for the DM. The chat id is the peer bare
     // JID; `stanza_id_by` is the user's own server JID (carried on
@@ -72,4 +78,9 @@ export function useDmReadMarkers(deps: UseDmReadMarkersDeps) {
     markDisplayed,
     persistLastSeen,
   };
+}
+
+function elapsedSince(createdAt: string): number | null {
+  const startedAt = Date.parse(createdAt);
+  return Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null;
 }
