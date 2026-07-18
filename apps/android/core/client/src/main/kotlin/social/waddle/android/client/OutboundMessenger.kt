@@ -20,6 +20,7 @@ import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
+import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
@@ -126,7 +127,11 @@ internal class OutboundMessenger(
         if (expectedOwnerBareJid != null && expectedOwnerBareJid != owner) {
             return SendResult(WaddleSendMessageOutcome.Error)
         }
-        val draft = queuedMessage(owner, conversationJid, isGroupchat, body, extras, source)
+        val draft = queuedMessage(
+            owner = owner,
+            source = source,
+            payload = queuedPayload(conversationJid, isGroupchat, body, extras),
+        )
         val attempt = activeSession.attemptRef
         if (attempt == null) {
             val enqueue = persistQueueMutation {
@@ -175,19 +180,25 @@ internal class OutboundMessenger(
 
     private fun queuedMessage(
         owner: String,
+        source: DeliverySource,
+        payload: QueuedOutboundPayload,
+    ): QueuedOutboundDraft = QueuedOutboundDraft.create(
+        ownerBareJid = owner,
+        clientStanzaId = newClientStanzaId(),
+        enqueuedAtMillis = System.currentTimeMillis(),
+        payload = payload,
+        source = source,
+    )
+
+    private fun queuedPayload(
         conversationJid: String,
         isGroupchat: Boolean,
         body: String,
         extras: MessageSendExtras?,
-        source: DeliverySource,
-    ): QueuedOutboundDraft = QueuedOutboundDraft.create(
-        ownerBareJid = owner,
+    ): QueuedOutboundPayload = QueuedOutboundPayload(
         conversationJid = conversationJid,
         isGroupchat = isGroupchat,
         body = body,
-        clientStanzaId = newClientStanzaId(),
-        enqueuedAtMillis = System.currentTimeMillis(),
-        source = source,
         replyToId = extras?.replyToId,
         replyToAuthorJid = extras?.replyToAuthorJid,
         replyParentBody = extras?.replyParentBody,

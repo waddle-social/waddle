@@ -24,7 +24,6 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
 import social.waddle.client.ffi.WaddleChannel
-import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleSpace
 import social.waddle.client.ffi.WaddleTopology
 

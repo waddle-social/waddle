@@ -29,7 +29,6 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMamPage
 import social.waddle.android.client.testSessionInfo
-import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMamPage
 
 /**

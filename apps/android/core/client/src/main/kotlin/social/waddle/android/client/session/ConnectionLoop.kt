@@ -33,12 +33,13 @@ import social.waddle.android.client.SaslRetryDisposition
 import social.waddle.android.client.SessionReadyKind
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppEventRouter
-import social.waddle.android.client.retryDisposition
-import social.waddle.android.client.toXmppEvent
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toFfi
+import social.waddle.android.client.retryDisposition
+import social.waddle.android.client.toXmppEvent
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
@@ -52,26 +53,47 @@ import social.waddle.client.ffi.WaddleSaslCondition
  * back off via [ReconnectPolicy]; typed SASL failures decide whether this
  * login/config generation may retry.
  */
-internal data class ConnectionLoopCallbacks(
+internal data class ConnectionLoopConfiguration(
     val onReady: SessionReadyListener,
     val onAuthenticationStopped: suspend (SaslRetryDisposition) -> Unit,
-)
-
-internal data class ConnectionLoopSettings(
     val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     val connectTimeoutMillis: Long = ConnectionLoop.CONNECT_TIMEOUT_MILLIS,
 )
 
-internal class ConnectionLoop(
+internal class ConnectionAttemptClientFactory(
     private val clientFactory: ClientFactory,
-    private val networkSignal: NetworkSignal,
     private val sessionPrefs: SessionPrefs,
+) {
+    suspend fun resource(): String = RESOURCE_PREFIX + sessionPrefs.resourceSuffix()
+
+    fun create(
+        session: WaddleSessionInfo,
+        resource: String,
+        prepared: OutboundQueue.AttemptBootstrap,
+    ): WaddleClientInterface = clientFactory.create(
+        WaddleConfig(
+            serverUrl = session.xmppWebsocketUrl,
+            jid = session.jid,
+            accessToken = session.sessionId,
+            resource = resource,
+            resumeState = prepared.resumeSnapshot?.toFfi(),
+            deliveryAttempt = prepared.attempt.toFfi(),
+        ),
+    )
+
+    private companion object {
+        const val RESOURCE_PREFIX = "waddle-android-"
+    }
+}
+
+internal class ConnectionLoop(
+    private val attemptClientFactory: ConnectionAttemptClientFactory,
+    private val networkSignal: NetworkSignal,
     private val activeSession: ActiveSession,
     private val resume: ResumePersistence,
     private val router: XmppEventRouter,
     private val messenger: OutboundMessenger,
-    private val callbacks: ConnectionLoopCallbacks,
-    private val settings: ConnectionLoopSettings = ConnectionLoopSettings(),
+    private val configuration: ConnectionLoopConfiguration,
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -105,10 +127,8 @@ internal class ConnectionLoop(
             waitUntilOnline()
             if (!admissionsOpen) return
             _state.value = ConnectionState.Connecting
-            // The attempt touches DataStore (buildConfig reads the resume
-            // snapshot/resource suffix): IOException on a corrupt or full
-            // store must back off like any failed attempt — escaping this
-            // handler-less root coroutine would crash-loop the process.
+            // Reading the durable resource suffix can fail before the client
+            // exists; treat that like any other connect failure.
             val end = try {
                 runAttempt(session)
             } catch (cancellation: CancellationException) {
@@ -122,13 +142,13 @@ internal class ConnectionLoop(
                         condition = end.condition,
                         disposition = end.disposition,
                     )
-                    callbacks.onAuthenticationStopped(end.disposition)
+                    configuration.onAuthenticationStopped(end.disposition)
                     return
                 }
                 AttemptEnd.DroppedAfterReady -> attempt = 0
                 AttemptEnd.ConnectFailed -> Unit
             }
-            val delayMillis = settings.reconnectPolicy.delayMillisFor(attempt)
+            val delayMillis = configuration.reconnectPolicy.delayMillisFor(attempt)
             if (delayMillis == null) {
                 // Budget spent: park instead of abandoning the session.
                 // Web parity (armOnlineRecovery/connectWithFreshBudget):
@@ -152,17 +172,16 @@ internal class ConnectionLoop(
      */
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
         val ownerBareJid = social.waddle.android.client.bareJid(session.jid)
-        val resource = RESOURCE_PREFIX + sessionPrefs.resourceSuffix()
+        val resource = attemptClientFactory.resource()
         val prepared = messenger.prepareAttempt(ownerBareJid)
         val attempt = activeSession.beginAttempt(prepared.attempt)
         val bridge = attempt.bridge
         var client: WaddleClientInterface? = null
         var activeAttempt: ActiveAttempt? = null
         try {
-            val config = buildConfig(session, resource, prepared)
-            val liveClient = clientFactory.create(config)
+            val liveClient = attemptClientFactory.create(session, resource, prepared)
             client = liveClient
-            val connected = withTimeoutOrNull(settings.connectTimeoutMillis) {
+            val connected = withTimeoutOrNull(configuration.connectTimeoutMillis) {
                 try {
                     liveClient.connect()
                     true
@@ -214,42 +233,15 @@ internal class ConnectionLoop(
         localEvents: ReceiveChannel<XmppEvent>,
         attempt: ActiveAttempt,
     ): AttemptEnd = coroutineScope {
-        var nativePoll: Deferred<WaddleClientEvent>? = null
-
-        suspend fun nextOrdered(): OrderedPull {
-            val poll = nativePoll ?: async { nativeClient.nextEvent() }.also {
-                nativePoll = it
-            }
-            return select {
-                poll.onAwait { event ->
-                    nativePoll = null
-                    OrderedPull.Native(event)
-                }
-                localEvents.onReceiveCatching { result ->
-                    result.getOrNull()?.let(OrderedPull::Local) ?: OrderedPull.LocalClosed
-                }
-            }
-        }
-
-        suspend fun nextDomain(): DomainPull {
-            while (true) {
-                when (val pulled = nextOrdered()) {
-                    OrderedPull.LocalClosed -> return DomainPull.Fenced
-                    is OrderedPull.Local -> return DomainPull.Event(pulled.event)
-                    is OrderedPull.Native -> when (
-                        val converted = handleNativeControl(pulled.event, attempt)
-                    ) {
-                        NativeControl.Consumed -> continue
-                        NativeControl.Fenced -> return DomainPull.Fenced
-                        is NativeControl.Event -> return DomainPull.Event(converted.event)
-                    }
-                }
-            }
-        }
-
+        val puller = OrderedEventPuller(
+            scope = this,
+            nativeClient = nativeClient,
+            localEvents = localEvents,
+            handleNative = { event -> handleNativeControl(event, attempt) },
+        )
         try {
-            val readiness = withTimeoutOrNull(settings.connectTimeoutMillis) {
-                awaitReadiness(::nextDomain)
+            val readiness = withTimeoutOrNull(configuration.connectTimeoutMillis) {
+                awaitReadiness(puller::nextDomain)
             }
             when (readiness) {
                 null, Readiness.Closed -> return@coroutineScope AttemptEnd.ConnectFailed
@@ -262,30 +254,13 @@ internal class ConnectionLoop(
             }
             activeSession.onReady(attempt.client, readiness.attempt)
             _state.value = ConnectionState.Ready
-            callbacks.onReady(
+            configuration.onReady(
                 attempt.scope,
                 attempt.client,
                 attempt.session,
                 readiness.kind == SessionReadyKind.FRESH,
             )
-            // Auth classification is deliberately confined to the pre-ready
-            // phase: after the session is bound, "not-authorized"/"forbidden"
-            // shaped text also arrives on per-operation stanza errors, and
-            // treating those as terminal would sign the user out mid-session.
-            while (currentCoroutineContext().isActive) {
-                when (val pulled = nextDomain()) {
-                    DomainPull.Fenced -> return@coroutineScope AttemptEnd.DroppedAfterReady
-                    is DomainPull.Event -> {
-                        val event = pulled.event
-                        if (!messenger.reconcileDeliveryEvent(event)) continue
-                        router.dispatch(event)
-                        if (event is XmppEvent.Disconnected) {
-                            return@coroutineScope AttemptEnd.DroppedAfterReady
-                        }
-                    }
-                }
-            }
-            AttemptEnd.DroppedAfterReady
+            consumeReadyEvents(puller::nextDomain)
         } finally {
             // A pending UniFFI future is a structured child of this scope.
             // Fence sends first, then make Rust publish a new lifecycle epoch
@@ -293,9 +268,28 @@ internal class ConnectionLoop(
             withContext(NonCancellable) {
                 activeSession.endAttempt(attempt.deliveryAttempt)
                 runCatching { nativeClient.disconnect() }
-                nativePoll?.cancelAndJoin()
+                puller.cancelNativePoll()
             }
         }
+    }
+
+    private suspend fun consumeReadyEvents(
+        nextDomain: suspend () -> DomainPull,
+    ): AttemptEnd {
+        while (currentCoroutineContext().isActive) {
+            when (val pulled = nextDomain()) {
+                DomainPull.Fenced -> return AttemptEnd.DroppedAfterReady
+                is DomainPull.Event -> {
+                    val event = pulled.event
+                    if (!messenger.reconcileDeliveryEvent(event)) continue
+                    router.dispatch(event)
+                    if (event is XmppEvent.Disconnected) {
+                        return AttemptEnd.DroppedAfterReady
+                    }
+                }
+            }
+        }
+        return AttemptEnd.DroppedAfterReady
     }
 
     private suspend fun awaitReadiness(nextDomain: suspend () -> DomainPull): Readiness {
@@ -328,86 +322,126 @@ internal class ConnectionLoop(
     private suspend fun handleNativeControl(
         event: WaddleClientEvent,
         activeAttempt: ActiveAttempt,
+    ): NativeControl = when (event) {
+        is WaddleClientEvent.ResumeFailed -> handleResumeFailure(event, activeAttempt)
+        is WaddleClientEvent.ResumeStateChanged ->
+            handleResumeStateChange(event, activeAttempt.ownerBareJid)
+        else -> handleDomainEvent(event, activeAttempt.ownerBareJid)
+    }
+
+    private suspend fun handleResumeFailure(
+        event: WaddleClientEvent.ResumeFailed,
+        activeAttempt: ActiveAttempt,
     ): NativeControl {
-        val ownerBareJid = activeAttempt.ownerBareJid
-        return when (event) {
-            is WaddleClientEvent.ResumeFailed -> {
-                val affected = event.affected.map { it.value }
-                if (affected.size != affected.toSet().size) {
-                    NativeControl.Fenced
-                } else {
-                    val transition = try {
-                        event.transition.toDomain(ownerBareJid)
-                    } catch (_: IllegalArgumentException) {
-                        return NativeControl.Fenced
-                    }
-                    if (
-                        transition.old != activeSession.attemptRef ||
-                        !messenger.rotateAndAwait(transition, affected.toSet())
-                    ) {
-                        NativeControl.Fenced
-                    } else {
-                        activeAttempt.deliveryAttempt = transition.fresh
-                        NativeControl.Consumed
-                    }
-                }
-            }
-            is WaddleClientEvent.ResumeStateChanged -> {
-                val attempt = try {
-                    event.attempt.toDomain(ownerBareJid)
-                } catch (_: IllegalArgumentException) {
-                    return NativeControl.Fenced
-                }
-                if (
-                    attempt != activeSession.attemptRef ||
-                    !resume.persistResumeSnapshot(attempt, event.state)
-                ) {
-                    NativeControl.Fenced
-                } else {
-                    NativeControl.Consumed
-                }
-            }
-            else -> {
-                val domain = try {
-                    event.toXmppEvent(ownerBareJid)
-                } catch (_: IllegalArgumentException) {
-                    return NativeControl.Fenced
-                } ?: return NativeControl.Fenced
-                val eventAttempt = when (domain) {
-                    is XmppEvent.SessionReady -> domain.attempt
-                    is XmppEvent.NativeDeliveryAcked -> domain.attempt
-                    is XmppEvent.NativeDeliveryFailed -> domain.attempt
-                    else -> null
-                }
-                if (eventAttempt != null && eventAttempt != activeSession.attemptRef) {
-                    NativeControl.Fenced
-                } else {
-                    NativeControl.Event(domain)
-                }
-            }
+        val affected = event.affected.map { it.value }
+        val affectedSet = affected.toSet()
+        if (affected.size != affectedSet.size) return NativeControl.Fenced
+        val transition = try {
+            event.transition.toDomain(activeAttempt.ownerBareJid)
+        } catch (_: IllegalArgumentException) {
+            return NativeControl.Fenced
+        }
+        if (
+            transition.old != activeSession.attemptRef ||
+            !messenger.rotateAndAwait(transition, affectedSet)
+        ) {
+            return NativeControl.Fenced
+        }
+        activeAttempt.deliveryAttempt = transition.fresh
+        return NativeControl.Consumed
+    }
+
+    private suspend fun handleResumeStateChange(
+        event: WaddleClientEvent.ResumeStateChanged,
+        ownerBareJid: String,
+    ): NativeControl {
+        val attempt = try {
+            event.attempt.toDomain(ownerBareJid)
+        } catch (_: IllegalArgumentException) {
+            return NativeControl.Fenced
+        }
+        if (
+            attempt != activeSession.attemptRef ||
+            !resume.persistResumeSnapshot(attempt, event.state)
+        ) {
+            return NativeControl.Fenced
+        }
+        return NativeControl.Consumed
+    }
+
+    private fun handleDomainEvent(
+        event: WaddleClientEvent,
+        ownerBareJid: String,
+    ): NativeControl {
+        val domain = try {
+            event.toXmppEvent(ownerBareJid)
+        } catch (_: IllegalArgumentException) {
+            return NativeControl.Fenced
+        } ?: return NativeControl.Fenced
+        val eventAttempt = domain.deliveryAttempt()
+        return if (eventAttempt != null && eventAttempt != activeSession.attemptRef) {
+            NativeControl.Fenced
+        } else {
+            NativeControl.Event(domain)
         }
     }
 
-    private fun buildConfig(
-        session: WaddleSessionInfo,
-        resource: String,
-        prepared: OutboundQueue.AttemptBootstrap,
-    ): WaddleConfig = WaddleConfig(
-        serverUrl = session.xmppWebsocketUrl,
-        jid = session.jid,
-        accessToken = session.sessionId,
-        resource = resource,
-        resumeState = prepared.resumeSnapshot?.toFfi(),
-        deliveryAttempt = prepared.attempt.toFfi(),
-    )
+    private fun XmppEvent.deliveryAttempt(): DeliveryAttemptRef? = when (this) {
+        is XmppEvent.SessionReady -> attempt
+        is XmppEvent.NativeDeliveryAcked -> attempt
+        is XmppEvent.NativeDeliveryFailed -> attempt
+        else -> null
+    }
 
     private data class ActiveAttempt(
         val client: WaddleClientInterface,
         val session: WaddleSessionInfo,
         val scope: CoroutineScope,
         val ownerBareJid: String,
-        var deliveryAttempt: social.waddle.android.client.prefs.DeliveryAttemptRef,
+        var deliveryAttempt: DeliveryAttemptRef,
     )
+
+    private class OrderedEventPuller(
+        private val scope: CoroutineScope,
+        private val nativeClient: WaddleClientInterface,
+        private val localEvents: ReceiveChannel<XmppEvent>,
+        private val handleNative: suspend (WaddleClientEvent) -> NativeControl,
+    ) {
+        private var nativePoll: Deferred<WaddleClientEvent>? = null
+
+        suspend fun nextDomain(): DomainPull {
+            while (true) {
+                when (val pulled = nextOrdered()) {
+                    OrderedPull.LocalClosed -> return DomainPull.Fenced
+                    is OrderedPull.Local -> return DomainPull.Event(pulled.event)
+                    is OrderedPull.Native -> when (val converted = handleNative(pulled.event)) {
+                        NativeControl.Consumed -> continue
+                        NativeControl.Fenced -> return DomainPull.Fenced
+                        is NativeControl.Event -> return DomainPull.Event(converted.event)
+                    }
+                }
+            }
+        }
+
+        suspend fun cancelNativePoll() {
+            nativePoll?.cancelAndJoin()
+        }
+
+        private suspend fun nextOrdered(): OrderedPull {
+            val poll = nativePoll ?: scope.async { nativeClient.nextEvent() }.also {
+                nativePoll = it
+            }
+            return select {
+                poll.onAwait { event ->
+                    nativePoll = null
+                    OrderedPull.Native(event)
+                }
+                localEvents.onReceiveCatching { result ->
+                    result.getOrNull()?.let(OrderedPull::Local) ?: OrderedPull.LocalClosed
+                }
+            }
+        }
+    }
 
     private sealed interface OrderedPull {
         data class Native(val event: WaddleClientEvent) : OrderedPull
@@ -475,7 +509,7 @@ internal class ConnectionLoop(
     private sealed interface Readiness {
         data class Ready(
             val kind: SessionReadyKind,
-            val attempt: social.waddle.android.client.prefs.DeliveryAttemptRef,
+            val attempt: DeliveryAttemptRef,
         ) : Readiness
 
         data class AuthenticationStopped(
@@ -489,8 +523,6 @@ internal class ConnectionLoop(
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = 15_000L
-
-        private const val RESOURCE_PREFIX = "waddle-android-"
     }
 }
 

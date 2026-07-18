@@ -14,13 +14,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
-import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.session.ConnectionAttemptClientFactory
 import social.waddle.android.client.session.ConnectionLoop
-import social.waddle.android.client.session.ConnectionLoopCallbacks
-import social.waddle.android.client.session.ConnectionLoopSettings
+import social.waddle.android.client.session.ConnectionLoopConfiguration
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
@@ -101,18 +101,15 @@ class XmppSessionManager(
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
     private val loop = ConnectionLoop(
-        clientFactory = clientFactory,
+        attemptClientFactory = ConnectionAttemptClientFactory(clientFactory, sessionPrefs),
         networkSignal = networkSignal,
-        sessionPrefs = sessionPrefs,
         activeSession = activeSession,
         resume = resume,
         router = router,
         messenger = messenger,
-        callbacks = ConnectionLoopCallbacks(
+        configuration = ConnectionLoopConfiguration(
             onReady = ::onSessionReady,
             onAuthenticationStopped = ::onAuthenticationStopped,
-        ),
-        settings = ConnectionLoopSettings(
             reconnectPolicy = reconnectPolicy,
             connectTimeoutMillis = connectTimeoutMillis,
         ),

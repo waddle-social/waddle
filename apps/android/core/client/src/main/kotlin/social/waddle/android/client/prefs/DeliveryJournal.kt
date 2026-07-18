@@ -3,9 +3,9 @@ package social.waddle.android.client.prefs
 import kotlinx.serialization.Serializable
 import social.waddle.client.ffi.WaddleConnectionGeneration
 import social.waddle.client.ffi.WaddleDeliveryAttemptId
+import java.util.UUID
 import social.waddle.client.ffi.WaddleDeliveryAttemptRef as FfiDeliveryAttemptRef
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition as FfiDeliveryAttemptTransition
-import java.util.UUID
 
 /**
  * The only durable authority for Android delivery state.

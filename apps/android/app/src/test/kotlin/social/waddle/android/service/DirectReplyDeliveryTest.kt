@@ -32,6 +32,7 @@ import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
+import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
@@ -196,6 +197,17 @@ class DirectReplyDeliveryTest {
         val rowA = seedClaimed(prefs, queue, OWNER_A, "reply-a")
         val rowB = seedClaimed(prefs, queue, OWNER_B, "reply-b")
 
+        assertForeignOwnerTerminalIsRejected(queue, rowA, rowB)
+        prefs.activateSession(OWNER_A, "session-a")
+        assertExactAttemptIsRequired(queue, rowA, rowB)
+        assertStaleIntentCannotDeleteReplacement()
+    }
+
+    private suspend fun assertForeignOwnerTerminalIsRejected(
+        queue: OutboundQueue,
+        rowA: SeededRow,
+        rowB: SeededRow,
+    ) {
         assertEquals(
             OutboundQueue.TerminalRecordResult.Stale,
             queue.recordTerminal(
@@ -215,8 +227,13 @@ class DirectReplyDeliveryTest {
         assertEquals(rowB.row.identity, failed.callback.row)
         assertEquals(rowB.attempt, failed.callback.attempt)
         assertEquals(rowA.row, queue.rows(OWNER_A).single())
+    }
 
-        prefs.activateSession(OWNER_A, "session-a")
+    private suspend fun assertExactAttemptIsRequired(
+        queue: OutboundQueue,
+        rowA: SeededRow,
+        rowB: SeededRow,
+    ) {
         val wrongAttempt = rowA.attempt.copy(
             attemptId = DeliveryAttemptId(WRONG_ATTEMPT_ID),
         )
@@ -241,7 +258,9 @@ class DirectReplyDeliveryTest {
         assertEquals(rowA.attempt, acknowledged.callback.attempt)
         assertTrue(queue.rows(OWNER_A).isEmpty())
         assertEquals(rowB.row.identity, queue.rows(OWNER_B).single().identity)
+    }
 
+    private suspend fun assertStaleIntentCannotDeleteReplacement() {
         val reusePrefs = SessionPrefs(InMemoryPreferencesDataStore())
         val reuseQueue = OutboundQueue(reusePrefs)
         val old = seedClaimed(reusePrefs, reuseQueue, OWNER_A, "old payload")
@@ -352,11 +371,13 @@ class DirectReplyDeliveryTest {
         body: String,
     ): QueuedOutboundDraft = QueuedOutboundDraft.create(
         ownerBareJid = owner,
-        conversationJid = PEER,
-        isGroupchat = false,
-        body = body,
         clientStanzaId = SHARED_STANZA_ID,
         enqueuedAtMillis = 1_000,
+        payload = QueuedOutboundPayload(
+            conversationJid = PEER,
+            isGroupchat = false,
+            body = body,
+        ),
         source = DeliverySource.DirectReply(PEER, false),
     )
 

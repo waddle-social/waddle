@@ -26,6 +26,7 @@ import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
+import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import java.util.UUID
@@ -454,11 +455,13 @@ class OutboundQueueTest {
         body: String = "body-$id",
     ): QueuedOutboundDraft = QueuedOutboundDraft.create(
         ownerBareJid = owner,
-        conversationJid = "peer@waddle.test",
-        isGroupchat = false,
-        body = body,
         clientStanzaId = id,
         enqueuedAtMillis = 1_000,
+        payload = QueuedOutboundPayload(
+            conversationJid = "peer@waddle.test",
+            isGroupchat = false,
+            body = body,
+        ),
         source = DeliverySource.Composer,
     )
 

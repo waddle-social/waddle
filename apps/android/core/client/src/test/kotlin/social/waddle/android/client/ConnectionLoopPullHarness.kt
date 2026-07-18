@@ -11,13 +11,14 @@ import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.QueuedOutboundDraft
+import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.toSnapshot
 import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.session.ConnectionAttemptClientFactory
 import social.waddle.android.client.session.ConnectionLoop
-import social.waddle.android.client.session.ConnectionLoopCallbacks
-import social.waddle.android.client.session.ConnectionLoopSettings
+import social.waddle.android.client.session.ConnectionLoopConfiguration
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.store.SessionStores
 import java.util.concurrent.CopyOnWriteArrayList
@@ -62,18 +63,15 @@ internal class ConnectionLoopPullHarness(
         },
     )
     val loop = ConnectionLoop(
-        clientFactory = factory,
+        attemptClientFactory = ConnectionAttemptClientFactory(factory, prefs),
         networkSignal = FakeNetworkSignal(),
-        sessionPrefs = prefs,
         activeSession = activeSession,
         resume = resume,
         router = router,
         messenger = messenger,
-        callbacks = ConnectionLoopCallbacks(
+        configuration = ConnectionLoopConfiguration(
             onReady = { _, _, _, _ -> },
             onAuthenticationStopped = { },
-        ),
-        settings = ConnectionLoopSettings(
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
         ),
     )
@@ -90,11 +88,13 @@ internal class ConnectionLoopPullHarness(
             queue.enqueueAndClaimAbsoluteHead(
                 QueuedOutboundDraft.create(
                     ownerBareJid = OWNER,
-                    conversationJid = PEER,
-                    isGroupchat = false,
-                    body = "queued before resume",
                     clientStanzaId = stanzaId,
                     enqueuedAtMillis = 1_000,
+                    payload = QueuedOutboundPayload(
+                        conversationJid = PEER,
+                        isGroupchat = false,
+                        body = "queued before resume",
+                    ),
                     source = DeliverySource.Composer,
                 ),
                 previous,

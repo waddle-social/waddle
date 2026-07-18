@@ -19,6 +19,7 @@ import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
+import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.SessionPrefs
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -252,11 +253,13 @@ class DeliveryTerminalWorkerTest {
 
     private fun draft(id: String): QueuedOutboundDraft = QueuedOutboundDraft.create(
         ownerBareJid = OWNER,
-        conversationJid = "peer@waddle.test",
-        isGroupchat = false,
-        body = "body-$id",
         clientStanzaId = id,
         enqueuedAtMillis = 1_000,
+        payload = QueuedOutboundPayload(
+            conversationJid = "peer@waddle.test",
+            isGroupchat = false,
+            body = "body-$id",
+        ),
         source = DeliverySource.Composer,
     )
 

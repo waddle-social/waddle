@@ -106,6 +106,19 @@ sealed interface DeliverySource {
     ) : DeliverySource
 }
 
+data class QueuedOutboundPayload(
+    val conversationJid: String,
+    val isGroupchat: Boolean,
+    val body: String,
+    val replyToId: String? = null,
+    val replyToAuthorJid: String? = null,
+    val replyParentBody: String? = null,
+    val threadId: String? = null,
+    val threadParent: String? = null,
+    val sharedFiles: List<SharedFileRef> = emptyList(),
+    val mentions: List<MentionRef> = emptyList(),
+)
+
 /**
  * One persisted outbound send in [SessionPrefs]. Ready rows await Kotlin
  * replay; NativeOwned rows await native acknowledgement/failure or
@@ -155,6 +168,20 @@ data class QueuedOutboundMessage(
             payloadDigest = payloadDigest,
         )
 
+    val payload: QueuedOutboundPayload
+        get() = QueuedOutboundPayload(
+            conversationJid = conversationJid,
+            isGroupchat = isGroupchat,
+            body = body,
+            replyToId = replyToId,
+            replyToAuthorJid = replyToAuthorJid,
+            replyParentBody = replyParentBody,
+            threadId = threadId,
+            threadParent = threadParent,
+            sharedFiles = sharedFiles,
+            mentions = mentions,
+        )
+
     init {
         require(ownerBareJid.isNotBlank()) { "delivery owner must not be blank" }
         require(clientStanzaId.isNotBlank()) { "client stanza id must not be blank" }
@@ -168,31 +195,11 @@ data class QueuedOutboundMessage(
      * Stable digest of validated client semantics. Delivery identity,
      * timestamps, ownership, and retry metadata are deliberately excluded.
      */
-    fun structuralDigest(): DeliveryPayloadDigest = computeStructuralDigest(
-        conversationJid = conversationJid,
-        isGroupchat = isGroupchat,
-        body = body,
-        replyToId = replyToId,
-        replyToAuthorJid = replyToAuthorJid,
-        replyParentBody = replyParentBody,
-        threadId = threadId,
-        threadParent = threadParent,
-        sharedFiles = sharedFiles,
-        mentions = mentions,
-    )
+    fun structuralDigest(): DeliveryPayloadDigest = computeStructuralDigest(payload)
 
     companion object {
         internal fun computeStructuralDigest(
-            conversationJid: String,
-            isGroupchat: Boolean,
-            body: String,
-            replyToId: String?,
-            replyToAuthorJid: String?,
-            replyParentBody: String?,
-            threadId: String?,
-            threadParent: String?,
-            sharedFiles: List<SharedFileRef>,
-            mentions: List<MentionRef>,
+            payload: QueuedOutboundPayload,
         ): DeliveryPayloadDigest {
             val digest = MessageDigest.getInstance("SHA-256")
             fun bytes(value: String) {
@@ -218,24 +225,24 @@ data class QueuedOutboundMessage(
             }
             field("domain", "waddle.android.delivery")
             field("version", "1")
-            field("target", conversationJid)
-            field("stanza-kind", if (isGroupchat) "groupchat" else "chat")
-            field("body", body)
-            field("reply-id", replyToId)
-            field("reply-author", replyToAuthorJid)
-            field("reply-fallback-body", replyParentBody)
-            field("thread-id", threadId)
-            field("thread-parent", threadParent)
-            field("shared-file-count", sharedFiles.size.toString())
-            sharedFiles.forEachIndexed { index, file ->
+            field("target", payload.conversationJid)
+            field("stanza-kind", if (payload.isGroupchat) "groupchat" else "chat")
+            field("body", payload.body)
+            field("reply-id", payload.replyToId)
+            field("reply-author", payload.replyToAuthorJid)
+            field("reply-fallback-body", payload.replyParentBody)
+            field("thread-id", payload.threadId)
+            field("thread-parent", payload.threadParent)
+            field("shared-file-count", payload.sharedFiles.size.toString())
+            payload.sharedFiles.forEachIndexed { index, file ->
                 field("shared-file[$index].url", file.url)
                 field("shared-file[$index].name", file.name)
                 field("shared-file[$index].media-type", file.mediaType)
                 field("shared-file[$index].size", file.sizeBytes?.toString())
                 field("shared-file[$index].disposition", file.disposition.name)
             }
-            field("mention-count", mentions.size.toString())
-            mentions.forEachIndexed { index, mention ->
+            field("mention-count", payload.mentions.size.toString())
+            payload.mentions.forEachIndexed { index, mention ->
                 field("mention[$index].uri", mention.uri)
                 field("mention[$index].begin", mention.begin.toString())
                 field("mention[$index].end", mention.end.toString())
@@ -248,53 +255,28 @@ data class QueuedOutboundMessage(
         }
 
         fun create(
-            ownerBareJid: String,
-            conversationJid: String,
-            isGroupchat: Boolean,
-            body: String,
-            clientStanzaId: String,
+            draft: QueuedOutboundDraft,
             sequence: Long,
-            enqueuedAtMillis: Long,
             ownership: OutboundOwnership = OutboundOwnership.Ready,
-            source: DeliverySource = DeliverySource.Composer,
-            replyToId: String? = null,
-            replyToAuthorJid: String? = null,
-            replyParentBody: String? = null,
-            threadId: String? = null,
-            threadParent: String? = null,
-            sharedFiles: List<SharedFileRef> = emptyList(),
-            mentions: List<MentionRef> = emptyList(),
-            incarnation: DeliveryIncarnation = DeliveryIncarnation.random(),
         ): QueuedOutboundMessage = QueuedOutboundMessage(
-            ownerBareJid = ownerBareJid,
-            conversationJid = conversationJid,
-            isGroupchat = isGroupchat,
-            body = body,
-            clientStanzaId = clientStanzaId,
-            incarnation = incarnation,
-            payloadDigest = computeStructuralDigest(
-                conversationJid = conversationJid,
-                isGroupchat = isGroupchat,
-                body = body,
-                replyToId = replyToId,
-                replyToAuthorJid = replyToAuthorJid,
-                replyParentBody = replyParentBody,
-                threadId = threadId,
-                threadParent = threadParent,
-                sharedFiles = sharedFiles,
-                mentions = mentions,
-            ),
+            ownerBareJid = draft.ownerBareJid,
+            conversationJid = draft.conversationJid,
+            isGroupchat = draft.isGroupchat,
+            body = draft.body,
+            clientStanzaId = draft.clientStanzaId,
+            incarnation = draft.incarnation,
+            payloadDigest = draft.payloadDigest,
             sequence = sequence,
-            enqueuedAtMillis = enqueuedAtMillis,
+            enqueuedAtMillis = draft.enqueuedAtMillis,
             ownership = ownership,
-            source = source,
-            replyToId = replyToId,
-            replyToAuthorJid = replyToAuthorJid,
-            replyParentBody = replyParentBody,
-            threadId = threadId,
-            threadParent = threadParent,
-            sharedFiles = sharedFiles,
-            mentions = mentions,
+            source = draft.source,
+            replyToId = draft.replyToId,
+            replyToAuthorJid = draft.replyToAuthorJid,
+            replyParentBody = draft.replyParentBody,
+            threadId = draft.threadId,
+            threadParent = draft.threadParent,
+            sharedFiles = draft.sharedFiles,
+            mentions = draft.mentions,
         )
     }
 }
@@ -331,23 +313,9 @@ data class QueuedOutboundDraft(
 
     fun persisted(sequence: Long, ownership: OutboundOwnership): QueuedOutboundMessage =
         QueuedOutboundMessage.create(
-            ownerBareJid = ownerBareJid,
-            conversationJid = conversationJid,
-            isGroupchat = isGroupchat,
-            body = body,
-            clientStanzaId = clientStanzaId,
+            draft = this,
             sequence = sequence,
-            enqueuedAtMillis = enqueuedAtMillis,
             ownership = ownership,
-            source = source,
-            replyToId = replyToId,
-            replyToAuthorJid = replyToAuthorJid,
-            replyParentBody = replyParentBody,
-            threadId = threadId,
-            threadParent = threadParent,
-            sharedFiles = sharedFiles,
-            mentions = mentions,
-            incarnation = incarnation,
         ).also {
             require(it.payloadDigest == payloadDigest) {
                 "delivery draft digest changed before persistence"
@@ -357,50 +325,30 @@ data class QueuedOutboundDraft(
     companion object {
         fun create(
             ownerBareJid: String,
-            conversationJid: String,
-            isGroupchat: Boolean,
-            body: String,
             clientStanzaId: String,
             enqueuedAtMillis: Long,
+            payload: QueuedOutboundPayload,
             source: DeliverySource = DeliverySource.Composer,
-            replyToId: String? = null,
-            replyToAuthorJid: String? = null,
-            replyParentBody: String? = null,
-            threadId: String? = null,
-            threadParent: String? = null,
-            sharedFiles: List<SharedFileRef> = emptyList(),
-            mentions: List<MentionRef> = emptyList(),
             incarnation: DeliveryIncarnation = DeliveryIncarnation.random(),
         ): QueuedOutboundDraft {
-            val digest = QueuedOutboundMessage.computeStructuralDigest(
-                conversationJid = conversationJid,
-                isGroupchat = isGroupchat,
-                body = body,
-                replyToId = replyToId,
-                replyToAuthorJid = replyToAuthorJid,
-                replyParentBody = replyParentBody,
-                threadId = threadId,
-                threadParent = threadParent,
-                sharedFiles = sharedFiles,
-                mentions = mentions,
-            )
+            val digest = QueuedOutboundMessage.computeStructuralDigest(payload)
             return QueuedOutboundDraft(
                 ownerBareJid = ownerBareJid,
-                conversationJid = conversationJid,
-                isGroupchat = isGroupchat,
-                body = body,
+                conversationJid = payload.conversationJid,
+                isGroupchat = payload.isGroupchat,
+                body = payload.body,
                 clientStanzaId = clientStanzaId,
                 incarnation = incarnation,
                 payloadDigest = digest,
                 enqueuedAtMillis = enqueuedAtMillis,
                 source = source,
-                replyToId = replyToId,
-                replyToAuthorJid = replyToAuthorJid,
-                replyParentBody = replyParentBody,
-                threadId = threadId,
-                threadParent = threadParent,
-                sharedFiles = sharedFiles,
-                mentions = mentions,
+                replyToId = payload.replyToId,
+                replyToAuthorJid = payload.replyToAuthorJid,
+                replyParentBody = payload.replyParentBody,
+                threadId = payload.threadId,
+                threadParent = payload.threadParent,
+                sharedFiles = payload.sharedFiles,
+                mentions = payload.mentions,
             )
         }
     }

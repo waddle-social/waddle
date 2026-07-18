@@ -56,14 +56,17 @@ class SessionPrefsTest {
         prefs.activateSession(OWNER_A, "sess-a")
         val attempt = attempt(OWNER_A, "00000000-0000-4000-8000-000000000001", 9u)
         val rows = NativeOutboundPhase.entries.mapIndexed { index, phase ->
-            QueuedOutboundMessage.create(
+            QueuedOutboundDraft.create(
                 ownerBareJid = OWNER_A,
-                conversationJid = "alice@waddle.test",
-                isGroupchat = false,
-                body = "message-$index",
                 clientStanzaId = "q-$index",
-                sequence = index.toLong() + 1,
                 enqueuedAtMillis = 1_000L + index,
+                payload = QueuedOutboundPayload(
+                    conversationJid = "alice@waddle.test",
+                    isGroupchat = false,
+                    body = "message-$index",
+                ),
+            ).persisted(
+                sequence = index.toLong() + 1,
                 ownership = OutboundOwnership.NativeOwned(attempt, phase),
             )
         }

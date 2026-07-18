@@ -16,9 +16,9 @@ import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
-import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
 import social.waddle.client.ffi.WaddleDeliveryStanzaId
+import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
@@ -30,9 +30,9 @@ import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
+import social.waddle.client.ffi.WaddleSessionReadyKind
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
-import social.waddle.client.ffi.WaddleSessionReadyKind
 import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
@@ -217,6 +217,7 @@ data class SearchCall(
  */
 class FakeWaddleClient : WaddleClientInterface {
     private val events = Channel<WaddleClientEvent>(Channel.UNLIMITED)
+
     @Volatile
     var connectCalls = 0
 
