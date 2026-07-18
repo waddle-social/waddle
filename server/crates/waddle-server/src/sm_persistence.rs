@@ -75,6 +75,7 @@ type StreamLockMap = dashmap::DashMap<SmSessionId, Arc<tokio::sync::Mutex<()>>>;
 ///     sequence BIGINT NOT NULL,
 ///     stanza_xml TEXT NOT NULL,
 ///     original_receipt_at_ms BIGINT NOT NULL,
+///     purpose TEXT NOT NULL,
 ///     PRIMARY KEY (stream_id, sequence)
 /// );
 /// ```

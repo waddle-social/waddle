@@ -189,25 +189,14 @@ async fn list_unacked_orders_ascending_by_sequence() {
 }
 
 #[tokio::test]
-async fn unacked_purpose_round_trips_and_legacy_insert_defaults_to_application() {
+async fn unacked_purpose_round_trips() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     let mut barrier = fixture_unacked("purpose-stream", 1);
     barrier.purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     storage.append_unacked(barrier).await.unwrap();
 
-    let legacy = fixture_unacked("purpose-stream", 2);
-    let legacy_xml = serialize_stanza(&legacy.stanza).unwrap();
     storage
-        .execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
-            crate::db_params![
-                "purpose-stream".to_string(),
-                2i64,
-                legacy_xml,
-                legacy.original_receipt_at.timestamp_millis(),
-            ],
-        )
+        .append_unacked(fixture_unacked("purpose-stream", 2))
         .await
         .unwrap();
 
@@ -218,58 +207,6 @@ async fn unacked_purpose_round_trips_and_legacy_insert_defaults_to_application()
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::ResumeBarrier);
     assert_eq!(rows[1].purpose, SmUnackedStanzaPurpose::Application);
-}
-
-#[tokio::test]
-async fn legacy_sm_unacked_schema_is_backfilled_with_application_purpose() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("legacy-sm-purpose.sqlite");
-    let url = format!("sqlite://{}", path.to_str().expect("UTF-8 path"));
-    let legacy = fixture_unacked("legacy-purpose-stream", 1);
-    let legacy_xml = serialize_stanza(&legacy.stanza).unwrap();
-
-    {
-        let db = crate::db::Database::from_config(
-            "legacy_sm_purpose",
-            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
-        )
-        .await
-        .unwrap();
-        let conn = db.guard().await.unwrap();
-        conn.execute(
-            "CREATE TABLE sm_unacked (
-                stream_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                stanza_xml TEXT NOT NULL,
-                original_receipt_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (stream_id, sequence)
-            )",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sm_unacked \
-             (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
-            crate::db_params![
-                legacy.stream_id.as_str().to_string(),
-                i64::from(legacy.sequence),
-                legacy_xml,
-                legacy.original_receipt_at.timestamp_millis(),
-            ],
-        )
-        .await
-        .unwrap();
-    }
-
-    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
-    let rows = storage
-        .list_unacked(&SmSessionId::new("legacy-purpose-stream"))
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::Application);
 }
 
 #[tokio::test]
@@ -743,13 +680,15 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
         .unwrap();
     storage
         .execute(
-            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO sm_unacked \
+             (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, ?)",
             crate::db_params![
                 "beta".to_string(),
                 1i64,
                 "not valid xml <<<".to_string(),
-                0i64
+                0i64,
+                "application".to_string(),
             ],
         )
         .await
