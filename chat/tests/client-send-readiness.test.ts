@@ -590,6 +590,7 @@ describe("client send readiness", () => {
     expect(errors[0].kind).toBe("muc-join");
     expect(errors[0].condition).toBe("registration-required");
     expect(errors[0].errorType).toBe("auth");
+    expect(errors[0].roomLocalpart).toBe("c1");
     expect(staleJoinVisibleAtEmit).toEqual([false]);
   });
 

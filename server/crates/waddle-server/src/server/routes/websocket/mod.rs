@@ -68,6 +68,7 @@ use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
 mod batch_write;
+mod call_signaling_telemetry;
 mod cleanup;
 mod connection;
 mod frame;

@@ -459,10 +459,11 @@ async fn insert_groupchat_notification_candidate(
         crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
-                recipient = %owner,
-                room = %room,
-                class = ?class,
-                %reason,
+                recipient = %candidate.recipient_bare_jid(),
+                conversation = %candidate.conversation_jid(),
+                notification_class = candidate.class().as_db_value(),
+                push_stage = "suppressed",
+                suppression_reason = reason.as_db_value(),
                 "ProjectGroupchatInbox: T0 push gate suppressed groupchat candidate; no candidate row persisted"
             );
             waddle_xmpp::telemetry::reliability::increment_push_suppressed(

@@ -65,18 +65,25 @@ async fn xmpp_websocket_handler(
     // span on the session into one giant trace (Tempo truncates
     // those). Dispatch spans stay independent roots, correlated via
     // their `xmpp.resource`/`user` attributes instead.
-    if let Some(client_context) = crate::server::trace::client_trace_context_from_query(uri.query())
-    {
-        let established_span = tracing::info_span!(
-            "xmpp.connection.established",
-            client.trace_id = %client_context.trace_id(),
-        );
-        tracing_opentelemetry::OpenTelemetrySpanExt::add_link(&established_span, client_context);
+    if let Some(established_span) = connection_established_span(uri.query()) {
         let _enter = established_span.enter();
     }
 
     ws.protocols(["xmpp"])
         .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
+}
+
+fn connection_established_span(query: Option<&str>) -> Option<tracing::Span> {
+    let client_parent = crate::server::trace::client_trace_parent_from_query(query)?;
+    let established_span = tracing::info_span!(
+        "xmpp.connection.established",
+        client.trace_id = %client_parent.trace_id(),
+    );
+    tracing_opentelemetry::OpenTelemetrySpanExt::add_link(
+        &established_span,
+        client_parent.remote_span_context(),
+    );
+    Some(established_span)
 }
 
 /// Size of the outbound message channel buffer
@@ -1020,7 +1027,63 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Debug)]
+    struct CaptureSpanExporter(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for CaptureSpanExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.0.lock().expect("capture lock").extend(batch);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn connection_span_records_client_trace_id_and_remote_link_from_query() {
+        let exported = Arc::new(Mutex::new(Vec::new()));
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(CaptureSpanExporter(Arc::clone(&exported)))
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("connection-span-test")),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = connection_established_span(Some(
+                "traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ))
+            .expect("valid traceparent creates a connection span");
+            let _entered = span.enter();
+        });
+
+        let exported = exported.lock().expect("capture lock");
+        let span = exported
+            .iter()
+            .find(|span| span.name == "xmpp.connection.established")
+            .expect("connection span exported");
+        assert!(
+            span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "client.trace_id"
+                    && attribute.value.to_string() == "0af7651916cd43dd8448eb211c80319c"
+            }),
+            "connection span must expose the linked client trace id: {:?}",
+            span.attributes,
+        );
+        assert_eq!(span.links.len(), 1, "connection span has one client link");
+        let linked = &span.links[0].span_context;
+        assert_eq!(
+            linked.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(linked.span_id().to_string(), "b7ad6b7169203331");
+        assert!(linked.is_remote());
+    }
 
     #[tokio::test]
     async fn abandoned_inbound_slot_does_not_block_handoff_cleanup() {

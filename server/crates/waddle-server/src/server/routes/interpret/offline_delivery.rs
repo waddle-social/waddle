@@ -440,10 +440,12 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
-                recipient = %recipient,
+                recipient = %candidate.recipient_bare_jid(),
+                conversation = %candidate.conversation_jid(),
                 sender = %sender,
-                is_mention,
-                %reason,
+                notification_class = candidate.class().as_db_value(),
+                push_stage = "suppressed",
+                suppression_reason = reason.as_db_value(),
                 "T0 push gate suppressed XEP-0357 DM candidate; no candidate row persisted"
             );
             waddle_xmpp::telemetry::reliability::increment_push_suppressed(

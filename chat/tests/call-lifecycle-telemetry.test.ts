@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   __resetCallLifecycleTelemetryForTesting,
   beginCallAttempt,
+  resumeCallAttempt,
   durationBucket,
   finishCallAttempt,
   finishCallAttemptForTransportDisconnect,
@@ -10,6 +11,7 @@ import {
   observeCallConnectionQuality,
   observeCallStats,
   packetLossBand,
+  reconnectCountBucket,
   reportDeclinedCallAttempt,
   reportFailedCallAttempt,
   rttBand,
@@ -48,6 +50,9 @@ describe("call lifecycle mappings", () => {
     expect(packetLossBand(0.5)).toBe("under-1pct");
     expect(packetLossBand(5)).toBe("1pct-5pct");
     expect(packetLossBand(5.1)).toBe("over-5pct");
+    expect(reconnectCountBucket(0)).toBe("none");
+    expect(reconnectCountBucket(1)).toBe("once");
+    expect(reconnectCountBucket(2)).toBe("multiple");
   });
 
   test("emits one declined DM setup outcome for an unaccepted attempt", () => {
@@ -55,11 +60,20 @@ describe("call lifecycle mappings", () => {
     __setFaroForTesting(stub as never);
     beginCallAttempt("dm-1", "dm");
 
-    const first = finishCallAttempt("dm-1", { setupOutcome: "declined" }, 1_000);
-    const duplicate = finishCallAttempt("dm-1", { setupOutcome: "failed" }, 2_000);
+    const first = finishCallAttempt(
+      "dm-1",
+      { setupOutcome: "declined", endReason: "peer-left" },
+      1_000,
+    );
+    const duplicate = finishCallAttempt(
+      "dm-1",
+      { setupOutcome: "failed", endReason: "error" },
+      2_000,
+    );
 
     expect(first).toMatchObject({
       setupOutcome: "declined",
+      endReason: "peer-left",
       callKind: "dm",
       durationBucket: "none",
     });
@@ -68,12 +82,13 @@ describe("call lifecycle mappings", () => {
       name: "chat.call.lifecycle",
       attributes: {
         setup_outcome: "declined",
+        end_reason: "peer-left",
         duration_bucket: "none",
         call_kind: "dm",
         rtt_band: "unknown",
         packet_loss_band: "unknown",
         connection_quality: "unknown",
-        reconnect_count: "0",
+        reconnect_count: "none",
       },
     }]);
   });
@@ -88,24 +103,98 @@ describe("call lifecycle mappings", () => {
     finishCallAttempt("active", { endReason: "hangup" });
 
     expect(stub.events.map((event) => event.attributes)).toEqual([
-      expect.objectContaining({ setup_outcome: "declined", call_kind: "dm" }),
+      expect.objectContaining({
+        setup_outcome: "declined",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
       expect.objectContaining({ setup_outcome: "accepted", end_reason: "hangup" }),
     ]);
   });
 
-  test("classifies transport loss from observed reconnect state and permits explicit SID reuse", () => {
-    const stub = createFaroStub();
-    __setFaroForTesting(stub as never);
+  test("classifies transport loss from observed reconnect state", () => {
     beginCallAttempt("restored-sid", "dm");
     markCallAttemptAccepted("restored-sid");
     expect(finishCallAttemptForTransportDisconnect("restored-sid")?.endReason).toBe("error");
 
-    beginCallAttempt("restored-sid", "dm");
-    markCallAttemptAccepted("restored-sid");
+    beginCallAttempt("reconnecting-sid", "dm");
+    markCallAttemptAccepted("reconnecting-sid");
     observeCallConnectionPhase("reconnecting");
-    expect(finishCallAttemptForTransportDisconnect("restored-sid")?.endReason)
+    expect(finishCallAttemptForTransportDisconnect("reconnecting-sid")?.endReason)
       .toBe("reconnect-exhausted");
+  });
 
+  test("emits once for a replayed SID while a new SID retry emits independently", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    beginCallAttempt("replayed-sid", "dm");
+    finishCallAttempt(
+      "replayed-sid",
+      { setupOutcome: "failed", endReason: "error" },
+    );
+
+    beginCallAttempt("replayed-sid", "dm");
+    markCallAttemptAccepted("replayed-sid");
+    expect(finishCallAttempt("replayed-sid", { endReason: "hangup" })).toBeNull();
+
+    beginCallAttempt("retry-sid", "dm");
+    markCallAttemptAccepted("retry-sid");
+    finishCallAttempt("retry-sid", { endReason: "hangup" });
+
+    expect(stub.events).toHaveLength(2);
+    expect(stub.events.map((event) => event.attributes?.setup_outcome)).toEqual([
+      "failed",
+      "accepted",
+    ]);
+  });
+
+  test("retains exactly-once history for the whole session", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    for (let index = 0; index < 2_050; index += 1) {
+      const sid = `session-sid-${index}`;
+      beginCallAttempt(sid, "dm");
+      finishCallAttempt(sid, { setupOutcome: "failed", endReason: "error" });
+    }
+
+    beginCallAttempt("session-sid-0", "dm");
+    expect(
+      finishCallAttempt("session-sid-0", {
+        setupOutcome: "accepted",
+        endReason: "hangup",
+      })
+    ).toBeNull();
+    expect(stub.events).toHaveLength(2_050);
+  });
+
+  test("a resumed media session re-opens telemetry for an already-emitted sid", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    // First segment ends in a transport loss and emits its terminal.
+    beginCallAttempt("resumed-sid", "dm");
+    markCallAttemptAccepted("resumed-sid");
+    finishCallAttempt("resumed-sid", { setupOutcome: "accepted", endReason: "error" });
+    expect(stub.events).toHaveLength(1);
+
+    // A replayed proposal with the same sid stays deduped...
+    beginCallAttempt("resumed-sid", "dm");
+    expect(
+      finishCallAttempt("resumed-sid", { setupOutcome: "proposed", endReason: "hangup" })
+    ).toBeNull();
+    expect(stub.events).toHaveLength(1);
+
+    // ...but an explicit resume re-opens the sid so the recovered
+    // segment's duration/quality is not dark.
+    resumeCallAttempt("resumed-sid", "dm");
+    markCallAttemptAccepted("resumed-sid");
+    const payload = finishCallAttempt("resumed-sid", {
+      setupOutcome: "accepted",
+      endReason: "hangup",
+    });
+    expect(payload?.setupOutcome).toBe("accepted");
     expect(stub.events).toHaveLength(2);
   });
 
@@ -125,7 +214,11 @@ describe("call lifecycle mappings", () => {
     finishCallAttempt("first", { endReason: "hangup" }, 91_000);
 
     beginCallAttempt("second", "dm");
-    const second = finishCallAttempt("second", { setupOutcome: "failed" }, 100_000);
+    const second = finishCallAttempt(
+      "second",
+      { setupOutcome: "failed", endReason: "error" },
+      100_000,
+    );
 
     expect(second).toMatchObject({
       durationBucket: "none",
@@ -141,7 +234,11 @@ describe("call lifecycle mappings", () => {
 
     expect(stub.events).toEqual([{
       name: "chat.call.lifecycle",
-      attributes: expect.objectContaining({ setup_outcome: "failed", call_kind: "muc" }),
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "muc",
+      }),
     }]);
   });
 
@@ -171,13 +268,13 @@ describe("call lifecycle mappings", () => {
       rttBand: "over-300ms",
       packetLossBand: "over-5pct",
       connectionQuality: "poor",
-      reconnectCount: 1,
+      reconnectCount: "once",
     });
     expect(stub.events[0]?.attributes).toMatchObject({
       setup_outcome: "accepted",
       end_reason: "hangup",
       call_kind: "muc",
-      reconnect_count: "1",
+      reconnect_count: "once",
     });
   });
 });

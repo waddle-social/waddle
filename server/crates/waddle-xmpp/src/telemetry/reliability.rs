@@ -98,27 +98,44 @@ dual_increment!(
     "Unacked stanzas evicted from a detached XEP-0198 session replay window."
 );
 
-dual_increment!(
-    increment_push_candidate_created,
-    crate::prometheus::increment_push_candidate_created,
-    "xmpp.push.candidate_created",
-    "{notification}",
-    "XEP-0357 notification candidates inserted into the durable pipeline."
-);
-dual_increment!(
-    increment_push_candidate_coalesced,
-    crate::prometheus::increment_push_candidate_coalesced,
-    "xmpp.push.candidate_coalesced",
-    "{notification}",
-    "Duplicate XEP-0357 notification candidates coalesced at insertion."
-);
-dual_increment!(
-    increment_push_outbox_published,
-    crate::prometheus::increment_push_outbox_published,
-    "xmpp.push.outbox_published",
-    "{notification}",
-    "XEP-0357 notification outbox jobs accepted by the Push Service."
-);
+/// Record a durable push candidate in the legacy, reliability, and typed
+/// pipeline families.
+pub fn increment_push_candidate_created() {
+    crate::prometheus::increment_push_candidate_created();
+    crate::counter_add!(
+        "xmpp.push.candidate_created",
+        "{notification}",
+        "XEP-0357 notification candidates inserted into the durable pipeline.",
+        1,
+    );
+    super::push_pipeline::increment_candidate_created();
+}
+
+/// Record duplicate candidate coalescing in the legacy, reliability, and
+/// typed pipeline families.
+pub fn increment_push_candidate_coalesced() {
+    crate::prometheus::increment_push_candidate_coalesced();
+    crate::counter_add!(
+        "xmpp.push.candidate_coalesced",
+        "{notification}",
+        "Duplicate XEP-0357 notification candidates coalesced at insertion.",
+        1,
+    );
+    super::push_pipeline::increment_coalesced();
+}
+
+/// Record Push Service acceptance in the legacy, reliability, and typed
+/// pipeline families.
+pub fn increment_push_outbox_published() {
+    crate::prometheus::increment_push_outbox_published();
+    crate::counter_add!(
+        "xmpp.push.outbox_published",
+        "{notification}",
+        "XEP-0357 notification outbox jobs accepted by the Push Service.",
+        1,
+    );
+    super::push_pipeline::increment_published();
+}
 /// Dual-emit for outbox retry scheduling. Hand-written (not
 /// `dual_increment!`) because the OTel successor must carry the same
 /// `reason` label shape the legacy text family renders
@@ -134,14 +151,21 @@ pub fn increment_push_outbox_retry_scheduled(reason: PushRetryReason) {
         1,
         reason,
     );
+    super::push_pipeline::increment_retry_scheduled();
 }
-dual_increment!(
-    increment_push_outbox_dead_lettered,
-    crate::prometheus::increment_push_outbox_dead_lettered,
-    "xmpp.push.outbox_dead_lettered",
-    "{notification}",
-    "XEP-0357 notification outbox jobs terminally dead-lettered."
-);
+
+/// Record terminal outbox dead-lettering in the legacy, reliability, and
+/// typed pipeline families.
+pub fn increment_push_outbox_dead_lettered() {
+    crate::prometheus::increment_push_outbox_dead_lettered();
+    crate::counter_add!(
+        "xmpp.push.outbox_dead_lettered",
+        "{notification}",
+        "XEP-0357 notification outbox jobs terminally dead-lettered.",
+        1,
+    );
+    super::push_pipeline::increment_dead_lettered();
+}
 
 /// Record one typed push suppression in both telemetry systems.
 pub fn increment_push_suppressed(reason: PushSuppressReason) {
@@ -153,6 +177,7 @@ pub fn increment_push_suppressed(reason: PushSuppressReason) {
         1,
         reason,
     );
+    super::push_pipeline::increment_suppressed();
 }
 
 // No dual helper for the legacy unknown-reason catch-all: the sealed
@@ -318,6 +343,10 @@ mod tests {
         increment_push_suppressed(PushSuppressReason::Xep0492Never);
         assert_eq!(
             guard.counter_sum("xmpp.push.suppressed", &[("reason", "xep0492_never")]),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("waddle.push.pipeline", &[("stage", "suppressed")]),
             Some(1)
         );
         assert!(crate::prometheus::render_metrics()
@@ -649,5 +678,12 @@ mod tests {
             Some(1)
         );
         assert!(rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1\n"));
+        for stage in ["suppressed", "retry_scheduled", "dead_lettered"] {
+            assert_eq!(
+                guard.counter_sum("waddle.push.pipeline", &[("stage", stage)]),
+                Some(1),
+                "typed pipeline sample missing or wrong for {stage}"
+            );
+        }
     }
 }

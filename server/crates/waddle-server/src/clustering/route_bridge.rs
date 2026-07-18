@@ -67,6 +67,13 @@ const MAX_ORDERED_RELAY_CHANNEL_LOCKS: usize = 4096;
 const MAX_REMOTE_OWNER_REGISTRATION_LOCKS: usize = 4096;
 const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+fn stanza_message_id(stanza: &Stanza) -> &str {
+    match stanza {
+        Stanza::Message(message) => message.id.as_ref().map_or("", |id| id.0.as_str()),
+        Stanza::Iq(_) | Stanza::Presence(_) => "",
+    }
+}
+
 type RemoteDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
@@ -258,6 +265,47 @@ fn route_target_stanza_is_iq(target: &RemoteResourceRouteTarget) -> bool {
         | RemoteResourceRouteTarget::BareJid { stanza, .. }
         | RemoteResourceRouteTarget::MucProxy { stanza, .. } => matches!(stanza.0, Stanza::Iq(_)),
     }
+}
+
+/// The few small fields the delivery-outcome log needs, extracted
+/// before the route target (and its full stanza) is moved into the
+/// routing future — logging must never force a stanza deep-clone.
+struct RouteOutcomeLog {
+    kind: &'static str,
+    entity: String,
+    message_id: String,
+}
+
+fn route_outcome_log(target: &RemoteResourceRouteTarget) -> RouteOutcomeLog {
+    match target {
+        RemoteResourceRouteTarget::FullJid { target, stanza } => RouteOutcomeLog {
+            kind: "full-JID",
+            entity: target.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
+        RemoteResourceRouteTarget::BareJid { target, stanza } => RouteOutcomeLog {
+            kind: "bare-JID",
+            entity: target.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
+        RemoteResourceRouteTarget::MucProxy {
+            room_jid, stanza, ..
+        } => RouteOutcomeLog {
+            kind: "MUC proxy",
+            entity: room_jid.to_string(),
+            message_id: stanza_message_id(&stanza.0).to_owned(),
+        },
+    }
+}
+
+fn log_remote_resource_route_outcome(context: &RouteOutcomeLog, outcome: FullJidDeliveryOutcome) {
+    tracing::debug!(
+        kind = context.kind,
+        entity = %context.entity,
+        message_id = %context.message_id,
+        ?outcome,
+        "ordered-relay delivery outcome"
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -639,16 +687,28 @@ impl OrderedRelayDeliveryBridge {
                 if handoff.mark_deferred() {
                     let bridge = Arc::clone(self);
                     let origin_stanza = stanza.clone();
+                    let outcome_target = target.clone();
+                    let outcome_message_id = match stanza {
+                        Stanza::Message(message) => message.id.clone(),
+                        Stanza::Iq(_) | Stanza::Presence(_) => None,
+                    };
                     tokio::spawn(async move {
-                        let replies = bridge
+                        let delivery_outcome = bridge
                             .deliver_seeded_remote(seed, true)
                             .await
-                            .map(|outcome| {
-                                replies_for_origin_handoff(
-                                    &origin_stanza,
-                                    caller_delivery_outcome(outcome),
-                                )
-                            })
+                            .map(caller_delivery_outcome);
+                        if let Some(outcome) = delivery_outcome {
+                            tracing::debug!(
+                                jid = %outcome_target,
+                                message_id = outcome_message_id
+                                    .as_ref()
+                                    .map_or("", |id| id.0.as_str()),
+                                ?outcome,
+                                "ordered-relay deferred full-JID delivery outcome"
+                            );
+                        }
+                        let replies = delivery_outcome
+                            .map(|outcome| replies_for_origin_handoff(&origin_stanza, outcome))
                             .unwrap_or_default();
                         handoff.complete(replies);
                     });
@@ -656,9 +716,15 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
 
-            Some(caller_delivery_outcome(
-                Arc::clone(self).deliver_seeded_remote(seed, true).await?,
-            ))
+            let outcome =
+                caller_delivery_outcome(Arc::clone(self).deliver_seeded_remote(seed, true).await?);
+            tracing::debug!(
+                jid = %target,
+                message_id = stanza_message_id(stanza),
+                ?outcome,
+                "ordered-relay full-JID delivery outcome"
+            );
+            Some(outcome)
         })
     }
 
@@ -1903,6 +1969,7 @@ impl OrderedRelayDeliveryBridge {
         origin_stanza: &Stanza,
         origin: &OrderedRelayRouteOrigin,
     ) -> Option<FullJidDeliveryOutcome> {
+        let outcome_log = route_outcome_log(&target);
         if let Some(handoff) = origin.handoff.clone() {
             if handoff.mark_deferred() {
                 let bridge = Arc::clone(&self);
@@ -1912,13 +1979,19 @@ impl OrderedRelayDeliveryBridge {
                         .route_remote_resource_origin_once(remote_origin, target)
                         .await
                         .unwrap_or(FullJidDeliveryOutcome::Dropped);
+                    log_remote_resource_route_outcome(&outcome_log, outcome);
                     handoff.complete(replies_for_origin_handoff(&origin_stanza, outcome));
                 });
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
         }
-        self.route_remote_resource_origin_once(remote_origin, target)
-            .await
+        let outcome = self
+            .route_remote_resource_origin_once(remote_origin, target)
+            .await;
+        if let Some(outcome) = outcome {
+            log_remote_resource_route_outcome(&outcome_log, outcome);
+        }
+        outcome
     }
 
     async fn route_remote_resource_origin_once(
@@ -2473,14 +2546,34 @@ impl OrderedRelayDeliveryBridge {
                 {
                     waddle_xmpp::telemetry::messages::record_delivered_message(message_kind);
                 }
+                tracing::debug!(
+                    jid = %target,
+                    message_id = stanza_message_id(stanza),
+                    outcome = ?FullJidDeliveryOutcome::Delivered,
+                    "clustered remote-resource delivery outcome"
+                );
                 Some(FullJidDeliveryOutcome::Delivered)
             }
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Backpressure,
-            }) => Some(FullJidDeliveryOutcome::Dropped),
+            }) => {
+                tracing::debug!(
+                    jid = %target,
+                    message_id = stanza_message_id(stanza),
+                    outcome = ?FullJidDeliveryOutcome::Dropped,
+                    "clustered remote-resource delivery outcome"
+                );
+                Some(FullJidDeliveryOutcome::Dropped)
+            }
             Ok(RelayRemoteResourceFrameReply {
                 status: RelayRemoteResourceFrameStatus::Unavailable,
             }) => {
+                tracing::debug!(
+                    jid = %target,
+                    message_id = stanza_message_id(stanza),
+                    outcome = ?FullJidDeliveryOutcome::Unavailable,
+                    "clustered remote-resource delivery outcome"
+                );
                 self.cleanup_remote_owner_resource_if_registration(
                     target,
                     registration.registration_id,
@@ -2491,6 +2584,7 @@ impl OrderedRelayDeliveryBridge {
             Err(error) => {
                 tracing::warn!(
                     jid = %target,
+                    message_id = stanza_message_id(stanza),
                     %error,
                     "clustered remote-resource acked delivery relay ask failed"
                 );

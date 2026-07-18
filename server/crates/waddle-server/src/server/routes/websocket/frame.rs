@@ -4,7 +4,10 @@ use super::{
     isr_resume::handle_isr_resume_authenticate,
     parse_errors::{is_sasl_parse_failure, parse_error_responses},
     resource_binding::handle_resource_binding,
-    sasl::{handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response},
+    sasl::{
+        handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
+        record_scram_failure,
+    },
     state::WsConnState,
     stream_management::{handle_sm_stanza, SmCtx},
     transport_xml::{
@@ -12,6 +15,7 @@ use super::{
         websocket_stream_open_xml,
     },
 };
+use crate::server::routes::auth_telemetry::AuthFailure;
 
 /// Handle an XMPP frame per RFC 7395
 pub(super) async fn handle_xmpp_frame(
@@ -92,6 +96,7 @@ async fn handle_xmpp_frame_impl(
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
                 if phase.scram_pending_username().is_some() && is_sasl_parse_failure(frame, &err) {
+                    record_scram_failure(AuthFailure::ScramMalformed, None);
                     let _ = phase.take_scram_pending();
                 }
                 warn!(
@@ -130,6 +135,9 @@ async fn handle_xmpp_frame_impl(
             if !phase.allows_sasl_auth() {
                 let reset_scram_phase = phase.scram_pending_username().is_some();
                 warn!(phase = ?phase, mechanism = %mechanism, "SASL auth received in invalid phase");
+                if reset_scram_phase || mechanism == "SCRAM-SHA-256" {
+                    record_scram_failure(AuthFailure::ScramOther, None);
+                }
                 if reset_scram_phase {
                     let _ = phase.take_scram_pending();
                 }
@@ -202,6 +210,7 @@ async fn handle_xmpp_frame_impl(
         InboundFrame::SaslResponse(data) => {
             if !phase.allows_sasl_response() {
                 warn!(phase = ?phase, "SASL response received in invalid phase");
+                record_scram_failure(AuthFailure::ScramOther, None);
                 return vec![sasl_failure_xml("not-authorized")];
             }
             let scram = phase

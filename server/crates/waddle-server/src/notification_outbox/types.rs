@@ -72,7 +72,7 @@ pub enum NotificationClass {
 }
 
 impl NotificationClass {
-    pub(super) fn as_db_value(self) -> &'static str {
+    pub(crate) fn as_db_value(self) -> &'static str {
         match self {
             Self::DirectMessage => "dm",
             Self::DirectMessageMention => "dm_mention",
@@ -152,9 +152,8 @@ pub(crate) enum SuppressedReason {
     /// path is structurally a no-row outcome, but the audit shape
     /// exists so race-window state changes can record it.
     Xep0357Self,
-    /// Recipient has no XEP-0357 push registration. Reserved variant;
-    /// emitted by the publish-layer disable transitions
-    /// (XEP-0357 §6) in later slices.
+    /// Recipient has no usable active first-party XEP-0357 push
+    /// registration when the T1 drain resolves delivery targets.
     Xep0357NoRegistration,
     /// Recipient's XEP-0357 push registration was disabled in
     /// response to a stanza-error from the push service

@@ -10,7 +10,7 @@ import {
 } from "./muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "./types";
 import {
-  beginCallAttempt,
+  resumeCallAttempt,
   markCallAttemptAccepted,
   reportFailedCallAttempt,
 } from "./call-lifecycle-telemetry";
@@ -60,9 +60,12 @@ export async function startMucCallAction({
   tryResumeFirst = false,
 }: MucCallStartActionOptions): Promise<boolean> {
   if (isBusy()) return false;
-  const sender = getSender();
-  if (!sender) return false;
   const lifecycleAttemptId = crypto.randomUUID();
+  const sender = getSender();
+  if (!sender) {
+    reportFailedCallAttempt(lifecycleAttemptId, "muc");
+    return false;
+  }
   setStarting(true);
   try {
     await ensureJoined?.();
@@ -260,7 +263,7 @@ export async function resumeMucCallActivity({
     selfNick,
     selfFullJid,
   });
-  beginCallAttempt(session.sid, "muc");
+  resumeCallAttempt(session.sid, "muc");
   markCallAttemptAccepted(session.sid);
 
   // Best-effort republish of Muji active presence under the current

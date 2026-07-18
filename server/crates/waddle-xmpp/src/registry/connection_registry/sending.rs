@@ -15,7 +15,15 @@ impl ConnectionRegistry {
     /// stale connections and removed from the registry; if a concurrent
     /// `register` installed a fresh sender on the same JID between our lookup and
     /// a failed send, the stanza is retried on the replacement rather than lost.
-    #[instrument(skip(self, stanza), fields(to = %jid))]
+    #[instrument(
+        skip(self, stanza),
+        fields(
+            to = %jid,
+            message_id = %crate::telemetry::messages::fanout_span_message_id(
+                stanza_message_id(&stanza)
+            )
+        )
+    )]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
@@ -315,5 +323,12 @@ impl ConnectionRegistry {
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }
+    }
+}
+
+fn stanza_message_id(stanza: &Stanza) -> &str {
+    match stanza {
+        Stanza::Message(message) => message.id.as_ref().map_or("", |id| id.0.as_str()),
+        Stanza::Iq(_) | Stanza::Presence(_) => "",
     }
 }

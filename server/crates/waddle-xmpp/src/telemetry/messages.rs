@@ -17,6 +17,23 @@ use super::attributes::MessageKind;
 use crate::Stanza;
 use xmpp_parsers::message::MessageType;
 
+const FANOUT_MESSAGE_ID_MAX_BYTES: usize = 64;
+
+/// Bound a client-controlled message id before attaching it to a
+/// per-recipient fan-out span. The returned slice is at most 64 bytes and
+/// always ends on a UTF-8 boundary.
+pub fn fanout_span_message_id(message_id: &str) -> &str {
+    if message_id.len() <= FANOUT_MESSAGE_ID_MAX_BYTES {
+        return message_id;
+    }
+
+    let mut end = FANOUT_MESSAGE_ID_MAX_BYTES;
+    while !message_id.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message_id[..end]
+}
+
 /// Classify a stanza about to be queued for local delivery. `None`
 /// for non-messages and body-less message stanzas.
 pub fn delivered_message_kind(stanza: &Stanza) -> Option<MessageKind> {
@@ -102,6 +119,23 @@ mod tests {
             xmpp_parsers::presence::Type::None,
         ));
         assert_eq!(delivered_message_kind(&presence), None);
+    }
+
+    #[test]
+    fn fanout_span_message_id_caps_bytes_without_splitting_utf8() {
+        let ascii = "a".repeat(FANOUT_MESSAGE_ID_MAX_BYTES + 1);
+        assert_eq!(
+            fanout_span_message_id(&ascii),
+            "a".repeat(FANOUT_MESSAGE_ID_MAX_BYTES)
+        );
+
+        let multibyte = format!("{}é", "a".repeat(FANOUT_MESSAGE_ID_MAX_BYTES - 1));
+        assert_eq!(
+            fanout_span_message_id(&multibyte),
+            "a".repeat(FANOUT_MESSAGE_ID_MAX_BYTES - 1)
+        );
+        assert!(fanout_span_message_id(&multibyte)
+            .is_char_boundary(fanout_span_message_id(&multibyte).len()));
     }
 
     #[tokio::test]

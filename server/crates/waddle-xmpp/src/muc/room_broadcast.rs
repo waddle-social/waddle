@@ -19,7 +19,7 @@ impl MucRoom {
     /// - All occupants receive the message (including the sender as echo)
     /// - Visitors in moderated rooms cannot send messages
     #[instrument(
-        name = "xmpp.muc.fanout",
+        name = "xmpp.muc.broadcast_build",
         skip(self, message),
         fields(
             room = %self.room_jid,
@@ -73,10 +73,11 @@ impl MucRoom {
         tracing::Span::current().record("recipients", outbound.len());
         crate::metrics::record_muc_message();
         crate::histogram_record!(
-            "waddle.muc.fanout.duration",
+            "xmpp.muc.broadcast_build.duration",
             "ms",
-            "MUC fanout latency: groupchat broadcast accepted until the \
-             per-recipient outbound set is built.",
+            "MUC broadcast-build duration: groupchat broadcast accepted until \
+             the per-recipient outbound set is built. The full delivery \
+             fan-out interval is `xmpp.muc.fanout.latency`.",
             fanout_started.elapsed().as_secs_f64() * 1000.0,
         );
 
@@ -176,5 +177,100 @@ impl MucRoom {
             setter_nick,
             set_at,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Affiliation, Role};
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn room_with_two_occupants() -> MucRoom {
+        let mut room = MucRoom::new(
+            "team@muc.example.com".parse().expect("room jid"),
+            "waddle-1".into(),
+            "channel-1".into(),
+            Default::default(),
+        );
+        for (real_jid, nick) in [
+            ("alice@example.com/browser", "alice"),
+            ("bob@example.com/phone", "bob"),
+        ] {
+            room.add_occupant(Occupant {
+                real_jid: real_jid.parse().expect("occupant jid"),
+                nick: nick.into(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+                is_remote: false,
+                home_server: None,
+            });
+        }
+        room
+    }
+
+    fn correlated_message() -> Message {
+        let mut message = Message::new(None::<Jid>);
+        message.id = Some(xmpp_parsers::message::Id("fanout-correlation-1".into()));
+        message.type_ = MessageType::Groupchat;
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "sensitive fanout body".into(),
+        );
+        message
+    }
+
+    #[test]
+    fn fanout_span_carries_room_message_id_and_recipient_count_without_body() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(CaptureWriter(Arc::clone(&bytes)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            room_with_two_occupants()
+                .broadcast_message("alice", &correlated_message())
+                .expect("broadcast succeeds");
+        });
+
+        let output = String::from_utf8(bytes.lock().expect("capture lock").clone())
+            .expect("captured tracing is UTF-8");
+        for expected in [
+            "\"room\":\"team@muc.example.com\"",
+            "\"message_id\":\"fanout-correlation-1\"",
+            "\"recipients\":2",
+        ] {
+            assert!(output.contains(expected), "missing {expected} in {output}");
+        }
+        assert!(
+            !output.contains("sensitive fanout body"),
+            "message bodies must never be tracing fields: {output}"
+        );
     }
 }

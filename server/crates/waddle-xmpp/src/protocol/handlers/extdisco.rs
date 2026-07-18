@@ -16,6 +16,7 @@ use waddle_sfu::{Identity, SfuService};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::traits::IqHandler;
+use crate::telemetry::attributes::RequestOutcome;
 use crate::xep::xep0215::{
     build_services_result_element, build_stun_service_element, build_turn_service, ServiceType,
     NS_EXT_DISCO,
@@ -98,13 +99,21 @@ impl IqHandler for ExtDiscoHandler {
             // spoof any identity into the TURN username).
             let identity = Identity::from_jid(ctx.full_jid.clone());
             match self.sfu.issue_turn_credentials(&identity) {
-                Ok(cred) => services.push(build_turn_service(
-                    self.sfu.turn_host(),
-                    self.turn_tls_port,
-                    &cred,
-                )),
+                Ok(cred) => {
+                    record_turn_credential_outcome(RequestOutcome::Success);
+                    services.push(build_turn_service(
+                        self.sfu.turn_host(),
+                        self.turn_tls_port,
+                        &cred,
+                    ));
+                }
                 Err(e) => {
-                    tracing::error!(error = %e, "TURN credential mint failed");
+                    record_turn_credential_outcome(RequestOutcome::Failure);
+                    tracing::error!(
+                        user = %ctx.full_jid.to_bare(),
+                        error = %e,
+                        "TURN credential mint failed"
+                    );
                     return error_reply(
                         iq,
                         DefinedCondition::InternalServerError,
@@ -137,6 +146,16 @@ impl IqHandler for ExtDiscoHandler {
             reply,
         ))))]
     }
+}
+
+fn record_turn_credential_outcome(outcome: RequestOutcome) {
+    crate::counter_add!(
+        "waddle.call.turn_credentials",
+        "1",
+        "TURN credential issuance attempts by outcome.",
+        1,
+        outcome,
+    );
 }
 
 /// Wire-form `type` value for the (typed) filter on the inbound
@@ -263,6 +282,25 @@ mod tests {
         assert_eq!(stun.attr("type"), Some("stun"));
         assert_eq!(stun.attr("transport"), Some("udp"));
         assert_eq!(stun.attr("port"), Some("3478"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn turn_credential_issuance_emits_success_counter() {
+        let metrics = crate::telemetry::test_support::acquire().await;
+        let jid = test_jid();
+        let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+
+        let events = handler.handle(&services_get_iq(), &ctx(&jid));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            metrics.counter_sum("waddle.call.turn_credentials", &[("outcome", "success")]),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.turn_credentials"),
+            Some("1".to_string())
+        );
     }
 
     #[test]

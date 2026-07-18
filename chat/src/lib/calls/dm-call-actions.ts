@@ -19,9 +19,10 @@ import {
 import type { CallMedia } from "./types";
 import { barePeerJid } from "../xmpp/jid";
 import {
-  beginCallAttempt,
+  resumeCallAttempt,
   finishCallAttempt,
   markCallAttemptAccepted,
+  reportFailedCallAttempt,
 } from "./call-lifecycle-telemetry";
 
 export async function startDmCallAction(options: {
@@ -33,10 +34,13 @@ export async function startDmCallAction(options: {
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") return;
 
-  const sender = options.getSender();
-  if (!sender) return;
-
   const sid = newCallSid();
+  const sender = options.getSender();
+  if (!sender) {
+    reportFailedCallAttempt(sid, "dm");
+    return;
+  }
+
   beginOutgoingCall(
     options.peerBareJid,
     sid,
@@ -145,7 +149,7 @@ export function resumeDmCallActivity(options: {
     join: activity.join,
     initiator: selfFullJid,
   });
-  beginCallAttempt(activity.sid, "dm");
+  resumeCallAttempt(activity.sid, "dm");
   markCallAttemptAccepted(activity.sid);
   return true;
 }
