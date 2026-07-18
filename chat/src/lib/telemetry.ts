@@ -868,18 +868,48 @@ export function setXmppResourceForTelemetry(resource: string): void {
  * parameter is the only cross-stack propagation channel available here.
  */
 export function websocketUrlWithTraceparent(value: string): string {
-  const spanContext = trace.getSpan(context.active())?.spanContext();
-  if (!spanContext) return value;
+  const activeSpanContext = trace.getSpan(context.active())?.spanContext();
+  const spanContext = activeSpanContext && validSpanContext(activeSpanContext)
+    ? activeSpanContext
+    : randomSpanContext();
   return websocketUrlWithSpanContext(value, spanContext);
+}
+
+function validSpanContext(spanContext: { traceId: string; spanId: string; traceFlags: number }): boolean {
+  return isValidTraceparent(traceparentFromSpanContext(spanContext));
+}
+
+function randomSpanContext(): { traceId: string; spanId: string; traceFlags: number } {
+  return {
+    traceId: randomNonZeroHex(16),
+    spanId: randomNonZeroHex(8),
+    traceFlags: 0,
+  };
+}
+
+function randomNonZeroHex(byteLength: number): string {
+  let value = "";
+  do {
+    value = Array.from(crypto.getRandomValues(new Uint8Array(byteLength)), (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+  } while (/^0+$/.test(value));
+  return value;
+}
+
+function traceparentFromSpanContext(
+  spanContext: { traceId: string; spanId: string; traceFlags: number },
+): string {
+  return `00-${spanContext.traceId}-${spanContext.spanId}-${(spanContext.traceFlags & 0xff)
+    .toString(16)
+    .padStart(2, "0")}`;
 }
 
 function websocketUrlWithSpanContext(
   value: string,
   spanContext: { traceId: string; spanId: string; traceFlags: number },
 ): string {
-  const traceparent = `00-${spanContext.traceId}-${spanContext.spanId}-${(spanContext.traceFlags & 0xff)
-    .toString(16)
-    .padStart(2, "0")}`;
+  const traceparent = traceparentFromSpanContext(spanContext);
   if (!isValidTraceparent(traceparent)) return value;
   try {
     const url = new URL(value);
@@ -1148,13 +1178,13 @@ export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: C
 export function reportCallLifecycle(payload: CallLifecyclePayload): void {
   faro?.api.pushEvent("chat.call.lifecycle", {
     setup_outcome: payload.setupOutcome,
-    ...(payload.endReason ? { end_reason: payload.endReason } : {}),
+    end_reason: payload.endReason,
     duration_bucket: payload.durationBucket,
     call_kind: payload.callKind,
     rtt_band: payload.rttBand,
     packet_loss_band: payload.packetLossBand,
     connection_quality: payload.connectionQuality,
-    reconnect_count: String(payload.reconnectCount),
+    reconnect_count: payload.reconnectCount,
   });
 }
 

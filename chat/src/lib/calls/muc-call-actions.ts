@@ -60,9 +60,12 @@ export async function startMucCallAction({
   tryResumeFirst = false,
 }: MucCallStartActionOptions): Promise<boolean> {
   if (isBusy()) return false;
-  const sender = getSender();
-  if (!sender) return false;
   const lifecycleAttemptId = crypto.randomUUID();
+  const sender = getSender();
+  if (!sender) {
+    reportFailedCallAttempt(lifecycleAttemptId, "muc");
+    return false;
+  }
   setStarting(true);
   try {
     await ensureJoined?.();

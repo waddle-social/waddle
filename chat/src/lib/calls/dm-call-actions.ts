@@ -22,6 +22,7 @@ import {
   beginCallAttempt,
   finishCallAttempt,
   markCallAttemptAccepted,
+  reportFailedCallAttempt,
 } from "./call-lifecycle-telemetry";
 
 export async function startDmCallAction(options: {
@@ -33,10 +34,13 @@ export async function startDmCallAction(options: {
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") return;
 
-  const sender = options.getSender();
-  if (!sender) return;
-
   const sid = newCallSid();
+  const sender = options.getSender();
+  if (!sender) {
+    reportFailedCallAttempt(sid, "dm");
+    return;
+  }
+
   beginOutgoingCall(
     options.peerBareJid,
     sid,

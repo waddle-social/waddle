@@ -412,9 +412,54 @@ describe("telemetry module no-op behaviour", () => {
     )).toBe(`wss://xmpp.example/:route?traceparent=${traceparent}`);
   });
 
-  test("leaves WebSocket URLs unchanged when there is no active span", () => {
-    expect(websocketUrlWithTraceparent("wss://xmpp.example/ws?transport=websocket"))
-      .toBe("wss://xmpp.example/ws?transport=websocket");
+  test("generates valid random trace context when there is no active span", () => {
+    const result = new URL(
+      websocketUrlWithTraceparent("wss://xmpp.example/ws?transport=websocket"),
+    );
+
+    expect(result.searchParams.get("transport")).toBe("websocket");
+    expect(result.searchParams.get("traceparent"))
+      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
+  });
+
+  test("passes a well-formed traceparent into the XMPP WebSocket configuration", async () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+    let configuredUrl = "";
+
+    class StubConfig {
+      constructor(url: string, ..._args: unknown[]) {
+        configuredUrl = url;
+      }
+    }
+    class StubClient {
+      async connect(): Promise<void> {}
+      async disconnect(): Promise<void> {}
+    }
+
+    const client = new BrowserXmppClient(session({
+      xmpp_websocket_url: "wss://xmpp.example/ws?session_id=secret",
+    }));
+    const state = client as unknown as {
+      connectTimeoutMs: number;
+      loadModule: () => Promise<unknown>;
+      reconnect: { clearTimer: () => void };
+    };
+    state.connectTimeoutMs = 1_000;
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+
+    const pendingConnect = client.connect();
+    pendingConnect.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const configured = new URL(configuredUrl);
+    expect(configured.searchParams.get("session_id")).toBe("secret");
+    expect(configured.searchParams.get("traceparent"))
+      .toMatch(/^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-00$/);
+
+    await client.disconnect();
+    await pendingConnect.catch(() => undefined);
+    state.reconnect.clearTimer();
   });
 
   test("appends the active trace context without dropping existing WebSocket query values", () => {
@@ -959,10 +1004,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
         detail: string;
         cause?: unknown;
         condition?: string;
-      errorType?: string;
-      errorText?: string;
-      roomLocalpart?: string;
-        roomLocalpart?: string;
+        errorType?: string;
         errorText?: string;
       }) => void;
     };
@@ -1026,6 +1068,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
         detail: string;
         condition?: string;
         errorType?: string;
+        errorText?: string;
+        roomLocalpart?: string;
       }) => void;
     };
 

@@ -331,7 +331,7 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  */
 export function applyCallEvent(
   event: CallEvent,
-  options: { sender?: CallWireSender | null } = {},
+  options: { sender?: CallWireSender | null; selfOriginated?: boolean } = {},
 ): void {
   // Route inbound Muji session-accept stanzas to the pending
   // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
@@ -355,12 +355,29 @@ export function applyCallEvent(
   }
   if (next.phase === "ended" && (before.phase !== "ended" || before.sid !== next.sid)) {
     if (event.kind === "reject") {
-      finishCallAttempt(next.sid, { setupOutcome: "declined" });
+      finishCallAttempt(next.sid, {
+        setupOutcome: "declined",
+        endReason: signaledCallEndReason(options.selfOriginated),
+      });
     } else if (event.kind === "retract") {
-      finishCallAttempt(next.sid, { setupOutcome: "proposed" });
+      finishCallAttempt(next.sid, {
+        setupOutcome: "proposed",
+        endReason: signaledCallEndReason(options.selfOriginated),
+      });
     } else {
-      finishCallAttempt(next.sid, callLifecycleTerminalForRemoteEnd(before, event, next.reason));
+      finishCallAttempt(
+        next.sid,
+        callLifecycleTerminalForSignaledEnd(before, event, next.reason, options.selfOriginated),
+      );
     }
+  }
+  if (
+    before.phase === "incoming"
+    && next.phase === "idle"
+    && event.kind === "proceed"
+    && event.sid === before.sid
+  ) {
+    finishCallAttempt(before.sid, { setupOutcome: "proposed", endReason: "hangup" });
   }
   if (next !== before) {
     $lastCallError.set(null);
@@ -398,19 +415,36 @@ const CALL_ERROR_REASONS = new Set([
   "error",
 ]);
 
-export function callLifecycleTerminalForRemoteEnd(
+export function callLifecycleTerminalForSignaledEnd(
   before: CallState,
   _event: CallEvent,
   reason: string | null,
-): { setupOutcome?: CallSetupOutcome; endReason?: CallEndReason } {
+  selfOriginated: boolean = false,
+): { setupOutcome?: CallSetupOutcome; endReason: CallEndReason } {
   const isFailure = reason !== null && CALL_ERROR_REASONS.has(reason);
   if (before.phase === "active") {
-    return { endReason: isFailure || reason === "timeout" ? "error" : "peer-left" };
+    return {
+      endReason: isFailure || reason === "timeout"
+        ? "error"
+        : signaledCallEndReason(selfOriginated),
+    };
   }
-  if (reason === "timeout") return { setupOutcome: "timeout" };
-  if (reason === "decline") return { setupOutcome: "declined" };
-  if (isFailure) return { setupOutcome: "failed" };
-  return { setupOutcome: "proposed" };
+  if (reason === "timeout") return { setupOutcome: "timeout", endReason: "error" };
+  if (reason === "decline") {
+    return {
+      setupOutcome: "declined",
+      endReason: signaledCallEndReason(selfOriginated),
+    };
+  }
+  if (isFailure) return { setupOutcome: "failed", endReason: "error" };
+  return {
+    setupOutcome: "proposed",
+    endReason: signaledCallEndReason(selfOriginated),
+  };
+}
+
+function signaledCallEndReason(selfOriginated: boolean | undefined): CallEndReason {
+  return selfOriginated ? "hangup" : "peer-left";
 }
 
 function applyIncomingCallAlerts(before: CallState, next: CallState): void {
@@ -454,11 +488,10 @@ export function clearCallState(terminal: {
   );
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") {
+    const derivedTerminal = callLifecycleTerminalForTeardown(current.phase, "clear");
     finishCallAttempt(current.sid, {
-      setupOutcome: terminal.setupOutcome ?? teardownSetupOutcome(current.phase),
-      ...(terminal.endReason
-        ? { endReason: terminal.endReason }
-        : current.phase === "active" ? { endReason: "error" as const } : {}),
+      setupOutcome: terminal.setupOutcome ?? derivedTerminal.setupOutcome,
+      endReason: terminal.endReason ?? derivedTerminal.endReason,
     });
   }
   if (current.phase === "incoming") {
@@ -598,7 +631,7 @@ export function scheduleOutgoingTimeout(
       .catch((err) => reportCallError(err));
     publishNoAnswerOutcome(s.to, sid, s.media, s.initiator);
     clearDmCallActivity(s.to, sid);
-    finishCallAttempt(sid, { setupOutcome: "timeout" });
+    finishCallAttempt(sid, { setupOutcome: "timeout", endReason: "error" });
     $callState.set({
       phase: "ended",
       sid,
@@ -631,7 +664,7 @@ export function scheduleSessionAcceptTimeout(
       .catch((err) => reportCallError(err));
     publishNoAnswerOutcome(peerFullJid, sid, s.media, s.initiator);
     clearDmCallActivity(peerFullJid, sid);
-    finishCallAttempt(sid, { setupOutcome: "timeout" });
+    finishCallAttempt(sid, { setupOutcome: "timeout", endReason: "error" });
     $callState.set({
       phase: "ended",
       sid,
@@ -739,6 +772,19 @@ export function teardownSetupOutcome(phase: CallState["phase"]): CallSetupOutcom
   }
 }
 
+export function callLifecycleTerminalForTeardown(
+  phase: CallState["phase"],
+  disposition: "clear" | "success" | "gone",
+): { setupOutcome: CallSetupOutcome; endReason: CallEndReason } {
+  const failedSetup = phase === "muc-pending";
+  const terminalFailure = disposition === "gone" || failedSetup
+    || (disposition === "clear" && phase === "active");
+  return {
+    setupOutcome: teardownSetupOutcome(phase),
+    endReason: terminalFailure ? "error" : "hangup",
+  };
+}
+
 export async function tearDownActiveCall(
   sender: CallWireSender | null,
   reason: "success" | "gone",
@@ -746,12 +792,7 @@ export async function tearDownActiveCall(
   cancelCallTimers();
   const s = $callState.get();
   if (s.phase !== "idle" && s.phase !== "ended") {
-    finishCallAttempt(s.sid, {
-      setupOutcome: teardownSetupOutcome(s.phase),
-      ...(s.phase === "active"
-        ? { endReason: reason === "success" ? "hangup" as const : "error" as const }
-        : {}),
-    });
+    finishCallAttempt(s.sid, callLifecycleTerminalForTeardown(s.phase, reason));
   }
   if (sender) {
     try {

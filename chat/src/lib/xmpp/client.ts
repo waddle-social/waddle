@@ -2941,7 +2941,10 @@ export class BrowserXmppClient {
           (event.kind === "finish" && prev.phase === "active" && prev.kind === "dm")
         );
       if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall) {
-        applyCallEvent(event, { sender: xmpp as unknown as CallWireSender });
+        applyCallEvent(event, {
+          sender: xmpp as unknown as CallWireSender,
+          selfOriginated: isSelfOriginated,
+        });
       }
       if (!isSelfOriginated) {
         void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);
