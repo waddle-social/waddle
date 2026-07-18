@@ -82,8 +82,12 @@ pub(super) struct StanzaBackstop {
 
 impl StanzaBackstop {
     /// Capture backstop metadata from a borrowed stanza before it is moved into
-    /// the dispatch future.
-    pub(super) fn capture(stanza: &Stanza) -> Self {
+    /// the dispatch future. `bound_jid` (the session's bound full JID, once
+    /// binding happened) stamps the correlation attributes from #1326: the
+    /// XMPP resource plus the bare user JID, so one attribute search joins a
+    /// browser session's Faro beacons to its server-side spans.
+    pub(super) fn capture(stanza: &Stanza, bound_jid: Option<&jid::FullJid>) -> Self {
+        let correlation = MessageCorrelation::capture(stanza);
         match stanza {
             // Only IQ `get`/`set` carry a request payload AND owe a response, so
             // a single match keeps the namespace and the reply addressing in
@@ -98,23 +102,51 @@ impl StanzaBackstop {
                         from: iq.to().map(|jid| jid.to_string()),
                         to: iq.from().map(|jid| jid.to_string()),
                     }),
+                    correlation,
+                    bound_jid,
                 ),
-                _ => Self::build("iq", String::new(), None),
+                _ => Self::build("iq", String::new(), None, correlation, bound_jid),
             },
-            Stanza::Presence(_) => Self::build("presence", String::new(), None),
-            Stanza::Message(_) => Self::build("message", String::new(), None),
+            Stanza::Presence(_) => {
+                Self::build("presence", String::new(), None, correlation, bound_jid)
+            }
+            Stanza::Message(_) => {
+                Self::build("message", String::new(), None, correlation, bound_jid)
+            }
         }
     }
 
-    fn build(kind: &'static str, payload_ns: String, iq_reply: Option<IqReply>) -> Self {
+    fn build(
+        kind: &'static str,
+        payload_ns: String,
+        iq_reply: Option<IqReply>,
+        correlation: MessageCorrelation,
+        bound_jid: Option<&jid::FullJid>,
+    ) -> Self {
         // `otel.status_code` is declared Empty and recorded as ERROR on elapse;
         // `tracing-opentelemetry` maps that field onto the OTEL span status.
+        // The correlation fields (#1321/#1326) are declared Empty and recorded
+        // only when known, so absent values don't serialize at all.
         let span = info_span!(
             "xmpp.stanza.dispatch",
             stanza_kind = kind,
             payload_ns = %payload_ns,
             otel.status_code = tracing::field::Empty,
+            message_id = tracing::field::Empty,
+            room = tracing::field::Empty,
+            xmpp.resource = tracing::field::Empty,
+            user = tracing::field::Empty,
         );
+        if let Some(message_id) = &correlation.message_id {
+            span.record("message_id", message_id.as_str());
+        }
+        if let Some(room) = &correlation.room {
+            span.record("room", room.as_str());
+        }
+        if let Some(jid) = bound_jid {
+            span.record("xmpp.resource", jid.resource().as_str());
+            span.record("user", tracing::field::display(jid.to_bare()));
+        }
         Self {
             kind,
             payload_ns,
@@ -170,9 +202,39 @@ impl StanzaBackstop {
     }
 }
 
+/// Message-correlation fields for the dispatch span (#1321): the stanza's
+/// message id, and the room bare JID for groupchat traffic. Captured from the
+/// borrowed stanza before it moves into the dispatch future.
+struct MessageCorrelation {
+    message_id: Option<String>,
+    room: Option<String>,
+}
+
+impl MessageCorrelation {
+    fn capture(stanza: &Stanza) -> Self {
+        match stanza {
+            Stanza::Message(message) => Self {
+                message_id: message.id.as_ref().map(|id| id.0.clone()),
+                room: (message.type_ == xmpp_parsers::message::MessageType::Groupchat)
+                    .then(|| message.to.as_ref().map(|to| to.to_bare().to_string()))
+                    .flatten(),
+            },
+            _ => Self {
+                message_id: None,
+                room: None,
+            },
+        }
+    }
+}
+
 /// Drive a stanza's dispatch under the wedge backstop: run `dispatch` within the
 /// backstop span and the [`STANZA_HANDLER_WEDGE_TIMEOUT`]; on elapse, return the
 /// conformant timeout response instead of letting the connection hang.
+///
+/// Completed dispatches feed the `xmpp.stanzas.processed` counter and the
+/// `xmpp.stanza.latency` histogram (#1320 wire-up / #1321 dispatch seam);
+/// timeouts keep their dedicated counter and are not double-counted as
+/// processed.
 pub(super) async fn run_with_backstop<F>(
     backstop: StanzaBackstop,
     dispatch: F,
@@ -181,8 +243,14 @@ where
     F: Future<Output = Vec<String>> + Send,
 {
     let span = backstop.span.clone();
+    let kind = backstop.kind;
+    let started = std::time::Instant::now();
     match tokio::time::timeout(STANZA_HANDLER_WEDGE_TIMEOUT, dispatch.instrument(span)).await {
-        Ok(responses) => Ok(responses),
+        Ok(responses) => {
+            metrics::record_stanza(kind, "inbound");
+            metrics::record_stanza_latency(started.elapsed().as_secs_f64() * 1000.0, kind);
+            Ok(responses)
+        }
         Err(_elapsed) => Err(backstop.on_timeout()),
     }
 }

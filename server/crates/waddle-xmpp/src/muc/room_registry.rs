@@ -140,6 +140,7 @@ impl MucRoomRegistry {
         self.rooms.insert(room_jid.clone(), handle.clone());
         self.room_data.insert(room_jid.clone(), room_data);
         prometheus::increment_room_count();
+        crate::metrics::record_muc_rooms_active(self.room_count() as i64);
 
         info!("Created new MUC room");
         Ok(handle)
@@ -210,6 +211,7 @@ impl MucRoomRegistry {
         self.rooms.insert(room_jid.clone(), handle.clone());
         self.room_data.insert(room_jid.clone(), room_data);
         prometheus::increment_room_count();
+        crate::metrics::record_muc_rooms_active(self.room_count() as i64);
 
         info!("Created instant MUC room (XEP-0045)");
         Ok(handle)
@@ -222,6 +224,7 @@ impl MucRoomRegistry {
         let removed = self.rooms.remove(room_jid);
         if removed.is_some() {
             prometheus::decrement_room_count();
+            crate::metrics::record_muc_rooms_active(self.room_count() as i64);
             info!("Destroyed MUC room");
         } else {
             warn!("Attempted to destroy non-existent room");

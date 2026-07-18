@@ -195,8 +195,12 @@ pub(super) fn handle_sasl_scram_response(
     };
 
     let server_final = match scram.process_client_final(&client_final) {
-        Ok(result) => result,
+        Ok(result) => {
+            waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", true);
+            result
+        }
         Err(e) => {
+            waddle_xmpp::metrics::record_auth_attempt("SCRAM-SHA-256", false);
             warn!(
                 error = %e,
                 username = %scram.username(),

@@ -55,7 +55,7 @@ fn responses_and_disposition(
 #[tokio::test(start_paused = true)]
 async fn iq_get_timeout_yields_conformant_resource_constraint() {
     let stanza = iq_get_stanza("disco-1", "alice@example.com/web", "upload.example.com");
-    let backstop = StanzaBackstop::capture(&stanza);
+    let backstop = StanzaBackstop::capture(&stanza, None);
 
     let mut fut = Box::pin(run_with_backstop(backstop, pending::<Vec<String>>()));
     assert!(
@@ -120,7 +120,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
 #[tokio::test(start_paused = true)]
 async fn message_timeout_yields_no_response() {
     let stanza = message_stanza();
-    let backstop = StanzaBackstop::capture(&stanza);
+    let backstop = StanzaBackstop::capture(&stanza, None);
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
@@ -137,7 +137,7 @@ async fn message_timeout_yields_no_response() {
 #[tokio::test(start_paused = true)]
 async fn presence_timeout_yields_no_response() {
     let stanza = presence_stanza();
-    let backstop = StanzaBackstop::capture(&stanza);
+    let backstop = StanzaBackstop::capture(&stanza, None);
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
@@ -153,7 +153,7 @@ async fn iq_result_timeout_yields_no_response() {
     // IQ must NOT synthesize an error reply (locks the `_ => None` arm in
     // `capture`).
     let stanza = iq_result_stanza("ack-1");
-    let backstop = StanzaBackstop::capture(&stanza);
+    let backstop = StanzaBackstop::capture(&stanza, None);
 
     let fut = run_with_backstop(backstop, pending::<Vec<String>>());
     tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
@@ -170,7 +170,7 @@ async fn iq_result_timeout_yields_no_response() {
 #[tokio::test(start_paused = true)]
 async fn fast_dispatch_passes_through_untouched() {
     let stanza = iq_get_stanza("disco-2", "alice@example.com/web", "example.com");
-    let backstop = StanzaBackstop::capture(&stanza);
+    let backstop = StanzaBackstop::capture(&stanza, None);
 
     // A handler that completes immediately must pass its response through
     // unchanged, with no timeout reply.

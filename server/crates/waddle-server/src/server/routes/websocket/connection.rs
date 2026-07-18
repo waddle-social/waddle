@@ -34,6 +34,7 @@ pub fn router(state: Arc<WebSocketState>) -> Router {
 /// Upgrades HTTP connection to WebSocket and handles XMPP framing.
 async fn xmpp_websocket_handler(
     ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
     // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
@@ -51,8 +52,28 @@ async fn xmpp_websocket_handler(
     }
     info!("XMPP WebSocket connection request");
 
-    ws.protocols(["xmpp"])
-        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
+    // #1326 phase A: the browser cannot set headers on a WebSocket
+    // upgrade, so the client's connect trace arrives as a
+    // `traceparent` query parameter. Link (not parent) it onto the
+    // connection-scoped span so the browser's `xmpp.connect` span and
+    // this server session become one navigable graph in Tempo.
+    let connection_span =
+        tracing::info_span!("xmpp.connection", client.trace_id = tracing::field::Empty,);
+    if let Some(client_context) = crate::server::trace::client_trace_context_from_query(uri.query())
+    {
+        connection_span.record(
+            "client.trace_id",
+            tracing::field::display(client_context.trace_id()),
+        );
+        tracing_opentelemetry::OpenTelemetrySpanExt::add_link(&connection_span, client_context);
+    }
+
+    ws.protocols(["xmpp"]).on_upgrade(move |socket| {
+        tracing::Instrument::instrument(
+            handle_xmpp_websocket(socket, state, connection_guard),
+            connection_span,
+        )
+    })
 }
 
 /// Size of the outbound message channel buffer

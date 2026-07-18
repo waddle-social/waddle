@@ -608,6 +608,99 @@ mod tests {
     }
 }
 
+/// What the managed-channel affiliation/membership resolver reported
+/// for a denied join, recorded on the admission-denial log (#1315).
+/// This is diagnostic context on the log only — it is never a metric
+/// attribute (the counter keys on the stanza error condition alone).
+#[derive(Debug, Clone, Copy)]
+enum ManagedAdmissionResolverOutcome {
+    /// The join carried no authenticated session, so the resolver was
+    /// never consulted.
+    SessionMissing,
+    /// The authenticated session's JID failed to parse, so the
+    /// resolver was never consulted.
+    SessionJidMalformed,
+    /// The resolver reported the joiner is banned (outcast).
+    Banned,
+    /// The resolver reported no channel affiliation for the joiner in a
+    /// members-only channel.
+    NoAffiliation,
+    /// The resolver failed to produce an affiliation (backend error).
+    ResolverError,
+}
+
+impl ManagedAdmissionResolverOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionMissing => "session-missing",
+            Self::SessionJidMalformed => "session-jid-malformed",
+            Self::Banned => "banned",
+            Self::NoAffiliation => "no-affiliation",
+            Self::ResolverError => "resolver-error",
+        }
+    }
+}
+
+/// The typed descriptor of a single managed-channel admission denial:
+/// the XEP-0045 §7.2 stanza error it maps to plus the diagnostic
+/// context (`members_only`, resolver outcome) recorded on the log.
+struct ManagedAdmissionDenial {
+    /// The RFC 6120 §8.3.3 stanza error condition; the counter keys on
+    /// this alone.
+    condition: waddle_xmpp::telemetry::attributes::StanzaErrorCondition,
+    /// The `<error type=.../>` class carried on the presence error.
+    error_type: ErrorType,
+    /// Whether admission treated the channel as members-only.
+    members_only: bool,
+    /// What the affiliation/membership resolver reported.
+    resolver_outcome: ManagedAdmissionResolverOutcome,
+    /// Human-facing `<text/>` on the presence error.
+    message: &'static str,
+}
+
+/// Central choke point for managed-channel admission denials (#1315).
+///
+/// Every managed-channel join rejection routes through here so the
+/// denial is never invisible again: it emits one info-level structured
+/// log (bare room JID, bare user JID, condition, `members_only`, and
+/// the resolver outcome) and increments the
+/// `waddle.muc.admission.denied` counter keyed by the stanza error
+/// condition, then returns the XEP-0045 §7.2 presence-error frame
+/// unchanged. JIDs live on the log only — never as a metric attribute.
+fn deny_managed_channel_admission(
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    denial: ManagedAdmissionDenial,
+) -> Vec<String> {
+    info!(
+        room = %room_jid,
+        user = %sender_jid.to_bare(),
+        condition = denial.condition.as_str(),
+        members_only = denial.members_only,
+        resolver_outcome = denial.resolver_outcome.as_str(),
+        "managed-channel admission denied"
+    );
+    waddle_xmpp::counter_add!(
+        "waddle.muc.admission.denied",
+        "{denial}",
+        "Managed-channel admission denials by stanza error condition.",
+        1,
+        denial.condition,
+    );
+    vec![build_muc_presence_error_xml(
+        room_jid,
+        nick,
+        sender_jid,
+        StanzaError::new(
+            denial.error_type,
+            denial.condition.to_xmpp(),
+            "en",
+            denial.message,
+        ),
+    )]
+}
+
 async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'_>) -> Vec<String> {
     let MucJoinWork {
         domain,
@@ -713,34 +806,38 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             .unwrap_or(0);
         let managed_affiliation = if let Some(channel) = managed_channel.as_ref() {
             let Some(session) = authenticated_session else {
-                return vec![build_muc_presence_error_xml(
+                return deny_managed_channel_admission(
                     room_jid,
-                    &nick,
                     sender_jid,
-                    StanzaError::new(
-                        ErrorType::Auth,
-                        DefinedCondition::NotAuthorized,
-                        "en",
-                        "Authentication required to join managed channel.",
-                    ),
-                )];
+                    &nick,
+                    ManagedAdmissionDenial {
+                        condition:
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::NotAuthorized,
+                        error_type: ErrorType::Auth,
+                        members_only: channel.members_only,
+                        resolver_outcome: ManagedAdmissionResolverOutcome::SessionMissing,
+                        message: "Authentication required to join managed channel.",
+                    },
+                );
             };
             let admission_members_only = existing_room_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.room.config.members_only)
                 .unwrap_or(channel.members_only);
             let Ok(session_bare) = session.user_jid.parse::<BareJid>() else {
-                return vec![build_muc_presence_error_xml(
+                return deny_managed_channel_admission(
                     room_jid,
-                    &nick,
                     sender_jid,
-                    StanzaError::new(
-                        ErrorType::Wait,
-                        DefinedCondition::InternalServerError,
-                        "en",
-                        "Failed to resolve managed-channel affiliation.",
-                    ),
-                )];
+                    &nick,
+                    ManagedAdmissionDenial {
+                        condition:
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
+                        error_type: ErrorType::Wait,
+                        members_only: admission_members_only,
+                        resolver_outcome: ManagedAdmissionResolverOutcome::SessionJidMalformed,
+                        message: "Failed to resolve managed-channel affiliation.",
+                    },
+                );
             };
             match resolve_managed_channel_affiliation(
                 state,
@@ -776,17 +873,19 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         Affiliation::Outcast,
                         admission_revision,
                     );
-                    return vec![build_muc_presence_error_xml(
+                    return deny_managed_channel_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Auth,
-                            DefinedCondition::Forbidden,
-                            "en",
-                            "Banned from managed channel.",
-                        ),
-                    )];
+                        &nick,
+                        ManagedAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
+                            error_type: ErrorType::Auth,
+                            members_only: admission_members_only,
+                            resolver_outcome: ManagedAdmissionResolverOutcome::Banned,
+                            message: "Banned from managed channel.",
+                        },
+                    );
                 }
                 Ok(Some(affiliation)) => Some(affiliation),
                 Ok(None) => {
@@ -809,32 +908,36 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             Affiliation::None,
                             admission_revision,
                         );
-                        return vec![build_muc_presence_error_xml(
+                        return deny_managed_channel_admission(
                             room_jid,
-                            &nick,
                             sender_jid,
-                            StanzaError::new(
-                                ErrorType::Auth,
-                                DefinedCondition::RegistrationRequired,
-                                "en",
-                                "Membership required to join managed channel.",
-                            ),
-                        )];
+                            &nick,
+                            ManagedAdmissionDenial {
+                                condition:
+                                    waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
+                                error_type: ErrorType::Auth,
+                                members_only: admission_members_only,
+                                resolver_outcome: ManagedAdmissionResolverOutcome::NoAffiliation,
+                                message: "Membership required to join managed channel.",
+                            },
+                        );
                     }
                     Some(Affiliation::None)
                 }
                 Err(()) => {
-                    return vec![build_muc_presence_error_xml(
+                    return deny_managed_channel_admission(
                         room_jid,
-                        &nick,
                         sender_jid,
-                        StanzaError::new(
-                            ErrorType::Wait,
-                            DefinedCondition::InternalServerError,
-                            "en",
-                            "Failed to resolve managed-channel affiliation.",
-                        ),
-                    )];
+                        &nick,
+                        ManagedAdmissionDenial {
+                            condition:
+                                waddle_xmpp::telemetry::attributes::StanzaErrorCondition::InternalServerError,
+                            error_type: ErrorType::Wait,
+                            members_only: admission_members_only,
+                            resolver_outcome: ManagedAdmissionResolverOutcome::ResolverError,
+                            message: "Failed to resolve managed-channel affiliation.",
+                        },
+                    );
                 }
             }
         } else {

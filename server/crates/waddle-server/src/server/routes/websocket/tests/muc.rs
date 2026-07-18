@@ -1042,6 +1042,131 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
     );
 }
 
+/// #1315: a managed members-only join by an unaffiliated user is
+/// rejected with `<registration-required/>`, and that denial must now
+/// be visible — the `waddle.muc.admission.denied` counter records it,
+/// keyed by the stanza error condition, through the metric-reader seam.
+#[tokio::test]
+async fn managed_registration_required_denial_increments_admission_counter() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+    let room_jid: BareJid = "locked-space@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "locked-space".to_string(),
+            name: "Locked Space".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("registration-required"),
+        "unaffiliated managed members-only join must be registration-required: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "registration-required")]
+        ),
+        Some(1),
+        "the registration-required admission denial must increment the counter exactly once"
+    );
+    assert!(
+        get_room_actor(state.as_ref(), &room_jid).await.is_none(),
+        "denied members-only join must not create the room actor"
+    );
+}
+
+/// #1315: a channel-banned (outcast) joiner is rejected with
+/// `<forbidden/>` per XEP-0045 §7.2.8, even in an open room. The
+/// denial must be counted under the `forbidden` condition through the
+/// metric-reader seam.
+#[tokio::test]
+async fn managed_forbidden_ban_denial_increments_admission_counter() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let session = crate::auth::Session::new("mallory@example.com", "mallory", "mallory");
+    let room_jid: BareJid = "guarded-space@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "mallory@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "guarded-space".to_string(),
+            name: "Guarded Space".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    // An explicit channel-level ban makes the resolver report Outcast,
+    // which XEP-0045 §7.2.8 maps to <forbidden/> even in an open room.
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "guarded-space"),
+                Relation::new("outcast"),
+                Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("channel outcast tuple");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "mallory",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("forbidden"),
+        "a channel-banned managed joiner must be forbidden: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum("waddle.muc.admission.denied", &[("condition", "forbidden")]),
+        Some(1),
+        "the forbidden (ban) admission denial must increment the counter exactly once"
+    );
+}
+
 #[tokio::test]
 async fn managed_public_channel_allows_deployment_member_without_channel_tuple() {
     let state = create_test_websocket_state().await;

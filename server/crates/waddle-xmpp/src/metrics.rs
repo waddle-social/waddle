@@ -6,9 +6,18 @@
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::KeyValue;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 
 static METER: OnceLock<Meter> = OnceLock::new();
+
+/// Per-pod running total of MUC occupants (nicks) across every active
+/// room on this process. Occupancy changes happen inside independent
+/// per-room actors, so the pod-wide gauge value cannot be read cheaply
+/// from any single room; instead each occupancy change contributes a
+/// signed delta here and republishes the resulting total. See
+/// [`adjust_muc_occupant_total`].
+static MUC_OCCUPANT_TOTAL: AtomicI64 = AtomicI64::new(0);
 
 fn meter() -> &'static Meter {
     METER.get_or_init(|| opentelemetry::global::meter("waddle-xmpp"))
@@ -188,6 +197,13 @@ pub fn record_connection_count(count: i64, transport: &str) {
     connections_active().record(count, &[KeyValue::new("transport", transport.to_string())]);
 }
 
+/// Publish the current number of active MUC rooms on this pod to the
+/// `xmpp.muc.rooms.active` gauge. No attributes — the room JID is
+/// unbounded and never a metric dimension.
+pub fn record_muc_rooms_active(count: i64) {
+    muc_rooms_active().record(count, &[]);
+}
+
 /// Record stanza processing latency in milliseconds.
 pub fn record_stanza_latency(latency_ms: f64, stanza_type: &str) {
     stanza_latency().record(
@@ -278,20 +294,38 @@ pub fn record_actor_restart(actor: &str, reason: &str) {
     );
 }
 
-/// Record a MUC presence event (join or leave).
-pub fn record_muc_presence(event_type: &str, room: &str) {
-    muc_presence_events().add(
-        1,
-        &[
-            KeyValue::new("event", event_type.to_string()),
-            KeyValue::new("room", room.to_string()),
-        ],
-    );
+/// Record one MUC groupchat message accepted for room fanout.
+pub fn record_muc_message() {
+    muc_messages().add(1, &[]);
 }
 
-/// Update the MUC occupants gauge.
-pub fn record_muc_occupant_count(count: i64, room: &str) {
-    muc_occupants().record(count, &[KeyValue::new("room", room.to_string())]);
+/// Record a MUC presence event (join or leave).
+///
+/// `event_type` is a bounded label (`"join"` / `"leave"`); the room JID
+/// is deliberately not an attribute — it is unbounded and belongs on
+/// spans/logs per the cardinality budget (`telemetry` module docs).
+pub fn record_muc_presence(event_type: &str) {
+    muc_presence_events().add(1, &[KeyValue::new("event", event_type.to_string())]);
+}
+
+/// Publish the pod-wide MUC occupant total to the `xmpp.muc.occupants`
+/// gauge. The room JID is not an attribute (unbounded); this is the
+/// single per-pod total across every active room.
+pub fn record_muc_occupant_count(count: i64) {
+    muc_occupants().record(count, &[]);
+}
+
+/// Apply a signed occupancy `delta` to the per-pod running total and
+/// republish it to the occupants gauge. Call with `+1` when a join adds
+/// a brand-new occupant, `-1` when a leave removes an occupant's last
+/// session, and `0` for multi-session joins / partial leaves that leave
+/// the occupant set unchanged (pass the pre/post occupant-count diff and
+/// this holds automatically).
+pub fn adjust_muc_occupant_total(delta: i64) {
+    let total = MUC_OCCUPANT_TOTAL
+        .fetch_add(delta, Ordering::Relaxed)
+        .saturating_add(delta);
+    record_muc_occupant_count(total);
 }
 
 // ============================================================================
@@ -321,6 +355,112 @@ pub fn record_extension_enrichment(latency_ms: f64, embeds: u64) {
     extension_enrichment_latency().record(latency_ms, &[]);
     if embeds > 0 {
         extension_embeds_added().add(embeds, &[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::test_support;
+
+    #[tokio::test]
+    async fn record_muc_presence_emits_bounded_event_label() {
+        let guard = test_support::acquire().await;
+        record_muc_presence("join");
+        record_muc_presence("join");
+        record_muc_presence("leave");
+
+        assert_eq!(
+            guard.counter_sum("xmpp.muc.presence", &[("event", "join")]),
+            Some(2),
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.muc.presence", &[("event", "leave")]),
+            Some(1),
+        );
+    }
+
+    #[tokio::test]
+    async fn adjust_muc_occupant_total_publishes_running_total_gauge() {
+        let guard = test_support::acquire().await;
+        // A brand-new occupant, then a multi-session join (delta 0), then
+        // a leave that removed the last session.
+        adjust_muc_occupant_total(1);
+        adjust_muc_occupant_total(0);
+        adjust_muc_occupant_total(-1);
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.muc.occupants".to_string()),
+            "occupants gauge must export after an adjustment",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_muc_rooms_active_emits_gauge() {
+        let guard = test_support::acquire().await;
+        record_muc_rooms_active(3);
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.muc.rooms.active".to_string()),
+            "rooms-active gauge must export after a recording",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_connection_count_emits_transport_gauge() {
+        let guard = test_support::acquire().await;
+        record_connection_count(7, "websocket");
+
+        assert!(
+            guard
+                .metric_names()
+                .contains(&"xmpp.connections.active".to_string()),
+            "connections gauge must export after a recording",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_auth_attempt_labels_outcome() {
+        let guard = test_support::acquire().await;
+        record_auth_attempt("SCRAM-SHA-256", true);
+        record_auth_attempt("SCRAM-SHA-256", false);
+
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.auth.attempts",
+                &[("mechanism", "SCRAM-SHA-256"), ("result", "success")],
+            ),
+            Some(1),
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.auth.attempts",
+                &[("mechanism", "SCRAM-SHA-256"), ("result", "failure")],
+            ),
+            Some(1),
+        );
+    }
+
+    #[tokio::test]
+    async fn record_extension_enrichment_counts_only_added_embeds() {
+        let guard = test_support::acquire().await;
+        // A zero-embed pass records latency but must not touch the embed
+        // counter; a two-embed pass adds two.
+        record_extension_enrichment(1.5, 0);
+        record_extension_enrichment(2.0, 2);
+
+        assert_eq!(
+            guard.counter_sum("xmpp.extensions.embeds.added", &[]),
+            Some(2),
+        );
+        assert_eq!(
+            guard.histogram_count("xmpp.extensions.enrichment.latency", &[]),
+            Some(2),
+        );
     }
 }
 

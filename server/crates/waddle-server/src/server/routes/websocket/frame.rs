@@ -257,7 +257,7 @@ async fn handle_xmpp_frame_impl(
             // longer freeze the connection's frame loop indefinitely; on elapse
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
-            let backstop = StanzaBackstop::capture(&stanza);
+            let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
             let dispatch = async {
                 match *stanza {
                     Stanza::Iq(iq) => {

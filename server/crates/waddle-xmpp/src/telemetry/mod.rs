@@ -48,6 +48,7 @@
 //! `test`/`test-utils`).
 
 pub mod attributes;
+pub mod messages;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 #[cfg(test)]

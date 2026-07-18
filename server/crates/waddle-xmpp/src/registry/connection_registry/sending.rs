@@ -194,9 +194,13 @@ impl ConnectionRegistry {
             }
         };
 
+        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&stanza);
         match sender.try_send(OutboundStanza::new(stanza)) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
+                if let Some(kind) = delivered_kind {
+                    crate::telemetry::messages::record_delivered_message(kind);
+                }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -246,9 +250,13 @@ impl ConnectionRegistry {
             }
         };
 
+        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&outbound.stanza);
         match sender.try_send(outbound) {
             Ok(()) => {
                 prometheus::increment_broadcast_delivered();
+                if let Some(kind) = delivered_kind {
+                    crate::telemetry::messages::record_delivered_message(kind);
+                }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
