@@ -83,7 +83,7 @@ use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use waddle_extensions::{
     message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
     ExtensionManager, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId,

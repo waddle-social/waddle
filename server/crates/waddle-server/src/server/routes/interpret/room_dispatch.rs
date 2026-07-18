@@ -531,15 +531,28 @@ pub(super) async fn dispatch_to_room(
         dispatch_timestamp,
     };
     let mut working = prototype;
+    let fanout_started = std::time::Instant::now();
+    let fanout_span = info_span!(
+        "xmpp.muc.fanout",
+        room = %room_jid,
+        message_id = incoming.id.as_ref().map_or("", |id| id.0.as_str()),
+        recipients = tracing::field::Empty,
+    );
     // Run only the post-gate pipeline (canonicalize → archive → inbox
     // → reflector). The occupancy gate already ran above as an
     // explicit stand-alone call (Copilot review on PR #279); using
     // the full `default_room_dispatcher()` here would re-run it.
-    let dispatch_outcome = default_room_pipeline_dispatcher().dispatch(&mut working, &ctx);
+    let dispatch_outcome = fanout_span
+        .in_scope(|| default_room_pipeline_dispatcher().dispatch(&mut working, &ctx));
     let observer_message = working.clone();
     let mut dispatch_events = dispatch_outcome.events;
     bind_room_claim_fence(&mut dispatch_events, snapshot.claim_fence.as_ref());
     let dispatch_events = order_subject_persistence_after_archive(dispatch_events);
+    let recipients = dispatch_events
+        .iter()
+        .filter(|event| matches!(event, OutboundEvent::RouteToConnection { .. }))
+        .count();
+    fanout_span.record("recipients", recipients);
 
     // 6. Recursively interpret the chain's emitted events. Pass the
     //    depth through unchanged: `recursion_depth` is the headless
@@ -549,7 +562,16 @@ pub(super) async fn dispatch_to_room(
     //    promotes to a headless recipient pass (depth bumped there).
     //    Bumping here would break that path for every offline
     //    occupant.
-    let nested = Box::pin(interpret_with_depth(dispatch_events, deps, recursion_depth)).await;
+    let nested = Box::pin(
+        interpret_with_depth(dispatch_events, deps, recursion_depth).instrument(fanout_span),
+    )
+    .await;
+    waddle_xmpp::histogram_record!(
+        "xmpp.muc.fanout.latency",
+        "ms",
+        "MUC fanout latency: accepted groupchat broadcast until all per-recipient sends are enqueued.",
+        fanout_started.elapsed().as_secs_f64() * 1000.0,
+    );
     let retry_suppression = nested.retry_suppression;
     outcome.frames.extend(nested.frames);
     if nested.close {

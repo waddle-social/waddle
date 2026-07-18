@@ -130,16 +130,24 @@ pub async fn promote_session_unacked(
     };
 
     for entry in &session.unacked_stanzas {
+        let stanza = parse_stanza(&entry.stanza_xml);
+        let message_id = match &stanza {
+            Some(Stanza::Message(message)) => {
+                message.id.as_ref().map_or("", |id| id.0.as_str())
+            }
+            Some(Stanza::Iq(_)) | Some(Stanza::Presence(_)) | None => "",
+        };
         if tombstoned_sequences.contains(&entry.sequence) {
             debug!(
                 stream_id = %session.stream_id,
                 sequence = entry.sequence,
+                message_id,
                 "Q6 promotion: stanza matches a recent tombstone; scrubbed"
             );
             summary.record(entry.sequence, &PromotedOutcome::Scrubbed);
             continue;
         }
-        let outcome = match parse_stanza(&entry.stanza_xml) {
+        let outcome = match stanza {
             Some(Stanza::Message(message)) => {
                 let ctx = PromotionContext {
                     online: &online,
@@ -160,6 +168,7 @@ pub async fn promote_session_unacked(
         debug!(
             stream_id = %session.stream_id,
             sequence = entry.sequence,
+            message_id,
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );

@@ -65,18 +65,25 @@ async fn xmpp_websocket_handler(
     // span on the session into one giant trace (Tempo truncates
     // those). Dispatch spans stay independent roots, correlated via
     // their `xmpp.resource`/`user` attributes instead.
-    if let Some(client_context) = crate::server::trace::client_trace_context_from_query(uri.query())
-    {
-        let established_span = tracing::info_span!(
-            "xmpp.connection.established",
-            client.trace_id = %client_context.trace_id(),
-        );
-        tracing_opentelemetry::OpenTelemetrySpanExt::add_link(&established_span, client_context);
+    if let Some(established_span) = connection_established_span(uri.query()) {
         let _enter = established_span.enter();
     }
 
     ws.protocols(["xmpp"])
         .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
+}
+
+fn connection_established_span(query: Option<&str>) -> Option<tracing::Span> {
+    let client_parent = crate::server::trace::client_trace_parent_from_query(query)?;
+    let established_span = tracing::info_span!(
+        "xmpp.connection.established",
+        client.trace_id = %client_parent.trace_id(),
+    );
+    tracing_opentelemetry::OpenTelemetrySpanExt::add_link(
+        &established_span,
+        client_parent.remote_span_context(),
+    );
+    Some(established_span)
 }
 
 /// Size of the outbound message channel buffer
@@ -1020,7 +1027,57 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[String]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn connection_span_records_client_trace_id_from_query() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CaptureWriter(Arc::clone(&bytes)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = connection_established_span(Some(
+                "traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ))
+            .expect("valid traceparent creates a connection span");
+            let _entered = span.enter();
+            tracing::info!("connection field probe");
+        });
+
+        let output = String::from_utf8(bytes.lock().expect("capture lock").clone())
+            .expect("captured tracing is UTF-8");
+        assert!(
+            output.contains("\"client.trace_id\":\"0af7651916cd43dd8448eb211c80319c\""),
+            "connection span must expose the linked client trace id: {output}"
+        );
+    }
 
     #[tokio::test]
     async fn abandoned_inbound_slot_does_not_block_handoff_cleanup() {
