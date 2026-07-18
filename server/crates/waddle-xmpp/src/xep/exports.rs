@@ -62,7 +62,7 @@ pub use super::xep0085::{
     NS_CHATSTATES,
 };
 
-pub use super::xep0199::{build_ping_result, is_ping, NS_PING};
+pub use super::xep0199::{build_ping_result, is_ping, is_ping_from_server_to_full_jid, NS_PING};
 
 pub use super::xep0092::{
     build_version_element, build_version_response, is_version_query, parse_version_response,

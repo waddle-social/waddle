@@ -313,6 +313,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
                     > 0
                     || summary.storage_failed > 0
+                    || summary.quarantined > 0
                 {
                     info!(
                         jid = %session.jid,
@@ -324,8 +325,30 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         unparseable = summary.unparseable,
                         scrubbed = summary.scrubbed,
                         storage_failed = summary.storage_failed,
+                        quarantined = summary.quarantined,
                         "SM janitor: Q6 promotion completed"
                     );
+                }
+                if summary.has_quarantined() {
+                    sweep_failed = true;
+                    error!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        quarantined = summary.quarantined,
+                        "SM janitor: promotion found unreconciled durable invariants; \
+                         preserving session state without consuming the transient \
+                         retry budget"
+                    );
+                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        &state.deps.protocol.sm_session_registry,
+                        session.clone(),
+                        &summary,
+                    )
+                    .await
+                    {
+                        promotion_guard.complete();
+                    }
+                    continue;
                 }
                 if summary.has_storage_failure() {
                     sweep_failed = true;
@@ -359,7 +382,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             continue;
                         }
                     };
-                    if attempts >= max_promotion_attempts_from_env() {
+                    if summary.should_dead_letter(attempts, max_promotion_attempts_from_env()) {
                         waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
                         error!(
                             jid = %session.jid,
@@ -5331,8 +5354,29 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     unparseable = summary.unparseable,
                     scrubbed = summary.scrubbed,
                     storage_failed = summary.storage_failed,
+                    quarantined = summary.quarantined,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
+                if summary.has_quarantined() {
+                    error!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        quarantined = summary.quarantined,
+                        "Graceful shutdown: promotion found unreconciled durable invariants; \
+                         preserving durable SM rows for operator reconciliation"
+                    );
+                    record_sm_drain_outcome(false);
+                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        session.clone(),
+                        &summary,
+                    )
+                    .await
+                    {
+                        promotion_guard.complete();
+                    }
+                    continue;
+                }
                 if summary.has_storage_failure() {
                     warn!(
                         jid = %session.jid,

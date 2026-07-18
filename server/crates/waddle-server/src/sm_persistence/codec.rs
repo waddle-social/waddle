@@ -126,6 +126,11 @@ pub(crate) fn decode_unacked(
             .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
                 detail: e.to_string(),
             })?;
+    // Purpose is the replay-policy boundary. Validate it before decoding any
+    // other fallible payload field so a compound-corrupt row cannot be
+    // downgraded to a generic row skip before the caller sees the typed
+    // quarantine signal.
+    let purpose = parse_unacked_purpose(&purpose_raw)?;
 
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
@@ -139,7 +144,7 @@ pub(crate) fn decode_unacked(
         sequence: sequence.max(0) as u32,
         stanza: Box::new(stanza),
         original_receipt_at,
-        purpose: parse_unacked_purpose(&purpose_raw)?,
+        purpose,
     })
 }
 
@@ -169,6 +174,11 @@ pub(super) fn decode_unacked_join_row(
             .map_err(|e| SmPersistenceError::InvalidUnackedPurpose {
                 detail: e.to_string(),
             })?;
+    // The JOIN loader quarantines an entire session only for this typed
+    // purpose error. Parse it first so malformed XML/timestamps/sequences on
+    // the same row cannot hide an unknown replay policy and restore a partial
+    // queue with a replay hole.
+    let purpose = parse_unacked_purpose(&purpose_raw)?;
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid unacked receipt timestamp".into()))?;
     let element: xmpp_parsers::minidom::Element = stanza_xml
@@ -182,7 +192,7 @@ pub(super) fn decode_unacked_join_row(
         sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
-        purpose: parse_unacked_purpose(&purpose_raw)?,
+        purpose,
     })
 }
 

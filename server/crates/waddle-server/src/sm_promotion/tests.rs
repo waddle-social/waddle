@@ -515,7 +515,9 @@ async fn mistagged_resume_barrier_is_retained_fail_closed() {
     )
     .await;
 
-    assert_eq!(summary.storage_failed, 1);
+    assert_eq!(summary.quarantined, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert!(summary.has_quarantined());
     assert!(summary.promoted_sequences.is_empty());
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
 }
@@ -563,7 +565,9 @@ async fn assert_barrier_link_failure(outbound_sequence: Option<u32>, row_count: 
     )
     .await;
 
-    assert_eq!(summary.storage_failed, 1);
+    assert_eq!(summary.quarantined, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert!(summary.has_quarantined());
     assert!(summary.promoted_sequences.is_empty());
     let retained = storage.list(&recipient).await.expect("read retained row");
     assert_eq!(retained.len(), row_count);
@@ -612,8 +616,32 @@ async fn resume_barrier_with_unreadable_pending_links_is_retained_fail_closed() 
     )
     .await;
 
-    assert_eq!(summary.storage_failed, 1);
+    assert_eq!(summary.quarantined, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert!(summary.has_quarantined());
     assert!(summary.promoted_sequences.is_empty());
+}
+
+#[test]
+fn quarantined_barrier_never_exhausts_the_transient_dead_letter_budget() {
+    let quarantined = PromotionSummary {
+        storage_failed: 1,
+        quarantined: 1,
+        ..PromotionSummary::default()
+    };
+    assert!(quarantined.has_quarantined());
+    assert!(quarantined.has_storage_failure());
+    assert!(
+        !quarantined.should_dead_letter(5, 5),
+        "quarantine must take precedence even when a concurrent transient \
+         failure has reached the default attempt limit"
+    );
+
+    let transient = PromotionSummary {
+        storage_failed: 1,
+        ..PromotionSummary::default()
+    };
+    assert!(transient.should_dead_letter(5, 5));
 }
 
 #[tokio::test]

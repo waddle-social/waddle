@@ -34,6 +34,10 @@ pub enum PromotedOutcome {
     /// caller would call `confirm_drained` and permanently lose the
     /// stanza when offline storage was temporarily failing.)
     StorageFailure,
+    /// A durable cross-store invariant could not be established. The caller
+    /// MUST retain this row for operator reconciliation and MUST NOT age it
+    /// through the transient storage-failure dead-letter budget.
+    Quarantined,
 }
 
 /// Aggregate outcome of promoting every unacked stanza in a session.
@@ -55,8 +59,13 @@ pub struct PromotionSummary {
     /// MUST NOT call `confirm_drained` for this session, so its
     /// durable SM row survives for restart-time retry.
     pub storage_failed: u32,
+    /// Number of rows retained because their durable replay invariants could
+    /// not be established. These rows require reconciliation and are never
+    /// eligible for automatic dead-lettering.
+    pub quarantined: u32,
     /// XEP-0198 sequences of every stanza this promotion pass fully
-    /// handled (every outcome except [`PromotedOutcome::StorageFailure`]).
+    /// handled (every outcome except [`PromotedOutcome::StorageFailure`] and
+    /// [`PromotedOutcome::Quarantined`]).
     /// On a partial failure the retry path durably deletes exactly
     /// these `sm_unacked` rows and drops them from the reinserted
     /// session, so the next tick retries only the failed stanzas
@@ -75,8 +84,12 @@ impl PromotionSummary {
             PromotedOutcome::Unparseable => self.unparseable += 1,
             PromotedOutcome::Scrubbed => self.scrubbed += 1,
             PromotedOutcome::StorageFailure => self.storage_failed += 1,
+            PromotedOutcome::Quarantined => self.quarantined += 1,
         }
-        if !matches!(outcome, PromotedOutcome::StorageFailure) {
+        if !matches!(
+            outcome,
+            PromotedOutcome::StorageFailure | PromotedOutcome::Quarantined
+        ) {
             self.promoted_sequences.push(sequence);
         }
     }
@@ -88,5 +101,18 @@ impl PromotionSummary {
     /// later janitor pass / restart can retry promotion.
     pub fn has_storage_failure(&self) -> bool {
         self.storage_failed > 0
+    }
+
+    /// True when at least one row needs durable invariant reconciliation.
+    /// Quarantine takes precedence over transient retry/dead-letter policy.
+    pub fn has_quarantined(&self) -> bool {
+        self.quarantined > 0
+    }
+
+    /// Whether a transient promotion failure has exhausted its automatic
+    /// retry budget. Quarantined rows are deliberately ineligible regardless
+    /// of the current attempt count.
+    pub(crate) fn should_dead_letter(&self, attempts: u32, max_attempts: u32) -> bool {
+        !self.has_quarantined() && self.has_storage_failure() && attempts >= max_attempts
     }
 }
