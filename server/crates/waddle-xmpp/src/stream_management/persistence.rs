@@ -34,9 +34,11 @@ use jid::FullJid;
 use thiserror::Error;
 use xmpp_parsers::presence::Show;
 
-use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, NodeIdentity};
+use crate::ownership::{ClaimEpoch, CurrentNodeIdentityGuard, Entity, EntityType, NodeIdentity};
 use crate::pending_delivery::SmSessionId;
 use crate::Stanza;
+
+use super::session_registry::SmSessionGenerationId;
 
 /// Immutable ownership context authorizing one clustered SM persistence write.
 ///
@@ -73,12 +75,35 @@ pub enum SmPersistenceError {
     #[error("invalid SM unacked-stanza purpose: {detail}")]
     InvalidUnackedPurpose { detail: String },
 
+    /// An atomic snapshot attempt failed before its commit was issued, so the
+    /// caller may safely restore the predecessor's bare-row authority.
+    #[error("SM snapshot definitely not committed: {0}")]
+    SnapshotDefinitelyNotCommitted(String),
+
     /// A row for an exact typed stream id exists but cannot be decoded into
     /// the typed persistence model. Recovery may quarantine that stream's
     /// durable session and unacked queue; ordinary backend errors must never
     /// take that destructive path.
     #[error("corrupt SM persistence for '{stream_id}': {detail}")]
     Corrupt {
+        stream_id: SmSessionId,
+        detail: String,
+    },
+
+    /// One exact terminal generation is structurally identifiable but its
+    /// persisted session or queue cannot be decoded. Recovery may quarantine
+    /// only this key and continue with unrelated generations.
+    #[error("corrupt terminal SM generation '{key}': {detail}")]
+    CorruptTerminal {
+        key: SmTerminalGenerationKey,
+        detail: String,
+    },
+
+    /// A terminal row's generation UUID itself is corrupt. No exact typed key
+    /// can be constructed, so recovery must fail closed instead of guessing a
+    /// deletion target or silently abandoning durable work.
+    #[error("corrupt terminal SM generation identity for stream '{stream_id}': {detail}")]
+    CorruptTerminalIdentity {
         stream_id: SmSessionId,
         detail: String,
     },
@@ -224,6 +249,180 @@ pub struct PersistedUnackedStanza {
     pub purpose: SmUnackedStanzaPurpose,
 }
 
+/// A complete, internally consistent durable view of one SM session.
+///
+/// Construction checks that every unacked row belongs to the session. This
+/// keeps the atomic replacement API from accepting a batch whose typed rows
+/// would be split across different stream ids by the storage adapter.
+#[derive(Debug, Clone)]
+pub struct PersistedSmSnapshot {
+    session: PersistedSession,
+    unacked: Vec<PersistedUnackedStanza>,
+}
+
+impl PersistedSmSnapshot {
+    pub fn new(
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<Self, PersistedSmSnapshotError> {
+        if let Some(row) = unacked
+            .iter()
+            .find(|row| row.stream_id != session.stream_id)
+        {
+            return Err(PersistedSmSnapshotError::UnackedStreamMismatch {
+                session_stream_id: session.stream_id,
+                unacked_stream_id: row.stream_id.clone(),
+            });
+        }
+        Ok(Self { session, unacked })
+    }
+
+    pub fn session(&self) -> &PersistedSession {
+        &self.session
+    }
+
+    pub fn unacked(&self) -> &[PersistedUnackedStanza] {
+        &self.unacked
+    }
+
+    pub fn into_parts(self) -> (PersistedSession, Vec<PersistedUnackedStanza>) {
+        (self.session, self.unacked)
+    }
+}
+
+/// Exact durable identity of one non-resumable terminal generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SmTerminalGenerationKey {
+    stream_id: SmSessionId,
+    generation_id: SmSessionGenerationId,
+}
+
+impl SmTerminalGenerationKey {
+    pub fn new(stream_id: SmSessionId, generation_id: SmSessionGenerationId) -> Self {
+        Self {
+            stream_id,
+            generation_id,
+        }
+    }
+
+    pub fn stream_id(&self) -> &SmSessionId {
+        &self.stream_id
+    }
+
+    pub fn generation_id(&self) -> SmSessionGenerationId {
+        self.generation_id
+    }
+}
+
+impl std::fmt::Display for SmTerminalGenerationKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}", self.stream_id, self.generation_id)
+    }
+}
+
+/// A displaced SM generation retained only for terminal promotion work.
+///
+/// Terminal generations are never resumable. Their exact generation key and
+/// complete unacked snapshot survive a process restart independently of the
+/// one current `sm_sessions` row with the same opaque XEP-0198 stream id.
+#[derive(Debug, Clone)]
+pub struct PersistedTerminalGeneration {
+    key: SmTerminalGenerationKey,
+    snapshot: PersistedSmSnapshot,
+    promotion_attempts: u32,
+}
+
+impl PersistedTerminalGeneration {
+    pub fn new(
+        key: SmTerminalGenerationKey,
+        snapshot: PersistedSmSnapshot,
+    ) -> Result<Self, PersistedSmSnapshotError> {
+        Self::with_promotion_attempts(key, snapshot, 0)
+    }
+
+    pub fn with_promotion_attempts(
+        key: SmTerminalGenerationKey,
+        snapshot: PersistedSmSnapshot,
+        promotion_attempts: u32,
+    ) -> Result<Self, PersistedSmSnapshotError> {
+        if key.stream_id != snapshot.session.stream_id {
+            return Err(PersistedSmSnapshotError::TerminalStreamMismatch {
+                key_stream_id: key.stream_id,
+                session_stream_id: snapshot.session.stream_id,
+            });
+        }
+        Ok(Self {
+            key,
+            snapshot,
+            promotion_attempts,
+        })
+    }
+
+    pub fn key(&self) -> &SmTerminalGenerationKey {
+        &self.key
+    }
+
+    pub fn snapshot(&self) -> &PersistedSmSnapshot {
+        &self.snapshot
+    }
+
+    pub fn promotion_attempts(&self) -> u32 {
+        self.promotion_attempts
+    }
+
+    pub fn into_parts(self) -> (SmTerminalGenerationKey, PersistedSmSnapshot, u32) {
+        (self.key, self.snapshot, self.promotion_attempts)
+    }
+}
+
+/// One structurally identifiable result from a terminal-generation scan.
+///
+/// Exact reads remain strict and return [`SmPersistenceError::CorruptTerminal`]
+/// for corrupt contents. Recovery scans instead preserve the exact key of a
+/// parseable corrupt generation so the caller can quarantine only that
+/// generation under its claim fence while continuing with healthy siblings.
+#[derive(Debug, Clone)]
+pub enum TerminalGenerationScanEntry {
+    Persisted(PersistedTerminalGeneration),
+    Corrupt {
+        key: SmTerminalGenerationKey,
+        detail: String,
+    },
+}
+
+impl TerminalGenerationScanEntry {
+    pub fn key(&self) -> &SmTerminalGenerationKey {
+        match self {
+            Self::Persisted(terminal) => terminal.key(),
+            Self::Corrupt { key, .. } => key,
+        }
+    }
+
+    pub fn stream_id(&self) -> &SmSessionId {
+        self.key().stream_id()
+    }
+}
+
+/// Structural errors rejected before an atomic persistence transaction begins.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PersistedSmSnapshotError {
+    #[error(
+        "unacked row for stream '{unacked_stream_id}' cannot belong to session '{session_stream_id}'"
+    )]
+    UnackedStreamMismatch {
+        session_stream_id: SmSessionId,
+        unacked_stream_id: SmSessionId,
+    },
+
+    #[error(
+        "terminal generation for stream '{key_stream_id}' cannot contain session '{session_stream_id}'"
+    )]
+    TerminalStreamMismatch {
+        key_stream_id: SmSessionId,
+        session_stream_id: SmSessionId,
+    },
+}
+
 /// Persistent storage contract for XEP-0198 SM session state.
 ///
 /// Operations are async to allow libSQL / Postgres backends; the
@@ -257,6 +456,22 @@ pub trait SmPersistenceStorage: Send + Sync {
         stream_id: &SmSessionId,
         _authority: &CurrentNodeIdentityGuard,
     ) -> Result<(), SmPersistenceError> {
+        self.delete_session(stream_id).await
+    }
+
+    /// Delete only while the immutable owner/claim epoch captured before
+    /// promotion is still authoritative. Portable stores have no external
+    /// ownership table and reuse their atomic delete.
+    async fn delete_session_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, stream_id.as_str().to_string()),
+            });
+        }
         self.delete_session(stream_id).await
     }
 
@@ -299,6 +514,21 @@ pub trait SmPersistenceStorage: Send + Sync {
         sequences: &[u32],
     ) -> Result<u64, SmPersistenceError>;
 
+    /// Exact-fence form of [`Self::delete_unacked`].
+    async fn delete_unacked_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, stream_id.as_str().to_string()),
+            });
+        }
+        self.delete_unacked(stream_id, sequences).await
+    }
+
     /// Read every unacked stanza for a session in sequence order.
     /// Used by `<resumed/>` to replay and by the Q6 promotion path to
     /// drain on session expiry.
@@ -314,6 +544,19 @@ pub trait SmPersistenceStorage: Send + Sync {
         &self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<PersistedSession>, SmPersistenceError>;
+
+    /// Enumerate the typed identities of every current durable session without
+    /// decoding its payload. Startup uses this key-only inventory to discover
+    /// streams before acquiring their claims; corrupt session contents must
+    /// not make an otherwise readable identity invisible.
+    async fn list_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        Ok(self
+            .list_all_sessions()
+            .await?
+            .into_iter()
+            .map(|session| session.stream_id)
+            .collect())
+    }
 
     /// Enumerate every currently-persisted session, regardless of
     /// expiry. Used by [`InMemorySmSessionRegistry`] on startup to
@@ -361,29 +604,183 @@ pub trait SmPersistenceStorage: Send + Sync {
         Ok(out)
     }
 
-    /// Atomically write a session record + its complete unacked
-    /// queue. Either every row commits or none does, so a panic /
-    /// process crash mid-batch leaves the durable view consistent
-    /// (no half-stored session whose row claims N unacked stanzas but
-    /// the table only holds K < N). Implementations must treat the
-    /// supplied queue as a full replacement for the stream's prior
-    /// unacked rows; appending full snapshots would duplicate replay
-    /// stanzas. Default impl falls back to delete + upsert + N
-    /// appends without a transaction so backends that don't support
-    /// nested ops keep working; the libSQL/Postgres backend overrides
-    /// with a `BEGIN; … ; COMMIT;` block via `Database::begin`.
+    /// Atomically replace the one resumable row and, when supplied, archive
+    /// its same-id predecessor as exact generation-keyed terminal work.
+    ///
+    /// A successful commit makes both effects visible together: the
+    /// successor is the only resumable session, while the predecessor remains
+    /// independently promotable and can never be confused with the successor
+    /// even when both queues contain the same sequence numbers. A failure
+    /// before commit must leave both prior durable views unchanged.
+    ///
+    /// The default is deliberately fail-closed for the displaced case. Trait
+    /// wrappers that only customize ordinary snapshots continue to delegate
+    /// through [`Self::store_session_atomic`], but a production backend must
+    /// override this method before it can durably displace a same-id
+    /// predecessor.
+    async fn replace_resumable_session_atomic(
+        &self,
+        successor: PersistedSmSnapshot,
+        displaced_same_id: Option<PersistedTerminalGeneration>,
+    ) -> Result<(), SmPersistenceError> {
+        if displaced_same_id.is_some() {
+            return Err(SmPersistenceError::SnapshotDefinitelyNotCommitted(
+                "persistence backend does not implement atomic terminal-generation replacement"
+                    .to_string(),
+            ));
+        }
+        let (session, unacked) = successor.into_parts();
+        self.store_session_atomic(session, unacked).await
+    }
+
+    /// Atomically write a session record + its complete unacked queue.
+    ///
+    /// Implementations must treat the supplied queue as a full replacement
+    /// for the stream's prior unacked rows. The old non-transactional trait
+    /// fallback was unsafe despite the method name; implementations that do
+    /// not provide a real atomic operation now fail before mutating storage.
     async fn store_session_atomic(
         &self,
-        session: PersistedSession,
-        unacked: Vec<PersistedUnackedStanza>,
+        _session: PersistedSession,
+        _unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
-        let stream_id = session.stream_id.clone();
-        self.delete_session(&stream_id).await?;
-        self.upsert_session(session).await?;
-        for entry in unacked {
-            self.append_unacked(entry).await?;
+        Err(SmPersistenceError::SnapshotDefinitelyNotCommitted(
+            "persistence backend does not implement atomic SM snapshots".to_string(),
+        ))
+    }
+
+    /// Read one exact non-resumable terminal generation and its queue.
+    async fn get_terminal_generation(
+        &self,
+        _key: &SmTerminalGenerationKey,
+    ) -> Result<Option<PersistedTerminalGeneration>, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "persistence backend does not implement terminal generations".to_string(),
+        ))
+    }
+
+    /// Enumerate terminal generations for restart recovery.
+    async fn list_terminal_generations(
+        &self,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "persistence backend does not implement terminal generations".to_string(),
+        ))
+    }
+
+    /// Enumerate terminal generations for one stream id.
+    ///
+    /// Reclaimed hydration uses this targeted form; the global scan above is
+    /// reserved for startup recovery.
+    async fn list_terminal_generations_for_stream(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        Ok(self
+            .list_terminal_generations()
+            .await?
+            .into_iter()
+            .filter(|entry| entry.stream_id() == stream_id)
+            .collect())
+    }
+
+    /// Delete one exact terminal generation and its queue atomically.
+    async fn delete_terminal_generation(
+        &self,
+        _key: &SmTerminalGenerationKey,
+    ) -> Result<(), SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "persistence backend does not implement terminal generations".to_string(),
+        ))
+    }
+
+    /// Exact-fence form of [`Self::delete_terminal_generation`].
+    async fn delete_terminal_generation_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, key.stream_id().as_str().to_string()),
+            });
         }
-        Ok(())
+        self.delete_terminal_generation(key).await
+    }
+
+    /// Quarantine a corrupt, structurally identifiable terminal generation.
+    /// The exact key and claim fence prevent poison recovery from deleting a
+    /// same-id successor or sibling generation.
+    async fn quarantine_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_terminal_generation_under_fence(key, expected_fence)
+            .await
+    }
+
+    /// Delete exact sequence rows from one terminal generation only.
+    async fn delete_terminal_unacked(
+        &self,
+        _key: &SmTerminalGenerationKey,
+        _sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "persistence backend does not implement terminal generations".to_string(),
+        ))
+    }
+
+    /// Exact-fence form of [`Self::delete_terminal_unacked`].
+    async fn delete_terminal_unacked_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        sequences: &[u32],
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, key.stream_id().as_str().to_string()),
+            });
+        }
+        self.delete_terminal_unacked(key, sequences).await
+    }
+
+    /// Increment the retry counter for one exact terminal generation.
+    async fn record_terminal_promotion_failure(
+        &self,
+        _key: &SmTerminalGenerationKey,
+    ) -> Result<u32, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "persistence backend does not implement terminal generations".to_string(),
+        ))
+    }
+
+    /// Exact-fence form of [`Self::record_terminal_promotion_failure`].
+    async fn record_terminal_promotion_failure_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, key.stream_id().as_str().to_string()),
+            });
+        }
+        self.record_terminal_promotion_failure(key).await
+    }
+
+    /// Whether a bare stream id still owns either resumable or terminal work.
+    /// Claim release must not occur while this returns true.
+    async fn has_durable_work(&self, stream_id: &SmSessionId) -> Result<bool, SmPersistenceError> {
+        if self.get_session(stream_id).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(self
+            .list_terminal_generations()
+            .await?
+            .iter()
+            .any(|entry| entry.stream_id() == stream_id))
     }
 
     /// Atomically increment the persistent promotion-failure counter
@@ -405,6 +802,25 @@ pub trait SmPersistenceStorage: Send + Sync {
     ) -> Result<u32, SmPersistenceError> {
         let _ = stream_id;
         Ok(0)
+    }
+
+    /// Exact-fence form of [`Self::record_promotion_failure`].
+    async fn record_promotion_failure_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        if self.requires_exact_claim_fence() {
+            return Err(SmPersistenceError::NotOwner {
+                entity: Entity::new(EntityType::SmSession, stream_id.as_str().to_string()),
+            });
+        }
+        self.record_promotion_failure(stream_id).await
+    }
+
+    /// Whether generation-sensitive mutations require an exact claim fence.
+    fn requires_exact_claim_fence(&self) -> bool {
+        false
     }
 
     /// Evict any per-`stream_id` claim-fence cache entry this implementation
@@ -441,6 +857,9 @@ struct InMemoryState {
     sessions: std::collections::HashMap<SmSessionId, PersistedSession>,
     // Per-session unacked queue keyed by stream_id.
     unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
+    promotion_attempts: std::collections::HashMap<SmSessionId, u32>,
+    terminal_generations:
+        std::collections::HashMap<SmTerminalGenerationKey, PersistedTerminalGeneration>,
 }
 
 impl InMemorySmPersistence {
@@ -478,6 +897,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         guard.sessions.remove(stream_id);
         guard.unacked.remove(stream_id);
+        guard.promotion_attempts.remove(stream_id);
         Ok(())
     }
 
@@ -572,6 +992,215 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         Ok(guard.sessions.values().cloned().collect())
+    }
+
+    async fn list_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let mut stream_ids = guard.sessions.keys().cloned().collect::<Vec<_>>();
+        stream_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(stream_ids)
+    }
+
+    async fn replace_resumable_session_atomic(
+        &self,
+        successor: PersistedSmSnapshot,
+        displaced_same_id: Option<PersistedTerminalGeneration>,
+    ) -> Result<(), SmPersistenceError> {
+        let successor_stream_id = successor.session().stream_id.clone();
+        if let Some(displaced) = displaced_same_id.as_ref() {
+            if displaced.key().stream_id() != &successor_stream_id {
+                return Err(SmPersistenceError::SnapshotDefinitelyNotCommitted(
+                    "terminal predecessor and resumable successor have different stream ids"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let (successor_session, successor_unacked) = successor.into_parts();
+        let mut guard = self.inner.lock().map_err(|error| {
+            SmPersistenceError::SnapshotDefinitelyNotCommitted(error.to_string())
+        })?;
+
+        if let Some(mut displaced) = displaced_same_id {
+            displaced.promotion_attempts = guard
+                .promotion_attempts
+                .remove(&successor_stream_id)
+                .unwrap_or(displaced.promotion_attempts);
+            guard
+                .terminal_generations
+                .insert(displaced.key.clone(), displaced);
+            // A successor is a new logical generation even though it reuses
+            // the same opaque stream id, so predecessor retry history must
+            // not leak into its resumable row.
+            guard.promotion_attempts.remove(&successor_stream_id);
+        }
+
+        guard
+            .sessions
+            .insert(successor_stream_id.clone(), successor_session);
+        guard.unacked.insert(successor_stream_id, successor_unacked);
+        Ok(())
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        let snapshot = PersistedSmSnapshot::new(session, unacked).map_err(|error| {
+            SmPersistenceError::SnapshotDefinitelyNotCommitted(error.to_string())
+        })?;
+        self.replace_resumable_session_atomic(snapshot, None).await
+    }
+
+    async fn get_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<Option<PersistedTerminalGeneration>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard.terminal_generations.get(key).cloned())
+    }
+
+    async fn list_terminal_generations(
+        &self,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let mut terminals = guard
+            .terminal_generations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        terminals.sort_by(|left, right| {
+            left.key
+                .stream_id
+                .as_str()
+                .cmp(right.key.stream_id.as_str())
+                .then_with(|| {
+                    left.key
+                        .generation_id
+                        .as_uuid()
+                        .as_bytes()
+                        .cmp(right.key.generation_id.as_uuid().as_bytes())
+                })
+        });
+        Ok(terminals
+            .into_iter()
+            .map(TerminalGenerationScanEntry::Persisted)
+            .collect())
+    }
+
+    async fn list_terminal_generations_for_stream(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let mut terminals = guard
+            .terminal_generations
+            .iter()
+            .filter(|(key, _)| key.stream_id() == stream_id)
+            .map(|(_, terminal)| terminal.clone())
+            .collect::<Vec<_>>();
+        terminals.sort_by(|left, right| {
+            left.key
+                .generation_id
+                .as_uuid()
+                .as_bytes()
+                .cmp(right.key.generation_id.as_uuid().as_bytes())
+        });
+        Ok(terminals
+            .into_iter()
+            .map(TerminalGenerationScanEntry::Persisted)
+            .collect())
+    }
+
+    async fn delete_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        guard.terminal_generations.remove(key);
+        Ok(())
+    }
+
+    async fn delete_terminal_unacked(
+        &self,
+        key: &SmTerminalGenerationKey,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let Some(terminal) = guard.terminal_generations.get_mut(key) else {
+            return Ok(0);
+        };
+        let before = terminal.snapshot.unacked.len();
+        terminal
+            .snapshot
+            .unacked
+            .retain(|row| !sequences.contains(&row.sequence));
+        Ok((before - terminal.snapshot.unacked.len()) as u64)
+    }
+
+    async fn record_promotion_failure(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<u32, SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        if !guard.sessions.contains_key(stream_id) {
+            return Ok(0);
+        }
+        let attempts = guard
+            .promotion_attempts
+            .entry(stream_id.clone())
+            .or_default();
+        *attempts = attempts.saturating_add(1);
+        Ok(*attempts)
+    }
+
+    async fn record_terminal_promotion_failure(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<u32, SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let Some(terminal) = guard.terminal_generations.get_mut(key) else {
+            return Ok(0);
+        };
+        terminal.promotion_attempts = terminal.promotion_attempts.saturating_add(1);
+        Ok(terminal.promotion_attempts)
+    }
+
+    async fn has_durable_work(&self, stream_id: &SmSessionId) -> Result<bool, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard.sessions.contains_key(stream_id)
+            || guard
+                .terminal_generations
+                .keys()
+                .any(|key| key.stream_id() == stream_id))
     }
 }
 

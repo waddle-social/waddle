@@ -1,9 +1,16 @@
 use super::*;
 
+pub(crate) fn decode_session_id(row: &crate::db::Row) -> Result<SmSessionId, SmPersistenceError> {
+    let raw: String = row.get(0).map_err(|error| {
+        SmPersistenceError::Other(format!("unreadable SM session identity: {error}"))
+    })?;
+    SmSessionId::try_from_wire(raw).map_err(|error| {
+        SmPersistenceError::Other(format!("unreadable SM session identity: {error}"))
+    })
+}
+
 pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
-    let stream_id: String = row
-        .get(0)
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let stream_id = decode_session_id(row)?;
     let user_id: String = row
         .get(1)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -85,7 +92,7 @@ pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, S
         });
 
     Ok(PersistedSession {
-        stream_id: SmSessionId::new(stream_id),
+        stream_id,
         user_id,
         jid,
         inbound_count: inbound_count.max(0) as u32,
@@ -132,6 +139,22 @@ pub(crate) fn decode_unacked(
         .get(3)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
+    decode_unacked_parts(
+        SmSessionId::new(stream_id),
+        sequence,
+        stanza_xml,
+        receipt_ms,
+        purpose,
+    )
+}
+
+pub(crate) fn decode_unacked_parts(
+    stream_id: SmSessionId,
+    sequence: i64,
+    stanza_xml: String,
+    receipt_ms: i64,
+    purpose: SmUnackedStanzaPurpose,
+) -> Result<PersistedUnackedStanza, SmPersistenceError> {
     let original_receipt_at = DateTime::<Utc>::from_timestamp_millis(receipt_ms)
         .ok_or_else(|| SmPersistenceError::Other("invalid receipt timestamp".into()))?;
     let element: xmpp_parsers::minidom::Element = stanza_xml
@@ -140,7 +163,7 @@ pub(crate) fn decode_unacked(
     let stanza = parse_stanza(element)?;
 
     Ok(PersistedUnackedStanza {
-        stream_id: SmSessionId::new(stream_id),
+        stream_id,
         sequence: sequence.max(0) as u32,
         stanza: Box::new(stanza),
         original_receipt_at,
@@ -218,7 +241,9 @@ pub(crate) fn unacked_purpose_wire_str(purpose: SmUnackedStanzaPurpose) -> &'sta
     }
 }
 
-fn parse_unacked_purpose(raw: &str) -> Result<SmUnackedStanzaPurpose, SmPersistenceError> {
+pub(crate) fn parse_unacked_purpose(
+    raw: &str,
+) -> Result<SmUnackedStanzaPurpose, SmPersistenceError> {
     match raw {
         "application" => Ok(SmUnackedStanzaPurpose::Application),
         "resume_barrier" => Ok(SmUnackedStanzaPurpose::ResumeBarrier),

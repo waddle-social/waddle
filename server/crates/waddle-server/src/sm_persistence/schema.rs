@@ -57,6 +57,59 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    // Same-id predecessors are terminal work, not additional resumable
+    // sessions. Keep them in a generation-keyed outbox so replacing the one
+    // `sm_sessions` row can never erase a predecessor's unacked queue.
+    storage
+        .execute(
+            &format!(
+                r#"
+            CREATE TABLE IF NOT EXISTS sm_terminal_generations (
+                stream_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                full_jid TEXT NOT NULL,
+                inbound_count {bigint} NOT NULL,
+                outbound_count {bigint} NOT NULL,
+                last_acked {bigint} NOT NULL,
+                max_resume_secs {bigint},
+                detached_at_ms {bigint} NOT NULL,
+                max_resume_duration_ms {bigint} NOT NULL,
+                carbons_enabled INTEGER NOT NULL,
+                roster_interested INTEGER NOT NULL,
+                blocklist_interested INTEGER NOT NULL DEFAULT 0,
+                presence_available INTEGER NOT NULL,
+                presence_show TEXT,
+                presence_status TEXT,
+                presence_priority INTEGER NOT NULL,
+                replay_gap_through {bigint},
+                promotion_attempts INTEGER NOT NULL DEFAULT 0,
+                presence_payloads TEXT,
+                PRIMARY KEY (stream_id, generation_id)
+            )
+            "#
+            ),
+            (),
+        )
+        .await?;
+    storage
+        .execute(
+            &format!(
+                r#"
+            CREATE TABLE IF NOT EXISTS sm_terminal_unacked (
+                stream_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                sequence {bigint} NOT NULL,
+                stanza_xml TEXT NOT NULL,
+                original_receipt_at_ms {bigint} NOT NULL,
+                purpose TEXT NOT NULL,
+                PRIMARY KEY (stream_id, generation_id, sequence)
+            )
+            "#
+            ),
+            (),
+        )
+        .await?;
     storage
         .execute(
             &format!(
@@ -95,6 +148,13 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached \
          ON sm_sessions (detached_at_ms)",
+            (),
+        )
+        .await?;
+    storage
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_sm_terminal_generations_stream \
+         ON sm_terminal_generations (stream_id)",
             (),
         )
         .await?;
@@ -144,6 +204,15 @@ async fn widen_existing_postgres_i64_columns(
         ("sm_sessions", "max_resume_duration_ms"),
         ("sm_unacked", "sequence"),
         ("sm_unacked", "original_receipt_at_ms"),
+        ("sm_terminal_generations", "inbound_count"),
+        ("sm_terminal_generations", "outbound_count"),
+        ("sm_terminal_generations", "last_acked"),
+        ("sm_terminal_generations", "replay_gap_through"),
+        ("sm_terminal_generations", "max_resume_secs"),
+        ("sm_terminal_generations", "detached_at_ms"),
+        ("sm_terminal_generations", "max_resume_duration_ms"),
+        ("sm_terminal_unacked", "sequence"),
+        ("sm_terminal_unacked", "original_receipt_at_ms"),
     ] {
         crate::db::widen_postgres_i64_column_to_bigint(&storage.db, table, column)
             .await

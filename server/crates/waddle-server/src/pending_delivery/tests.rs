@@ -37,6 +37,107 @@ fn transient_row(recipient: &str, body: &str) -> PendingRow {
     }
 }
 
+#[cfg(not(feature = "clustering"))]
+#[tokio::test]
+async fn clustered_pending_storage_fails_when_clustering_feature_is_unavailable() {
+    let global = crate::db::Database::in_memory("pending-cluster-feature-test")
+        .await
+        .expect("open global test database");
+    let error = crate::pending_delivery::open_for_cluster_mode(
+        None,
+        QuotaPolicy::Unlimited,
+        true,
+        None,
+        &global,
+    )
+    .await
+    .err()
+    .expect("cluster mode must fail closed without compiled support");
+    assert!(matches!(
+        error,
+        PendingStorageError::ClusteringFeatureUnavailable
+    ));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustered_pending_storage_rejects_unset_and_non_postgres_urls_before_open() {
+    let global = crate::db::Database::in_memory("pending-cluster-url-test")
+        .await
+        .expect("open global test database");
+    for url in [None, Some("sqlite://must-not-be-created.db")] {
+        let error = crate::pending_delivery::open_for_cluster_mode(
+            url,
+            QuotaPolicy::Unlimited,
+            true,
+            None,
+            &global,
+        )
+        .await
+        .err()
+        .expect("cluster mode requires explicit Postgres storage");
+        assert!(matches!(
+            error,
+            PendingStorageError::ClusterDatabaseRequired { .. }
+        ));
+    }
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustered_pending_storage_rejects_colocation_mismatch_before_network_open() {
+    let global = crate::db::Database::in_memory("pending-cluster-colocation-test")
+        .await
+        .expect("open in-memory global test database");
+    let unreachable_postgres = "postgres://127.0.0.1:1/must-not-connect";
+
+    let error = crate::pending_delivery::open_for_cluster_mode(
+        Some(unreachable_postgres),
+        QuotaPolicy::Unlimited,
+        true,
+        None,
+        &global,
+    )
+    .await
+    .err()
+    .expect("co-location mismatch must fail before opening the configured database");
+
+    assert!(matches!(
+        error,
+        PendingStorageError::ClusterColocationMismatch { .. }
+    ));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustered_pending_storage_rejects_missing_claim_handles_before_open() {
+    use crate::db::{DatabaseConfig, DatabaseDriver};
+
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let global = crate::db::Database::from_config(
+        "pending-cluster-handles-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, database_url.clone()),
+    )
+    .await
+    .expect("open test Postgres");
+    let error = crate::pending_delivery::open_for_cluster_mode(
+        Some(&database_url),
+        QuotaPolicy::Unlimited,
+        true,
+        None,
+        &global,
+    )
+    .await
+    .err()
+    .expect("cluster mode requires live claim handles");
+    assert!(matches!(
+        error,
+        PendingStorageError::ClusterClaimHandlesMissing
+    ));
+}
+
 fn archived_row(recipient: &str, archive_id: &str) -> PendingRow {
     let recipient_bare = bare(recipient);
     PendingRow {
@@ -1525,6 +1626,46 @@ async fn db_storage_release_row_if_session_skips_when_session_changed() {
 }
 
 #[tokio::test]
+async fn db_storage_delete_row_if_session_skips_reclaimed_row() {
+    let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+        .await
+        .unwrap();
+    let recipient = bare("alice@example.com");
+    storage
+        .insert(transient_row("alice@example.com", "preserve-reclaim"))
+        .await
+        .unwrap();
+    let origin = SmSessionId::new("sm-origin");
+    let successor = SmSessionId::new("sm-successor");
+    let claimed = storage
+        .claim_for_session(&recipient, &origin)
+        .await
+        .unwrap();
+    let row_id = claimed[0].id.clone();
+    storage.release_claim(&origin).await.unwrap();
+    assert_eq!(
+        storage
+            .claim_for_session(&recipient, &successor)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    assert_eq!(
+        storage
+            .delete_row_if_session(&row_id, &origin)
+            .await
+            .unwrap(),
+        0
+    );
+    let rows = storage.list(&recipient).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, row_id);
+    assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&successor));
+}
+
+#[tokio::test]
 async fn release_row_if_session_skips_when_a_fresh_claim_replaced_the_dead_session() {
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -2343,11 +2484,201 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
     assert_eq!(deleted, 1, "test row must be deleted by id");
 }
 
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn exact_pending_terminal_mutations_require_the_captured_sm_fence() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (pending_delivery exact terminal-fence regression)"
+        );
+        return;
+    };
+    let db = Database::from_config(
+        "pending-delivery-exact-terminal-fence-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, database_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open test Postgres");
+    let claims = PostgresClaimStore::new(db.clone());
+    claims.ensure_schema().await.expect("ensure claims schema");
+    let identity = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&database_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            std::sync::Arc::new(PostgresClaimStore::new(db.clone()))
+                as std::sync::Arc<dyn ClaimStore>,
+            SharedNodeIdentity::new(identity.clone()),
+        )),
+        &db,
+    )
+    .await
+    .expect("open exact-fenced pending storage");
+
+    let current_session =
+        SmSessionId::new(format!("pending-current-fence-{}", uuid::Uuid::new_v4()));
+    let current_entity = Entity::new(EntityType::SmSession, current_session.as_str().to_string());
+    let current_epoch = claims
+        .acquire(&current_entity, &identity)
+        .await
+        .expect("acquire current claim");
+    let current_fence = SmClaimFence::new(identity.clone(), current_epoch);
+    let current_recipient_text = format!("pending-current-{}@example.com", uuid::Uuid::new_v4());
+    let current_recipient = bare(&current_recipient_text);
+    let current_delete_row = transient_row(&current_recipient_text, "delete under current fence");
+    let current_delete_id = current_delete_row.id.clone();
+    let current_release_row = transient_row(&current_recipient_text, "release under current fence");
+    let current_release_id = current_release_row.id.clone();
+    for row in [current_delete_row, current_release_row] {
+        assert_eq!(
+            storage.insert(row).await.expect("insert current-fence row"),
+            InsertOutcome::Inserted
+        );
+    }
+    assert_eq!(
+        storage
+            .claim_for_session(&current_recipient, &current_session)
+            .await
+            .expect("claim current-fence rows")
+            .len(),
+        2
+    );
+
+    assert_eq!(
+        storage
+            .delete_row_under_sm_fence(&current_delete_id, &current_session, Some(&current_fence),)
+            .await
+            .expect("current fence deletes its linked row"),
+        1
+    );
+    assert_eq!(
+        storage
+            .release_claim_under_sm_fence(&current_session, Some(&current_fence))
+            .await
+            .expect("current fence releases its remaining linked row"),
+        1
+    );
+    let current_rows = storage
+        .list(&current_recipient)
+        .await
+        .expect("list current-fence rows");
+    assert_eq!(current_rows.len(), 1);
+    assert_eq!(current_rows[0].id, current_release_id);
+    assert!(
+        current_rows[0].flushed_in_session.is_none(),
+        "exact release must return the surviving row to the unclaimed pool"
+    );
+
+    let stale_session = SmSessionId::new(format!("pending-stale-fence-{}", uuid::Uuid::new_v4()));
+    let stale_entity = Entity::new(EntityType::SmSession, stale_session.as_str().to_string());
+    let stale_epoch = claims
+        .acquire(&stale_entity, &identity)
+        .await
+        .expect("acquire soon-to-be stale claim");
+    let stale_fence = SmClaimFence::new(identity.clone(), stale_epoch);
+    let stale_recipient_text = format!("pending-stale-{}@example.com", uuid::Uuid::new_v4());
+    let stale_recipient = bare(&stale_recipient_text);
+    let stale_delete_row = transient_row(&stale_recipient_text, "must survive stale delete");
+    let stale_delete_id = stale_delete_row.id.clone();
+    let stale_release_row = transient_row(&stale_recipient_text, "must survive stale release");
+    for row in [stale_delete_row, stale_release_row] {
+        assert_eq!(
+            storage.insert(row).await.expect("insert stale-fence row"),
+            InsertOutcome::Inserted
+        );
+    }
+    assert_eq!(
+        storage
+            .claim_for_session(&stale_recipient, &stale_session)
+            .await
+            .expect("claim stale-fence rows")
+            .len(),
+        2
+    );
+
+    let replacement = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let stale_entity_key = format!(
+        "{}:{}",
+        EntityType::SmSession.as_db_str(),
+        stale_session.as_str()
+    );
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE clustering_claims SET node_id = ?, node_epoch = ?, \
+             claim_epoch = claim_epoch + 1 WHERE entity = ?",
+            crate::db_params![
+                replacement.node_id,
+                replacement.node_epoch,
+                stale_entity_key.clone(),
+            ],
+        )
+        .await
+        .expect("replace the captured claim generation");
+
+    let stale_delete = storage
+        .delete_row_under_sm_fence(&stale_delete_id, &stale_session, Some(&stale_fence))
+        .await;
+    assert!(matches!(
+        stale_delete,
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    let stale_release = storage
+        .release_claim_under_sm_fence(&stale_session, Some(&stale_fence))
+        .await;
+    assert!(matches!(
+        stale_release,
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    let stale_rows = storage
+        .list(&stale_recipient)
+        .await
+        .expect("list rows after stale-fence rejection");
+    assert_eq!(stale_rows.len(), 2);
+    assert!(
+        stale_rows
+            .iter()
+            .all(|row| row.flushed_in_session.as_ref() == Some(&stale_session)),
+        "stale-fence operations must neither delete nor release linked rows"
+    );
+
+    for row in current_rows.into_iter().chain(stale_rows) {
+        storage.delete_row(&row.id).await.expect("clean test row");
+    }
+    let conn = db.guard().await.expect("guard");
+    for entity in [current_entity, stale_entity] {
+        conn.execute(
+            "DELETE FROM clustering_claims WHERE entity = ?",
+            crate::db_params![format!("{}:{}", entity.entity_type.as_db_str(), entity.id)],
+        )
+        .await
+        .expect("clean test claim");
+    }
+}
+
 // ── ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): fenced Q6
 // promotion insert — duplicate-promotion (double-janitor) prevention ──
 //
 // Element 9's locked text: "promotion executes under the row-locked
-// fenced epoch." This proves `insert_fenced`'s wiring end-to-end against
+// fenced epoch." This proves exact-fence insertion end-to-end against
 // real Postgres: two nodes attempting to promote the SAME SM session's
 // unacked queue under different claim states — one holds a now-stale
 // (deposed) claim, the other holds the current one — must have exactly
@@ -2488,10 +2819,24 @@ async fn insert_fenced_rejects_same_node_id_new_incarnation_at_the_same_claim_ep
     let entity = Entity::new(EntityType::SmSession, stream_id.clone());
     let schema_store = PostgresClaimStore::new(db.clone());
     schema_store.ensure_schema().await.expect("claim schema");
-    schema_store
+    let old_epoch = schema_store
         .acquire(&entity, &old)
         .await
         .expect("old claim");
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE clustering_claims SET node_epoch = ? WHERE entity = ?",
+            crate::db_params![
+                replacement.node_epoch.clone(),
+                format!("{}:{}", entity.entity_type.as_db_str(), entity.id),
+            ],
+        )
+        .await
+        .expect("rotate claim incarnation");
+    let old_fence =
+        waddle_xmpp::stream_management::persistence::SmClaimFence::new(old.clone(), old_epoch);
     let rotating_store: std::sync::Arc<dyn ClaimStore> =
         std::sync::Arc::new(RotateIncarnationAfterEnsureClaimStore {
             inner: PostgresClaimStore::new(db.clone()),
@@ -2512,7 +2857,11 @@ async fn insert_fenced_rejects_same_node_id_new_incarnation_at_the_same_claim_ep
     let recipient = bare(&recipient_text);
 
     let outcome = storage
-        .insert_fenced(transient_row(&recipient_text, "must not land"), &stream_id)
+        .insert_under_sm_fence(
+            transient_row(&recipient_text, "must not land"),
+            &SmSessionId::new(stream_id),
+            Some(&old_fence),
+        )
         .await;
     assert!(matches!(outcome, Err(PendingStorageError::NotOwner { .. })));
     assert!(storage.list(&recipient).await.expect("list").is_empty());
@@ -2565,7 +2914,7 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
 
     // Node A originally holds the claim — the ordinary "self-claimed
     // session" state a Q6 promotion runs under.
-    schema_store
+    let node_a_epoch = schema_store
         .acquire(&entity, &node_a)
         .await
         .expect("node A acquires");
@@ -2631,7 +2980,18 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
     // Node A's promotion aborts fenced — its own `ensure_claimed` observes
     // a genuinely different node/epoch now on the row and refuses before
     // any write.
-    let outcome_a = storage_a.insert_fenced(row_for_a, &stream_id).await;
+    let typed_stream_id = SmSessionId::new(stream_id.clone());
+    let node_a_fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        node_a.clone(),
+        node_a_epoch,
+    );
+    let node_b_fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        node_b.clone(),
+        waddle_xmpp::ownership::ClaimEpoch(node_a_epoch.0 + 1),
+    );
+    let outcome_a = storage_a
+        .insert_under_sm_fence(row_for_a, &typed_stream_id, Some(&node_a_fence))
+        .await;
     assert!(
         matches!(outcome_a, Err(PendingStorageError::NotOwner { .. })),
         "the deposed node's promotion attempt must abort fenced (NotOwner), got {outcome_a:?}"
@@ -2639,7 +2999,7 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
 
     // Node B's promotion succeeds — it is the current, genuine owner.
     let outcome_b = storage_b
-        .insert_fenced(row_for_b, &stream_id)
+        .insert_under_sm_fence(row_for_b, &typed_stream_id, Some(&node_b_fence))
         .await
         .expect("node B's promotion succeeds");
     assert_eq!(outcome_b, InsertOutcome::Inserted);

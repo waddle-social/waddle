@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use crate::ownership::Entity;
+use crate::stream_management::persistence::SmClaimFence;
 
 use super::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId};
 
@@ -20,8 +21,7 @@ pub enum PendingStorageError {
     #[error("pending_delivery storage error: {0}")]
     Other(String),
 
-    /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): a fenced
-    /// `insert_fenced` call's own `SELECT ... FOR SHARE` fencing check
+    /// A generation-safe exact-fence mutation's `SELECT ... FOR SHARE` check
     /// (against `clustering_claims`, mirroring
     /// `SmPersistenceError::NotOwner`/`sm_persistence_fenced`'s identical
     /// pattern one table over) observed that this node does not hold — or
@@ -53,6 +53,17 @@ pub enum PendingStorageError {
         pending_delivery_database_url: String,
         global_database_url: String,
     },
+
+    #[error(
+        "clustered pending_delivery requires an explicit Postgres database URL; configured value: {configured_database_url}"
+    )]
+    ClusterDatabaseRequired { configured_database_url: String },
+
+    #[error("clustered pending_delivery requires live ClaimStore and node-identity handles")]
+    ClusterClaimHandlesMissing,
+
+    #[error("clustered pending_delivery requested in a build without clustering support")]
+    ClusteringFeatureUnavailable,
 }
 
 /// Storage contract for `pending_delivery`.
@@ -70,30 +81,24 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// §3 step 3 (locked Q9b).
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError>;
 
-    /// Fenced variant of [`Self::insert`] for the XEP-0198 §5 Q6 promotion
-    /// write path (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
-    /// element 9's locked text requires "promotion executes under the
-    /// row-locked fenced epoch" of the origin SM session
-    /// (`origin_stream_id`) whose unacked queue is being promoted, so two
-    /// nodes double-janitoring the same expired session can never both
-    /// commit the same stanza into `pending_delivery`.
-    ///
-    /// Default impl ignores `origin_stream_id` and falls back to
-    /// [`Self::insert`] — correct for every implementation with no
-    /// clustering/fencing concept (the portable, single-node backend, and
-    /// the in-memory test double). A cluster-aware implementation
-    /// overrides this to run the fencing `SELECT ... FOR SHARE` check
-    /// (against `clustering_claims`) and the insert in one transaction,
-    /// mirroring `sm_persistence_fenced`'s identical pattern one table
-    /// over — see that module's doc comment for the full design. On a
-    /// failed fence, returns [`PendingStorageError::NotOwner`] and the
-    /// write never touches `pending_delivery`.
-    async fn insert_fenced(
+    /// Insert only while the caller-supplied immutable SM fence is current.
+    /// Clustered implementations validate the fence in the same transaction
+    /// as the write; portable implementations delegate to [`Self::insert`].
+    async fn insert_under_sm_fence(
         &self,
         row: PendingRow,
-        origin_stream_id: &str,
+        origin_session: &SmSessionId,
+        fence: Option<&SmClaimFence>,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        let _ = origin_stream_id;
+        let _ = fence;
+        if self.requires_exact_sm_fence() {
+            return Err(PendingStorageError::NotOwner {
+                entity: Entity::new(
+                    crate::ownership::EntityType::SmSession,
+                    origin_session.as_str().to_string(),
+                ),
+            });
+        }
         self.insert(row).await
     }
 
@@ -230,10 +235,71 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// rows that failed to push.
     async fn delete_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError>;
 
+    /// Delete a single row only while it is still claimed by
+    /// `expected_session`. This is the portable-store origin-session fence:
+    /// a terminal SM retry may observe a row that was released and then
+    /// reclaimed by a newer session, and must not erase that newer claim.
+    /// Implementations that cannot perform the predicate atomically fail
+    /// closed rather than falling back to a bare row-id delete.
+    async fn delete_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = (id, expected_session);
+        Err(PendingStorageError::Other(
+            "conditional pending-row delete is unsupported".to_string(),
+        ))
+    }
+
+    /// Delete a row linked to `origin_stream_id` only while its exact SM
+    /// fence is still current.
+    async fn delete_row_under_sm_fence(
+        &self,
+        id: &PendingRowId,
+        origin_stream_id: &SmSessionId,
+        fence: Option<&SmClaimFence>,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = fence;
+        if self.requires_exact_sm_fence() {
+            return Err(PendingStorageError::NotOwner {
+                entity: Entity::new(
+                    crate::ownership::EntityType::SmSession,
+                    origin_stream_id.as_str().to_string(),
+                ),
+            });
+        }
+        self.delete_row_if_session(id, origin_stream_id).await
+    }
+
     /// Release every row claimed by `session` back to the unclaimed
     /// pool. Used on SM-session expiry pre-ack so a subsequent
     /// recovering resource can re-flush them (Q7c re-flush path).
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError>;
+
+    /// Release rows linked to a session only while its exact SM fence remains
+    /// current, preventing a same-stream claim-epoch ABA.
+    async fn release_claim_under_sm_fence(
+        &self,
+        session: &SmSessionId,
+        fence: Option<&SmClaimFence>,
+    ) -> Result<u64, PendingStorageError> {
+        let _ = fence;
+        if self.requires_exact_sm_fence() {
+            return Err(PendingStorageError::NotOwner {
+                entity: Entity::new(
+                    crate::ownership::EntityType::SmSession,
+                    session.as_str().to_string(),
+                ),
+            });
+        }
+        self.release_claim(session).await
+    }
+
+    /// Whether exact-fence methods must be implemented by this backend.
+    fn requires_exact_sm_fence(&self) -> bool {
+        false
+    }
 
     /// Release a single row by id (clears `flushed_in_session`). Used
     /// by per-row partial-success flush paths so a row that failed to
@@ -790,6 +856,32 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         for queue in guard.values_mut() {
             let before = queue.len();
             queue.retain(|row| &row.id != id);
+            removed += (before - queue.len()) as u64;
+        }
+        guard.retain(|_, q| !q.is_empty());
+        drop(guard);
+        if removed > 0 {
+            self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
+            self.clear_claimed_at(std::slice::from_ref(id))?;
+        }
+        Ok(removed)
+    }
+
+    async fn delete_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        let mut removed = 0u64;
+        for queue in guard.values_mut() {
+            let before = queue.len();
+            queue.retain(|row| {
+                &row.id != id || row.flushed_in_session.as_ref() != Some(expected_session)
+            });
             removed += (before - queue.len()) as u64;
         }
         guard.retain(|_, q| !q.is_empty());

@@ -42,6 +42,42 @@ pub(super) fn detached_to_persisted(
     })
 }
 
+/// Convert one complete detached-session representation into the validated
+/// atomic snapshot shape used by both the resumable head and terminal outbox.
+pub(super) fn detached_to_persisted_snapshot(
+    session: &DetachedSession,
+) -> Result<super::super::persistence::PersistedSmSnapshot, SmRegistryError> {
+    let persisted = detached_to_persisted(session)?;
+    let mut unacked = Vec::with_capacity(session.unacked_stanzas.len());
+    for entry in &session.unacked_stanzas {
+        unacked.push(parse_xml_to_persisted_unacked(
+            &session.stream_id,
+            entry.sequence,
+            &entry.stanza_xml,
+            entry.original_receipt_at,
+            entry.purpose,
+        )?);
+    }
+    super::super::persistence::PersistedSmSnapshot::new(persisted, unacked)
+        .map_err(|error| SmRegistryError::Internal(error.to_string()))
+}
+
+/// Convert a displaced same-id generation into its exact durable terminal
+/// identity. Terminal generations are never eligible for XEP-0198 resume.
+pub(super) fn detached_to_terminal_generation(
+    session: &DetachedSession,
+) -> Result<super::super::persistence::PersistedTerminalGeneration, SmRegistryError> {
+    let key = super::super::persistence::SmTerminalGenerationKey::new(
+        crate::pending_delivery::SmSessionId::new(session.stream_id.clone()),
+        session.generation_id,
+    );
+    super::super::persistence::PersistedTerminalGeneration::new(
+        key,
+        detached_to_persisted_snapshot(session)?,
+    )
+    .map_err(|error| SmRegistryError::Internal(error.to_string()))
+}
+
 /// Parse a wire-XML fragment back to a typed persisted unacked stanza.
 pub(super) fn parse_xml_to_persisted_unacked(
     stream_id: &str,
@@ -143,6 +179,7 @@ pub(super) fn persisted_to_detached(
 
     Ok(DetachedSession {
         stream_id: persisted.stream_id.as_str().to_string(),
+        generation_id: super::SmSessionGenerationId::new(),
         user_id: persisted.user_id.clone(),
         jid: persisted.jid.clone(),
         inbound_count: persisted.inbound_count,
@@ -168,4 +205,15 @@ pub(super) fn persisted_to_detached(
         // subscribes once after a restart — acceptable.
         pending_subscribes_flushed: false,
     })
+}
+
+/// Rehydrate one exact non-resumable terminal generation while preserving the
+/// generation UUID that distinguishes it from a same-id resumable successor.
+pub(super) fn persisted_terminal_to_detached(
+    terminal: &super::super::persistence::PersistedTerminalGeneration,
+) -> Result<DetachedSession, SmRegistryError> {
+    let mut session =
+        persisted_to_detached(terminal.snapshot().session(), terminal.snapshot().unacked())?;
+    session.generation_id = terminal.key().generation_id();
+    Ok(session)
 }

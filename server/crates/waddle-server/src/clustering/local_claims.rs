@@ -109,7 +109,9 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
             .locally_owned_claim_ids_for_owner(owner)
             .unwrap_or_default();
         for stream_id in entities {
-            registry.forget_claim_locally(&stream_id).await;
+            registry
+                .forget_claim_locally_owned_by(&stream_id, owner)
+                .await;
         }
     }
 
@@ -182,11 +184,12 @@ impl LocallyClaimedEntities for SmSessionLocalClaims {
                 .hydrate_reclaimed_typed(entity, &fence, *reservation)
                 .await
             {
-                Ok(
-                    waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
-                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased
-                    | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
-                ) => {
+                Ok(waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity) => {
+                    // The registry atomically relinquished only this exact
+                    // stale local hydration/fence. The backend claim remains
+                    // discoverable for a fresh owner-scoped orphan pass.
+                }
+                Ok(outcome) if outcome.is_release_terminal() => {
                     if let Err(error) = registry
                         .release_reclaimed_claim(entity, &fence, *reservation)
                         .await
@@ -1011,11 +1014,122 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
 mod tests {
     use super::*;
     use kameo::actor::Spawn;
-    use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
+        SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        DetachedSession, DetachedUnackedStanza, SmSessionDrainConfirmation,
+        SmSessionPromotionAuthority, SmSessionRegistry as _,
+    };
+
+    struct ExactFenceTestPersistence {
+        inner: InMemorySmPersistence,
+    }
+
+    impl ExactFenceTestPersistence {
+        fn new() -> Self {
+            Self {
+                inner: InMemorySmPersistence::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SmPersistenceStorage for ExactFenceTestPersistence {
+        async fn upsert_session(
+            &self,
+            session: PersistedSession,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner.upsert_session(session).await
+        }
+
+        async fn get_session(
+            &self,
+            stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        ) -> Result<Option<PersistedSession>, SmPersistenceError> {
+            self.inner.get_session(stream_id).await
+        }
+
+        async fn delete_session(
+            &self,
+            stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner.delete_session(stream_id).await
+        }
+
+        async fn append_unacked(
+            &self,
+            stanza: PersistedUnackedStanza,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner.append_unacked(stanza).await
+        }
+
+        async fn ack_through(
+            &self,
+            stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+            up_to_sequence: u32,
+        ) -> Result<u64, SmPersistenceError> {
+            self.inner.ack_through(stream_id, up_to_sequence).await
+        }
+
+        async fn delete_unacked(
+            &self,
+            stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+            sequences: &[u32],
+        ) -> Result<u64, SmPersistenceError> {
+            self.inner.delete_unacked(stream_id, sequences).await
+        }
+
+        async fn list_unacked(
+            &self,
+            stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
+            self.inner.list_unacked(stream_id).await
+        }
+
+        async fn list_expired_sessions(
+            &self,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+            self.inner.list_expired_sessions(now).await
+        }
+
+        async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+            self.inner.list_all_sessions().await
+        }
+
+        async fn store_session_atomic(
+            &self,
+            session: PersistedSession,
+            unacked: Vec<PersistedUnackedStanza>,
+        ) -> Result<(), SmPersistenceError> {
+            self.inner.store_session_atomic(session, unacked).await
+        }
+
+        fn requires_exact_claim_fence(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_message_xml(from: &str, to: &str, body: &str) -> String {
+        let mut message =
+            xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().expect("valid to")));
+        message.from = Some(from.parse::<jid::Jid>().expect("valid from"));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+        let element: xmpp_parsers::minidom::Element = message.into();
+        let mut bytes = Vec::new();
+        element.write_to(&mut bytes).expect("serialize message");
+        String::from_utf8(bytes).expect("message XML is UTF-8")
+    }
 
     fn test_session(stream_id: &str, jid: &str) -> DetachedSession {
         DetachedSession {
             stream_id: stream_id.to_string(),
+            generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
             user_id: jid.to_string(),
             jid: jid.parse().expect("valid jid"),
             inbound_count: 0,
@@ -1076,8 +1190,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inline_reclaim_exact_releases_a_genuinely_stale_identity() {
-        use waddle_xmpp::ownership::{ClaimStore as _, InProcessClaimStore, NodeIdentity};
+    async fn inline_reclaim_retains_a_stale_identity_claim_for_recovery() {
+        use waddle_xmpp::ownership::{
+            ClaimStore as _, InProcessClaimStore, NodeIdentity, StalePredicate,
+        };
 
         let local_claims = SmSessionLocalClaims::new();
         let claim_store = Arc::new(InProcessClaimStore::new());
@@ -1090,7 +1206,7 @@ mod tests {
             .expect("won inline reclaim epoch");
         let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
             claim_store.clone(),
-            waddle_xmpp::ownership::SharedNodeIdentity::new(current_identity),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(current_identity.clone()),
         ));
         local_claims.wire(registry.clone());
         let reservation = registry
@@ -1098,17 +1214,39 @@ mod tests {
             .expect("inline reclaim reservation");
 
         local_claims
-            .hydrate_reclaimed(&[(entity.clone(), won_identity, epoch, reservation)])
+            .hydrate_reclaimed(&[(entity.clone(), won_identity.clone(), epoch, reservation)])
             .await;
 
-        assert!(
-            claim_store
-                .current_claim(&entity)
-                .await
-                .expect("claim lookup")
-                .is_none(),
-            "a second identity rotation must exact-release the now-stale won generation instead of retaining it indefinitely"
-        );
+        let retained = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .expect("the stale exact claim remains discoverable for a fresh reclaim");
+        assert_eq!(retained.owner, won_identity);
+        assert_eq!(retained.claim_epoch, epoch);
+        assert!(!registry
+            .locally_owned_claim_ids()
+            .expect("complete local claim inventory")
+            .contains(&entity.id));
+        let _fresh_reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("stale handoff frees same-stream reclaim capacity");
+        let fresh_epoch = claim_store
+            .steal_stale(
+                &entity,
+                epoch,
+                StalePredicate::OwnerStale,
+                &current_identity,
+            )
+            .await
+            .expect("fresh owner-scoped orphan pass can steal retained claim");
+        let fresh = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("fresh claim lookup")
+            .expect("fresh exact claim");
+        assert_eq!(fresh.owner, current_identity);
+        assert_eq!(fresh.claim_epoch, fresh_epoch);
     }
 
     #[tokio::test]
@@ -1140,6 +1278,14 @@ mod tests {
 
         let entity = Entity::new(EntityType::SmSession, "stream-b".to_string());
         local_claims.demote(&entity).await;
+        assert_eq!(registry.pending_claim_release_count(), 1);
+        local_claims.demote(&entity).await;
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            1,
+            "repeated local demotion must preserve the already-retained exact release"
+        );
+        assert_eq!(registry.retry_pending_claim_releases(1).await.attempted, 1);
         assert!(local_claims.owned().await.is_empty());
 
         // A different entity type for the same id must be a no-op.
@@ -1153,6 +1299,184 @@ mod tests {
             local_claims.owned().await.len(),
             1,
             "demote must not touch an entity of a different EntityType sharing the same id"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_demotion_requeues_drained_exact_fenced_generation_as_obsolete() {
+        use waddle_xmpp::ownership::{ClaimStore as _, InProcessClaimStore, NodeIdentity};
+
+        let local_claims = SmSessionLocalClaims::new();
+        let persistence = Arc::new(ExactFenceTestPersistence::new());
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let owner = NodeIdentity::new("self-fence-node", "retired-incarnation");
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::with_capacity(1)
+                .with_persistence(persistence.clone())
+                .with_claim_store(
+                    claim_store.clone(),
+                    waddle_xmpp::ownership::SharedNodeIdentity::new(owner.clone()),
+                ),
+        );
+        let stream_id = "demoted-drained-generation";
+        let mut session = test_session(stream_id, "alice@example.com/res");
+        session.outbound_count = 1;
+        session.max_resume_time = Some(0);
+        session.unacked_stanzas = vec![DetachedUnackedStanza {
+            sequence: 1,
+            stanza_xml: test_message_xml(
+                "bob@example.net/phone",
+                "alice@example.com/res",
+                "keep me queued",
+            ),
+            original_receipt_at: chrono::Utc::now(),
+            purpose:
+                waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose::Application,
+        }];
+        registry
+            .store_session(session)
+            .await
+            .expect("store exact-fenced expired session");
+        local_claims.wire(Arc::clone(&registry));
+
+        let drained = registry
+            .drain_expired()
+            .await
+            .expect("drain expired generation");
+        assert_eq!(drained.len(), 1);
+        let generation = drained[0].clone();
+        let expected_xml = generation.unacked_stanzas[0].stanza_xml.clone();
+
+        local_claims.demote_owned_by(&owner).await;
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            1,
+            "adapter demotion must retain the exact old-incarnation release"
+        );
+        let lease = registry
+            .acquire_promotion_lease(&generation)
+            .await
+            .expect("acquire demoted generation")
+            .expect("demoted generation remains pending");
+        assert_eq!(
+            lease.authority(),
+            SmSessionPromotionAuthority::ObsoleteGeneration
+        );
+        assert!(lease.claim_fence().is_none());
+
+        registry
+            .retain_pending_promotion_for_retry(generation.clone())
+            .expect("requeue demoted payload");
+        drop(lease);
+        let retried = registry
+            .drain_expired()
+            .await
+            .expect("redrain demoted payload");
+        let retry = retried
+            .iter()
+            .find(|session| session.generation_id == generation.generation_id)
+            .expect("same exact generation remains retryable");
+        assert_eq!(retry.unacked_stanzas.len(), 1);
+        assert_eq!(retry.unacked_stanzas[0].stanza_xml, expected_xml);
+
+        let mut retry_lease = registry
+            .acquire_promotion_lease(retry)
+            .await
+            .expect("reacquire demoted generation")
+            .expect("demoted generation remains pending after requeue");
+        assert_eq!(
+            retry_lease.authority(),
+            SmSessionPromotionAuthority::ObsoleteGeneration
+        );
+        assert_eq!(
+            registry.confirm_drained_under(&mut retry_lease).await,
+            SmSessionDrainConfirmation::ObsoleteGenerationRetired
+        );
+        assert_eq!(registry.retry_pending_claim_releases(1).await.attempted, 1);
+        let retained_claim = claim_store
+            .current_claim(&Entity::new(EntityType::SmSession, stream_id))
+            .await
+            .expect("claim lookup")
+            .expect("durable current row keeps the exact claim held");
+        assert_eq!(retained_claim.owner, owner);
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            1,
+            "payload-only retirement cannot release a claim while its demoted durable row remains"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_scoped_demotion_preserves_a_fresh_same_id_lifecycle() {
+        use waddle_xmpp::ownership::{ClaimStore as _, InProcessClaimStore, NodeIdentity};
+
+        let local_claims = SmSessionLocalClaims::new();
+        let claim_store = Arc::new(InProcessClaimStore::new());
+        let old = NodeIdentity::new("self-fence-node", "retired-incarnation");
+        let fresh = NodeIdentity::new("self-fence-node", "fresh-incarnation");
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_claim_store(
+            claim_store.clone(),
+            waddle_xmpp::ownership::SharedNodeIdentity::new(fresh.clone()),
+        ));
+        let stream_id = "fresh-same-id-after-self-fence";
+        let entity = Entity::new(EntityType::SmSession, stream_id);
+        let expected_xml = test_message_xml(
+            "bob@example.net/phone",
+            "alice@example.com/res",
+            "keep the fresh lifecycle queued",
+        );
+        let mut session = test_session(stream_id, "alice@example.com/res");
+        session.outbound_count = 1;
+        session.unacked_stanzas = vec![DetachedUnackedStanza {
+            sequence: 1,
+            stanza_xml: expected_xml.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            purpose:
+                waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose::Application,
+        }];
+        registry
+            .store_session(session)
+            .await
+            .expect("store fresh exact-fenced session");
+        let reservation = registry
+            .reserve_reclaimed_claim_capacity(&entity)
+            .expect("same-id ambiguous old claim reservation");
+        registry.defer_uncertain_reclaimed_claim(&entity, &old, reservation);
+        local_claims.wire(Arc::clone(&registry));
+
+        assert_eq!(
+            registry
+                .locally_owned_claim_ids_for_owner(&old)
+                .expect("old-owner inventory"),
+            vec![stream_id.to_string()]
+        );
+
+        local_claims.demote_owned_by(&old).await;
+
+        let retained = registry
+            .peek_session(stream_id)
+            .await
+            .expect("peek fresh lifecycle")
+            .expect("fresh same-id lifecycle survives old-owner demotion");
+        assert_eq!(retained.unacked_stanzas.len(), 1);
+        assert_eq!(retained.unacked_stanzas[0].stanza_xml, expected_xml);
+        assert_eq!(
+            registry.pending_claim_release_count(),
+            0,
+            "old-owner demotion must not terminalize the fresh active fence"
+        );
+        let retained_claim = claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup")
+            .expect("fresh exact claim remains active");
+        assert_eq!(retained_claim.owner, fresh);
+        assert_eq!(
+            registry
+                .locally_owned_claim_ids_for_owner(&old)
+                .expect("retained old-owner reconciliation inventory"),
+            vec![stream_id.to_string()],
+            "the ambiguous old CAS remains represented for read-only reconciliation"
         );
     }
 

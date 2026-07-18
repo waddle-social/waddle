@@ -18,8 +18,37 @@ pub enum SmRegistryError {
     #[error(transparent)]
     DetachedReplaySequenceConflict(#[from] DetachedReplaySequenceConflict),
 
+    /// A generation-scoped lease was valid when acquired but was revoked
+    /// before a protected persistence mutation began.
+    #[error("SM promotion authority was revoked")]
+    PromotionAuthorityLost,
+
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// The persistence acknowledgement was ambiguous, but the registry kept
+    /// the detached successor published and claim-backed because the write
+    /// may have committed. Callers must complete normal detached-session
+    /// sidecar cleanup rather than treating this as a terminal detach loss.
+    #[error("Detached-session resumability preserved after ambiguous persistence outcome: {0}")]
+    ResumabilityPreserved(#[source] super::super::persistence::SmPersistenceError),
+
+    /// The durable snapshot may exist and the ownership CAS may have
+    /// committed, but its result was not observed. The registry retains the
+    /// local successor and bounded reconciliation responsibility, while a
+    /// force-detach caller must re-check instead of treating the stream as
+    /// proven stealable.
+    #[error("Detached-session claim acquisition is ambiguous and tracked for reconciliation")]
+    DetachClaimAmbiguous,
+
+    /// The ownership backend definitively refused the detach claim. Local
+    /// resumability has been removed, while the full detached payload remains
+    /// queued as a non-authoritative promotion carrier.
+    #[error("Detached-session claim acquisition was rejected")]
+    DetachClaimRejected,
+
+    #[error(transparent)]
+    Persistence(#[from] super::super::persistence::SmPersistenceError),
 }
 /// Trait for SM session registries.
 ///

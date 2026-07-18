@@ -5,11 +5,34 @@ use jid::BareJid;
 use kameo::actor::ActorRef;
 use tracing::warn;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+#[cfg(test)]
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
 use waddle_xmpp::registry::{ConnectionRegistry, SendResult, UserRegistryActor};
+#[cfg(test)]
+use waddle_xmpp::stream_management::persistence::SmClaimFence;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionPromotionLease};
 use waddle_xmpp::Stanza;
 
 use super::PromotedOutcome;
+
+#[derive(Clone, Copy)]
+pub(super) enum PendingInsertAuthority<'a> {
+    CurrentSm {
+        registry: &'a InMemorySmSessionRegistry,
+        lease: &'a SmSessionPromotionLease,
+    },
+    TerminalSm {
+        registry: &'a InMemorySmSessionRegistry,
+        lease: &'a SmSessionPromotionLease,
+    },
+    #[cfg(test)]
+    TestCurrent {
+        session_id: &'a SmSessionId,
+        fence: Option<&'a SmClaimFence>,
+    },
+    ObsoleteGeneration,
+}
 
 /// Bundled delivery handles for pending-storage promotion (ADR-0017 Phase 3
 /// Slice 9): the DashMap send surface plus the actor-authoritative registry
@@ -27,7 +50,7 @@ pub(super) async fn promote_as_transient(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     original_receipt_fallback: DateTime<Utc>,
     delivery: DeliveryHandles<'_>,
-    origin_stream_id: &str,
+    authority: PendingInsertAuthority<'_>,
 ) -> PromotedOutcome {
     let payload = PendingPayload::Transient(Box::new(message.clone()));
     insert_pending(
@@ -37,24 +60,17 @@ pub(super) async fn promote_as_transient(
         original_receipt_fallback,
         &message,
         delivery,
-        origin_stream_id,
+        authority,
     )
     .await
 }
 
 /// Insert one Q6-promoted `pending_delivery` row.
 ///
-/// `origin_stream_id` is the SM session whose unacked queue is being
-/// promoted (ADR-0017 Phase 3 Slice 5 FIX 3, council-adjudicated):
-/// element 9's locked text requires "promotion executes under the
-/// row-locked fenced epoch," so this calls
-/// [`PendingDeliveryStorage::insert_fenced`], not the bare `insert` — a
-/// cluster-fenced storage runs the write inside one transaction carrying
-/// the origin session's claim `SELECT ... FOR SHARE` fencing check
-/// (aborting with [`PendingStorageError::NotOwner`] before writing if this
-/// node no longer holds that claim); every non-fenced implementation
-/// (portable/SQLite, or clustering disabled) falls back to the identical
-/// unfenced `insert` path via `insert_fenced`'s own default impl.
+/// Current and terminal-durable generations insert under their immutable
+/// fences. Terminal authority is generation-qualified in the registry and
+/// never borrows successor state. Obsolete generations use an ordinary
+/// unlinked insert without borrowing successor authority.
 pub(super) async fn insert_pending(
     recipient: BareJid,
     payload: PendingPayload,
@@ -62,7 +78,7 @@ pub(super) async fn insert_pending(
     original_receipt_at: DateTime<Utc>,
     original_message: &xmpp_parsers::message::Message,
     delivery: DeliveryHandles<'_>,
-    origin_stream_id: &str,
+    authority: PendingInsertAuthority<'_>,
 ) -> PromotedOutcome {
     let row = PendingRow {
         id: PendingRowId::fresh(),
@@ -72,7 +88,62 @@ pub(super) async fn insert_pending(
         flushed_in_session: None,
         outbound_sequence: None,
     };
-    match pending_storage.insert_fenced(row, origin_stream_id).await {
+    let has_durable_authority = matches!(
+        authority,
+        PendingInsertAuthority::CurrentSm { .. } | PendingInsertAuthority::TerminalSm { .. }
+    );
+    #[cfg(test)]
+    let has_durable_authority =
+        has_durable_authority || matches!(authority, PendingInsertAuthority::TestCurrent { .. });
+    let insert_result = match authority {
+        PendingInsertAuthority::CurrentSm { registry, lease } => {
+            let guard = match registry.lock_current_promotion_mutation(lease).await {
+                Ok(guard) => guard,
+                Err(waddle_xmpp::stream_management::SmRegistryError::PromotionAuthorityLost) => {
+                    return PromotedOutcome::AuthorityLost;
+                }
+                Err(error) => {
+                    warn!(
+                        recipient = %recipient,
+                        %error,
+                        "Q6 promotion: could not validate current-generation authority"
+                    );
+                    return PromotedOutcome::StorageFailure;
+                }
+            };
+            pending_storage
+                .insert_under_sm_fence(row, guard.session_id(), guard.claim_fence())
+                .await
+        }
+        PendingInsertAuthority::TerminalSm { registry, lease } => {
+            let guard = match registry.lock_terminal_promotion_mutation(lease).await {
+                Ok(guard) => guard,
+                Err(waddle_xmpp::stream_management::SmRegistryError::PromotionAuthorityLost) => {
+                    return PromotedOutcome::AuthorityLost;
+                }
+                Err(error) => {
+                    warn!(
+                        recipient = %recipient,
+                        %error,
+                        "Q6 promotion: could not validate terminal-generation authority"
+                    );
+                    return PromotedOutcome::StorageFailure;
+                }
+            };
+            let key = guard.key();
+            pending_storage
+                .insert_under_sm_fence(row, key.stream_id(), guard.claim_fence())
+                .await
+        }
+        #[cfg(test)]
+        PendingInsertAuthority::TestCurrent { session_id, fence } => {
+            pending_storage
+                .insert_under_sm_fence(row, session_id, fence)
+                .await
+        }
+        PendingInsertAuthority::ObsoleteGeneration => pending_storage.insert(row).await,
+    };
+    match insert_result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         Ok(InsertOutcome::QuotaExceeded) => {
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
@@ -84,7 +155,9 @@ pub(super) async fn insert_pending(
             send_quota_bounce(original_message, &recipient, delivery).await;
             PromotedOutcome::Bounced
         }
-        Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
+        Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity })
+            if has_durable_authority =>
+        {
             // FIX 3: this node's claim on the origin SM session was lost
             // (or never held) by the time the fenced write ran — another
             // node's own janitor/reaper is (or is about to be) the real
@@ -95,11 +168,11 @@ pub(super) async fn insert_pending(
             warn!(
                 recipient = %recipient,
                 %entity,
-                "Q6 promotion: pending_delivery insert_fenced observed a lost claim \
+                "Q6 promotion: exact pending insert observed a lost claim \
                  (NotOwner); caller must NOT confirm_drained so the durable SM row \
                  survives for the current owner's own promotion pass"
             );
-            PromotedOutcome::StorageFailure
+            PromotedOutcome::AuthorityLost
         }
         Err(error) => {
             warn!(

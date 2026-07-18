@@ -152,7 +152,7 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
     // session and returns them from the detached presence-state reads.
     use std::time::Instant;
     use waddle_xmpp::stream_management::{
-        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
+        DetachedSession, InMemorySmSessionRegistry, SmSessionGenerationId, SmSessionRegistry,
     };
 
     let registry = InMemorySmSessionRegistry::new();
@@ -161,6 +161,7 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
     registry
         .store_session(DetachedSession {
             stream_id: "xep0319-detached".to_string(),
+            generation_id: SmSessionGenerationId::new(),
             user_id: "juliet@capulet.com".to_string(),
             jid: jid.clone(),
             inbound_count: 0,

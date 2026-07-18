@@ -52,7 +52,7 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     jid: &FullJid,
     owner: &Arc<std::sync::atomic::AtomicBool>,
 ) -> SmRegistrationFinalization {
-    if let Some(stream_id) = conn.pending_resume_stream_id.take() {
+    if let Some(stream_id) = conn.pending_resume_stream_id.clone() {
         return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
     }
 
@@ -83,7 +83,14 @@ async fn complete_pending_resume_claim(
     owner: &Arc<std::sync::atomic::AtomicBool>,
     stream_id: String,
 ) -> SmRegistrationFinalization {
-    let resume_h = conn.pending_resume_h.take();
+    // Keep both resume coordinates on the connection until claim completion
+    // returns a terminal result. If this future is cancelled while the
+    // registry is deleting/probing durable state, connection cleanup still
+    // has the exact stream id needed to return the claimed session to the
+    // process-local detached pool without inventing a successor lifecycle;
+    // the handled count must remain paired with that id. A durable
+    // in-progress-resume handoff is intentionally outside this PR's scope.
+    let resume_h = conn.pending_resume_h;
     let completion = match resume_h {
         Some(h) => {
             state
@@ -102,6 +109,10 @@ async fn complete_pending_resume_claim(
                 .await
         }
     };
+    if completion.is_ok() {
+        conn.pending_resume_stream_id = None;
+        conn.pending_resume_h = None;
+    }
     let mut remove_resumable_sidecar = true;
     let finalization = match completion {
         Ok(Some(SmClaimCompletion::Resumed(detached))) => match resume_h {

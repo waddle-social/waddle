@@ -250,6 +250,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
     let sm = Arc::new(InMemorySmSessionRegistry::new());
     let detached = DetachedSession {
         stream_id: "phone-stream-id".to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: "alice".to_string(),
         jid: alice_phone.clone(),
         inbound_count: 0,
@@ -5611,6 +5612,7 @@ fn detached_dm_session(
 ) -> waddle_xmpp::stream_management::DetachedSession {
     waddle_xmpp::stream_management::DetachedSession {
         stream_id: stream_id.to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 0,

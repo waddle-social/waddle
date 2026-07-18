@@ -77,43 +77,11 @@ fn db_err(error: DatabaseError) -> ClaimError {
     ClaimError::Backend(error.to_string())
 }
 
-/// True iff `error` is a Postgres `40P01 deadlock_detected` failure.
-///
-/// FIX 1(c): `steal_stale`'s `StealIntentExpired` CAS and
-/// `clear_steal_intent`'s epoch-fenced veto DELETE deliberately acquire
-/// their `clustering_claims`/`clustering_steal_intents` row locks in
-/// opposite orders (see both statements' doc comments for the full
-/// reasoning) — a documented design choice, not an oversight, because it is
-/// exactly what lets the two statements serialize *on the intent rows
-/// themselves* rather than racing an unlocked `EXISTS` read. The
-/// consequence is that Postgres may occasionally abort one side of a
-/// contended pair with `40P01` instead of blocking it. That outcome is
-/// always safe (a typed [`ClaimError::Backend`], never a panic; the loser
-/// retries on its own next tick/scan) — this helper only distinguishes it
-/// so callers can log it at `debug` instead of `warn`/`error`, since it is
-/// an expected consequence of the lock-order design, not a fault.
-fn is_postgres_deadlock(error: &DatabaseError) -> bool {
-    matches!(
-        error,
-        DatabaseError::Internal(sqlx::Error::Database(inner))
-            if inner.code().as_deref() == Some("40P01")
-    )
-}
-
-/// Log a `debug`-level note when `error` is the expected FIX 1(c) deadlock
-/// outcome; a no-op for every other error (those are logged by the normal
-/// `tracing::warn!` call sites that already wrap this store's callers).
-fn log_if_postgres_deadlock(error: &DatabaseError, entity_key: &str, statement: &'static str) {
-    if is_postgres_deadlock(error) {
-        tracing::debug!(
-            entity_key = %entity_key,
-            statement,
-            "clustering claim CAS: deadlock detected against the opposite-lock-order \
-             counterpart statement (FIX 1(c), expected under contention); retrying next \
-             tick/scan is the correct response"
-        );
-    }
-}
+/// Domain seed for the transaction-scoped advisory lock that serializes all
+/// mutations of one encoded claim entity, including the interval in which no
+/// `clustering_claims` row exists yet. Keep this value stable: changing it
+/// during a rolling deployment would split the lock domain between versions.
+const CLAIM_ENTITY_ADVISORY_LOCK_SEED: i64 = 0x5741_4444_4c45_434c;
 
 /// Injective `(entity_type, id) -> TEXT` encoding for the
 /// `clustering_claims.entity` primary key (fix: the PK previously bound
@@ -327,6 +295,16 @@ impl PostgresClaimStore {
         cleanup: OrphanedSmClaimCleanup,
     ) -> Result<bool, ClaimError> {
         let mut tx = self.db.begin().await.map_err(db_err)?;
+        // Join the same per-entity lock domain as every ClaimStore mutation
+        // before taking either the claim-row lock below or any durable SM-row
+        // locks. This transaction remains on the main pool because the claim
+        // deletion and durable cleanup must commit atomically.
+        tx.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+            crate::db_params![cleanup.encoded.clone(), CLAIM_ENTITY_ADVISORY_LOCK_SEED,],
+        )
+        .await
+        .map_err(db_err)?;
         // Serialize with every fenced SM writer before evaluating durable-row
         // absence. Under Postgres READ COMMITTED, putting `NOT EXISTS` in the
         // same DELETE that waits on a writer's `FOR SHARE` lock is not enough:
@@ -399,6 +377,10 @@ impl PostgresClaimStore {
                     SELECT 1 FROM sm_sessions s
                     WHERE clustering_claims.entity = ('sm_session:' || s.stream_id)
                   )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM sm_terminal_generations t
+                    WHERE clustering_claims.entity = ('sm_session:' || t.stream_id)
+                  )
                 "#,
                 params,
             )
@@ -407,6 +389,18 @@ impl PostgresClaimStore {
         };
         if affected == 1 {
             if let Some(stream_id) = cleanup.durable_stream_id {
+                tx.execute(
+                    "DELETE FROM sm_terminal_unacked WHERE stream_id = ?",
+                    crate::db_params![stream_id.clone()],
+                )
+                .await
+                .map_err(db_err)?;
+                tx.execute(
+                    "DELETE FROM sm_terminal_generations WHERE stream_id = ?",
+                    crate::db_params![stream_id.clone()],
+                )
+                .await
+                .map_err(db_err)?;
                 tx.execute(
                     "DELETE FROM sm_unacked WHERE stream_id = ?",
                     crate::db_params![stream_id.clone()],
@@ -634,6 +628,7 @@ impl ClaimStore for PostgresClaimStore {
         if !me.is_active() {
             return Err(ClaimError::AuthorityDisabled);
         }
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Acquire CAS (element 4): a fresh claim only inserts; a
         // still-live claim on the same entity leaves the row untouched and
@@ -653,8 +648,12 @@ impl ClaimStore for PostgresClaimStore {
         let mut inserted = conn
             .query(
                 r#"
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
                 INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch)
                 SELECT ?, ?, ?, ?, nextval('clustering_claim_epoch_seq'::regclass)
+                FROM claim_lock
                 WHERE NOT EXISTS (
                     SELECT 1 FROM clustering_nodes
                     WHERE node_id = ? AND node_epoch = ? AND draining
@@ -663,7 +662,9 @@ impl ClaimStore for PostgresClaimStore {
                 RETURNING claim_epoch
                 "#,
                 crate::db_params![
-                    entity_key(entity),
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
+                    encoded.clone(),
                     entity.entity_type.as_db_str().to_string(),
                     me.node_id.clone(),
                     me.node_epoch.clone(),
@@ -691,7 +692,7 @@ impl ClaimStore for PostgresClaimStore {
                         false
                     ) AS draining
                 "#,
-                crate::db_params![entity_key(entity), me.node_id.clone(), me.node_epoch.clone()],
+                crate::db_params![encoded, me.node_id.clone(), me.node_epoch.clone()],
             )
             .await
             .map_err(db_err)?;
@@ -814,6 +815,7 @@ impl ClaimStore for PostgresClaimStore {
                 if entity.entity_type == EntityType::SmSession {
                     return Err(ClaimError::SmSessionExcludedFromStealIntent);
                 }
+                let encoded = entity_key(entity);
                 let conn = self.db.control_plane_guard().await.map_err(db_err)?;
                 // FIX 1(a) — council-adjudicated redesign closing the veto
                 // race (write skew under READ COMMITTED between this CAS
@@ -824,18 +826,12 @@ impl ClaimStore for PostgresClaimStore {
                 // WITH-clause's data-modifying CTE), row-locking and
                 // removing every steal-intent row for this entity aged
                 // past `intent_ttl`, *before* the outer `UPDATE` even
-                // evaluates its own `WHERE` clause. A concurrent
-                // `clear_steal_intent` racing to delete those exact same
-                // rows under the owner's live epoch therefore serializes
-                // on the intent rows themselves: whichever transaction's
-                // `DELETE` commits first physically removes the rows, and
-                // the loser — blocked on the row lock, then unblocked by
-                // the winner's commit — has its own predicate re-evaluated
-                // against the now-committed, already-emptied state
-                // (Postgres's EvalPlanQual re-check), so it finds nothing
-                // left to act on. A healthy owner's veto and a stealer's
-                // claim can therefore never both succeed against the same
-                // intent rows.
+                // evaluates its own `WHERE` clause. This statement and
+                // `clear_steal_intent` first take the same per-entity
+                // advisory lock, so one completes its claim/intent decision
+                // before the other can take either table's row locks. A
+                // healthy owner's veto and a stealer's claim can therefore
+                // never both succeed against the same intent rows.
                 //
                 // This closes the instant-re-steal hole for free: a
                 // successful steal deletes exactly the intents that
@@ -844,19 +840,10 @@ impl ClaimStore for PostgresClaimStore {
                 // re-trigger another steal — with the full `intent_ttl`
                 // window of protection any freshly-acquired claim gets.
                 //
-                // FIX 1(c) — DEADLOCK NOTE: this statement acquires locks
-                // in the order {`clustering_steal_intents` rows (the
-                // DELETE), then the `clustering_claims` row (the UPDATE)}.
-                // `clear_steal_intent` below acquires them in the *opposite*
-                // order ({`clustering_claims` row via `FOR SHARE`, then
-                // `clustering_steal_intents` rows via DELETE}) — a
-                // deliberate, documented lock-order inversion, not an
-                // oversight. Under sustained contention Postgres may abort
-                // either statement with a `40P01 deadlock_detected` error;
-                // this is SAFE and expected: it surfaces as an ordinary
-                // typed [`ClaimError::Backend`] (never a panic), logged at
-                // `debug` (see [`is_postgres_deadlock`]), and the loser
-                // simply retries on its own next tick/scan.
+                // FIX 1(c): the advisory lock is acquired before both the
+                // intent-row DELETE and claim-row UPDATE. The owner-veto
+                // path uses the same outer lock order, removing the former
+                // cross-table lock inversion.
                 // The DELETE is additionally gated on the caller's observed
                 // epoch still being current (an unlocked read — the
                 // authoritative gate remains the epoch-CAS on the UPDATE):
@@ -890,7 +877,10 @@ impl ClaimStore for PostgresClaimStore {
                 let mut rows = conn
                     .query(
                         r#"
-                        WITH live_stealer AS (
+                        WITH claim_lock AS MATERIALIZED (
+                            SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                        ),
+                        live_stealer AS (
                             SELECT 1 FROM clustering_nodes
                             WHERE node_id = ?
                               AND node_epoch = ?
@@ -898,9 +888,10 @@ impl ClaimStore for PostgresClaimStore {
                               AND NOT draining
                         ),
                         consumed AS (
-                            DELETE FROM clustering_steal_intents
-                            WHERE entity = ?
-                              AND created_at < now() - (? || ' milliseconds')::interval
+                            DELETE FROM clustering_steal_intents AS si
+                            USING claim_lock
+                            WHERE si.entity = ?
+                              AND si.created_at < now() - (? || ' milliseconds')::interval
                               AND EXISTS (SELECT 1 FROM live_stealer)
                               AND EXISTS (
                                   SELECT 1 FROM clustering_claims
@@ -908,43 +899,40 @@ impl ClaimStore for PostgresClaimStore {
                               )
                             RETURNING 1
                         )
-                        UPDATE clustering_claims
+                        UPDATE clustering_claims AS c
                         SET node_id = ?, node_epoch = ?,
                             claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
-                        WHERE entity = ?
-                          AND claim_epoch = ?
+                        FROM claim_lock
+                        WHERE c.entity = ?
+                          AND c.claim_epoch = ?
                           AND EXISTS (SELECT 1 FROM consumed)
                           AND EXISTS (SELECT 1 FROM live_stealer)
-                        RETURNING claim_epoch
+                        RETURNING c.claim_epoch
                         "#,
                         crate::db_params![
+                            encoded.clone(),
+                            CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                             me.node_id.clone(),
                             me.node_epoch.clone(),
-                            entity_key(entity),
+                            encoded.clone(),
                             intent_ttl.as_millis().to_string(),
-                            entity_key(entity),
+                            encoded.clone(),
                             observed.0,
                             me.node_id.clone(),
                             me.node_epoch.clone(),
-                            entity_key(entity),
+                            encoded,
                             observed.0,
                         ],
                     )
                     .await
-                    .map_err(|error| {
-                        log_if_postgres_deadlock(
-                            &error,
-                            &entity_key(entity),
-                            "steal_stale(StealIntentExpired)",
-                        );
-                        db_err(error)
-                    })?;
+                    .map_err(db_err)?;
                 match rows.next().await.map_err(db_err)? {
                     Some(row) => Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
                     None => Err(ClaimError::Conflict),
                 }
             }
             StalePredicate::OwnerStale => {
+                let encoded = entity_key(entity);
                 let conn = self.db.control_plane_guard().await.map_err(db_err)?;
                 // Owner-stale steal CAS (element 4): the `NOT EXISTS`
                 // correlated subquery realizes the ADR's "LEFT JOIN"
@@ -970,16 +958,20 @@ impl ClaimStore for PostgresClaimStore {
                 let mut rows = conn
                     .query(
                         r#"
-                        UPDATE clustering_claims
+                        WITH claim_lock AS MATERIALIZED (
+                            SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                        )
+                        UPDATE clustering_claims AS c
                         SET node_id = ?, node_epoch = ?,
                             claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
-                        WHERE entity = ?
-                          AND claim_epoch = ?
+                        FROM claim_lock
+                        WHERE c.entity = ?
+                          AND c.claim_epoch = ?
                           AND NOT EXISTS (
                             SELECT 1 FROM clustering_nodes n
-                            WHERE n.node_id = clustering_claims.node_id
+                            WHERE n.node_id = c.node_id
                               AND NOT n.expired
-                              AND n.node_epoch = clustering_claims.node_epoch
+                              AND n.node_epoch = c.node_epoch
                           )
                           AND EXISTS (
                             SELECT 1 FROM clustering_nodes
@@ -988,12 +980,14 @@ impl ClaimStore for PostgresClaimStore {
                               AND NOT expired
                               AND NOT draining
                           )
-                        RETURNING claim_epoch
+                        RETURNING c.claim_epoch
                         "#,
                         crate::db_params![
+                            encoded.clone(),
+                            CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                             me.node_id.clone(),
                             me.node_epoch.clone(),
-                            entity_key(entity),
+                            encoded,
                             observed.0,
                             me.node_id.clone(),
                             me.node_epoch.clone(),
@@ -1019,6 +1013,7 @@ impl ClaimStore for PostgresClaimStore {
         if !me.is_active() {
             return Err(ClaimError::AuthorityDisabled);
         }
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Consent/epoch-only steal CAS (element 4's third variant): no
         // staleness predicate at all — authorized exclusively by the
@@ -1027,16 +1022,22 @@ impl ClaimStore for PostgresClaimStore {
         let mut rows = conn
             .query(
                 r#"
-                UPDATE clustering_claims
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
+                UPDATE clustering_claims AS c
                 SET node_id = ?, node_epoch = ?,
                     claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
-                WHERE entity = ? AND claim_epoch = ?
-                RETURNING claim_epoch
+                FROM claim_lock
+                WHERE c.entity = ? AND c.claim_epoch = ?
+                RETURNING c.claim_epoch
                 "#,
                 crate::db_params![
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    entity_key(entity),
+                    encoded,
                     observed.0,
                 ],
             )
@@ -1104,17 +1105,37 @@ impl ClaimStore for PostgresClaimStore {
         &self,
         entity: &Entity,
     ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, ClaimError> {
-        // Terminal orphan recovery can arrive here after its caller dropped
-        // a steal future. Locking the claim row makes this SELECT wait behind
-        // that detached UPDATE, so the returned version is post-commit (or
-        // post-rollback) rather than the unlocked pre-CAS snapshot. A stale
-        // room steal only updates an existing row, so the absent-row gap does
-        // not need predicate/range locking.
-        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let mut rows = conn
+        // Terminal recovery can arrive here after its caller dropped any
+        // claim mutation future, including a first acquire whose INSERT is
+        // still in flight while this entity has no committed row. Row locks
+        // cannot cover that absent-key interval, so every single-entity
+        // mutation and this barrier join one transaction-scoped advisory
+        // lock domain. `release_many` is the bounded exception: it only
+        // deletes existing rows and remains ordered by this method's
+        // second-statement `FOR UPDATE`, avoiding ~18k advisory locks.
+        //
+        // The lock and snapshot MUST remain separate READ COMMITTED
+        // statements in one transaction. If they were combined in one CTE,
+        // Postgres could take the SELECT snapshot before waiting for the
+        // advisory lock and then miss the just-committed absent-row INSERT.
+        // Statement two starts only after statement one acquires the lock, so
+        // it receives a fresh post-wait snapshot. `FOR UPDATE` is retained to
+        // continue ordering against fenced writers that hold `FOR SHARE`.
+        let encoded = entity_key(entity);
+        let mut tx = self.db.begin_control_plane().await.map_err(db_err)?;
+        tx.query(
+            r#"
+                /* terminal_claim_reconciliation_lock */
+                SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                "#,
+            crate::db_params![encoded.clone(), CLAIM_ENTITY_ADVISORY_LOCK_SEED],
+        )
+        .await
+        .map_err(db_err)?;
+        let mut rows = tx
             .query(
                 r#"
-                /* terminal_claim_reconciliation_lock */
+                /* terminal_claim_reconciliation_snapshot */
                 SELECT
                     c.node_id,
                     c.node_epoch,
@@ -1129,24 +1150,27 @@ impl ClaimStore for PostgresClaimStore {
                 WHERE c.entity = ?
                 FOR UPDATE
                 "#,
-                crate::db_params![entity_key(entity)],
+                crate::db_params![encoded],
             )
             .await
             .map_err(db_err)?;
-        match rows.next().await.map_err(db_err)? {
+        let snapshot = match rows.next().await.map_err(db_err)? {
             Some(row) => {
                 let node_id: String = row.get(0).map_err(db_err)?;
                 let node_epoch: String = row.get(1).map_err(db_err)?;
                 let claim_epoch: i64 = row.get(2).map_err(db_err)?;
                 let owner_lease_fresh: bool = row.get(3).map_err(db_err)?;
-                Ok(Some(waddle_xmpp::ownership::ClaimSnapshot {
+                Some(waddle_xmpp::ownership::ClaimSnapshot {
                     owner: NodeIdentity::new(node_id, node_epoch),
                     claim_epoch: ClaimEpoch(claim_epoch),
                     owner_lease_fresh,
-                }))
+                })
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        drop(rows);
+        tx.commit().await.map_err(db_err)?;
+        Ok(snapshot)
     }
 
     async fn fence(
@@ -1184,14 +1208,21 @@ impl ClaimStore for PostgresClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<(), ClaimError> {
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         conn.execute(
             r#"
-                DELETE FROM clustering_claims
-                WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
+                DELETE FROM clustering_claims AS c
+                USING claim_lock
+                WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ?
                 "#,
             crate::db_params![
-                entity_key(entity),
+                encoded.clone(),
+                CLAIM_ENTITY_ADVISORY_LOCK_SEED,
+                encoded,
                 me.node_id.clone(),
                 me.node_epoch.clone(),
                 mine.0,
@@ -1208,15 +1239,22 @@ impl ClaimStore for PostgresClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, ClaimError> {
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         let affected = conn
             .execute(
                 r#"
-                DELETE FROM clustering_claims
-                WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
+                DELETE FROM clustering_claims AS c
+                USING claim_lock
+                WHERE c.entity = ? AND c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ?
                 "#,
                 crate::db_params![
-                    entity_key(entity),
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
+                    encoded,
                     me.node_id.clone(),
                     me.node_epoch.clone(),
                     mine.0,
@@ -1243,10 +1281,18 @@ impl ClaimStore for PostgresClaimStore {
         // on `ClaimStore::release_many`'s trait doc comment — see there for
         // the mitigations (Slice 2 draining marker, Slice 10 batch
         // ordering).
+        // Deliberate advisory-lock exception: this one-round-trip drain path
+        // is modeled at roughly 18k existing claims. Holding that many
+        // distinct advisory locks in one transaction can exhaust Postgres's
+        // shared lock table. Unlike first acquire, this operation cannot
+        // mutate an absent row; the terminal barrier's second-statement
+        // `SELECT ... FOR UPDATE` retains row-level ordering with its DELETE.
+        // A later mutation remains protected by its own exact epoch fencing.
+        //
         // `db_params!` only accepts a fixed, comma-separated literal list,
         // not a runtime-length one, so the dynamically-sized `IN (...)`
-        // parameter list is built as a plain `Vec<Value>` directly (`Vec<Value>`
-        // implements `IntoParams`).
+        // parameter list is built as a plain `Vec<Value>` directly
+        // (`Vec<Value>` implements `IntoParams`).
         let placeholders = entities.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
         let sql = format!(
             "DELETE FROM clustering_claims WHERE node_id = ? AND node_epoch = ? AND entity IN ({placeholders})"
@@ -1474,17 +1520,13 @@ pub trait NodeLeaseStore: Send + Sync {
     /// `FOR SHARE` lock taken on `clustering_claims` — a cross-table
     /// fencing discipline, not a self-CAS. The actual guarantee, precisely:
     /// this DELETE and `steal_stale`'s `StealIntentExpired` CTE (FIX 1(a))
-    /// acquire their `clustering_claims`/`clustering_steal_intents` locks in
-    /// **opposite order** by design, so a concurrent veto-clear and a
-    /// concurrent steal **serialize on the intent rows themselves**
-    /// (whichever statement's row-locking `DELETE` half commits first
-    /// wins; the loser's own predicate re-check, evaluated against the
-    /// now-committed state, observes nothing left to act on) — never on an
-    /// unlocked, racy `EXISTS` read of a table neither statement is
-    /// otherwise touching. Under contention this lock-order inversion can
-    /// surface as a Postgres `40P01` deadlock on either side (FIX 1(c)) —
-    /// safe, typed, logged at `debug`, retried by the loser next
-    /// tick/scan — never a correctness hazard.
+    /// first acquire the same transaction-scoped per-entity advisory lock.
+    /// The winner then completes both of its claim/intent row operations
+    /// before the loser can take either table's row locks; the loser's
+    /// epoch/intent predicate re-check observes the winner's committed
+    /// result. This removes the former opposite row-lock order while
+    /// retaining the cross-table fence against an unlocked, racy `EXISTS`
+    /// read.
     ///
     /// **FIX 1(b)**: returns the number of rows actually deleted (`0` or
     /// more; realistically `0` or `1` per reporter row, so a caller with
@@ -2101,6 +2143,7 @@ impl NodeLeaseStore for PostgresClaimStore {
         me: &NodeIdentity,
         mine: ClaimEpoch,
     ) -> Result<u64, ClaimError> {
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // FIX 1(b) — council-adjudicated redesign closing the veto race:
         // the previous shape gated the DELETE on an *unlocked* `EXISTS`
@@ -2112,20 +2155,10 @@ impl NodeLeaseStore for PostgresClaimStore {
         // data-modifying CTE input, so the DELETE below only proceeds once
         // that lock is held and the row is confirmed live under `mine`.
         //
-        // FIX 1(c) — DEADLOCK NOTE: this statement acquires locks in the
-        // order {`clustering_claims` row (`FOR SHARE`), then
-        // `clustering_steal_intents` rows (the DELETE)} — the *opposite*
-        // order from `steal_stale`'s `StealIntentExpired` CTE (FIX 1(a)),
-        // which acquires {`clustering_steal_intents` rows first, then the
-        // `clustering_claims` row}. This is deliberate: it is exactly what
-        // makes a concurrent veto-clear and a concurrent steal serialize
-        // on the intent rows themselves rather than race an unlocked read
-        // — see `steal_stale`'s doc comment for the full argument. Under
-        // contention Postgres may abort either side with a `40P01`
-        // deadlock instead of blocking it; that is SAFE (a typed
-        // [`ClaimError::Backend`], never a panic — logged at `debug` via
-        // [`log_if_postgres_deadlock`] — the loser retries next
-        // tick/scan).
+        // FIX 1(c): take the shared per-entity advisory lock before either
+        // the claim-row `FOR SHARE` or intent-row DELETE. The steal path does
+        // the same, so the two multi-table operations no longer acquire
+        // their table row locks in opposite concurrent orders.
         //
         // A deposed owner's stale `(node_id, mine)` pair matches no
         // `clustering_claims` row, so `fenced` is empty, the DELETE's
@@ -2137,28 +2170,32 @@ impl NodeLeaseStore for PostgresClaimStore {
         let affected = conn
             .execute(
                 r#"
-                WITH fenced AS (
-                    SELECT 1 FROM clustering_claims
-                    WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?
-                    FOR SHARE
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                ),
+                fenced AS (
+                    SELECT 1
+                    FROM claim_lock
+                    JOIN clustering_claims AS c ON c.entity = ?
+                    WHERE c.node_id = ? AND c.node_epoch = ? AND c.claim_epoch = ?
+                    FOR SHARE OF c
                 )
                 DELETE FROM clustering_steal_intents
                 WHERE entity = ?
                   AND EXISTS (SELECT 1 FROM fenced)
                 "#,
                 crate::db_params![
-                    entity_key(entity),
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
+                    encoded.clone(),
                     me.node_id.clone(),
                     me.node_epoch.clone(),
                     mine.0,
-                    entity_key(entity),
+                    encoded,
                 ],
             )
             .await
-            .map_err(|error| {
-                log_if_postgres_deadlock(&error, &entity_key(entity), "clear_steal_intent");
-                db_err(error)
-            })?;
+            .map_err(db_err)?;
         Ok(affected)
     }
 
@@ -2172,11 +2209,12 @@ impl NodeLeaseStore for PostgresClaimStore {
         // candidate scan, never itself the authority (see this method's
         // trait doc comment).
         //
-        // ADR-0017 Phase 4 Slice 1a: orphan reaping may only surface detached
-        // SM sessions that already have a durable `sm_sessions` row. `<enable
-        // resume='true'/>` creates the claim while the socket is still live;
-        // stealing such claim-only rows would leave this node owning an
-        // unhydratable session and break later XEP-0198 resume/ISR paths.
+        // ADR-0017 Phase 4 Slice 1a: orphan reaping may only surface SM
+        // streams that still have durable resumable or terminal-generation
+        // work. `<enable resume='true'/>` creates the claim while the socket
+        // is still live; stealing such claim-only rows would leave this node
+        // owning an unhydratable stream and break later XEP-0198 resume/ISR
+        // paths.
         let mut rows = conn
             .query(
                 r#"
@@ -2189,12 +2227,19 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT n.expired
                       AND n.node_epoch = clustering_claims.node_epoch
                   )
-                  AND EXISTS (
-                    SELECT 1 FROM sm_sessions s
-                    WHERE clustering_claims.entity = (? || ':' || s.stream_id)
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM sm_sessions s
+                      WHERE clustering_claims.entity = (? || ':' || s.stream_id)
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM sm_terminal_generations t
+                      WHERE clustering_claims.entity = (? || ':' || t.stream_id)
+                    )
                   )
                 "#,
                 crate::db_params![
+                    EntityType::SmSession.as_db_str().to_string(),
                     EntityType::SmSession.as_db_str().to_string(),
                     EntityType::SmSession.as_db_str().to_string(),
                 ],
@@ -2270,6 +2315,9 @@ impl NodeLeaseStore for PostgresClaimStore {
                        CASE WHEN EXISTS (
                          SELECT 1 FROM sm_sessions s
                          WHERE raw_claims.entity = ('sm_session:' || s.stream_id)
+                       ) OR EXISTS (
+                         SELECT 1 FROM sm_terminal_generations t
+                         WHERE raw_claims.entity = ('sm_session:' || t.stream_id)
                        ) THEN 1 ELSE 0 END AS has_durable
                 FROM raw_claims
                 ORDER BY entity
@@ -2395,6 +2443,9 @@ impl NodeLeaseStore for PostgresClaimStore {
                        CASE WHEN EXISTS (
                          SELECT 1 FROM sm_sessions s
                          WHERE raw_claims.entity = ('sm_session:' || s.stream_id)
+                       ) OR EXISTS (
+                         SELECT 1 FROM sm_terminal_generations t
+                         WHERE raw_claims.entity = ('sm_session:' || t.stream_id)
                        ) THEN 1 ELSE 0 END AS has_durable
                 FROM raw_claims
                 ORDER BY entity
@@ -2435,25 +2486,36 @@ impl NodeLeaseStore for PostgresClaimStore {
         me: &NodeIdentity,
         lease_ttl: Duration,
     ) -> Result<ClaimEpoch, ClaimError> {
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         let mut rows = conn
             .query(
                 r#"
-                UPDATE clustering_claims
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
+                UPDATE clustering_claims AS c
                 SET node_id = ?, node_epoch = ?,
                     claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
-                WHERE entity = ?
-                  AND entity_type = ?
-                  AND claim_epoch = ?
+                FROM claim_lock
+                WHERE c.entity = ?
+                  AND c.entity_type = ?
+                  AND c.claim_epoch = ?
                   AND NOT EXISTS (
                     SELECT 1 FROM clustering_nodes n
-                    WHERE n.node_id = clustering_claims.node_id
+                    WHERE n.node_id = c.node_id
                       AND NOT n.expired
-                      AND n.node_epoch = clustering_claims.node_epoch
+                      AND n.node_epoch = c.node_epoch
                   )
-                  AND EXISTS (
-                    SELECT 1 FROM sm_sessions s
-                    WHERE clustering_claims.entity = (? || ':' || s.stream_id)
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM sm_sessions s
+                      WHERE c.entity = (? || ':' || s.stream_id)
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM sm_terminal_generations t
+                      WHERE c.entity = (? || ':' || t.stream_id)
+                    )
                   )
                   AND EXISTS (
                     SELECT 1 FROM clustering_nodes
@@ -2463,14 +2525,17 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT draining
                       AND heartbeat >= now() - (? || ' milliseconds')::interval
                   )
-                RETURNING claim_epoch
+                RETURNING c.claim_epoch
                 "#,
                 crate::db_params![
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    entity_key(entity),
+                    encoded,
                     EntityType::SmSession.as_db_str().to_string(),
                     observed.0,
+                    EntityType::SmSession.as_db_str().to_string(),
                     EntityType::SmSession.as_db_str().to_string(),
                     me.node_id.clone(),
                     me.node_epoch.clone(),
@@ -2603,17 +2668,23 @@ impl NodeLeaseStore for PostgresClaimStore {
             let affected = conn
                 .execute(
                     r#"
-                    DELETE FROM clustering_claims
-                    WHERE entity = ? AND entity_type = ? AND node_id = ? AND node_epoch = ?
-                      AND claim_epoch = ?
+                    WITH claim_lock AS MATERIALIZED (
+                        SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                    )
+                    DELETE FROM clustering_claims AS c
+                    USING claim_lock
+                    WHERE c.entity = ? AND c.entity_type = ? AND c.node_id = ? AND c.node_epoch = ?
+                      AND c.claim_epoch = ?
                       AND NOT EXISTS (
                         SELECT 1 FROM clustering_nodes n
-                        WHERE n.node_id = clustering_claims.node_id
+                        WHERE n.node_id = c.node_id
                           AND NOT n.expired
-                          AND n.node_epoch = clustering_claims.node_epoch
+                          AND n.node_epoch = c.node_epoch
                       )
                     "#,
                     crate::db_params![
+                        encoded.clone(),
+                        CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                         encoded,
                         EntityType::RoomActor.as_db_str().to_string(),
                         node_id,
@@ -2649,21 +2720,26 @@ impl NodeLeaseStore for PostgresClaimStore {
         if entity.entity_type != EntityType::RoomActor {
             return Err(ClaimError::Conflict);
         }
+        let encoded = entity_key(entity);
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         let mut rows = conn
             .query(
                 r#"
-                UPDATE clustering_claims
+                WITH claim_lock AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+                )
+                UPDATE clustering_claims AS c
                 SET node_id = ?, node_epoch = ?,
                     claim_epoch = nextval('clustering_claim_epoch_seq'::regclass)
-                WHERE entity = ?
-                  AND entity_type = ?
-                  AND claim_epoch = ?
+                FROM claim_lock
+                WHERE c.entity = ?
+                  AND c.entity_type = ?
+                  AND c.claim_epoch = ?
                   AND NOT EXISTS (
                     SELECT 1 FROM clustering_nodes n
-                    WHERE n.node_id = clustering_claims.node_id
+                    WHERE n.node_id = c.node_id
                       AND NOT n.expired
-                      AND n.node_epoch = clustering_claims.node_epoch
+                      AND n.node_epoch = c.node_epoch
                   )
                   AND EXISTS (
                     SELECT 1 FROM clustering_nodes
@@ -2673,12 +2749,14 @@ impl NodeLeaseStore for PostgresClaimStore {
                       AND NOT draining
                       AND heartbeat >= now() - (? || ' milliseconds')::interval
                   )
-                RETURNING claim_epoch
+                RETURNING c.claim_epoch
                 "#,
                 crate::db_params![
+                    encoded.clone(),
+                    CLAIM_ENTITY_ADVISORY_LOCK_SEED,
                     me.node_id.clone(),
                     me.node_epoch.clone(),
-                    entity_key(entity),
+                    encoded,
                     EntityType::RoomActor.as_db_str().to_string(),
                     observed.0,
                     me.node_id.clone(),
@@ -2744,8 +2822,10 @@ pub(crate) fn clustering_control_plane_table_lock() -> &'static tokio::sync::Mut
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabaseDriver};
+    use crate::sm_persistence::codec::unacked_purpose_wire_str;
     use std::sync::Arc;
     use waddle_xmpp::ownership::SharedNodeIdentity;
+    use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 
     fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
@@ -2806,6 +2886,12 @@ mod tests {
         .await
         .expect("ensure SM persistence schema");
         let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM sm_terminal_unacked", ())
+            .await
+            .expect("clean sm_terminal_unacked");
+        conn.execute("DELETE FROM sm_terminal_generations", ())
+            .await
+            .expect("clean sm_terminal_generations");
         conn.execute("DELETE FROM sm_unacked", ())
             .await
             .expect("clean sm_unacked");
@@ -2944,6 +3030,45 @@ mod tests {
         )
         .await
         .expect("seed sm_sessions row");
+    }
+
+    async fn seed_sm_terminal_generation_row(db: &Database, stream_id: &str, generation_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            INSERT INTO sm_terminal_generations (
+                stream_id, generation_id, user_id, full_jid, inbound_count,
+                outbound_count, last_acked, max_resume_secs, detached_at_ms,
+                max_resume_duration_ms, carbons_enabled, roster_interested,
+                blocklist_interested, presence_available, presence_priority
+            ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            ON CONFLICT (stream_id, generation_id) DO NOTHING
+            "#,
+            crate::db_params![
+                stream_id.to_string(),
+                generation_id.to_string(),
+                "alice".to_string(),
+                "alice@example.com/web".to_string(),
+            ],
+        )
+        .await
+        .expect("seed sm_terminal_generations row");
+    }
+
+    async fn seed_sm_terminal_unacked_row(db: &Database, stream_id: &str, generation_id: &str) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            "INSERT INTO sm_terminal_unacked \
+             (stream_id, generation_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, 1, '<message/>', 0, ?)",
+            crate::db_params![
+                stream_id.to_string(),
+                generation_id.to_string(),
+                unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application).to_string(),
+            ],
+        )
+        .await
+        .expect("seed sm_terminal_unacked row");
     }
 
     #[tokio::test]
@@ -4163,8 +4288,42 @@ mod tests {
         Entity::new(EntityType::RoomActor, id.to_string())
     }
 
+    async fn assert_terminal_claim_query_is_blocked(db: &Database, query_marker: &str) {
+        let monitor = db.guard().await.expect("monitor guard");
+        let query_pattern = format!("%{query_marker}%");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE ?
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        crate::db_params![query_pattern.clone()],
+                    )
+                    .await
+                    .expect("inspect blocked terminal lookup");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read blocked lookup count")
+                    .expect("blocked lookup count row")
+                    .get::<i64>(0)
+                    .expect("blocked lookup count");
+                if blocked > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal lookup reached the per-entity advisory barrier");
+    }
+
     #[tokio::test]
-    async fn terminal_claim_lookup_waits_for_an_in_flight_steal_update() {
+    async fn terminal_claim_lookup_waits_for_an_in_flight_existing_row_update() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
@@ -4180,6 +4339,13 @@ mod tests {
             .expect("seed previous claim");
 
         let mut steal = store.db.begin().await.expect("begin detached steal");
+        steal
+            .query(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+                crate::db_params![entity_key(&entity), CLAIM_ENTITY_ADVISORY_LOCK_SEED,],
+            )
+            .await
+            .expect("lock detached claim mutation");
         let mut rows = steal
             .query(
                 r#"
@@ -4215,37 +4381,8 @@ mod tests {
                 .await
         });
 
-        let monitor = store.db.guard().await.expect("monitor guard");
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let mut rows = monitor
-                    .query(
-                        r#"
-                        SELECT COUNT(*) FROM pg_stat_activity
-                        WHERE pid <> pg_backend_pid()
-                          AND query LIKE '%terminal_claim_reconciliation_lock%'
-                          AND wait_event_type = 'Lock'
-                        "#,
-                        (),
-                    )
-                    .await
-                    .expect("inspect blocked terminal lookup");
-                let blocked = rows
-                    .next()
-                    .await
-                    .expect("read blocked lookup count")
-                    .expect("blocked lookup count row")
-                    .get::<i64>(0)
-                    .expect("blocked lookup count");
-                if blocked > 0 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("terminal lookup reached the claim-row barrier");
-        drop(monitor);
+        assert_terminal_claim_query_is_blocked(&store.db, "terminal_claim_reconciliation_lock")
+            .await;
 
         steal.commit().await.expect("commit detached steal");
         let snapshot = barrier
@@ -4255,6 +4392,139 @@ mod tests {
             .expect("claim remains present");
         assert_eq!(snapshot.owner, new_owner);
         assert_eq!(snapshot.claim_epoch, committed_epoch);
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_lookup_waits_for_an_in_flight_bulk_existing_row_delete() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        let entity = room_entity("terminal-bulk-delete@muc.example.com");
+        store
+            .acquire(&entity, &owner)
+            .await
+            .expect("seed claim for bulk release");
+
+        // Stage the same existing-row DELETE shape used by release_many,
+        // which is deliberately exempt from per-entity advisory locks to
+        // keep its ~18k-claim operation bounded and one-round-trip.
+        let mut release = store.db.begin().await.expect("begin detached bulk release");
+        let mut rows = release
+            .query(
+                r#"
+                DELETE FROM clustering_claims
+                WHERE node_id = ? AND node_epoch = ? AND entity IN (?)
+                RETURNING claim_epoch
+                "#,
+                crate::db_params![
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                    entity_key(&entity),
+                ],
+            )
+            .await
+            .expect("stage bulk claim delete");
+        assert!(
+            rows.next().await.expect("read staged delete").is_some(),
+            "fixture must delete the existing claim"
+        );
+        drop(rows);
+
+        let barrier_store = PostgresClaimStore::new(store.db.clone());
+        let barrier_entity = entity.clone();
+        let barrier = tokio::spawn(async move {
+            barrier_store
+                .current_claim_after_pending_writes(&barrier_entity)
+                .await
+        });
+
+        assert_terminal_claim_query_is_blocked(&store.db, "terminal_claim_reconciliation_snapshot")
+            .await;
+        release
+            .commit()
+            .await
+            .expect("commit detached bulk release");
+
+        assert!(
+            barrier
+                .await
+                .expect("terminal lookup joined")
+                .expect("terminal lookup")
+                .is_none(),
+            "post-wait snapshot must observe the committed delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_lookup_waits_for_an_in_flight_absent_row_insert() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        seed_node(&store.db, &owner, false).await;
+        let entity = room_entity("terminal-absent-insert@muc.example.com");
+
+        // Model a dropped acquire future whose backend write has reached
+        // Postgres but has not committed yet. There is deliberately no
+        // committed claim row when the terminal lookup begins.
+        let mut acquire = store.db.begin().await.expect("begin detached acquire");
+        acquire
+            .query(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+                crate::db_params![entity_key(&entity), CLAIM_ENTITY_ADVISORY_LOCK_SEED,],
+            )
+            .await
+            .expect("lock detached absent-row mutation");
+        let mut rows = acquire
+            .query(
+                r#"
+                INSERT INTO clustering_claims
+                    (entity, entity_type, node_id, node_epoch, claim_epoch)
+                VALUES (?, ?, ?, ?, nextval('clustering_claim_epoch_seq'::regclass))
+                RETURNING claim_epoch
+                "#,
+                crate::db_params![
+                    entity_key(&entity),
+                    entity.entity_type.as_db_str().to_string(),
+                    owner.node_id.clone(),
+                    owner.node_epoch.clone(),
+                ],
+            )
+            .await
+            .expect("stage absent-row claim insert");
+        let committed_epoch = ClaimEpoch(
+            rows.next()
+                .await
+                .expect("read staged insert")
+                .expect("inserted claim")
+                .get::<i64>(0)
+                .expect("claim epoch"),
+        );
+        drop(rows);
+
+        let barrier_store = PostgresClaimStore::new(store.db.clone());
+        let barrier_entity = entity.clone();
+        let barrier = tokio::spawn(async move {
+            barrier_store
+                .current_claim_after_pending_writes(&barrier_entity)
+                .await
+        });
+
+        assert_terminal_claim_query_is_blocked(&store.db, "terminal_claim_reconciliation_lock")
+            .await;
+        acquire.commit().await.expect("commit detached acquire");
+
+        let snapshot = barrier
+            .await
+            .expect("terminal lookup joined")
+            .expect("terminal lookup")
+            .expect("post-wait snapshot observes inserted claim");
+        assert_eq!(snapshot.owner, owner);
+        assert_eq!(snapshot.claim_epoch, committed_epoch);
+        assert!(snapshot.owner_lease_fresh);
     }
 
     // --- ADR-0017 Phase 3 Slice 10: the acquire-side draining gate -------
@@ -4464,6 +4734,54 @@ mod tests {
             .await
             .expect("a heartbeat-fresh stealer can reclaim the orphaned SM session claim");
         assert!(epoch1.0 > epoch0.0);
+    }
+
+    #[tokio::test]
+    async fn terminal_generation_is_durable_for_every_sm_orphan_recovery_query() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let entity = sm_entity("terminal-only-orphan");
+        let observed = store
+            .acquire(&entity, &stale_owner)
+            .await
+            .expect("seed terminal-only claim");
+        seed_sm_terminal_generation_row(&store.db, &entity.id, "generation-terminal").await;
+
+        let legacy = store
+            .list_orphaned_sm_session_claims()
+            .await
+            .expect("legacy orphan scan");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].entity, entity);
+
+        let page = store
+            .list_orphaned_sm_session_claims_page(None, 64)
+            .await
+            .expect("paged orphan scan");
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].entity, entity);
+
+        let owned = store
+            .list_orphaned_sm_session_claims_for_owner(&stale_owner, 64)
+            .await
+            .expect("self-fence owner scan");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].entity, entity);
+
+        let fresh_owner = node_identity();
+        store
+            .register(&fresh_owner, None)
+            .await
+            .expect("register fresh recovery owner");
+        let reclaimed = store
+            .steal_orphaned_sm_session_claim(&entity, observed, &fresh_owner, NODE_LEASE_TTL)
+            .await
+            .expect("terminal-only work keeps the claim reclaimable");
+        assert!(reclaimed.0 > observed.0);
     }
 
     #[tokio::test]
@@ -4959,8 +5277,8 @@ mod tests {
 
         // Owner scans its own claims, finds the intent, health-asks
         // healthily, and clears it — FIX 1(e): the veto is enforced by
-        // serializing on the intent rows against a concurrent steal
-        // (deadlock-abort-safe, FIX 1(c)), not by any inherent
+        // taking the same per-entity advisory lock as a concurrent steal,
+        // then applying the cross-table epoch fence; not by any inherent
         // "unforgeability" of the write itself.
         let intents = store
             .owner_steal_intents(&owner)
@@ -5372,15 +5690,13 @@ mod tests {
     // The invariant under test: a clear reporting `rows_affected > 0` (a
     // real veto) and a steal succeeding against the SAME observed epoch
     // must never both happen in one round — write skew would mean a
-    // "vetoed" owner was simultaneously deposed. FIX 1(c)'s deliberate
-    // opposite lock-acquisition order means Postgres may occasionally
-    // abort one side of a round with `40P01 deadlock_detected`; this test
-    // asserts that outcome — when it occurs — surfaces as an ordinary typed
-    // `ClaimError::Backend`, never a panic, and counts how often it
-    // happened for the test's own report (not an assertion, since a
-    // deadlock is a possible-but-not-guaranteed outcome of any given round).
+    // "vetoed" owner was simultaneously deposed. Both statements now take
+    // the same per-entity advisory lock before either table's row locks, so
+    // every round must produce exactly one winner without a backend
+    // deadlock: clear wins with `Ok(rows > 0)` or steal wins while clear
+    // returns the fenced `Ok(0)` no-op.
     #[tokio::test]
-    async fn steal_intent_veto_vs_steal_stress_never_both_succeed_same_round() {
+    async fn steal_intent_veto_vs_steal_stress_serializes_exactly_one_winner_per_round() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(store) = clean_store().await else {
             return;
@@ -5404,11 +5720,6 @@ mod tests {
         const ROUNDS: usize = 200;
         let mut clears_won = 0usize;
         let mut steals_won = 0usize;
-        let mut deadlocks_observed = 0usize;
-
-        fn mentions_deadlock(err: &ClaimError) -> bool {
-            matches!(err, ClaimError::Backend(msg) if msg.to_lowercase().contains("deadlock"))
-        }
 
         for round in 0..ROUNDS {
             // Re-seed an already-aged intent directly: `report_steal_intent`
@@ -5468,31 +5779,22 @@ mod tests {
             let clear_result = clear_task.await.expect("clear task must not panic");
             let steal_result = steal_task.await.expect("steal task must not panic");
 
+            assert!(
+                clear_result.is_ok(),
+                "round {round}: serialized veto-clear must not fail: {clear_result:?}"
+            );
+            assert!(
+                matches!(steal_result, Ok(_) | Err(ClaimError::Conflict)),
+                "round {round}: serialized steal must either win or lose its CAS: {steal_result:?}"
+            );
+
             let clear_won = matches!(clear_result, Ok(rows) if rows > 0);
             let steal_won = steal_result.is_ok();
             assert!(
-                !(clear_won && steal_won),
-                "round {round}: both a veto-clear ({clear_result:?}) and a steal \
-                 ({steal_result:?}) succeeded against the same observed epoch {epoch:?} — \
-                 write skew between clear_steal_intent and steal_stale"
+                clear_won ^ steal_won,
+                "round {round}: expected exactly one winner, got veto-clear={clear_result:?}, \
+                 steal={steal_result:?}, observed epoch={epoch:?}"
             );
-
-            // Both results are already typed `Result<_, ClaimError>` at this
-            // point (propagated cleanly through the `?` operator inside
-            // `clear_steal_intent`/`steal_stale` — a panic would have
-            // already failed the `expect("... task must not panic")` calls
-            // above). This only distinguishes the FIX 1(c) deadlock outcome
-            // for the test's own report.
-            if let Err(error) = &clear_result {
-                if mentions_deadlock(error) {
-                    deadlocks_observed += 1;
-                }
-            }
-            if let Err(error) = &steal_result {
-                if mentions_deadlock(error) {
-                    deadlocks_observed += 1;
-                }
-            }
 
             if steal_won {
                 steals_won += 1;
@@ -5502,20 +5804,16 @@ mod tests {
                 clears_won += 1;
                 // Ownership/epoch unchanged: the veto held.
             }
-            // Neither winning (both sides lost, e.g. one aborted on a
-            // deadlock while the other had already been overtaken by the
-            // seed step's own timing) is possible but rare; nothing to
-            // update in that case — the next round simply re-seeds and
-            // retries under the same owner/epoch.
         }
 
         eprintln!(
             "steal_intent_veto_vs_steal_stress: {ROUNDS} rounds, clears_won={clears_won}, \
-             steals_won={steals_won}, deadlocks_observed={deadlocks_observed}"
+             steals_won={steals_won}"
         );
-        assert!(
-            clears_won + steals_won <= ROUNDS,
-            "sanity: cannot win more rounds than were run"
+        assert_eq!(
+            clears_won + steals_won,
+            ROUNDS,
+            "the advisory lock must serialize exactly one winner per round"
         );
     }
     #[tokio::test]
@@ -5607,7 +5905,9 @@ mod tests {
         seed_node(&store.db, &stale_owner, true).await;
         let malformed_id = "z".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
         let malformed = sm_entity(&malformed_id);
-        seed_sm_session_row(&store.db, &malformed_id).await;
+        let malformed_generation_id = "malformed-terminal-generation";
+        seed_sm_terminal_generation_row(&store.db, &malformed_id, malformed_generation_id).await;
+        seed_sm_terminal_unacked_row(&store.db, &malformed_id, malformed_generation_id).await;
         store
             .acquire(&malformed, &stale_owner)
             .await
@@ -5661,7 +5961,9 @@ mod tests {
         // satisfies the durable-row join, so the scan must exact-owner/epoch
         // quarantine it instead of re-WARN forever.
         let malformed_id = "z".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
-        seed_sm_session_row(&store.db, &malformed_id).await;
+        let malformed_generation_id = "malformed-terminal-page-generation";
+        seed_sm_terminal_generation_row(&store.db, &malformed_id, malformed_generation_id).await;
+        seed_sm_terminal_unacked_row(&store.db, &malformed_id, malformed_generation_id).await;
         let encoded = format!("{}:{malformed_id}", EntityType::SmSession.as_db_str());
         let conn = store.db.guard().await.expect("guard");
         conn.execute(
@@ -5704,21 +6006,26 @@ mod tests {
             .get(0)
             .expect("count");
         assert_eq!(count, 0);
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*) FROM sm_sessions WHERE stream_id = ?",
-                crate::db_params![malformed_id],
-            )
-            .await
-            .expect("count quarantined durable row");
-        let durable_count: i64 = rows
-            .next()
-            .await
-            .expect("row")
-            .expect("row")
-            .get(0)
-            .expect("count");
-        assert_eq!(durable_count, 0);
+        for table in ["sm_terminal_unacked", "sm_terminal_generations"] {
+            let query = match table {
+                "sm_terminal_unacked" => {
+                    "SELECT COUNT(*) FROM sm_terminal_unacked WHERE stream_id = ?"
+                }
+                _ => "SELECT COUNT(*) FROM sm_terminal_generations WHERE stream_id = ?",
+            };
+            let mut rows = conn
+                .query(query, crate::db_params![malformed_id.clone()])
+                .await
+                .expect("count quarantined terminal row");
+            let durable_count: i64 = rows
+                .next()
+                .await
+                .expect("row")
+                .expect("row")
+                .get(0)
+                .expect("count");
+            assert_eq!(durable_count, 0, "quarantine must clean {table}");
+        }
     }
 
     #[tokio::test]
@@ -5852,6 +6159,62 @@ mod tests {
             .get(0)
             .expect("count");
         assert_eq!(durable_count, 1);
+    }
+
+    #[tokio::test]
+    async fn claim_only_cleanup_rechecks_terminal_generation_after_scan_classification() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let stale_owner = node_identity();
+        seed_node(&store.db, &stale_owner, true).await;
+        let entity = sm_entity("claim-only-raced-by-terminal-generation");
+        let claim_epoch = store
+            .acquire(&entity, &stale_owner)
+            .await
+            .expect("seed stale claim without durable state");
+        let cleanup = OrphanedSmClaimCleanup {
+            encoded: entity_key(&entity),
+            owner: stale_owner.clone(),
+            claim_epoch,
+            durable_stream_id: None,
+            malformed: false,
+        };
+        seed_sm_terminal_generation_row(&store.db, &entity.id, "late-terminal-generation").await;
+
+        assert!(!store
+            .cleanup_orphaned_sm_claim(cleanup)
+            .await
+            .expect("cleanup transaction"));
+        let snapshot = store
+            .current_claim(&entity)
+            .await
+            .expect("read claim after cleanup");
+        assert_eq!(
+            snapshot
+                .as_ref()
+                .map(|claim| (&claim.owner, claim.claim_epoch)),
+            Some((&stale_owner, claim_epoch)),
+            "terminal work appearing after classification must retain the exact claim"
+        );
+        let conn = store.db.guard().await.expect("guard");
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sm_terminal_generations WHERE stream_id = ?",
+                crate::db_params![entity.id],
+            )
+            .await
+            .expect("count terminal generation");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row")
+                .expect("row")
+                .get::<i64>(0)
+                .expect("count"),
+            1
+        );
     }
 
     #[tokio::test]

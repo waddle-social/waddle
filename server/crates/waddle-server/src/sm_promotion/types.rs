@@ -38,6 +38,8 @@ pub enum PromotedOutcome {
     /// MUST retain this row for operator reconciliation and MUST NOT age it
     /// through the transient storage-failure dead-letter budget.
     Quarantined,
+    /// The exact captured SM fence is no longer authoritative.
+    AuthorityLost,
 }
 
 /// Aggregate outcome of promoting every unacked stanza in a session.
@@ -63,9 +65,12 @@ pub struct PromotionSummary {
     /// not be established. These rows require reconciliation and are never
     /// eligible for automatic dead-lettering.
     pub quarantined: u32,
+    /// Whether promotion stopped because the captured generation/fence ceased
+    /// to be authoritative.
+    pub authority_lost: bool,
     /// XEP-0198 sequences of every stanza this promotion pass fully
-    /// handled (every outcome except [`PromotedOutcome::StorageFailure`] and
-    /// [`PromotedOutcome::Quarantined`]).
+    /// handled (every outcome except [`PromotedOutcome::StorageFailure`],
+    /// [`PromotedOutcome::Quarantined`], and [`PromotedOutcome::AuthorityLost`]).
     /// On a partial failure the retry path durably deletes exactly
     /// these `sm_unacked` rows and drops them from the reinserted
     /// session, so the next tick retries only the failed stanzas
@@ -85,10 +90,13 @@ impl PromotionSummary {
             PromotedOutcome::Scrubbed => self.scrubbed += 1,
             PromotedOutcome::StorageFailure => self.storage_failed += 1,
             PromotedOutcome::Quarantined => self.quarantined += 1,
+            PromotedOutcome::AuthorityLost => self.authority_lost = true,
         }
         if !matches!(
             outcome,
-            PromotedOutcome::StorageFailure | PromotedOutcome::Quarantined
+            PromotedOutcome::StorageFailure
+                | PromotedOutcome::Quarantined
+                | PromotedOutcome::AuthorityLost
         ) {
             self.promoted_sequences.push(sequence);
         }
@@ -114,5 +122,9 @@ impl PromotionSummary {
     /// of the current attempt count.
     pub(crate) fn should_dead_letter(&self, attempts: u32, max_attempts: u32) -> bool {
         !self.has_quarantined() && self.has_storage_failure() && attempts >= max_attempts
+    }
+
+    pub fn has_authority_lost(&self) -> bool {
+        self.authority_lost
     }
 }

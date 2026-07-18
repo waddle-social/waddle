@@ -3,8 +3,9 @@ use super::*;
 mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
+use crate::db::Transaction;
 
-use waddle_xmpp::ownership::{ClaimError, ClaimStore, Entity, EntityType, SharedNodeIdentity};
+use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity};
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 // ---------------------------------------------------------------------------
@@ -80,32 +81,69 @@ pub struct DatabasePendingDeliveryStorage {
     /// inserts, so two writers can both pass the cap check). SQLite
     /// already serializes writers; this is portable defense.
     recipient_locks: std::sync::Arc<RecipientLockMap>,
-    /// ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): present only
-    /// when clustering is enabled AND this storage's `db` is co-located
-    /// with the clustering global database (checked once, before
-    /// construction, by [`open_for_cluster_mode`] — mirroring
-    /// `sm_persistence::open_for_cluster_mode`'s identical invariant for
-    /// `PostgresFencedSmPersistence`, one table over). `insert_fenced`
-    /// uses this to run the Q6 promotion insert under the origin SM
-    /// session's claim fence; `None` means this storage falls back to the
-    /// portable, unfenced `insert` path — correct for every
-    /// non-clustered/non-co-located deployment.
+    /// Present only when clustering is enabled and this database is
+    /// co-located with the clustering claims table. Exact-fence methods use
+    /// the caller-supplied immutable SM fence; they never acquire/rebind it.
     fencing: Option<PendingDeliveryFencing>,
 }
 
-/// Clustering context [`DatabasePendingDeliveryStorage::insert_fenced`]
-/// needs — the same `ClaimStore`/live-identity pair every other
-/// clustering-aware call site binds, never a second, independent store.
+/// Identity context needed to reject a fence from an obsolete node
+/// incarnation before the transaction mutates pending delivery.
 #[derive(Clone)]
 struct PendingDeliveryFencing {
-    claim_store: std::sync::Arc<dyn ClaimStore>,
     node_identity: SharedNodeIdentity,
+}
+
+impl PendingDeliveryFencing {
+    async fn assert_exact_sm_fence(
+        &self,
+        tx: &mut Transaction<'_>,
+        stream_id: &str,
+        fence: &SmClaimFence,
+    ) -> Result<CurrentNodeIdentityGuard, PendingStorageError> {
+        let entity = Entity::new(EntityType::SmSession, stream_id.to_string());
+        let Some(identity_guard) = self.node_identity.guard_if_current(fence.owner()).await else {
+            return Err(PendingStorageError::NotOwner { entity });
+        };
+        let entity_key = format!("{}:{stream_id}", EntityType::SmSession.as_db_str());
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM clustering_claims \
+                 WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? \
+                 FOR SHARE",
+                crate::db_params![
+                    entity_key,
+                    fence.owner().node_id.clone(),
+                    fence.owner().node_epoch.clone(),
+                    fence.epoch().0,
+                ],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let held = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+            .is_some();
+        if !held {
+            return Err(PendingStorageError::NotOwner { entity });
+        }
+        Ok(identity_guard)
+    }
+}
+
+fn required_sm_fence<'a>(
+    stream_id: &SmSessionId,
+    fence: Option<&'a SmClaimFence>,
+) -> Result<&'a SmClaimFence, PendingStorageError> {
+    fence.ok_or_else(|| PendingStorageError::NotOwner {
+        entity: Entity::new(EntityType::SmSession, stream_id.as_str().to_string()),
+    })
 }
 
 /// Column values for one `pending_delivery` INSERT — the shared output of
 /// [`DatabasePendingDeliveryStorage::prepare_insert_row`], named rather
-/// than a bare tuple (clippy `type_complexity`) since both `insert` and
-/// `insert_fenced` destructure it.
+/// than a bare tuple (clippy `type_complexity`).
 struct PreparedInsertRow {
     row_id: String,
     receipt_ms: i64,
@@ -113,40 +151,6 @@ struct PreparedInsertRow {
     by: Option<String>,
     sid: Option<String>,
     xml: Option<String>,
-}
-
-/// Map a [`ClaimError`] to the [`PendingStorageError`] `insert_fenced`'s
-/// callers expect — mirrors
-/// `sm_persistence_fenced::claim_error_to_sm_persistence_error` exactly,
-/// one error type over: only a genuine ownership loss
-/// ([`ClaimError::AlreadyClaimed`]/[`ClaimError::Conflict`]) becomes
-/// [`PendingStorageError::NotOwner`]; a transient backend outage or a
-/// poisoned in-process lock must never masquerade as ownership loss.
-/// Matched exhaustively so a future `ClaimError` variant forces this
-/// mapping to be revisited.
-fn claim_error_to_pending_storage_error(error: ClaimError, entity: Entity) -> PendingStorageError {
-    match error {
-        // ADR-0017 Phase 3 Slice 10: `ensure_claimed` surfaces `Draining`
-        // when this node refused a NEW claim while marked draining — from
-        // this fenced-insert path's point of view that is the same signal
-        // as `AlreadyClaimed`/`Conflict`: this node is not (and, for
-        // `Draining`, will not become) the owner, so the caller should
-        // treat it exactly like any other ownership loss, never a
-        // transient backend error.
-        ClaimError::AlreadyClaimed
-        | ClaimError::Conflict
-        | ClaimError::Draining
-        | ClaimError::AuthorityDisabled => PendingStorageError::NotOwner { entity },
-        ClaimError::Backend(_) | ClaimError::Poisoned => {
-            PendingStorageError::Other(error.to_string())
-        }
-        // Defensive only: `ensure_claimed` never actually returns this
-        // variant — it is exclusive to the steal-intent path, which never
-        // applies to `EntityType::SmSession` claims (Slice 3 rule 1).
-        ClaimError::SmSessionExcludedFromStealIntent => {
-            PendingStorageError::Other(error.to_string())
-        }
-    }
 }
 
 impl DatabasePendingDeliveryStorage {
@@ -190,7 +194,7 @@ impl DatabasePendingDeliveryStorage {
         Ok(storage)
     }
 
-    /// Shared row-shape extraction for `insert`/`insert_fenced`: the row
+    /// Shared row-shape extraction for fenced and unfenced inserts: the row
     /// id (freshly minted if the caller left it empty), the receipt
     /// timestamp in ms, and the payload-kind/by/stanza-id/xml column
     /// values. Factored out so the fenced and unfenced insert paths issue
@@ -231,9 +235,7 @@ impl DatabasePendingDeliveryStorage {
         })
     }
 
-    /// Attach clustering fencing (ADR-0017 Phase 3 Slice 5 FIX 3):
-    /// `insert_fenced` then runs the Q6 promotion insert under the origin
-    /// SM session's claim fence instead of the unfenced portable path.
+    /// Attach clustering fencing for caller-supplied exact SM claim fences.
     /// Infallible — the co-location invariant is [`open_for_cluster_mode`]'s
     /// job, checked before this storage was ever opened; call this
     /// directly only if you have already verified co-location yourself.
@@ -243,15 +245,8 @@ impl DatabasePendingDeliveryStorage {
     /// itself feature-gated, so this would otherwise be dead code on a
     /// build without the `clustering` Cargo feature.
     #[cfg(feature = "clustering")]
-    pub(crate) fn with_cluster_fencing(
-        mut self,
-        claim_store: std::sync::Arc<dyn ClaimStore>,
-        node_identity: SharedNodeIdentity,
-    ) -> Self {
-        self.fencing = Some(PendingDeliveryFencing {
-            claim_store,
-            node_identity,
-        });
+    pub(crate) fn with_cluster_fencing(mut self, node_identity: SharedNodeIdentity) -> Self {
+        self.fencing = Some(PendingDeliveryFencing { node_identity });
         self
     }
 
@@ -369,19 +364,17 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         }
     }
 
-    #[instrument(skip(self, row), fields(recipient = %row.recipient, origin_stream_id))]
-    async fn insert_fenced(
+    #[instrument(skip(self, row, fence), fields(recipient = %row.recipient, origin_stream_id = %origin_session))]
+    async fn insert_under_sm_fence(
         &self,
         row: PendingRow,
-        origin_stream_id: &str,
+        origin_session: &SmSessionId,
+        fence: Option<&SmClaimFence>,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        // ADR-0017 Phase 3 Slice 5 FIX 3 (council-adjudicated): no fencing
-        // context attached (clustering disabled, non-Postgres, or this
-        // storage's `db` failed the co-location check at construction) —
-        // fall back to the exact unfenced path, byte-identical to `insert`.
         let Some(fencing) = &self.fencing else {
             return self.insert(row).await;
         };
+        let fence = required_sm_fence(origin_session, fence)?;
 
         let recipient_lock = self
             .recipient_locks
@@ -390,21 +383,6 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .clone();
         let _guard = recipient_lock.lock().await;
 
-        let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
-        let identity = fencing.node_identity.current();
-        // `ensure_claimed`, not a bare `acquire`: the caller (Q6 promotion)
-        // is running against a session this node's own claim lifecycle
-        // already holds (deviation 29's "claim held continuously while the
-        // session sits in `sessions`" invariant) — this is the ordinary
-        // self-reacquire case, exactly like
-        // `sm_persistence_fenced::claim_epoch_for`'s identical call one
-        // table over.
-        let epoch = fencing
-            .claim_store
-            .ensure_claimed(&entity, &identity)
-            .await
-            .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
-        let claim_fence = SmClaimFence::new(identity, epoch);
         let PreparedInsertRow {
             row_id,
             receipt_ms,
@@ -420,40 +398,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
 
-        // Fencing check: identical shape to
-        // `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced`
-        // — the first statement inside this transaction, on the SAME
-        // connection as the write it guards. A failed check aborts BEFORE
-        // any write: `tx` is dropped here (rolling back) rather than
-        // committed.
-        let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), origin_stream_id);
-        let mut fence_rows = tx
-            .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
-                crate::db_params![
-                    entity_key,
-                    claim_fence.owner().node_id.clone(),
-                    claim_fence.owner().node_epoch.clone(),
-                    claim_fence.epoch().0,
-                ],
-            )
-            .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let held = fence_rows
-            .next()
-            .await
-            .map_err(|e| PendingStorageError::Other(e.to_string()))?
-            .is_some();
-        if !held || fencing.node_identity.current() != *claim_fence.owner() {
-            return Err(PendingStorageError::NotOwner { entity });
-        }
-        let Some(identity_guard) = fencing
-            .node_identity
-            .guard_if_current(claim_fence.owner())
-            .await
-        else {
-            return Err(PendingStorageError::NotOwner { entity });
-        };
+        let identity_guard = fencing
+            .assert_exact_sm_fence(&mut tx, origin_session.as_str(), fence)
+            .await?;
 
         // Same two INSERT shapes as `insert`, issued on `tx` instead of a
         // pooled single-statement guard, so the fencing check and the
@@ -842,6 +789,58 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         .await
     }
 
+    async fn delete_row_if_session(
+        &self,
+        id: &PendingRowId,
+        expected_session: &SmSessionId,
+    ) -> Result<u64, PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery \
+             WHERE row_id = ? AND flushed_in_session = ?",
+            crate::db_params![
+                id.as_str().to_string(),
+                expected_session.as_str().to_string(),
+            ],
+        )
+        .await
+    }
+
+    async fn delete_row_under_sm_fence(
+        &self,
+        id: &PendingRowId,
+        origin_stream_id: &SmSessionId,
+        fence: Option<&SmClaimFence>,
+    ) -> Result<u64, PendingStorageError> {
+        let Some(fencing) = &self.fencing else {
+            return self.delete_row_if_session(id, origin_stream_id).await;
+        };
+        let fence = required_sm_fence(origin_stream_id, fence)?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let identity_guard = fencing
+            .assert_exact_sm_fence(&mut tx, origin_stream_id.as_str(), fence)
+            .await?;
+        let removed = tx
+            .execute(
+                "DELETE FROM pending_delivery \
+                 WHERE row_id = ? AND flushed_in_session = ?",
+                crate::db_params![
+                    id.as_str().to_string(),
+                    origin_stream_id.as_str().to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        drop(identity_guard);
+        Ok(removed)
+    }
+
     async fn release_claim(&self, session: &SmSessionId) -> Result<u64, PendingStorageError> {
         // Clear `outbound_sequence` alongside `flushed_in_session` so a
         // stale sequence from the dead session can't survive a re-claim
@@ -855,6 +854,44 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             crate::db_params![session.as_str().to_string()],
         )
         .await
+    }
+
+    async fn release_claim_under_sm_fence(
+        &self,
+        session: &SmSessionId,
+        fence: Option<&SmClaimFence>,
+    ) -> Result<u64, PendingStorageError> {
+        let Some(fencing) = &self.fencing else {
+            return self.release_claim(session).await;
+        };
+        let fence = required_sm_fence(session, fence)?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let identity_guard = fencing
+            .assert_exact_sm_fence(&mut tx, session.as_str(), fence)
+            .await?;
+        let released = tx
+            .execute(
+                "UPDATE pending_delivery SET flushed_in_session = NULL, \
+                                              outbound_sequence = NULL, \
+                                              claimed_at_ms = NULL \
+                 WHERE flushed_in_session = ?",
+                crate::db_params![session.as_str().to_string()],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        drop(identity_guard);
+        Ok(released)
+    }
+
+    fn requires_exact_sm_fence(&self) -> bool {
+        self.fencing.is_some()
     }
 
     async fn release_row(&self, id: &PendingRowId) -> Result<u64, PendingStorageError> {

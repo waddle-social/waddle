@@ -31,15 +31,23 @@ pub(crate) fn session_has_unclassified_barrier(session: &DetachedSession) -> boo
 /// retains the barrier for reconciliation.
 pub(super) async fn load_pending_links(
     session: &DetachedSession,
+    source_session_id: Option<&SmSessionId>,
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
 ) -> PendingLinks {
     if !session_has_unclassified_barrier(session) {
         return PendingLinks::Known(HashMap::new());
     }
 
-    let source_session_id = SmSessionId::new(session.stream_id.clone());
+    // Terminal and obsolete generations cannot prove ownership from the bare
+    // stream id: a current same-id successor may own that pending linkage.
+    // Their exact authority therefore supplies no source id and must not read
+    // or mutate the successor's rows.
+    let Some(source_session_id) = source_session_id else {
+        return PendingLinks::Known(HashMap::new());
+    };
+
     match pending_storage
-        .list_claimed_by_session(&source_session_id)
+        .list_claimed_by_session(source_session_id)
         .await
     {
         Ok(rows) => {

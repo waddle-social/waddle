@@ -29,6 +29,7 @@ use chrono::TimeZone;
 use std::time::Duration as StdDuration;
 use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity, StalePredicate};
 use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
+use waddle_xmpp::stream_management::SmSessionGenerationId;
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use xmpp_parsers::presence::Show;
 
@@ -67,16 +68,27 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
 }
 
 fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
+    fixture_unacked_with_body(stream_id, sequence, &format!("m{sequence}"))
+}
+
+fn fixture_unacked_with_body(stream_id: &str, sequence: u32, body: &str) -> PersistedUnackedStanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message
         .bodies
-        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     PersistedUnackedStanza {
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(waddle_xmpp::Stanza::Message(message)),
         original_receipt_at: stale_caller_supplied_time(),
         purpose: SmUnackedStanzaPurpose::Application,
+    }
+}
+
+fn message_body(row: &PersistedUnackedStanza) -> Option<&str> {
+    match row.stanza.as_ref() {
+        waddle_xmpp::Stanza::Message(message) => message.bodies.values().next().map(String::as_str),
+        waddle_xmpp::Stanza::Iq(_) | waddle_xmpp::Stanza::Presence(_) => None,
     }
 }
 
@@ -184,6 +196,8 @@ async fn fixture() -> Option<Fixture> {
         "DELETE FROM clustering_claims",
         "DELETE FROM clustering_nodes",
         "DELETE FROM clustering_steal_intents",
+        "DELETE FROM sm_terminal_unacked",
+        "DELETE FROM sm_terminal_generations",
         "DELETE FROM sm_unacked",
         "DELETE FROM sm_sessions",
     ] {
@@ -532,6 +546,157 @@ async fn record_promotion_failure_on_missing_stream_returns_zero() {
     assert_eq!(count, 0);
 }
 
+#[tokio::test]
+async fn exact_terminal_mutations_accept_the_current_claim_fence() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-exact-terminal-current");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert establishes the current claim");
+    for sequence in [1, 2] {
+        f.fenced
+            .append_unacked(fixture_unacked(stream_id.as_str(), sequence))
+            .await
+            .expect("append unacked row");
+    }
+    let fence = SmClaimFence::new(f.identity.clone(), current_claim_epoch(&f, &entity).await);
+
+    assert_eq!(
+        f.fenced
+            .record_promotion_failure_under_fence(&stream_id, &fence)
+            .await
+            .expect("current fence increments the retry counter"),
+        1
+    );
+    assert_eq!(
+        f.fenced
+            .delete_unacked_under_fence(&stream_id, &[1], &fence)
+            .await
+            .expect("current fence deletes the selected unacked row"),
+        1
+    );
+    let remaining = f
+        .fenced
+        .list_unacked(&stream_id)
+        .await
+        .expect("list remaining unacked rows");
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|stanza| stanza.sequence)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+
+    f.fenced
+        .delete_session_under_fence(&stream_id, &fence)
+        .await
+        .expect("current fence retires the durable session");
+    assert!(f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("read retired session")
+        .is_none());
+    assert!(f
+        .fenced
+        .list_unacked(&stream_id)
+        .await
+        .expect("read retired unacked rows")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn exact_terminal_mutations_reject_a_stale_fence_without_mutation() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("stream-exact-terminal-stale");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .upsert_session(fixture_session(stream_id.as_str()))
+        .await
+        .expect("upsert establishes the original claim");
+    for sequence in [1, 2] {
+        f.fenced
+            .append_unacked(fixture_unacked(stream_id.as_str(), sequence))
+            .await
+            .expect("append unacked row");
+    }
+    let original_epoch = current_claim_epoch(&f, &entity).await;
+    let stale_fence = SmClaimFence::new(f.identity.clone(), original_epoch);
+
+    seed_node(&f.claims_db, &f.identity, true).await;
+    let stealer = live_stealer(&f.claims_db).await;
+    f.claims
+        .steal_stale(
+            &entity,
+            original_epoch,
+            StalePredicate::OwnerStale,
+            &stealer,
+        )
+        .await
+        .expect("replacement owner steals the original claim");
+
+    let failure = f
+        .fenced
+        .record_promotion_failure_under_fence(&stream_id, &stale_fence)
+        .await;
+    assert!(matches!(failure, Err(SmPersistenceError::NotOwner { .. })));
+
+    let unacked_delete = f
+        .fenced
+        .delete_unacked_under_fence(&stream_id, &[1], &stale_fence)
+        .await;
+    assert!(matches!(
+        unacked_delete,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+
+    let session_delete = f
+        .fenced
+        .delete_session_under_fence(&stream_id, &stale_fence)
+        .await;
+    assert!(matches!(
+        session_delete,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+
+    assert!(f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("read preserved session")
+        .is_some());
+    let remaining = f
+        .fenced
+        .list_unacked(&stream_id)
+        .await
+        .expect("read preserved unacked rows");
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|stanza| stanza.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "stale-fence deletes must not remove any unacked row"
+    );
+    let conn = f.claims_db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT promotion_attempts FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("read promotion counter");
+    let row = rows.next().await.expect("row").expect("session row exists");
+    let attempts: i64 = row.get(0).expect("promotion_attempts column");
+    assert_eq!(
+        attempts, 0,
+        "stale-fence counter mutation must roll back before the UPDATE"
+    );
+}
+
 /// The steal-committed-mid-transaction case, named explicitly in the
 /// Slice 4 plan's Tests list: a claim stolen out from under this node
 /// BEFORE a fenced write starts must make that write observe zero rows
@@ -647,7 +812,7 @@ async fn quarantine_rejects_same_node_id_new_incarnation_after_claim_recreation(
 }
 
 #[tokio::test]
-async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_retry() {
+async fn identity_rotation_evicts_stale_cache_without_releasing_durable_claim() {
     let Some(f) = fixture().await else { return };
     let stream_id = SmSessionId::new("stream-identity-rotation-cleanup");
     let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
@@ -655,6 +820,7 @@ async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_re
         .upsert_session(fixture_session(stream_id.as_str()))
         .await
         .expect("old incarnation establishes the cached claim fence");
+    let old_epoch = current_claim_epoch(&f, &entity).await;
 
     let replacement =
         NodeIdentity::new(f.identity.node_id.clone(), uuid::Uuid::new_v4().to_string());
@@ -664,24 +830,38 @@ async fn identity_rotation_exactly_releases_the_cached_old_incarnation_before_re
         .fenced
         .upsert_session(fixture_session(stream_id.as_str()))
         .await
-        .expect_err("the first post-rotation write performs cleanup and retries explicitly");
+        .expect_err("the first post-rotation write relinquishes its stale local cache");
     assert!(matches!(
         rotation_error,
         SmPersistenceError::NotOwner { .. }
     ));
-    assert!(
+    let retained = f
+        .claims
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup after cache handoff")
+        .expect("durable old-incarnation claim remains discoverable");
+    assert_eq!(retained.owner, f.identity);
+    assert_eq!(retained.claim_epoch, old_epoch);
+    assert!(f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("durable row lookup after cache handoff")
+        .is_some());
+
+    assert_eq!(
         f.claims
-            .current_claim(&entity)
+            .release_exact(&entity, &f.identity, old_epoch)
             .await
-            .expect("claim lookup after exact cleanup")
-            .is_none(),
-        "the stale incarnation must not block the replacement identity"
+            .expect("simulate owner-stale recovery of the retained claim"),
+        waddle_xmpp::ownership::ExactReleaseOutcome::Released
     );
 
     f.fenced
         .upsert_session(fixture_session(stream_id.as_str()))
         .await
-        .expect("the replacement identity acquires on the explicit retry");
+        .expect("cache eviction lets the replacement acquire after external recovery");
     let claim = f
         .claims
         .current_claim(&entity)
@@ -1076,6 +1256,52 @@ async fn list_all_sessions_round_trips_every_persisted_session() {
     );
 }
 
+#[tokio::test]
+async fn fenced_session_id_scan_survives_corrupt_payload_and_rejects_unreadable_id() {
+    let Some(f) = fixture().await else { return };
+    for stream_id in ["stream-id-b", "stream-id-a"] {
+        f.fenced
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .expect("persist current session");
+    }
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET full_jid = ? WHERE stream_id = ?",
+        crate::db_params!["not a jid".to_string(), "stream-id-b".to_string()],
+    )
+    .await
+    .expect("corrupt current session payload");
+    drop(conn);
+
+    assert_eq!(
+        f.fenced.list_session_ids().await.unwrap(),
+        vec![
+            SmSessionId::new("stream-id-a"),
+            SmSessionId::new("stream-id-b")
+        ],
+        "key-only discovery must retain a stream whose payload is corrupt"
+    );
+    assert!(
+        f.fenced.list_all_sessions().await.is_err(),
+        "the payload fixture must actually be corrupt"
+    );
+
+    let unreadable = "x".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET stream_id = ? WHERE stream_id = ?",
+        crate::db_params![unreadable, "stream-id-b".to_string()],
+    )
+    .await
+    .expect("corrupt current session identity");
+    drop(conn);
+    assert!(
+        f.fenced.list_session_ids().await.is_err(),
+        "an unreadable durable identity must fail discovery closed"
+    );
+}
+
 /// FIX 1: two concurrent first writes for the same brand-new, not-yet-
 /// claimed stream_id must both succeed (the `ensure_claimed` self-reacquire
 /// path, layered under the per-key `OnceCell` single-flight) and leave
@@ -1258,4 +1484,273 @@ async fn restore_from_persistence_hydrates_only_unclaimed_or_self_claimed_rows()
         persisted_after_restart, 1,
         "node B's own restart must self-reacquire its own pre-restart claim on stream-b"
     );
+}
+
+#[tokio::test]
+async fn fenced_same_id_replacement_preserves_exact_terminal_generation() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("fenced-same-id");
+    f.fenced
+        .store_session_atomic(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked_with_body(
+                stream_id.as_str(),
+                1,
+                "predecessor",
+            )],
+        )
+        .await
+        .expect("store predecessor");
+    assert_eq!(
+        f.fenced
+            .record_promotion_failure(&stream_id)
+            .await
+            .expect("record predecessor retry"),
+        1
+    );
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    let fence = SmClaimFence::new(f.identity.clone(), current_claim_epoch(&f, &entity).await);
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let mut terminal_unacked = fixture_unacked_with_body(stream_id.as_str(), 1, "predecessor");
+    terminal_unacked.purpose = SmUnackedStanzaPurpose::ResumeBarrier;
+    let terminal = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), vec![terminal_unacked])
+            .unwrap(),
+    )
+    .unwrap();
+    f.fenced
+        .replace_resumable_session_atomic(
+            PersistedSmSnapshot::new(
+                fixture_session(stream_id.as_str()),
+                vec![fixture_unacked_with_body(
+                    stream_id.as_str(),
+                    1,
+                    "successor",
+                )],
+            )
+            .unwrap(),
+            Some(terminal),
+        )
+        .await
+        .expect("atomically archive predecessor and install successor");
+
+    let current = f.fenced.list_unacked(&stream_id).await.unwrap();
+    assert_eq!(message_body(&current[0]), Some("successor"));
+    let archived = f
+        .fenced
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .expect("terminal predecessor");
+    assert_eq!(archived.promotion_attempts(), 1);
+    assert_eq!(
+        archived.snapshot().unacked()[0].purpose,
+        SmUnackedStanzaPurpose::ResumeBarrier,
+        "fenced terminal archival must preserve the typed replay policy"
+    );
+    assert_eq!(
+        message_body(&archived.snapshot().unacked()[0]),
+        Some("predecessor")
+    );
+    assert_eq!(
+        f.fenced
+            .list_terminal_generations_for_stream(&stream_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(f.fenced.has_durable_work(&stream_id).await.unwrap());
+
+    assert_eq!(
+        f.fenced
+            .delete_terminal_unacked_under_fence(&key, &[1], &fence)
+            .await
+            .expect("exact fenced terminal prune"),
+        1
+    );
+    assert_eq!(
+        message_body(&f.fenced.list_unacked(&stream_id).await.unwrap()[0]),
+        Some("successor")
+    );
+    f.fenced
+        .delete_terminal_generation_under_fence(&key, &fence)
+        .await
+        .expect("exact fenced terminal retirement");
+    assert!(f.fenced.get_session(&stream_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn fenced_terminal_scan_surfaces_parseable_poison_with_healthy_sibling() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("fenced-terminal-siblings");
+    let mut keys = Vec::new();
+    for body in ["healthy-terminal", "poison-terminal"] {
+        let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+        let terminal = PersistedTerminalGeneration::new(
+            key.clone(),
+            PersistedSmSnapshot::new(
+                fixture_session(stream_id.as_str()),
+                vec![fixture_unacked_with_body(stream_id.as_str(), 1, body)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        f.fenced
+            .replace_resumable_session_atomic(
+                PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), Vec::new()).unwrap(),
+                Some(terminal),
+            )
+            .await
+            .expect("archive terminal sibling");
+        keys.push(key);
+    }
+    let healthy_key = &keys[0];
+    let poison_key = &keys[1];
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    let fence = SmClaimFence::new(f.identity.clone(), current_claim_epoch(&f, &entity).await);
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_terminal_unacked SET purpose = ?, stanza_xml = ? \
+         WHERE stream_id = ? AND generation_id = ?",
+        crate::db_params![
+            "unknown-purpose".to_string(),
+            "not xml <<<".to_string(),
+            poison_key.stream_id().as_str().to_string(),
+            poison_key.generation_id().to_string(),
+        ],
+    )
+    .await
+    .expect("poison one exact terminal generation");
+    drop(conn);
+
+    let recovered = f.fenced.list_terminal_generations().await.unwrap();
+    assert_eq!(recovered.len(), 2);
+    assert!(recovered.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Persisted(terminal) if terminal.key() == healthy_key
+    )));
+    assert!(recovered.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Corrupt { key, detail }
+            if key == poison_key && detail.contains("unknown value")
+    )));
+
+    let targeted = f
+        .fenced
+        .list_terminal_generations_for_stream(&stream_id)
+        .await
+        .unwrap();
+    assert_eq!(targeted.len(), 2);
+    assert!(targeted.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Persisted(terminal) if terminal.key() == healthy_key
+    )));
+    assert!(targeted.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Corrupt { key, .. } if key == poison_key
+    )));
+    assert!(matches!(
+        f.fenced.get_terminal_generation(poison_key).await,
+        Err(SmPersistenceError::CorruptTerminal { key, .. }) if &key == poison_key
+    ));
+
+    f.fenced
+        .delete_session_under_fence(&stream_id, &fence)
+        .await
+        .expect("delete current generation");
+    f.fenced
+        .delete_terminal_generation_under_fence(healthy_key, &fence)
+        .await
+        .expect("delete healthy terminal sibling");
+    assert!(
+        f.fenced.has_durable_work(&stream_id).await.unwrap(),
+        "a corrupt but exactly identifiable generation remains durable work"
+    );
+    let remaining = f
+        .fenced
+        .list_terminal_generations_for_stream(&stream_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        remaining.as_slice(),
+        [TerminalGenerationScanEntry::Corrupt { key, .. }] if key == poison_key
+    ));
+
+    f.fenced
+        .quarantine_terminal_generation(poison_key, &fence)
+        .await
+        .expect("quarantine exact poison generation");
+    assert!(!f.fenced.has_durable_work(&stream_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn stale_fence_cannot_mutate_or_quarantine_terminal_generation() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("fenced-terminal-stale");
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_string());
+    f.fenced
+        .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
+        .await
+        .expect("establish current claim");
+    let original_epoch = current_claim_epoch(&f, &entity).await;
+    let stale_fence = SmClaimFence::new(f.identity.clone(), original_epoch);
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let terminal = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked(stream_id.as_str(), 1)],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    f.fenced
+        .replace_resumable_session_atomic(
+            PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), Vec::new()).unwrap(),
+            Some(terminal),
+        )
+        .await
+        .expect("archive terminal predecessor");
+
+    seed_node(&f.claims_db, &f.identity, true).await;
+    let stealer = live_stealer(&f.claims_db).await;
+    f.claims
+        .steal_stale(
+            &entity,
+            original_epoch,
+            StalePredicate::OwnerStale,
+            &stealer,
+        )
+        .await
+        .expect("steal original claim");
+
+    assert!(matches!(
+        f.fenced
+            .record_terminal_promotion_failure_under_fence(&key, &stale_fence)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        f.fenced
+            .delete_terminal_unacked_under_fence(&key, &[1], &stale_fence)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        f.fenced
+            .quarantine_terminal_generation(&key, &stale_fence)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    let archived = f
+        .fenced
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .expect("stale mutations preserve terminal generation");
+    assert_eq!(archived.promotion_attempts(), 0);
+    assert_eq!(archived.snapshot().unacked().len(), 1);
 }

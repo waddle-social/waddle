@@ -3143,12 +3143,12 @@ mod ownership_claims_tests {
             })
             .await
             .expect("repeat existing exact reclaimed reservation"));
+        let backlog_after = registry
+            .ask(GetPendingReclaimedRoomBacklog)
+            .await
+            .expect("reclaimed backlog after duplicate");
         assert_eq!(
-            registry
-                .ask(GetPendingReclaimedRoomBacklog)
-                .await
-                .expect("reclaimed backlog after duplicate"),
-            backlog_before,
+            backlog_after.depth, backlog_before.depth,
             "an exact reclaimed responsibility must not gain a redundant bare-JID reservation",
         );
         assert!(!registry

@@ -235,6 +235,7 @@ fn isr_authenticate_frame(bare_jid: &str, token: &str, previd: &str, h: u32) -> 
 fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
     DetachedSession {
         stream_id: stream_id.to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 3,
@@ -281,7 +282,7 @@ fn seeded_detached_session_for_persistence(stream_id: &str, jid: &FullJid) -> De
 }
 
 #[tokio::test]
-async fn isr_identity_rotation_forgets_local_session_and_releases_old_exact_claim() {
+async fn isr_identity_rotation_defers_then_releases_old_exact_claim() {
     let identity_handle = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "old-incarnation"));
     let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let registry = Arc::new(
@@ -321,6 +322,22 @@ async fn isr_identity_rotation_forgets_local_session_and_releases_old_exact_clai
             .is_empty(),
         "the old-incarnation session must not remain locally resumable"
     );
+    assert_eq!(
+        registry.pending_claim_release_count(),
+        1,
+        "identity rotation must retain the old exact fence until durable work is proven empty"
+    );
+    assert!(
+        claim_store
+            .current_claim(&entity)
+            .await
+            .expect("claim lookup before durable-work proof")
+            .is_some(),
+        "the fail-closed handoff keeps the old exact claim discoverable"
+    );
+
+    assert_eq!(registry.retry_pending_claim_releases(1).await.attempted, 1);
+    assert_eq!(registry.pending_claim_release_count(), 0);
     assert!(
         claim_store
             .current_claim(&entity)

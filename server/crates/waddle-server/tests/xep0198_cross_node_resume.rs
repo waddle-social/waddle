@@ -144,6 +144,7 @@ async fn node_registry_with_claim_store(
 fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
     DetachedSession {
         stream_id: stream_id.to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 3,

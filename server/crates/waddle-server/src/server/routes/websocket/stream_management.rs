@@ -241,7 +241,7 @@ mod enable_claim_guard_tests {
         drop(guard);
 
         assert_eq!(registry.pending_claim_release_count(), 1);
-        assert_eq!(registry.retry_pending_claim_releases(1).await, 1);
+        assert_eq!(registry.retry_pending_claim_releases(1).await.attempted, 1);
         assert_eq!(registry.pending_claim_release_count(), 0);
         assert!(store
             .current_claim(&Entity::new(EntityType::SmSession, stream_id))
@@ -275,9 +275,18 @@ mod enable_claim_guard_tests {
 
         assert!(guard.commit(true).is_none());
         demotion.await.expect("self-fence demotion");
+        assert_eq!(
+            registry.locally_owned_claim_ids().expect("owned inventory"),
+            vec![stream_id.to_string()],
+            "self-fence demotion must retain exact release responsibility until durable work is proven empty"
+        );
+        assert_eq!(registry.pending_claim_release_count(), 1);
+
+        assert_eq!(registry.retry_pending_claim_releases(1).await.attempted, 1);
+        assert_eq!(registry.pending_claim_release_count(), 0);
         assert!(registry
             .locally_owned_claim_ids()
-            .expect("owned inventory")
+            .expect("owned inventory after empty-durable proof")
             .is_empty());
     }
 

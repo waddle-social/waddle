@@ -978,7 +978,7 @@ async fn create_sm_session_registry(
     global_db: &crate::db::Database,
 ) -> Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
-    if sm_database_url.is_none() {
+    if sm_database_url.is_none() && !server_config.clustering.enabled {
         warn!(
             "Neither WADDLE_XMPP_SM_DATABASE_URL nor WADDLE_DATABASE_URL is set; \
              falling back to in-memory SQLite for SM session persistence. \
@@ -986,13 +986,11 @@ async fn create_sm_session_registry(
              these env vars for durable session resumption (issue #209)."
         );
     }
-    // ADR-0017 Phase 3 Slice 4: cluster mode selects the Postgres-fenced
-    // `SmPersistenceStorage`; every other deployment shape (clustering
-    // disabled, non-Postgres, or a build without the `clustering` feature)
-    // keeps today's portable, single-node implementation. All of that
-    // branching — including FIX 4's co-location check against `global_db`,
-    // the same handle `clustering::start_if_enabled` itself received —
-    // lives inside `open_for_cluster_mode` itself.
+    // ADR-0017 Phase 3 Slice 4: cluster mode requires the Postgres-fenced
+    // `SmPersistenceStorage`, a co-located global Postgres database, and the
+    // clustering claim handles. `open_for_cluster_mode` fails startup when
+    // any of those requirements is absent; only clustering-disabled
+    // deployments use the portable single-node implementation.
     let sm_persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
         crate::sm_persistence::open_for_cluster_mode(
             sm_database_url.as_deref(),
@@ -1013,18 +1011,16 @@ async fn create_sm_session_registry(
     // bookkeeping — without this, `claim_session`/`restore_from_persistence`
     // silently stay on the single-node `InProcessClaimStore` default even
     // with clustering enabled and the fenced `SmPersistenceStorage` wired
-    // in above, defeating acquire-then-hydrate entirely. A `None` pair
-    // (clustering disabled, non-Postgres, or a build without the
-    // `clustering` feature) leaves today's single-node default untouched.
+    // in above, defeating acquire-then-hydrate entirely. A `None` pair is
+    // valid only with clustering disabled; the constructor above rejects it
+    // when cluster mode is requested.
     if let Some((claim_store, node_identity)) = clustering.claim_pair() {
         sm_session_registry = sm_session_registry.with_claim_store(claim_store, node_identity);
     }
     // ADR-0017 Phase 3 Slice 6: wire the cross-node resume live-handshake
     // asker (over `RelayHandle`) alongside the claim store above — both are
-    // `None`/absent under the exact same conditions (clustering disabled,
-    // non-Postgres, or a build without the `clustering` feature), so the
-    // cross-node resume fallback never has anything to ask in those cases
-    // and single-node behavior stays byte-identical.
+    // absent when clustering is disabled, so the cross-node resume fallback
+    // never has anything to ask in single-node deployments.
     #[cfg(feature = "clustering")]
     if let Some(stop_token) = &clustering.stop_token {
         let asker = crate::clustering::resume_asker::SwarmRemoteResumeAsker::new(
@@ -1064,7 +1060,7 @@ async fn create_pending_delivery_storage(
     global_db: &crate::db::Database,
 ) -> Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
-    if pending_delivery_url.is_none() {
+    if pending_delivery_url.is_none() && !server_config.clustering.enabled {
         warn!(
             "Neither WADDLE_XMPP_PENDING_DELIVERY_DATABASE_URL nor \
              WADDLE_DATABASE_URL is set; falling back to in-memory SQLite. \
@@ -1073,13 +1069,11 @@ async fn create_pending_delivery_storage(
              for durable offline delivery (issue #209)."
         );
     }
-    // ADR-0017 Phase 3 Slice 5 FIX 3: cluster mode attaches claim-fenced
-    // Q6-promotion inserts; every other deployment shape (clustering
-    // disabled, non-Postgres, or a build without the `clustering` feature)
-    // keeps today's portable, unfenced path. All of that branching —
-    // including the co-location check against `global_db` — lives inside
-    // `open_for_cluster_mode` itself, mirroring `create_sm_session_registry`'s
-    // identical `sm_persistence::open_for_cluster_mode` call above.
+    // ADR-0017 Phase 3 Slice 5 FIX 3: cluster mode requires claim-fenced,
+    // co-located Postgres storage and fails startup if its database or claim
+    // handles are unsuitable. Only clustering-disabled deployments use the
+    // portable path. The validation lives inside `open_for_cluster_mode`,
+    // mirroring `create_sm_session_registry` above.
     Arc::new(
         crate::pending_delivery::open_for_cluster_mode(
             pending_delivery_url.as_deref(),

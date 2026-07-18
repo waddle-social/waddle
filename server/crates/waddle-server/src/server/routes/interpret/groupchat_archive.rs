@@ -223,7 +223,7 @@ pub(super) async fn finish_archive_groupchat_message(
     // ADR-0017 Phase 3 Slice 7 FIX 1: the fenced variant when this room's
     // claim fence is known (clustering enabled + Postgres) — the SAME
     // `store_message`/`store_message_fenced` split
-    // `pending_delivery::insert_fenced` establishes one table over,
+    // `pending_delivery::insert_under_sm_fence` establishes one table over,
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
     let store_result = match fence {

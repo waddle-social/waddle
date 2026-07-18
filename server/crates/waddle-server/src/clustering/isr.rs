@@ -473,11 +473,11 @@ impl IsrTokenStore for PostgresIsrTokenStore {
         // deliberately avoids. Age alone is not terminal authority: an SM
         // stream can remain live for longer than this backstop and its ISR
         // token must remain valid throughout that lifetime. Reap only an old
-        // token whose typed SM-session claim and durable detached-session row
-        // are both absent. A persisted session is still resumable even while
-        // its former node's exact claim is being recovered, so deleting its
-        // ISR credential would turn a recoverable node loss into permanent
-        // resume failure. Mirrors
+        // token whose typed SM-session claim and all durable resumable or
+        // terminal-generation work are absent. Persisted work still requires
+        // recovery even while its former node's exact claim is being
+        // recovered, so deleting its ISR credential would turn a recoverable
+        // node loss into permanent resume failure. Mirrors
         // `lease.rs`'s own `(? || ' milliseconds')::interval`
         // TTL-comparison idiom.
         let mut tx = self.db.begin().await.map_err(db_err)?;
@@ -546,6 +546,10 @@ impl IsrTokenStore for PostgresIsrTokenStore {
                       AND NOT EXISTS (
                         SELECT 1 FROM sm_sessions AS session
                         WHERE session.stream_id = token.sm_id
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM sm_terminal_generations AS terminal
+                        WHERE terminal.stream_id = token.sm_id
                       )
                     "#,
                     crate::db_params![
@@ -680,6 +684,12 @@ mod tests {
 
     async fn clean_sweep_tables(db: &Database) {
         let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM sm_terminal_unacked", ())
+            .await
+            .expect("clean sm_terminal_unacked");
+        conn.execute("DELETE FROM sm_terminal_generations", ())
+            .await
+            .expect("clean sm_terminal_generations");
         conn.execute("DELETE FROM sm_unacked", ())
             .await
             .expect("clean sm_unacked");
@@ -727,6 +737,28 @@ mod tests {
         )
         .await
         .expect("seed durable SM session");
+    }
+
+    async fn seed_sm_terminal_generation_row(db: &Database, sm_id: &SmSessionId) {
+        let conn = db.guard().await.expect("guard");
+        conn.execute(
+            r#"
+            INSERT INTO sm_terminal_generations (
+                stream_id, generation_id, user_id, full_jid, inbound_count,
+                outbound_count, last_acked, max_resume_secs, detached_at_ms,
+                max_resume_duration_ms, carbons_enabled, roster_interested,
+                blocklist_interested, presence_available, presence_priority
+            ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            "#,
+            crate::db_params![
+                sm_id.to_string(),
+                "terminal-generation".to_string(),
+                "alice".to_string(),
+                "alice@example.com/web".to_string(),
+            ],
+        )
+        .await
+        .expect("seed terminal SM generation");
     }
 
     #[tokio::test]
@@ -917,7 +949,7 @@ mod tests {
     }
 
     /// Council-adjudicated FIX 4: `sweep_expired` reaps an old terminal row
-    /// but preserves fresh, exactly claimed, and durably persisted sessions.
+    /// but preserves fresh, exactly claimed, resumable, and terminal work.
     /// Token age starts at SM enable, not at disconnect, so age alone must
     /// never invalidate a live or recoverable stream.
     #[tokio::test]
@@ -934,6 +966,8 @@ mod tests {
         let fresh_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let claimed_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let persisted_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
+        let terminal_generation_stale_sm_id =
+            SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         let terminal_stale_sm_id = SmSessionId::new(format!("sm-{}", uuid::Uuid::new_v4()));
         store
             .issue(&fresh_sm_id, "PLAIN")
@@ -948,6 +982,10 @@ mod tests {
             .await
             .expect("issue persisted stale token");
         store
+            .issue(&terminal_generation_stale_sm_id, "PLAIN")
+            .await
+            .expect("issue terminal-generation stale token");
+        store
             .issue(&terminal_stale_sm_id, "PLAIN")
             .await
             .expect("issue terminal stale token");
@@ -955,16 +993,18 @@ mod tests {
         let me = node_identity();
         let claimed_stale_epoch = claim_sm_session(&db, &claimed_stale_sm_id, &me).await;
         seed_sm_session_row(&db, &persisted_stale_sm_id).await;
+        seed_sm_terminal_generation_row(&db, &terminal_generation_stale_sm_id).await;
 
         // Backdate all non-fresh rows directly. Only the row with neither
         // exact ownership nor durable resume state is terminal.
         let conn = db.guard().await.expect("guard");
         conn.execute(
             "UPDATE clustering_isr_tokens SET created_at = now() - interval '1 day' \
-             WHERE sm_id IN (?, ?, ?)",
+             WHERE sm_id IN (?, ?, ?, ?)",
             crate::db_params![
                 claimed_stale_sm_id.to_string(),
                 persisted_stale_sm_id.to_string(),
+                terminal_generation_stale_sm_id.to_string(),
                 terminal_stale_sm_id.to_string()
             ],
         )
@@ -977,11 +1017,13 @@ mod tests {
             .expect("sweep_expired");
         assert_eq!(deleted, 1, "only the terminal token may be reaped");
 
-        // The fresh row survives by age. The two old recoverable rows survive
-        // by ownership and persistence respectively. Only the terminal row
-        // is gone.
+        // The fresh row survives by age. The three old recoverable rows
+        // survive by ownership, resumable persistence, and terminal
+        // persistence respectively. Only the truly terminal row is gone.
         let fresh_epoch = claim_sm_session(&db, &fresh_sm_id, &me).await;
         let persisted_stale_epoch = claim_sm_session(&db, &persisted_stale_sm_id, &me).await;
+        let terminal_generation_stale_epoch =
+            claim_sm_session(&db, &terminal_generation_stale_sm_id, &me).await;
         let terminal_stale_epoch = claim_sm_session(&db, &terminal_stale_sm_id, &me).await;
         let terminal_stale_outcome = store
             .consume(
@@ -1020,6 +1062,20 @@ mod tests {
             persisted_stale_outcome,
             IsrConsumeOutcome::Mismatched,
             "an old token with durable resumable state must not be swept while its claim is absent"
+        );
+        let terminal_generation_stale_outcome = store
+            .consume(
+                &terminal_generation_stale_sm_id,
+                b"wrong-token-but-row-must-exist",
+                "PLAIN",
+                &fence(&me, terminal_generation_stale_epoch),
+            )
+            .await
+            .expect("consume terminal-generation stale");
+        assert_eq!(
+            terminal_generation_stale_outcome,
+            IsrConsumeOutcome::Mismatched,
+            "an old token with terminal-generation work must not be swept while its claim is absent"
         );
         let fresh_outcome = store
             .consume(

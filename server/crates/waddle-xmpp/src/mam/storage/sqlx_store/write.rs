@@ -228,7 +228,7 @@ pub(super) async fn store_message_fenced(
     // Fencing check: the exact `SELECT ... FOR SHARE` shape
     // `muc_durable::PostgresMucRoomStore::assert_fenced`/
     // `sm_persistence_fenced::assert_fenced`/`pending_delivery`'s
-    // `insert_fenced` already establish — the first statement inside this
+    // exact fenced inserts already establish — the first statement inside this
     // transaction, on the SAME connection as the write it guards. A failed
     // check rolls back BEFORE any write.
     if !claim_fence_is_held(&mut tx, fence).await? {

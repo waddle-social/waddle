@@ -8,6 +8,46 @@ use super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
 use crate::stream_management::persistence::SmUnackedStanzaPurpose;
 
+/// Identity of one detached-session representation.
+///
+/// This token distinguishes overlapping promotion work for the same opaque
+/// XEP-0198 stream id. Current resumable rows do not need to persist it, but a
+/// displaced generation's terminal outbox does: after a process restart, the
+/// exact predecessor must remain distinguishable from a same-id successor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SmSessionGenerationId(uuid::Uuid);
+
+impl SmSessionGenerationId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Borrow the UUID used by durable terminal-generation storage.
+    pub fn as_uuid(&self) -> &uuid::Uuid {
+        &self.0
+    }
+}
+
+impl Default for SmSessionGenerationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SmSessionGenerationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for SmSessionGenerationId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
 /// One unacknowledged stanza retained on a detached SM session.
 ///
 /// Carries the XEP-0198 outbound sequence + the serialized stanza
@@ -54,6 +94,8 @@ pub struct DetachedReplaySequenceConflict {
 pub struct DetachedSession {
     /// The unique stream ID
     pub stream_id: String,
+    /// Exact process-local representation of this logical SM session.
+    pub generation_id: SmSessionGenerationId,
     /// Authenticated user identifier.
     pub user_id: String,
     /// The full JID of the session owner

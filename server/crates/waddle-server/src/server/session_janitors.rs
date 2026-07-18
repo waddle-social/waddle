@@ -187,6 +187,26 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     pending_session,
                 );
                 let session = promotion_guard.session().clone();
+                let mut lease = match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .acquire_promotion_lease(&session)
+                    .await
+                {
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        sweep_failed = true;
+                        warn!(
+                            stream_id = %session.stream_id,
+                            generation_id = ?session.generation_id,
+                            %error,
+                            "SM janitor: could not acquire exact promotion lease"
+                        );
+                        continue;
+                    }
+                };
                 let blocklist = match state
                     .deps
                     .protocol
@@ -215,6 +235,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             );
                             if crate::sm_promotion::reinsert_failed_session_for_retry(
                                 &state.deps.protocol.sm_session_registry,
+                                &mut lease,
                                 session.clone(),
                             )
                             .await
@@ -223,15 +244,31 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             }
                             continue;
                         }
-                        let attempts = match state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .record_promotion_failure(&session.stream_id)
-                            .await
+                        let attempts = if lease.authority()
+                            != waddle_xmpp::stream_management::SmSessionPromotionAuthority::ObsoleteGeneration
                         {
+                            match state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .record_promotion_failure_under(&lease)
+                                .await
+                            {
                             Ok(n) => n,
                             Err(record_error) => {
+                                if crate::sm_promotion::promotion_registry_error_is_authority_lost(
+                                    &record_error,
+                                ) {
+                                    if state
+                                        .deps
+                                        .protocol
+                                        .sm_session_registry
+                                        .abandon_promotion_authority(&mut lease)
+                                    {
+                                        promotion_guard.complete();
+                                    }
+                                    continue;
+                                }
                                 warn!(
                                     jid = %session.jid,
                                     error = %error,
@@ -242,6 +279,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 );
                                 if crate::sm_promotion::reinsert_failed_session_for_retry(
                                     &state.deps.protocol.sm_session_registry,
+                                    &mut lease,
                                     session.clone(),
                                 )
                                 .await
@@ -250,6 +288,14 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 }
                                 continue;
                             }
+                            }
+                        } else {
+                            state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .record_obsolete_promotion_failure_under(&lease)
+                                .unwrap_or(u32::MAX)
                         };
                         if attempts >= max_promotion_attempts_from_env() {
                             waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
@@ -261,14 +307,23 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                                 "SM janitor: blocklist load has repeatedly failed; \
                                  dead-lettering the durable row to break the retry loop"
                             );
-                            if state
-                                .deps
-                                .protocol
-                                .sm_session_registry
-                                .confirm_drained(&session.stream_id)
-                                .await
+                            match crate::sm_promotion::retire_promoted_session(
+                                &state.deps.protocol.sm_session_registry,
+                                &state.deps.protocol.pending_delivery_storage,
+                                &mut promotion_guard,
+                                &mut lease,
+                            )
+                            .await
                             {
-                                promotion_guard.complete();
+                                Ok(
+                                    waddle_xmpp::stream_management::SmSessionDrainConfirmation::CurrentDurableConfirmed
+                                    | waddle_xmpp::stream_management::SmSessionDrainConfirmation::TerminalDurableConfirmed
+                                    | waddle_xmpp::stream_management::SmSessionDrainConfirmation::ObsoleteGenerationRetired
+                                    | waddle_xmpp::stream_management::SmSessionDrainConfirmation::PayloadRetiredClaimReconciliationPending
+                                    | waddle_xmpp::stream_management::SmSessionDrainConfirmation::AuthorityLost,
+                                ) => promotion_guard.complete(),
+                                Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::Unconfirmed)
+                                | Err(_) => {}
                             }
                             continue;
                         }
@@ -285,6 +340,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         // map for the next tick to see it.
                         if crate::sm_promotion::reinsert_failed_session_for_retry(
                             &state.deps.protocol.sm_session_registry,
+                            &mut lease,
                             session.clone(),
                         )
                         .await
@@ -310,16 +366,21 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         Vec::new()
                     }
                 };
-                let summary = crate::sm_promotion::promote_session_unacked(
-                    &session,
-                    &state.deps.protocol.connection_registry,
-                    &state.deps.protocol.user_registry,
-                    &state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    state.deps.auth_state.xmpp_domain.as_str(),
-                    &recent_tombstones,
-                )
-                .await;
+                let summary =
+                    crate::sm_promotion::promote_session_unacked_with_promotion_authority(
+                        &session,
+                        crate::sm_promotion::PromotionExecutionDeps {
+                            registry: &state.deps.protocol.connection_registry,
+                            user_registry: &state.deps.protocol.user_registry,
+                            pending_storage: &state.deps.protocol.pending_delivery_storage,
+                            blocklist: &blocklist,
+                            server_domain: state.deps.auth_state.xmpp_domain.as_str(),
+                            recent_tombstones: &recent_tombstones,
+                        },
+                        &state.deps.protocol.sm_session_registry,
+                        &lease,
+                    )
+                    .await;
                 // Finding B (retraction-vs-promotion TOCTOU): a
                 // retraction recorded after the snapshot above raced
                 // this session's promotion — re-scrub the pending rows
@@ -354,6 +415,19 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         "SM janitor: Q6 promotion completed"
                     );
                 }
+                if summary.has_authority_lost() {
+                    if state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .abandon_promotion_authority(&mut lease)
+                    {
+                        promotion_guard.complete();
+                    } else {
+                        sweep_failed = true;
+                    }
+                    continue;
+                }
                 if summary.has_quarantined() {
                     sweep_failed = true;
                     error!(
@@ -366,6 +440,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     );
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &state.deps.protocol.sm_session_registry,
+                        &mut lease,
                         session.clone(),
                         &summary,
                     )
@@ -380,15 +455,31 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(
                         u64::from(summary.storage_failed),
                     );
-                    let attempts = match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_promotion_failure(&session.stream_id)
-                        .await
+                    let attempts = if lease.authority()
+                        != waddle_xmpp::stream_management::SmSessionPromotionAuthority::ObsoleteGeneration
                     {
+                        match state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .record_promotion_failure_under(&lease)
+                            .await
+                        {
                         Ok(n) => n,
                         Err(error) => {
+                            if crate::sm_promotion::promotion_registry_error_is_authority_lost(
+                                &error,
+                            ) {
+                                if state
+                                    .deps
+                                    .protocol
+                                    .sm_session_registry
+                                    .abandon_promotion_authority(&mut lease)
+                                {
+                                    promotion_guard.complete();
+                                }
+                                continue;
+                            }
                             warn!(
                                 jid = %session.jid,
                                 %error,
@@ -397,6 +488,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             );
                             if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                                 &state.deps.protocol.sm_session_registry,
+                                &mut lease,
                                 session.clone(),
                                 &summary,
                             )
@@ -406,6 +498,14 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             }
                             continue;
                         }
+                        }
+                    } else {
+                        state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .record_obsolete_promotion_failure_under(&lease)
+                            .unwrap_or(u32::MAX)
                     };
                     if summary.should_dead_letter(attempts, max_promotion_attempts_from_env()) {
                         waddle_xmpp::telemetry::reliability::increment_sm_promotion_dead_lettered();
@@ -417,14 +517,23 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             "SM janitor: Q6 promotion repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
-                        if state
-                            .deps
-                            .protocol
-                            .sm_session_registry
-                            .confirm_drained(&session.stream_id)
-                            .await
+                        match crate::sm_promotion::retire_promoted_session(
+                            &state.deps.protocol.sm_session_registry,
+                            &state.deps.protocol.pending_delivery_storage,
+                            &mut promotion_guard,
+                            &mut lease,
+                        )
+                        .await
                         {
-                            promotion_guard.complete();
+                            Ok(
+                                waddle_xmpp::stream_management::SmSessionDrainConfirmation::CurrentDurableConfirmed
+                                | waddle_xmpp::stream_management::SmSessionDrainConfirmation::TerminalDurableConfirmed
+                                | waddle_xmpp::stream_management::SmSessionDrainConfirmation::ObsoleteGenerationRetired
+                                | waddle_xmpp::stream_management::SmSessionDrainConfirmation::PayloadRetiredClaimReconciliationPending
+                                | waddle_xmpp::stream_management::SmSessionDrainConfirmation::AuthorityLost,
+                            ) => promotion_guard.complete(),
+                            Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::Unconfirmed)
+                            | Err(_) => {}
                         }
                         continue;
                     }
@@ -437,6 +546,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     );
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &state.deps.protocol.sm_session_registry,
+                        &mut lease,
                         session.clone(),
                         &summary,
                     )
@@ -446,18 +556,45 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     }
                     continue;
                 }
-                if state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .confirm_drained(&session.stream_id)
-                    .await
+                match crate::sm_promotion::retire_promoted_session(
+                    &state.deps.protocol.sm_session_registry,
+                    &state.deps.protocol.pending_delivery_storage,
+                    &mut promotion_guard,
+                    &mut lease,
+                )
+                .await
                 {
-                    promotion_guard.complete();
-                } else {
-                    sweep_failed = true;
-                    continue;
+                    Ok(
+                        waddle_xmpp::stream_management::SmSessionDrainConfirmation::CurrentDurableConfirmed
+                        | waddle_xmpp::stream_management::SmSessionDrainConfirmation::TerminalDurableConfirmed
+                        | waddle_xmpp::stream_management::SmSessionDrainConfirmation::PayloadRetiredClaimReconciliationPending,
+                    ) => {
+                        promotion_guard.complete();
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::ObsoleteGenerationRetired) => {
+                        promotion_guard.complete();
+                        continue;
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::AuthorityLost) => {
+                        promotion_guard.complete();
+                        continue;
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::Unconfirmed)
+                    | Err(_) => {
+                        sweep_failed = true;
+                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &state.deps.protocol.sm_session_registry,
+                            &mut lease,
+                            promotion_guard.session().clone(),
+                        )
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
+                        continue;
+                    }
                 }
+                #[cfg(feature = "clustering")]
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
 
@@ -581,22 +718,6 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                             sweep_failed = true;
                         }
                     }
-                }
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .release_claim(&session_id)
-                    .await
-                {
-                    sweep_failed = true;
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "SM janitor: pending_delivery release_claim failed; \
-                         rows remain claimed and will be released by claim-expiry janitor"
-                    );
                 }
             }
             if !retry_pending_sm_ownership(&state).await {
@@ -1560,7 +1681,8 @@ impl OrphanReaperSupervisor {
                     Ok(Ok(
                         waddle_xmpp::stream_management::ReclaimedHydrationOutcome::Hydrated
                         | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::AlreadyPresent
-                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::LostClaim,
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::LostClaim
+                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
                     )) => {
                         let key = OrphanReaperWorkers::hydration_key(&work);
                         let mut pending =
@@ -1572,68 +1694,38 @@ impl OrphanReaperSupervisor {
                         );
                         info!("orphan reaper: targeted hydration work complete");
                     }
-                    Ok(Ok(
-                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::MissingDurable
-                        | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::PoisonReleased,
-                    )) => {
-                        let cleanup = tokio::select! {
-                            _ = hydration_cancel.cancelled() => break,
-                            result = tokio::time::timeout(
-                                ORPHAN_WORK_ATTEMPT_TIMEOUT,
-                                hydration_registry.release_reclaimed_claim(
-                                    &work.entity,
-                                    &work.fence,
-                                    work.reservation,
-                                ),
-                            ) => result,
-                        };
-                        match cleanup {
-                            Ok(Ok(_)) => {
-                                let key = OrphanReaperWorkers::hydration_key(&work);
-                                let mut pending =
-                                    hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
-                                pending.remove(&key);
-                                crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    "sm_hydration",
-                                    pending.len(),
-                                );
+                    Ok(Ok(outcome)) => {
+                        if outcome.is_release_terminal() {
+                            let cleanup = tokio::select! {
+                                _ = hydration_cancel.cancelled() => break,
+                                result = tokio::time::timeout(
+                                    ORPHAN_WORK_ATTEMPT_TIMEOUT,
+                                    hydration_registry.release_reclaimed_claim(
+                                        &work.entity,
+                                        &work.fence,
+                                        work.reservation,
+                                    ),
+                                ) => result,
+                            };
+                            match cleanup {
+                                Ok(Ok(_)) => {
+                                    let key = OrphanReaperWorkers::hydration_key(&work);
+                                    let mut pending =
+                                        hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
+                                    pending.remove(&key);
+                                    crate::clustering::metrics::record_orphan_work_queue_depth(
+                                        "sm_hydration",
+                                        pending.len(),
+                                    );
+                                }
+                                Ok(Err(error)) => {
+                                    debug!(%error, "orphan reaper: missing/poison SM exact release failed; retrying");
+                                    queue.push_back(work);
+                                }
+                                Err(_) => queue.push_back(work),
                             }
-                            Ok(Err(error)) => {
-                                debug!(%error, "orphan reaper: missing/poison SM exact release failed; retrying");
-                                queue.push_back(work);
-                            }
-                            Err(_) => queue.push_back(work),
-                        }
-                    }
-                    Ok(Ok(
-                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::TransientFailure,
-                    )) => {
-                        queue.push_back(work);
-                    }
-                    Ok(Ok(
-                        waddle_xmpp::stream_management::ReclaimedHydrationOutcome::StaleIdentity,
-                    )) => {
-                        let cleanup = tokio::time::timeout(
-                            ORPHAN_WORK_ATTEMPT_TIMEOUT,
-                            hydration_registry.release_reclaimed_claim(
-                                &work.entity,
-                                &work.fence,
-                                work.reservation,
-                            ),
-                        )
-                        .await;
-                        match cleanup {
-                            Ok(Ok(_)) => {
-                                let key = OrphanReaperWorkers::hydration_key(&work);
-                                let mut pending =
-                                    hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
-                                pending.remove(&key);
-                                crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    "sm_hydration",
-                                    pending.len(),
-                                );
-                            }
-                            Ok(Err(_)) | Err(_) => queue.push_back(work),
+                        } else {
+                            queue.push_back(work);
                         }
                     }
                     Ok(Err(error)) => {
@@ -2454,6 +2546,18 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         self.inner.list_unacked(stream_id).await
     }
 
+    async fn list_terminal_generations_for_stream(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::TerminalGenerationScanEntry>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .list_terminal_generations_for_stream(stream_id)
+            .await
+    }
+
     async fn list_expired_sessions(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -2951,9 +3055,10 @@ async fn worker_restart_preserves_hung_sm_reservation_until_terminal_shutdown() 
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
-async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
+async fn sm_rotation_before_hydration_worker_retains_the_exact_old_fence() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+        StalePredicate,
     };
 
     let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
@@ -2973,34 +3078,54 @@ async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("stale hydration reservation");
     let cancel = tokio_util::sync::CancellationToken::new();
-    let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
+    let supervisor = OrphanReaperSupervisor::new(registry.clone(), cancel.clone());
 
-    identity.rotate(new_owner).await;
+    identity.rotate(new_owner.clone()).await;
     assert!(supervisor
         .workers
         .enqueue_hydration(
             entity.clone(),
-            waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                old_owner.clone(),
+                epoch,
+            ),
             reservation,
         )
         .is_accepted());
 
     tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if claim_store
-                .current_claim(&entity)
-                .await
-                .expect("read claim")
-                .is_none()
-            {
-                break;
-            }
+        while !supervisor.workers.pending_hydrations().is_empty() {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("stale worker must release the exact old fence");
+    .expect("stale worker relinquishes its exact local work promptly");
+    let retained = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("read retained claim")
+        .expect("stale worker keeps the exact old fence discoverable");
+    assert_eq!(retained.claim_epoch, epoch);
+    assert_eq!(retained.owner, old_owner);
     assert!(supervisor.workers.pending_hydrations().is_empty());
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("complete local claim inventory")
+        .contains(&entity.id));
+    let _fresh_reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("stale worker handoff frees same-stream reclaim capacity");
+    let fresh_epoch = claim_store
+        .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &new_owner)
+        .await
+        .expect("fresh owner-scoped orphan pass can steal retained claim");
+    let fresh = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("fresh claim lookup")
+        .expect("fresh exact claim");
+    assert_eq!(fresh.owner, new_owner);
+    assert_eq!(fresh.claim_epoch, fresh_epoch);
 
     cancel.cancel();
     supervisor.shutdown().await;
@@ -3008,9 +3133,10 @@ async fn sm_rotation_before_hydration_worker_releases_the_exact_old_fence() {
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test(start_paused = true)]
-async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
+async fn sm_rotation_between_hydration_retries_retains_the_exact_old_fence() {
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+        StalePredicate,
     };
 
     let storage = Arc::new(HangingSmReadPersistence::default());
@@ -3032,39 +3158,54 @@ async fn sm_rotation_between_hydration_retries_releases_the_exact_old_fence() {
         .reserve_reclaimed_claim_capacity(&entity)
         .expect("retry hydration reservation");
     let cancel = tokio_util::sync::CancellationToken::new();
-    let supervisor = OrphanReaperSupervisor::new(registry, cancel.clone());
+    let supervisor = OrphanReaperSupervisor::new(registry.clone(), cancel.clone());
     assert!(supervisor
         .workers
         .enqueue_hydration(
             entity.clone(),
-            waddle_xmpp::stream_management::persistence::SmClaimFence::new(old_owner, epoch),
+            waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+                old_owner.clone(),
+                epoch,
+            ),
             reservation,
         )
         .is_accepted());
 
     storage.read_started.notified().await;
-    identity.rotate(new_owner).await;
+    identity.rotate(new_owner.clone()).await;
     tokio::time::advance(ORPHAN_WORK_ATTEMPT_TIMEOUT).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
     for _ in 0..100 {
-        if claim_store
-            .current_claim(&entity)
-            .await
-            .expect("read claim")
-            .is_none()
-        {
-            break;
-        }
         tokio::task::yield_now().await;
     }
 
-    assert!(claim_store
+    let retained = claim_store
         .current_claim(&entity)
         .await
         .expect("read final claim")
-        .is_none());
+        .expect("rotation keeps stale claim discoverable after a timed-out read");
+    assert_eq!(retained.claim_epoch, epoch);
+    assert_eq!(retained.owner, old_owner);
     assert!(supervisor.workers.pending_hydrations().is_empty());
+    assert!(!registry
+        .locally_owned_claim_ids()
+        .expect("complete local claim inventory")
+        .contains(&entity.id));
+    let _fresh_reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("retry handoff frees same-stream reclaim capacity");
+    let fresh_epoch = claim_store
+        .steal_stale(&entity, epoch, StalePredicate::OwnerStale, &new_owner)
+        .await
+        .expect("fresh owner-scoped orphan pass can steal retained claim");
+    let fresh = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("fresh claim lookup")
+        .expect("fresh exact claim");
+    assert_eq!(fresh.owner, new_owner);
+    assert_eq!(fresh.claim_epoch, fresh_epoch);
 
     cancel.cancel();
     supervisor.shutdown().await;
@@ -4400,7 +4541,12 @@ mod orphan_reaper_sweep_tests {
         .expect("open fenced SM persistence");
         {
             let conn = db.guard().await.expect("guard");
-            for stmt in ["DELETE FROM sm_unacked", "DELETE FROM sm_sessions"] {
+            for stmt in [
+                "DELETE FROM sm_terminal_unacked",
+                "DELETE FROM sm_terminal_generations",
+                "DELETE FROM sm_unacked",
+                "DELETE FROM sm_sessions",
+            ] {
                 conn.execute(stmt, ()).await.expect("clean table");
             }
         }
@@ -5148,28 +5294,56 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     });
 }
 
-/// ADR-0017 Phase 3 Slice 10: feed the SM-session Q6 drain's outcomes into
-/// the SAME `claims_released_on_drain`/`claims_abandoned_on_drain` counters
-/// the generic per-entity room drain uses (`clustering::drain::
-/// run_shutdown_drain`) — one shared observability surface for "how much of
-/// this node's owned state made it out cleanly," regardless of which of
-/// the two independent drain mechanisms (SM sessions vs. rooms) actually
-/// drove a given entity. A no-op on a non-`clustering`-feature build: the
-/// Q6 drain itself is unconditionally compiled (it works with or without
-/// clustering, via `InProcessClaimStore`), but the Slice-10 metrics module
-/// only exists behind the `clustering` Cargo feature.
-fn record_sm_drain_outcome(released: bool) {
+/// Record only a terminal, confirmed SM claim release. Retry-retained work is
+/// deliberately metric-neutral: it may succeed on a later pass, while any
+/// exact responsibility still present at the deadline is counted once by the
+/// deduplicated shutdown inventory.
+fn record_sm_claim_released_on_drain() {
     #[cfg(feature = "clustering")]
-    {
-        if released {
-            crate::clustering::metrics::record_claims_released_on_drain(1);
-        } else {
-            crate::clustering::metrics::record_claims_abandoned_on_drain(1);
-        }
+    crate::clustering::metrics::record_claims_released_on_drain(1);
+}
+
+fn retry_outcome_released_local_sm_claim(
+    outcome: waddle_xmpp::stream_management::SmClaimReleaseRetryOutcome,
+) -> bool {
+    outcome == waddle_xmpp::stream_management::SmClaimReleaseRetryOutcome::Released
+}
+
+fn exact_sm_claims_abandoned_at_deadline(
+    responsibilities: waddle_xmpp::stream_management::SmShutdownClaimResponsibilityCounts,
+) -> u64 {
+    responsibilities.exact as u64
+}
+
+#[cfg(test)]
+mod sm_drain_metric_tests {
+    use super::{exact_sm_claims_abandoned_at_deadline, retry_outcome_released_local_sm_claim};
+    use waddle_xmpp::stream_management::{
+        SmClaimReleaseRetryOutcome, SmShutdownClaimResponsibilityCounts,
+    };
+
+    #[test]
+    fn exact_release_retry_metric_counts_only_observed_release_success() {
+        assert!(retry_outcome_released_local_sm_claim(
+            SmClaimReleaseRetryOutcome::Released
+        ));
+        assert!(!retry_outcome_released_local_sm_claim(
+            SmClaimReleaseRetryOutcome::Disproved
+        ));
+        assert!(!retry_outcome_released_local_sm_claim(
+            SmClaimReleaseRetryOutcome::Retained
+        ));
     }
-    #[cfg(not(feature = "clustering"))]
-    {
-        let _ = released;
+
+    #[test]
+    fn deadline_abandonment_excludes_unknown_reservations() {
+        assert_eq!(
+            exact_sm_claims_abandoned_at_deadline(SmShutdownClaimResponsibilityCounts {
+                exact: 2,
+                unknown: 7,
+            }),
+            2
+        );
     }
 }
 
@@ -5241,27 +5415,59 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         loop {
             if std::time::Instant::now() >= drain_deadline {
                 waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
-                // ADR-0017 Phase 3 Slice 10: whatever this node still
-                // believes it owns at the timeout never even reached
-                // `drain_all_for_shutdown` this pass — abandoned, same as
-                // the generic per-entity drain's own budget-overrun path.
+                // Only immutable owner+epoch responsibility is a claim known
+                // abandoned by this process. Reservation and publication
+                // ambiguity remain useful diagnostics but are not proof of
+                // ownership and must not inflate the claim counter.
+                let claim_responsibilities = websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .pending_shutdown_claim_responsibility_counts();
+                let (exact_claims, unknown_claims) = match claim_responsibilities {
+                    Ok(responsibilities) => {
+                        let exact = exact_sm_claims_abandoned_at_deadline(responsibilities);
+                        if exact > 0 {
+                            #[cfg(feature = "clustering")]
+                            crate::clustering::metrics::record_claims_abandoned_on_drain(exact);
+                        }
+                        (Some(responsibilities.exact), Some(responsibilities.unknown))
+                    }
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            "Graceful shutdown: exact claim inventory unavailable at deadline; refusing guessed abandonment accounting"
+                        );
+                        (None, None)
+                    }
+                };
+                // The broad inventory continues to drive quiet detection and
+                // the recovery-work diagnostic independently of claim metrics.
                 let remaining = websocket_state
                     .deps
                     .protocol
                     .sm_session_registry
-                    .live_session_ids()
-                    .map(|ids| ids.len())
-                    .unwrap_or(0);
-                if remaining > 0 {
-                    #[cfg(feature = "clustering")]
-                    crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
-                }
+                    .pending_shutdown_recovery_count()
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            %error,
+                            "Graceful shutdown: recovery inventory unavailable at deadline"
+                        );
+                        websocket_state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .live_session_ids()
+                            .map_or(1, |ids| ids.len().max(1))
+                    });
                 warn!(
                     total_drained,
                     remaining,
-                    "Graceful shutdown: drain timeout reached. Remaining sessions \
-                     keep their durable SM rows and will be retried on next startup \
-                     via restore_from_persistence + Q6 expiry."
+                    exact_claims = ?exact_claims,
+                    unknown_claims = ?unknown_claims,
+                    "Graceful shutdown: drain timeout reached. Remaining durable SM rows \
+                     will be retried on restart; exact claim handoffs without durable rows \
+                     pass to stale-owner reconciliation."
                 );
                 break;
             }
@@ -5275,27 +5481,59 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 Ok(s) => s,
                 Err(error) => {
                     warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
-                    break;
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
                 }
             };
-            let release_retry_budget =
+            let ownership_retry_budget =
                 drain_deadline.saturating_duration_since(std::time::Instant::now());
-            if tokio::time::timeout(
-                release_retry_budget,
-                websocket_state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .retry_pending_claim_releases(64),
-            )
-            .await
-            .is_err()
-            {
+            let sm_registry = &websocket_state.deps.protocol.sm_session_registry;
+            let hydrations = async {
+                sm_registry
+                    .retry_pending_reclaimed_hydrations_observing(64, |outcome| {
+                        if retry_outcome_released_local_sm_claim(outcome) {
+                            record_sm_claim_released_on_drain();
+                        }
+                    })
+                    .await;
+            };
+            let releases = async {
+                sm_registry
+                    .retry_pending_claim_releases_observing(64, |outcome| {
+                        if retry_outcome_released_local_sm_claim(outcome) {
+                            record_sm_claim_released_on_drain();
+                        }
+                    })
+                    .await;
+            };
+            if !run_sm_retries_with_budget(ownership_retry_budget, hydrations, releases).await {
                 // Re-enter at the deadline check so timeout telemetry and
                 // abandonment accounting stay centralized above.
                 continue;
             }
             if drained.is_empty() {
+                let recovery_count = match websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .pending_shutdown_recovery_count()
+                {
+                    Ok(count) => count,
+                    Err(error) => {
+                        empty_passes = 0;
+                        warn!(
+                            %error,
+                            "Graceful shutdown: promotion recovery inventory unavailable; refusing quiet"
+                        );
+                        tokio::time::sleep(POLL_INTERVAL).await;
+                        continue;
+                    }
+                };
+                if recovery_count > 0 {
+                    empty_passes = 0;
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
                 empty_passes += 1;
                 if empty_passes >= QUIET_WINDOW_PASSES {
                     break;
@@ -5318,58 +5556,60 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
-                let session = promotion_guard.session();
-                let blocklist = match websocket_state
+                let session = promotion_guard.session().clone();
+                let mut lease = match websocket_state
                     .deps
                     .protocol
-                    .blocking_storage
-                    .list_blocked_jid_entries(&session.jid.to_bare())
+                    .sm_session_registry
+                    .acquire_promotion_lease(&session)
                     .await
                 {
-                    Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!(
+                            stream_id = %session.stream_id,
+                            generation_id = ?session.generation_id,
+                            %error,
+                            "Graceful shutdown: could not acquire exact promotion lease"
+                        );
+                        continue;
+                    }
+                };
+                let summary = match crate::sm_promotion::promote_with_tombstone_window(
+                    &session,
+                    &lease,
+                    "Graceful shutdown",
+                    crate::sm_promotion::DisplacedPromotionDeps {
+                        sm_registry: &websocket_state.deps.protocol.sm_session_registry,
+                        connection_registry: &websocket_state.deps.protocol.connection_registry,
+                        user_registry: &websocket_state.deps.protocol.user_registry,
+                        pending_storage: &websocket_state.deps.protocol.pending_delivery_storage,
+                        blocking_storage: websocket_state.deps.protocol.blocking_storage.as_ref(),
+                        server_domain: websocket_state.deps.auth_state.xmpp_domain.as_str(),
+                    },
+                )
+                .await
+                {
+                    Ok(summary) => summary,
                     Err(error) => {
                         warn!(
                             jid = %session.jid,
                             error = %error,
-                            "Graceful shutdown: blocklist load failed; SKIPPING \
-                             promotion to preserve fail-closed XEP-0191 policy. \
-                             Durable SM row will be retried on next startup."
+                            "Graceful shutdown: blocklist load failed; retaining exact generation"
                         );
-                        record_sm_drain_outcome(false);
+                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &websocket_state.deps.protocol.sm_session_registry,
+                            &mut lease,
+                            session.clone(),
+                        )
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
                         continue;
                     }
                 };
-                // Round-2 review R2 + round-3 finding 1: per-session
-                // recent-tombstone fetch so a retraction landing
-                // mid-batch during the shutdown drain is still seen.
-                let mut recent_tombstones = Vec::new();
-                if let Ok(records) = crate::sm_promotion::recent_tombstones_for_promotion(
-                    &websocket_state.deps.protocol.sm_session_registry,
-                    "Graceful shutdown",
-                ) {
-                    recent_tombstones = records;
-                }
-                let summary = crate::sm_promotion::promote_session_unacked(
-                    session,
-                    &websocket_state.deps.protocol.connection_registry,
-                    &websocket_state.deps.protocol.user_registry,
-                    &websocket_state.deps.protocol.pending_delivery_storage,
-                    &blocklist,
-                    websocket_state.deps.auth_state.xmpp_domain.as_str(),
-                    &recent_tombstones,
-                )
-                .await;
-                // Finding B: same TOCTOU close-out as the SM janitor —
-                // re-scrub pending rows for tombstones recorded during
-                // this session's promotion window before confirming.
-                let _ =
-                    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                        &websocket_state.deps.protocol.pending_delivery_storage,
-                        &recent_tombstones,
-                        "Graceful shutdown",
-                    )
-                    .await;
                 info!(
                     jid = %session.jid,
                     redelivered = summary.redelivered,
@@ -5382,6 +5622,17 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     quarantined = summary.quarantined,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
+                if summary.has_authority_lost() {
+                    if websocket_state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .abandon_promotion_authority(&mut lease)
+                    {
+                        promotion_guard.complete();
+                    }
+                    continue;
+                }
                 if summary.has_quarantined() {
                     error!(
                         jid = %session.jid,
@@ -5390,9 +5641,9 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         "Graceful shutdown: promotion found unreconciled durable invariants; \
                          preserving durable SM rows for operator reconciliation"
                     );
-                    record_sm_drain_outcome(false);
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
+                        &mut lease,
                         session.clone(),
                         &summary,
                     )
@@ -5409,9 +5660,9 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         "Graceful shutdown: promotion had storage failures; \
                          preserving durable SM row for restart-time retry"
                     );
-                    record_sm_drain_outcome(false);
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
+                        &mut lease,
                         session.clone(),
                         &summary,
                     )
@@ -5421,55 +5672,45 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     }
                     continue;
                 }
-                let confirmed = websocket_state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .confirm_drained(&session.stream_id)
-                    .await;
-                // ADR-0017 Phase 3 Slice 10: this session's own "final
-                // fenced write, then release" sequence — `confirm_drained`
-                // deletes the durable row and releases the `ClaimStore`
-                // claim only on success (see that method's own doc
-                // comment).
-                record_sm_drain_outcome(confirmed);
-                if !confirmed {
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        "Graceful shutdown: durable SM confirmation failed; retaining \
-                         promotion ownership and pending-delivery claim for retry"
-                    );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                        session.clone(),
-                        &summary,
-                    )
-                    .await
-                    {
-                        promotion_guard.complete();
-                    }
-                    continue;
-                }
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                if let Err(error) = websocket_state
-                    .deps
-                    .protocol
-                    .pending_delivery_storage
-                    .release_claim(&session_id)
-                    .await
+                match crate::sm_promotion::retire_promoted_session_observing(
+                    &websocket_state.deps.protocol.sm_session_registry,
+                    &websocket_state.deps.protocol.pending_delivery_storage,
+                    &mut promotion_guard,
+                    &mut lease,
+                    |outcome| {
+                        if retry_outcome_released_local_sm_claim(outcome) {
+                            record_sm_claim_released_on_drain();
+                        }
+                    },
+                )
+                .await
                 {
-                    warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "Graceful shutdown: pending_delivery release_claim failed; \
-                         rows remain claimed and will be released by next-startup \
-                        claim-expiry janitor"
-                    );
+                    Ok(
+                        waddle_xmpp::stream_management::SmSessionDrainConfirmation::CurrentDurableConfirmed
+                        | waddle_xmpp::stream_management::SmSessionDrainConfirmation::TerminalDurableConfirmed
+                        | waddle_xmpp::stream_management::SmSessionDrainConfirmation::ObsoleteGenerationRetired
+                    ) => {
+                        promotion_guard.complete();
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::PayloadRetiredClaimReconciliationPending) => {
+                        promotion_guard.complete();
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::AuthorityLost) => {
+                        promotion_guard.complete();
+                    }
+                    Ok(waddle_xmpp::stream_management::SmSessionDrainConfirmation::Unconfirmed)
+                    | Err(_) => {
+                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            &websocket_state.deps.protocol.sm_session_registry,
+                            &mut lease,
+                            promotion_guard.session().clone(),
+                        )
+                        .await
+                        {
+                            promotion_guard.complete();
+                        }
+                    }
                 }
-                promotion_guard.complete();
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -6469,6 +6710,7 @@ mod remote_muc_reconciler_tests {
     fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
         DetachedSession {
             stream_id: stream_id.to_string(),
+            generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
             user_id: jid.to_bare().to_string(),
             jid,
             inbound_count: 0,

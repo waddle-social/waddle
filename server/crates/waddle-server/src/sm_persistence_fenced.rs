@@ -124,7 +124,7 @@
 //! self-reacquire path once that same node's own restore/reaper pass claims
 //! it — see those modules' doc comments for the full lifecycle.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -135,17 +135,16 @@ use waddle_xmpp::ownership::{
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage,
+    PersistedSession, PersistedSmSnapshot, PersistedTerminalGeneration, PersistedUnackedStanza,
+    SmClaimFence, SmPersistenceError, SmPersistenceStorage, SmTerminalGenerationKey,
+    TerminalGenerationScanEntry,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
 use crate::sm_persistence::codec::{
-    decode_session, decode_unacked, serialize_presence_payloads, serialize_stanza, show_wire_str,
-    unacked_purpose_wire_str,
+    decode_session, decode_session_id, decode_unacked, serialize_presence_payloads,
+    serialize_stanza, show_wire_str, unacked_purpose_wire_str,
 };
-
-const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn remove_sm_claim_cell_if(
     claim_fences: &DashMap<SmSessionId, Arc<OnceCell<SmClaimFence>>>,
@@ -359,7 +358,60 @@ impl PostgresFencedSmPersistence {
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS sm_terminal_generations (
+                stream_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                full_jid TEXT NOT NULL,
+                inbound_count BIGINT NOT NULL,
+                outbound_count BIGINT NOT NULL,
+                last_acked BIGINT NOT NULL,
+                max_resume_secs BIGINT,
+                detached_at_ms BIGINT NOT NULL,
+                max_resume_duration_ms BIGINT NOT NULL,
+                carbons_enabled INTEGER NOT NULL,
+                roster_interested INTEGER NOT NULL,
+                blocklist_interested INTEGER NOT NULL DEFAULT 0,
+                presence_available INTEGER NOT NULL,
+                presence_show TEXT,
+                presence_status TEXT,
+                presence_priority INTEGER NOT NULL,
+                replay_gap_through BIGINT,
+                promotion_attempts INTEGER NOT NULL DEFAULT 0,
+                presence_payloads TEXT,
+                PRIMARY KEY (stream_id, generation_id)
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS sm_terminal_unacked (
+                stream_id TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                sequence BIGINT NOT NULL,
+                stanza_xml TEXT NOT NULL,
+                original_receipt_at_ms BIGINT NOT NULL,
+                purpose TEXT NOT NULL,
+                PRIMARY KEY (stream_id, generation_id, sequence)
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
+            (),
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sm_terminal_generations_stream \
+             ON sm_terminal_generations (stream_id)",
             (),
         )
         .await
@@ -433,46 +485,21 @@ impl PostgresFencedSmPersistence {
         match result {
             Ok(fence) if self.node_identity.current() == *fence.owner() => Ok(fence.clone()),
             Ok(fence) => {
-                // `ensure_claimed` may have committed under the previous
-                // incarnation immediately before self-fence rotation. Keep
-                // the resolved cell as exact retry inventory until that old
-                // owner+epoch is confirmed gone; otherwise a current-
-                // identity retry conflicts with our own stranded claim.
-                match tokio::time::timeout(
-                    STALE_CLAIM_RELEASE_TIMEOUT,
-                    self.claim_store
-                        .release_exact(&entity, fence.owner(), fence.epoch()),
-                )
-                .await
-                {
-                    Ok(Ok(
-                        waddle_xmpp::ownership::ExactReleaseOutcome::Released
-                        | waddle_xmpp::ownership::ExactReleaseOutcome::NotOwned,
-                    )) => {
-                        self.remove_claim_cell_if(stream_id, &cell);
-                        Err(SmPersistenceError::NotOwner { entity })
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            stream_id = %stream_id,
-                            %error,
-                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
-                             failed; retaining the immutable fence for retry"
-                        );
-                        Err(claim_error_to_sm_persistence_error(error, entity))
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            stream_id = %stream_id,
-                            timeout = ?STALE_CLAIM_RELEASE_TIMEOUT,
-                            "PostgresFencedSmPersistence: stale-incarnation exact claim cleanup \
-                             timed out; retaining the immutable fence for retry"
-                        );
-                        Err(SmPersistenceError::Other(
-                            "stale-incarnation exact claim cleanup timed out".to_string(),
-                        ))
-                    }
-                }
+                // Persistence knows that durable work may already exist for
+                // this exact fence, but it cannot prove the stream empty.
+                // Evict only the process-local cache and leave the backend
+                // claim intact for owner-stale recovery. Releasing here used
+                // to make a successfully written row unclaimed between
+                // identity rotation and an explicit retry/restart.
+                self.remove_claim_cell_if(stream_id, &cell);
+                tracing::warn!(
+                    stream_id = %stream_id,
+                    owner = ?fence.owner(),
+                    epoch = ?fence.epoch(),
+                    "PostgresFencedSmPersistence: relinquished a stale-incarnation claim cache; \
+                     backend ownership remains available to durable recovery"
+                );
+                Err(SmPersistenceError::NotOwner { entity })
             }
             Err(error) => {
                 tracing::warn!(
@@ -574,6 +601,188 @@ impl PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))
     }
+}
+
+async fn write_fenced_terminal_generation(
+    tx: &mut Transaction<'_>,
+    key: &SmTerminalGenerationKey,
+    snapshot: &crate::sm_persistence::atomic_store::EncodedSnapshot,
+    promotion_attempts: u32,
+) -> Result<(), SmPersistenceError> {
+    use crate::sm_persistence::atomic_store::definitely_not_committed;
+
+    let session = &snapshot.session;
+    tx.execute(
+        r#"
+        INSERT INTO sm_terminal_generations (
+            stream_id, generation_id, user_id, full_jid, inbound_count,
+            outbound_count, last_acked, max_resume_secs, detached_at_ms,
+            max_resume_duration_ms, carbons_enabled, roster_interested,
+            blocklist_interested, presence_available, presence_show,
+            presence_status, presence_priority, replay_gap_through,
+            promotion_attempts, presence_payloads
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (stream_id, generation_id) DO UPDATE SET
+            user_id = excluded.user_id,
+            full_jid = excluded.full_jid,
+            inbound_count = excluded.inbound_count,
+            outbound_count = excluded.outbound_count,
+            last_acked = excluded.last_acked,
+            max_resume_secs = excluded.max_resume_secs,
+            detached_at_ms = excluded.detached_at_ms,
+            max_resume_duration_ms = excluded.max_resume_duration_ms,
+            carbons_enabled = excluded.carbons_enabled,
+            roster_interested = excluded.roster_interested,
+            blocklist_interested = excluded.blocklist_interested,
+            presence_available = excluded.presence_available,
+            presence_show = excluded.presence_show,
+            presence_status = excluded.presence_status,
+            presence_priority = excluded.presence_priority,
+            replay_gap_through = excluded.replay_gap_through,
+            presence_payloads = excluded.presence_payloads
+        "#,
+        crate::db_params![
+            key.stream_id().as_str().to_string(),
+            key.generation_id().to_string(),
+            session.session.user_id.clone(),
+            session.session.jid.to_string(),
+            i64::from(session.session.inbound_count),
+            i64::from(session.session.outbound_count),
+            i64::from(session.session.last_acked),
+            session.session.max_resume_time.map(i64::from),
+            session.detached_at_ms,
+            session.max_resume_duration_ms,
+            i64::from(session.session.carbons_enabled),
+            i64::from(session.session.roster_interested),
+            i64::from(session.session.blocklist_interested),
+            i64::from(session.session.presence_available),
+            session.presence_show.clone(),
+            session.session.presence_status.clone(),
+            i64::from(session.session.presence_priority),
+            session.session.replay_gap_through.map(i64::from),
+            i64::from(promotion_attempts),
+            session.presence_payloads.clone(),
+        ],
+    )
+    .await
+    .map_err(definitely_not_committed)?;
+    tx.execute(
+        "DELETE FROM sm_terminal_unacked WHERE stream_id = ? AND generation_id = ?",
+        crate::db_params![
+            key.stream_id().as_str().to_string(),
+            key.generation_id().to_string(),
+        ],
+    )
+    .await
+    .map_err(definitely_not_committed)?;
+    for row in &snapshot.unacked {
+        tx.execute(
+            "INSERT INTO sm_terminal_unacked (stream_id, generation_id, sequence, \
+             stanza_xml, original_receipt_at_ms, purpose) VALUES (?, ?, ?, ?, ?, ?)",
+            crate::db_params![
+                key.stream_id().as_str().to_string(),
+                key.generation_id().to_string(),
+                i64::from(row.sequence),
+                row.stanza_xml.clone(),
+                row.original_receipt_at_ms,
+                unacked_purpose_wire_str(row.purpose).to_string(),
+            ],
+        )
+        .await
+        .map_err(definitely_not_committed)?;
+    }
+    Ok(())
+}
+
+async fn write_fenced_resumable_session(
+    tx: &mut Transaction<'_>,
+    snapshot: &crate::sm_persistence::atomic_store::EncodedSnapshot,
+    reset_promotion_attempts: bool,
+) -> Result<(), SmPersistenceError> {
+    use crate::sm_persistence::atomic_store::definitely_not_committed;
+
+    let session = &snapshot.session;
+    let stream_id = &session.session.stream_id;
+    tx.execute(
+        "DELETE FROM sm_unacked WHERE stream_id = ?",
+        crate::db_params![stream_id.as_str().to_string()],
+    )
+    .await
+    .map_err(definitely_not_committed)?;
+    tx.execute(
+        r#"
+        INSERT INTO sm_sessions (
+            stream_id, user_id, full_jid, inbound_count, outbound_count,
+            last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
+            carbons_enabled, roster_interested, blocklist_interested, presence_available,
+            presence_show, presence_status, presence_priority, replay_gap_through,
+            presence_payloads
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (stream_id) DO UPDATE SET
+            user_id = excluded.user_id,
+            full_jid = excluded.full_jid,
+            inbound_count = excluded.inbound_count,
+            outbound_count = excluded.outbound_count,
+            last_acked = excluded.last_acked,
+            max_resume_secs = excluded.max_resume_secs,
+            detached_at_ms = excluded.detached_at_ms,
+            max_resume_duration_ms = excluded.max_resume_duration_ms,
+            carbons_enabled = excluded.carbons_enabled,
+            roster_interested = excluded.roster_interested,
+            blocklist_interested = excluded.blocklist_interested,
+            presence_available = excluded.presence_available,
+            presence_show = excluded.presence_show,
+            presence_status = excluded.presence_status,
+            presence_priority = excluded.presence_priority,
+            replay_gap_through = excluded.replay_gap_through,
+            presence_payloads = excluded.presence_payloads
+        "#,
+        crate::db_params![
+            stream_id.as_str().to_string(),
+            session.session.user_id.clone(),
+            session.session.jid.to_string(),
+            i64::from(session.session.inbound_count),
+            i64::from(session.session.outbound_count),
+            i64::from(session.session.last_acked),
+            session.session.max_resume_time.map(i64::from),
+            session.max_resume_duration_ms,
+            i64::from(session.session.carbons_enabled),
+            i64::from(session.session.roster_interested),
+            i64::from(session.session.blocklist_interested),
+            i64::from(session.session.presence_available),
+            session.presence_show.clone(),
+            session.session.presence_status.clone(),
+            i64::from(session.session.presence_priority),
+            session.session.replay_gap_through.map(i64::from),
+            session.presence_payloads.clone(),
+        ],
+    )
+    .await
+    .map_err(definitely_not_committed)?;
+    if reset_promotion_attempts {
+        tx.execute(
+            "UPDATE sm_sessions SET promotion_attempts = 0 WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(definitely_not_committed)?;
+    }
+    for row in &snapshot.unacked {
+        tx.execute(
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, ?)",
+            crate::db_params![
+                stream_id.as_str().to_string(),
+                i64::from(row.sequence),
+                row.stanza_xml.clone(),
+                row.original_receipt_at_ms,
+                unacked_purpose_wire_str(row.purpose).to_string(),
+            ],
+        )
+        .await
+        .map_err(definitely_not_committed)?;
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -751,6 +960,14 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(())
     }
 
+    async fn delete_session_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.quarantine_session(stream_id, expected_fence).await
+    }
+
     async fn quarantine_session(
         &self,
         stream_id: &SmSessionId,
@@ -870,6 +1087,36 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(removed)
     }
 
+    async fn delete_unacked_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+        expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, stream_id, expected_fence)
+            .await?;
+        let mut removed = 0u64;
+        for sequence in sequences {
+            removed += tx
+                .execute(
+                    "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                    crate::db_params![stream_id.as_str().to_string(), i64::from(*sequence)],
+                )
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(removed)
+    }
+
     async fn list_unacked(
         &self,
         stream_id: &SmSessionId,
@@ -959,6 +1206,266 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(out)
     }
 
+    async fn list_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut rows = self
+            .guard_query("SELECT stream_id FROM sm_sessions ORDER BY stream_id", ())
+            .await?;
+        let mut stream_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            stream_ids.push(decode_session_id(&row)?);
+        }
+        Ok(stream_ids)
+    }
+
+    async fn get_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<Option<PersistedTerminalGeneration>, SmPersistenceError> {
+        let columns = crate::sm_persistence::terminal_generations::TERMINAL_JOIN_COLUMNS;
+        let sql = format!(
+            "SELECT {columns} FROM sm_terminal_generations t \
+             LEFT JOIN sm_terminal_unacked u \
+               ON t.stream_id = u.stream_id AND t.generation_id = u.generation_id \
+             WHERE t.stream_id = ? AND t.generation_id = ? \
+             ORDER BY u.sequence ASC"
+        );
+        let rows = self
+            .guard_query(
+                &sql,
+                crate::db_params![
+                    key.stream_id().as_str().to_string(),
+                    key.generation_id().to_string(),
+                ],
+            )
+            .await?;
+        let mut terminals = crate::sm_persistence::terminal_generations::decode_joined_rows(
+            rows,
+            crate::sm_persistence::terminal_generations::TerminalDecodeMode::Strict,
+        )
+        .await?;
+        match terminals.pop() {
+            Some(TerminalGenerationScanEntry::Persisted(terminal)) => Ok(Some(terminal)),
+            Some(TerminalGenerationScanEntry::Corrupt { key, detail }) => {
+                Err(SmPersistenceError::CorruptTerminal { key, detail })
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn list_terminal_generations(
+        &self,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        let columns = crate::sm_persistence::terminal_generations::TERMINAL_JOIN_COLUMNS;
+        let sql = format!(
+            "SELECT {columns} FROM sm_terminal_generations t \
+             LEFT JOIN sm_terminal_unacked u \
+               ON t.stream_id = u.stream_id AND t.generation_id = u.generation_id \
+             ORDER BY t.stream_id ASC, t.generation_id ASC, u.sequence ASC"
+        );
+        let rows = self.guard_query(&sql, ()).await?;
+        crate::sm_persistence::terminal_generations::decode_joined_rows(
+            rows,
+            crate::sm_persistence::terminal_generations::TerminalDecodeMode::Scan,
+        )
+        .await
+    }
+
+    async fn list_terminal_generations_for_stream(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        let columns = crate::sm_persistence::terminal_generations::TERMINAL_JOIN_COLUMNS;
+        let sql = format!(
+            "SELECT {columns} FROM sm_terminal_generations t \
+             LEFT JOIN sm_terminal_unacked u \
+               ON t.stream_id = u.stream_id AND t.generation_id = u.generation_id \
+             WHERE t.stream_id = ? \
+             ORDER BY t.generation_id ASC, u.sequence ASC"
+        );
+        let rows = self
+            .guard_query(&sql, crate::db_params![stream_id.as_str().to_string()])
+            .await?;
+        crate::sm_persistence::terminal_generations::decode_joined_rows(
+            rows,
+            crate::sm_persistence::terminal_generations::TerminalDecodeMode::Scan,
+        )
+        .await
+    }
+
+    async fn delete_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<(), SmPersistenceError> {
+        let fence = self.claim_fence_for(key.stream_id()).await?;
+        self.delete_terminal_generation_under_fence(key, &fence)
+            .await
+    }
+
+    async fn delete_terminal_generation_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, key.stream_id(), expected_fence)
+            .await?;
+        tx.execute(
+            "DELETE FROM sm_terminal_unacked WHERE stream_id = ? AND generation_id = ?",
+            crate::db_params![
+                key.stream_id().as_str().to_string(),
+                key.generation_id().to_string(),
+            ],
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM sm_terminal_generations WHERE stream_id = ? AND generation_id = ?",
+            crate::db_params![
+                key.stream_id().as_str().to_string(),
+                key.generation_id().to_string(),
+            ],
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_terminal_unacked(
+        &self,
+        key: &SmTerminalGenerationKey,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        let fence = self.claim_fence_for(key.stream_id()).await?;
+        self.delete_terminal_unacked_under_fence(key, sequences, &fence)
+            .await
+    }
+
+    async fn delete_terminal_unacked_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        sequences: &[u32],
+        expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, key.stream_id(), expected_fence)
+            .await?;
+        let mut removed = 0;
+        for sequence in sequences {
+            removed += tx
+                .execute(
+                    "DELETE FROM sm_terminal_unacked \
+                     WHERE stream_id = ? AND generation_id = ? AND sequence = ?",
+                    crate::db_params![
+                        key.stream_id().as_str().to_string(),
+                        key.generation_id().to_string(),
+                        i64::from(*sequence),
+                    ],
+                )
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(removed)
+    }
+
+    async fn record_terminal_promotion_failure(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<u32, SmPersistenceError> {
+        let fence = self.claim_fence_for(key.stream_id()).await?;
+        self.record_terminal_promotion_failure_under_fence(key, &fence)
+            .await
+    }
+
+    async fn record_terminal_promotion_failure_under_fence(
+        &self,
+        key: &SmTerminalGenerationKey,
+        expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, key.stream_id(), expected_fence)
+            .await?;
+        let count = {
+            let mut rows = tx
+                .query(
+                    "UPDATE sm_terminal_generations \
+                     SET promotion_attempts = promotion_attempts + 1 \
+                     WHERE stream_id = ? AND generation_id = ? \
+                     RETURNING promotion_attempts",
+                    crate::db_params![
+                        key.stream_id().as_str().to_string(),
+                        key.generation_id().to_string(),
+                    ],
+                )
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            match rows
+                .next()
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+            {
+                Some(row) => row
+                    .get::<i64>(0)
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+                None => 0,
+            }
+        };
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
+    }
+
+    async fn has_durable_work(&self, stream_id: &SmSessionId) -> Result<bool, SmPersistenceError> {
+        let mut rows = self
+            .guard_query(
+                "SELECT CASE WHEN \
+                     EXISTS (SELECT 1 FROM sm_sessions WHERE stream_id = ?) \
+                     OR EXISTS (SELECT 1 FROM sm_terminal_generations WHERE stream_id = ?) \
+                 THEN 1 ELSE 0 END",
+                crate::db_params![
+                    stream_id.as_str().to_string(),
+                    stream_id.as_str().to_string(),
+                ],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+            .ok_or_else(|| {
+                SmPersistenceError::Other("durable-work query returned no row".into())
+            })?;
+        let found: i64 = row
+            .get(0)
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(found != 0)
+    }
+
     // `list_all_sessions_with_unacked` is not overridden: the trait's
     // default N+1 fallback (`list_all_sessions` + `list_unacked` per
     // session) is correct here, and this impl has no divergence to apply
@@ -972,100 +1479,60 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
-        let stream_id = session.stream_id.clone();
-        let fence = self.claim_fence_for(&stream_id).await?;
-        let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
-            .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
-        let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
-        let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
+        let snapshot = PersistedSmSnapshot::new(session, unacked)
+            .map_err(crate::sm_persistence::atomic_store::definitely_not_committed)?;
+        self.replace_resumable_session_atomic(snapshot, None).await
+    }
 
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+    async fn replace_resumable_session_atomic(
+        &self,
+        successor: PersistedSmSnapshot,
+        displaced_same_id: Option<PersistedTerminalGeneration>,
+    ) -> Result<(), SmPersistenceError> {
+        use crate::sm_persistence::atomic_store::{
+            current_promotion_attempts, definitely_not_committed, encode_snapshot,
+        };
 
-        // Drop any pre-existing unacked rows first (see the portable
-        // impl's identical comment on this statement's ordering
-        // rationale), then upsert the session row (divergence (a):
-        // Postgres `now()`, not `session.detached_at`), then append every
-        // supplied unacked stanza.
-        tx.execute(
-            "DELETE FROM sm_unacked WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-
-        tx.execute(
-            r#"
-            INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, inbound_count, outbound_count,
-                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
-                carbons_enabled, roster_interested, blocklist_interested, presence_available,
-                presence_show, presence_status, presence_priority, replay_gap_through,
-                presence_payloads
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, (EXTRACT(EPOCH FROM now()) * 1000)::bigint, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (stream_id) DO UPDATE SET
-                user_id = excluded.user_id,
-                full_jid = excluded.full_jid,
-                inbound_count = excluded.inbound_count,
-                outbound_count = excluded.outbound_count,
-                last_acked = excluded.last_acked,
-                max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
-                max_resume_duration_ms = excluded.max_resume_duration_ms,
-                carbons_enabled = excluded.carbons_enabled,
-                roster_interested = excluded.roster_interested,
-                blocklist_interested = excluded.blocklist_interested,
-                presence_available = excluded.presence_available,
-                presence_show = excluded.presence_show,
-                presence_status = excluded.presence_status,
-                presence_priority = excluded.presence_priority,
-                replay_gap_through = excluded.replay_gap_through,
-                presence_payloads = excluded.presence_payloads
-            "#,
-            crate::db_params![
-                stream_id.as_str().to_string(),
-                session.user_id.clone(),
-                session.jid.to_string(),
-                i64::from(session.inbound_count),
-                i64::from(session.outbound_count),
-                i64::from(session.last_acked),
-                session.max_resume_time.map(i64::from),
-                max_resume_duration_ms,
-                i64::from(session.carbons_enabled),
-                i64::from(session.roster_interested),
-                i64::from(session.blocklist_interested),
-                i64::from(session.presence_available),
-                presence_show_str.map(str::to_string),
-                session.presence_status.clone(),
-                i64::from(session.presence_priority),
-                session.replay_gap_through.map(i64::from),
-                presence_payloads_xml,
-            ],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-
-        for stanza in &unacked {
-            let xml = serialize_stanza(&stanza.stanza)?;
-            let receipt_ms = stanza.original_receipt_at.timestamp_millis();
-            tx.execute(
-                "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
-                 VALUES (?, ?, ?, ?, ?)",
-                crate::db_params![
-                    stream_id.as_str().to_string(),
-                    i64::from(stanza.sequence),
-                    xml,
-                    receipt_ms,
-                    unacked_purpose_wire_str(stanza.purpose).to_string(),
-                ],
-            )
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let stream_id = successor.session().stream_id.clone();
+        if displaced_same_id
+            .as_ref()
+            .is_some_and(|terminal| terminal.key().stream_id() != &stream_id)
+        {
+            return Err(definitely_not_committed(
+                "terminal predecessor and resumable successor have different stream ids",
+            ));
         }
+        let fence = self
+            .claim_fence_for(&stream_id)
+            .await
+            .map_err(|error| match error {
+                error @ SmPersistenceError::NotOwner { .. } => error,
+                error => SmPersistenceError::SnapshotDefinitelyNotCommitted(error.to_string()),
+            })?;
+        let successor = encode_snapshot(successor)?;
+        let displaced = displaced_same_id
+            .map(|terminal| {
+                let (key, snapshot, attempts) = terminal.into_parts();
+                encode_snapshot(snapshot).map(|snapshot| (key, snapshot, attempts))
+            })
+            .transpose()?;
+
+        let mut tx = self.db.begin().await.map_err(definitely_not_committed)?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, &stream_id, &fence)
+            .await
+            .map_err(|error| match error {
+                error @ SmPersistenceError::NotOwner { .. } => error,
+                error => SmPersistenceError::SnapshotDefinitelyNotCommitted(error.to_string()),
+            })?;
+
+        if let Some((key, snapshot, supplied_attempts)) = displaced.as_ref() {
+            let attempts = current_promotion_attempts(&mut tx, &stream_id)
+                .await?
+                .unwrap_or(*supplied_attempts);
+            write_fenced_terminal_generation(&mut tx, key, snapshot, attempts).await?;
+        }
+        write_fenced_resumable_session(&mut tx, &successor, displaced.is_some()).await?;
 
         tx.commit()
             .await
@@ -1113,6 +1580,52 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    async fn record_promotion_failure_under_fence(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity_guard = self
+            .assert_fenced(&mut tx, stream_id, expected_fence)
+            .await?;
+        let mut rows = tx
+            .query(
+                "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \
+                 WHERE stream_id = ? RETURNING promotion_attempts",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let count = match rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+            None => {
+                tx.commit()
+                    .await
+                    .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+                return Ok(0);
+            }
+        };
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    fn requires_exact_claim_fence(&self) -> bool {
+        true
     }
 
     /// ADR-0017 Phase 3 Slice 5 debt (a): the module doc's "Epoch side

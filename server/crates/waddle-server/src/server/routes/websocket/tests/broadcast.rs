@@ -191,6 +191,7 @@ fn make_detached_session(
 ) -> waddle_xmpp::stream_management::DetachedSession {
     waddle_xmpp::stream_management::DetachedSession {
         stream_id: "stale-stream".to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),
         inbound_count: 0,

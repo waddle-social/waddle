@@ -33,6 +33,10 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
 }
 
 fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
+    fixture_unacked_with_body(stream_id, sequence, &format!("m{sequence}"))
+}
+
+fn fixture_unacked_with_body(stream_id: &str, sequence: u32, body: &str) -> PersistedUnackedStanza {
     // Build the typed Message via the project's XML hard-rule
     // builders — Element::builder + Body::new — instead of
     // format!-ing an XML string. The fixture stays portable across
@@ -41,13 +45,20 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message
         .bodies
-        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     PersistedUnackedStanza {
         stream_id: sid(stream_id),
         sequence,
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: Utc::now(),
         purpose: SmUnackedStanzaPurpose::Application,
+    }
+}
+
+fn message_body(row: &PersistedUnackedStanza) -> Option<&str> {
+    match row.stanza.as_ref() {
+        Stanza::Message(message) => message.bodies.values().next().map(String::as_str),
+        Stanza::Iq(_) | Stanza::Presence(_) => None,
     }
 }
 
@@ -198,6 +209,24 @@ async fn list_all_sessions_with_unacked_groups_by_session() {
     assert_eq!(grouped[2].1.len(), 1);
 }
 
+#[tokio::test]
+async fn list_session_ids_returns_sorted_direct_keys() {
+    let store = InMemorySmPersistence::new();
+    store
+        .upsert_session(fixture_session("stream-b"))
+        .await
+        .unwrap();
+    store
+        .upsert_session(fixture_session("stream-a"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.list_session_ids().await.unwrap(),
+        vec![sid("stream-a"), sid("stream-b")]
+    );
+}
+
 /// Issue #209 PR #405: the trait default for
 /// `store_session_atomic` falls back to delete + upsert + N appends.
 /// Verify the success path produces the expected complete snapshot.
@@ -248,4 +277,179 @@ async fn store_session_atomic_replaces_existing_unacked_snapshot() {
         vec![2, 3],
         "full detached snapshots must replace prior unacked rows, not append duplicates"
     );
+}
+
+#[tokio::test]
+async fn same_id_replacement_preserves_predecessor_as_exact_terminal_generation() {
+    let store = InMemorySmPersistence::new();
+    let stream_id = sid("same-id");
+    store
+        .store_session_atomic(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked_with_body(
+                stream_id.as_str(),
+                1,
+                "predecessor",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.record_promotion_failure(&stream_id).await.unwrap(), 1);
+    assert_eq!(store.record_promotion_failure(&stream_id).await.unwrap(), 2);
+
+    let generation_id = SmSessionGenerationId::new();
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), generation_id);
+    let predecessor = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked_with_body(
+                stream_id.as_str(),
+                1,
+                "predecessor",
+            )],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let successor = PersistedSmSnapshot::new(
+        fixture_session(stream_id.as_str()),
+        vec![fixture_unacked_with_body(
+            stream_id.as_str(),
+            1,
+            "successor",
+        )],
+    )
+    .unwrap();
+
+    store
+        .replace_resumable_session_atomic(successor, Some(predecessor))
+        .await
+        .unwrap();
+
+    let current = store.list_unacked(&stream_id).await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(message_body(&current[0]), Some("successor"));
+    let terminal = store
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .expect("predecessor terminal generation");
+    assert_eq!(terminal.promotion_attempts(), 2);
+    assert_eq!(terminal.snapshot().unacked().len(), 1);
+    assert_eq!(
+        message_body(&terminal.snapshot().unacked()[0]),
+        Some("predecessor")
+    );
+    let scan = store.list_terminal_generations().await.unwrap();
+    assert!(matches!(
+        scan.as_slice(),
+        [TerminalGenerationScanEntry::Persisted(terminal)] if terminal.key() == &key
+    ));
+    let targeted = store
+        .list_terminal_generations_for_stream(&stream_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        targeted.as_slice(),
+        [TerminalGenerationScanEntry::Persisted(terminal)] if terminal.key() == &key
+    ));
+    assert_eq!(
+        generation_id.to_string().parse::<SmSessionGenerationId>(),
+        Ok(generation_id),
+        "the exact generation identity must survive durable text encoding"
+    );
+
+    // The new logical generation starts with independent retry history.
+    assert_eq!(store.record_promotion_failure(&stream_id).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .get_terminal_generation(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .promotion_attempts(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn terminal_prune_and_delete_are_generation_exact() {
+    let store = InMemorySmPersistence::new();
+    let stream_id = sid("generation-exact");
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let predecessor = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(
+            fixture_session(stream_id.as_str()),
+            vec![
+                fixture_unacked_with_body(stream_id.as_str(), 1, "predecessor-one"),
+                fixture_unacked_with_body(stream_id.as_str(), 2, "predecessor-two"),
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let successor = PersistedSmSnapshot::new(
+        fixture_session(stream_id.as_str()),
+        vec![fixture_unacked_with_body(
+            stream_id.as_str(),
+            1,
+            "successor-one",
+        )],
+    )
+    .unwrap();
+    store
+        .replace_resumable_session_atomic(successor, Some(predecessor))
+        .await
+        .unwrap();
+
+    assert_eq!(store.delete_terminal_unacked(&key, &[1]).await.unwrap(), 1);
+    let terminal = store.get_terminal_generation(&key).await.unwrap().unwrap();
+    assert_eq!(
+        terminal
+            .snapshot()
+            .unacked()
+            .iter()
+            .map(|row| row.sequence)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    let current = store.list_unacked(&stream_id).await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(message_body(&current[0]), Some("successor-one"));
+
+    store.delete_terminal_generation(&key).await.unwrap();
+    assert!(store.get_terminal_generation(&key).await.unwrap().is_none());
+    assert!(store.has_durable_work(&stream_id).await.unwrap());
+    assert!(store.get_session(&stream_id).await.unwrap().is_some());
+
+    store.delete_session(&stream_id).await.unwrap();
+    assert!(!store.has_durable_work(&stream_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn snapshot_constructors_reject_cross_stream_rows_before_storage() {
+    let store = InMemorySmPersistence::new();
+    let error = PersistedSmSnapshot::new(
+        fixture_session("session-a"),
+        vec![fixture_unacked("session-b", 1)],
+    )
+    .expect_err("cross-stream queue must be rejected");
+    assert!(matches!(
+        error,
+        PersistedSmSnapshotError::UnackedStreamMismatch { .. }
+    ));
+    assert!(!store.has_durable_work(&sid("session-a")).await.unwrap());
+
+    let snapshot = PersistedSmSnapshot::new(fixture_session("session-a"), Vec::new()).unwrap();
+    let error = PersistedTerminalGeneration::new(
+        SmTerminalGenerationKey::new(sid("session-b"), SmSessionGenerationId::new()),
+        snapshot,
+    )
+    .expect_err("terminal key must match its snapshot");
+    assert!(matches!(
+        error,
+        PersistedSmSnapshotError::TerminalStreamMismatch { .. }
+    ));
 }

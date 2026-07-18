@@ -456,6 +456,7 @@ impl StreamManagementState {
 
         Some(DetachedSession {
             stream_id: self.stream_id.clone()?,
+            generation_id: super::session_registry::SmSessionGenerationId::new(),
             user_id: snapshot.user_id,
             jid: snapshot.jid,
             inbound_count: self.inbound_count,
@@ -834,6 +835,7 @@ mod tests {
         // pre-resume backlog the resume itself already covered.
         let detached = DetachedSession {
             stream_id: "previd".to_string(),
+            generation_id: super::super::session_registry::SmSessionGenerationId::new(),
             user_id: "u@h".to_string(),
             jid: "u@h/r".parse().unwrap(),
             inbound_count: 10,

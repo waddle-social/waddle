@@ -93,7 +93,7 @@ pub trait MamStorage: Send + Sync {
     /// concept (the portable, single-node backend, and the in-memory test
     /// double). A cluster-aware implementation overrides this to run the
     /// fencing check and the insert in one transaction, mirroring
-    /// `pending_delivery::storage::PendingDeliveryStorage::insert_fenced`'s
+    /// `pending_delivery::storage::PendingDeliveryStorage::insert_under_sm_fence`'s
     /// identical pattern one table over. On a failed fence, returns
     /// [`MamStorageError::NotOwner`] and the write never touches
     /// `mam_messages`.

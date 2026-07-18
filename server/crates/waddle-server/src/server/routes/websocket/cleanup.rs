@@ -296,18 +296,26 @@ pub(crate) async fn maybe_evict_empty_room(
 /// [`waddle_xmpp::registry::ForceDetachOutcome::Detached`] — the only
 /// outcome that authorizes the remote asker's `steal_for_resume` — and
 /// every other exit path (superseded, no cleanup-eligible JID, not
-/// resumable, no registry ownership, non-owned entry, `store_session`
-/// failure, ownership-moved-during-detach) onto
+/// resumable, no registry ownership, non-owned entry, terminal
+/// `store_session` failure, ownership-moved-during-detach) onto
 /// [`waddle_xmpp::registry::ForceDetachOutcome::NotPersisted`], which the
 /// bridge/asker treat identically to "not live locally" (re-check
-/// persistence, retry).
+/// persistence, retry). A commit-ambiguous snapshot whose registry outcome
+/// explicitly preserves a published, claim-backed successor follows the
+/// detached path. A commit-ambiguous claim still completes that same local
+/// sidecar cleanup, but reports `NotPersisted`: the local successor is kept
+/// only for reconciliation and is not yet proven stealable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "the cross-node resume force-detach ack must reflect whether a snapshot was actually persisted"]
 pub(super) enum ConnectionShutdownOutcome {
-    /// A detach-for-resume snapshot was persisted (`store_session`
-    /// succeeded).
+    /// A detach-for-resume snapshot is published under a proven exact claim,
+    /// or its snapshot acknowledgement was ambiguous while that claim stayed
+    /// established.
     Detached,
-    /// No detach-for-resume snapshot was persisted by this call.
+    /// The detach is not proven claim-backed and stealable. A durable
+    /// snapshot may exist when claim acquisition itself is ambiguous, but a
+    /// remote caller must re-check/retry rather than force-steal from this
+    /// acknowledgement.
     NotPersisted,
 }
 
@@ -317,6 +325,33 @@ pub(super) async fn cleanup_connection_shutdown(
     conn: &mut WsConnState,
     superseded: bool,
 ) -> ConnectionShutdownOutcome {
+    // A resume restores the old SM counters before registry registration,
+    // but the detached claim is not consumed until finalization. If that
+    // awaited completion is cancelled, the published registry owner may be
+    // present even though this exact stream id still lives in
+    // `claimed_sessions`. Return it to the process-local detached pool before
+    // any owner-dependent branch, and never detach the restored state as a
+    // fresh generation. This is runtime cancellation recovery, not a durable
+    // in-progress-resume handoff.
+    let resume_completion_was_pending = conn.pending_resume_stream_id.is_some();
+    if let Some(stream_id) = conn.pending_resume_stream_id.clone() {
+        match state
+            .deps
+            .protocol
+            .sm_session_registry
+            .release_claim(&stream_id)
+            .await
+        {
+            Ok(()) => {
+                conn.pending_resume_stream_id = None;
+                conn.pending_resume_h = None;
+            }
+            Err(error) => {
+                warn!(stream_id = %stream_id, error = %error, "Failed to release pending SM resume claim during cleanup");
+            }
+        }
+        state.deps.protocol.resumable_sessions.remove(&stream_id);
+    }
     // Short-circuit when this task was superseded: the registry and MUC
     // occupant slots now belong to the newer connection for this FullJid,
     // and any cleanup we do here would clobber the newcomer.
@@ -337,24 +372,11 @@ pub(super) async fn cleanup_connection_shutdown(
         return ConnectionShutdownOutcome::NotPersisted;
     };
 
-    let should_detach_for_resume =
-        conn.sm_state.is_resumable() && !matches!(conn.phase, ConnectionPhase::Closing { .. });
+    let should_detach_for_resume = !resume_completion_was_pending
+        && conn.sm_state.is_resumable()
+        && !matches!(conn.phase, ConnectionPhase::Closing { .. });
 
     if should_detach_for_resume {
-        if conn.registry_owner.is_none() {
-            if let Some(stream_id) = conn.pending_resume_stream_id.take() {
-                if let Err(error) = state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .release_claim(&stream_id)
-                    .await
-                {
-                    warn!(stream_id = %stream_id, error = %error, "Failed to release pending SM resume claim during cleanup");
-                }
-                state.deps.protocol.resumable_sessions.remove(&stream_id);
-            }
-        }
         let Some(owner) = conn.registry_owner.as_ref() else {
             conn.unpublished_isr_cleanup.take();
             debug!(jid = %jid, "Skipped SM detach for connection without registry ownership");
@@ -428,13 +450,39 @@ pub(super) async fn cleanup_connection_shutdown(
             },
         ) {
             let stream_id = detached.stream_id.clone();
-            match state
+            let store_result = state
                 .deps
                 .protocol
                 .sm_session_registry
                 .store_session(detached)
-                .await
-            {
+                .await;
+            let mut successful_shutdown_outcome = ConnectionShutdownOutcome::Detached;
+            let store_result = match store_result {
+                Err(waddle_xmpp::stream_management::SmRegistryError::ResumabilityPreserved(
+                    error,
+                )) => {
+                    warn!(
+                        jid = %jid,
+                        stream_id = %stream_id,
+                        %error,
+                        "SM snapshot acknowledgement was ambiguous; completing detached \
+                         sidecar cleanup for the preserved resumable session"
+                    );
+                    Ok(Vec::new())
+                }
+                Err(waddle_xmpp::stream_management::SmRegistryError::DetachClaimAmbiguous) => {
+                    successful_shutdown_outcome = ConnectionShutdownOutcome::NotPersisted;
+                    warn!(
+                        jid = %jid,
+                        stream_id = %stream_id,
+                        "SM snapshot retained while detach claim acquisition remains ambiguous; \
+                         completing detached sidecar cleanup without a force-detach success ack"
+                    );
+                    Ok(Vec::new())
+                }
+                result => result,
+            };
+            match store_result {
                 Ok(displaced) => {
                     // Issue #1097: sessions the registry displaced to make
                     // room (max_sessions overflow, or a stale detached
@@ -578,7 +626,7 @@ pub(super) async fn cleanup_connection_shutdown(
                     if let Some(reservation) = conn.unpublished_isr_cleanup.take() {
                         reservation.disarm();
                     }
-                    return ConnectionShutdownOutcome::Detached;
+                    return successful_shutdown_outcome;
                 }
                 Err(err) => {
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");

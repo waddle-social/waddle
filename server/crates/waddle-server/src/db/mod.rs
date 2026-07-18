@@ -264,6 +264,18 @@ impl Database {
         }
     }
 
+    /// Begin a transaction on the dedicated control-plane pool.
+    ///
+    /// Use this only when claim/node liveness work needs more than one SQL
+    /// statement to share a connection and transaction. Fenced application
+    /// writes still belong on the main pool via [`Database::begin`].
+    pub async fn begin_control_plane(&self) -> Result<Transaction<'_>, DatabaseError> {
+        match &self.control_plane_backend {
+            Some(backend) => Transaction::begin(backend).await,
+            None => Err(DatabaseError::ControlPlanePoolUnavailable),
+        }
+    }
+
     /// Begin a database transaction.
     ///
     /// Multiple statements executed against the returned [`Transaction`]
@@ -466,6 +478,16 @@ mod tests {
             Err(other) => panic!("expected ControlPlanePoolUnavailable, got {other}"),
             Ok(_) => panic!("no control-plane pool was configured"),
         }
+    }
+
+    #[tokio::test]
+    async fn begin_control_plane_errors_when_not_configured() {
+        let db = Database::in_memory("test").await.unwrap();
+        match db.begin_control_plane().await {
+            Err(DatabaseError::ControlPlanePoolUnavailable) => {}
+            Err(other) => panic!("expected ControlPlanePoolUnavailable, got {other}"),
+            Ok(_) => panic!("no control-plane pool was configured"),
+        };
     }
 
     // Postgres-gated: the control-plane CAS has no SQLite equivalent, so this

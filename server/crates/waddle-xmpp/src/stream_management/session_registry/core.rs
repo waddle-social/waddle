@@ -7,19 +7,31 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::ownership::{
-    ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-    SharedNodeIdentity,
+    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
 
 use super::persistence_codec::{
-    detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
+    detached_to_persisted, detached_to_persisted_snapshot, detached_to_terminal_generation,
+    parse_xml_to_persisted_unacked, persisted_terminal_to_detached, persisted_to_detached,
 };
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum PendingClaimAcquisitionDisposition {
     ReleaseRejectedEnable,
-    RetainDetachedSession,
+    RetainDetachedSession(super::SmSessionGenerationId),
+}
+
+/// Whether one exact locally-retained claim may be released yet.
+///
+/// A durable-recovery handoff keeps the backend claim discoverable until the
+/// durable inventory is proven empty. Once that proof succeeds the state may
+/// advance to `ReleaseMayComplete`; it must never move back, because an exact
+/// release may already have committed even when its result was not observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingClaimReleaseDisposition {
+    RetainedForDurableRecovery,
+    ReleaseMayComplete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,9 +46,880 @@ impl DetachClaimFenceReservation {
             registry.cancel_claim_fence_reservation(stream_id);
         }
     }
+
+    fn preserves_rejected_enable(self) -> bool {
+        self == Self::BorrowedRejectedEnable
+    }
 }
 
 const STREAM_LOCK_SHARDS: usize = 256;
+
+/// Generation-scoped promotion authorities for one opaque SM stream id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPromotionDurability {
+    DurableRow,
+    TerminalDurable,
+    /// The atomic publication may or may not have committed, and the exact
+    /// marker read also failed.  This generation remains durable recovery
+    /// inventory but is deliberately not leasable until a later
+    /// reconciliation or restart establishes which row shape won.
+    PublicationUnknown,
+    DefinitelyNeverPublished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalPromotionRetention {
+    Inserted,
+    Upgraded,
+    Unchanged,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPromotionGeneration {
+    current: bool,
+    failures: u32,
+    claim_fence: Option<super::super::persistence::SmClaimFence>,
+    durability: PendingPromotionDurability,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct PendingPromotions {
+    by_stream: HashMap<String, HashMap<super::SmSessionGenerationId, PendingPromotionGeneration>>,
+    active_leases: HashMap<(String, super::SmSessionGenerationId), super::SmPromotionLeaseNonce>,
+    active_current: HashMap<String, (super::SmSessionGenerationId, super::SmPromotionLeaseNonce)>,
+}
+
+impl PendingPromotions {
+    pub(super) fn insert_current(&mut self, session: &DetachedSession) -> bool {
+        if self.current_reservation_active(&session.stream_id) {
+            return false;
+        }
+        let generations = self.by_stream.entry(session.stream_id.clone()).or_default();
+        for state in generations.values_mut() {
+            state.current = false;
+        }
+        generations.insert(
+            session.generation_id,
+            PendingPromotionGeneration {
+                current: true,
+                failures: 0,
+                claim_fence: None,
+                durability: PendingPromotionDurability::DurableRow,
+            },
+        );
+        true
+    }
+
+    /// Retain a detach payload that could not be published as resumable.
+    /// It may own terminal cleanup only when no older generation still owns
+    /// the stream; otherwise it is a payload-only obsolete carrier.
+    pub(super) fn insert_terminal_carrier(
+        &mut self,
+        session: &DetachedSession,
+        force_obsolete: bool,
+    ) -> bool {
+        let generations = self.by_stream.entry(session.stream_id.clone()).or_default();
+        if generations.contains_key(&session.generation_id) {
+            return false;
+        }
+        let current = !force_obsolete
+            && !self.active_current.contains_key(&session.stream_id)
+            && !generations.values().any(|state| state.current);
+        generations.insert(
+            session.generation_id,
+            PendingPromotionGeneration {
+                current,
+                failures: 0,
+                claim_fence: None,
+                durability: PendingPromotionDurability::DefinitelyNeverPublished,
+            },
+        );
+        true
+    }
+
+    /// Retain the full payload of a snapshot that may exist durably but for
+    /// which this node definitively failed to acquire ownership. Unlike a
+    /// `DefinitelyNeverPublished` carrier, this generation must not claim
+    /// authority to delete the durable row: a foreign owner may already be
+    /// using it. It therefore enters Q6 as payload-only from the outset.
+    pub(super) fn insert_unowned_durable_carrier(&mut self, session: &DetachedSession) -> bool {
+        let generations = self.by_stream.entry(session.stream_id.clone()).or_default();
+        if generations.contains_key(&session.generation_id) {
+            return false;
+        }
+        generations.insert(
+            session.generation_id,
+            PendingPromotionGeneration {
+                current: false,
+                failures: 0,
+                claim_fence: None,
+                durability: PendingPromotionDurability::DurableRow,
+            },
+        );
+        true
+    }
+
+    /// Mark one exact archived generation as durably terminal.
+    ///
+    /// The live same-id replacement path already has the predecessor in the
+    /// inventory, while startup/reclaimed hydration does not.  Distinguish
+    /// those cases so only hydration injects a retry payload; the live caller
+    /// continues to own and promote the carrier it already received.
+    pub(super) fn retain_terminal_durable(
+        &mut self,
+        session: &DetachedSession,
+        promotion_attempts: u32,
+        claim_fence: super::super::persistence::SmClaimFence,
+    ) -> TerminalPromotionRetention {
+        let generations = self.by_stream.entry(session.stream_id.clone()).or_default();
+        if let Some(state) = generations.get_mut(&session.generation_id) {
+            if state.current
+                || self
+                    .active_leases
+                    .contains_key(&(session.stream_id.clone(), session.generation_id))
+                || state.durability != PendingPromotionDurability::DurableRow
+            {
+                return TerminalPromotionRetention::Unchanged;
+            }
+            state.failures = state.failures.max(promotion_attempts);
+            state.claim_fence = Some(claim_fence);
+            state.durability = PendingPromotionDurability::TerminalDurable;
+            return TerminalPromotionRetention::Upgraded;
+        }
+        generations.insert(
+            session.generation_id,
+            PendingPromotionGeneration {
+                current: false,
+                failures: promotion_attempts,
+                claim_fence: Some(claim_fence),
+                durability: PendingPromotionDurability::TerminalDurable,
+            },
+        );
+        TerminalPromotionRetention::Inserted
+    }
+
+    /// Park an exact payload whose atomic publication result cannot be
+    /// classified.  Publication-unknown generations are non-leasable: Q6
+    /// must not guess whether to mutate the bare row or a terminal archive.
+    pub(super) fn park_publication_unknown(
+        &mut self,
+        session: &DetachedSession,
+        claim_fence: Option<super::super::persistence::SmClaimFence>,
+    ) {
+        let generations = self.by_stream.entry(session.stream_id.clone()).or_default();
+        match generations.get_mut(&session.generation_id) {
+            Some(state) => {
+                state.current = false;
+                if state.claim_fence.is_none() {
+                    state.claim_fence = claim_fence;
+                }
+                state.durability = PendingPromotionDurability::PublicationUnknown;
+            }
+            None => {
+                generations.insert(
+                    session.generation_id,
+                    PendingPromotionGeneration {
+                        current: false,
+                        failures: 0,
+                        claim_fence,
+                        durability: PendingPromotionDurability::PublicationUnknown,
+                    },
+                );
+            }
+        }
+        if self
+            .active_current
+            .get(&session.stream_id)
+            .is_some_and(|(generation_id, _)| *generation_id == session.generation_id)
+        {
+            self.active_current.remove(&session.stream_id);
+        }
+    }
+
+    pub(super) fn demote_for_successor(&mut self, stream_id: &str) -> bool {
+        if self.current_reservation_active(stream_id) {
+            return false;
+        }
+        if let Some(generations) = self.by_stream.get_mut(stream_id) {
+            for state in generations.values_mut() {
+                state.current = false;
+            }
+        }
+        true
+    }
+
+    /// External self-fencing invalidates durable mutation authority even
+    /// when a Q6 lease is already active. Bare-row generations remain as
+    /// payload-only retries, but terminal generations are retired: they have
+    /// already been durably archived and must never fall back to an unfenced
+    /// ordinary pending insertion. `exact_fence` limits terminal retirement
+    /// to one lifecycle; `None` denotes broad whole-stream demotion.
+    pub(super) fn demote_for_external_claim_loss(
+        &mut self,
+        stream_id: &str,
+        exact_fence: Option<&super::super::persistence::SmClaimFence>,
+    ) -> Vec<super::SmSessionGenerationId> {
+        let mut terminal_generations = Vec::new();
+        if let Some(generations) = self.by_stream.get_mut(stream_id) {
+            for (generation_id, state) in generations.iter_mut() {
+                if state.durability == PendingPromotionDurability::TerminalDurable {
+                    if exact_fence.is_none_or(|fence| state.claim_fence.as_ref() == Some(fence)) {
+                        terminal_generations.push(*generation_id);
+                    }
+                    continue;
+                }
+                state.current = false;
+            }
+        }
+        self.active_current.remove(stream_id);
+        terminal_generations
+            .retain(|generation_id| self.purge_terminal_generation(stream_id, *generation_id));
+        terminal_generations
+    }
+
+    /// Retire terminal carriers whose retained typed fence belongs to one
+    /// node incarnation without touching a same-stream lifecycle owned by a
+    /// different incarnation. This selector remains valid after the active
+    /// fence has already moved into exact pending-release inventory.
+    pub(super) fn purge_terminal_generations_owned_by(
+        &mut self,
+        stream_id: &str,
+        owner: &NodeIdentity,
+    ) -> Vec<super::SmSessionGenerationId> {
+        let mut terminal_generations = self
+            .by_stream
+            .get(stream_id)
+            .into_iter()
+            .flat_map(|generations| generations.iter())
+            .filter_map(|(generation_id, state)| {
+                (state.durability == PendingPromotionDurability::TerminalDurable
+                    && state
+                        .claim_fence
+                        .as_ref()
+                        .is_some_and(|fence| fence.owner() == owner))
+                .then_some(*generation_id)
+            })
+            .collect::<Vec<_>>();
+        terminal_generations
+            .retain(|generation_id| self.purge_terminal_generation(stream_id, *generation_id));
+        terminal_generations
+    }
+
+    /// Revoke bare-row authority for one exact ambiguous detach generation
+    /// without disturbing a same-stream successor that may have published
+    /// while the older acquisition awaited reconciliation.
+    pub(super) fn demote_generation_for_external_claim_loss(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<super::SmSessionGenerationId> {
+        if self.purge_terminal_generation(stream_id, generation_id) {
+            return Some(generation_id);
+        }
+        if let Some(state) = self
+            .by_stream
+            .get_mut(stream_id)
+            .and_then(|generations| generations.get_mut(&generation_id))
+        {
+            state.current = false;
+        }
+        if self
+            .active_current
+            .get(stream_id)
+            .is_some_and(|(active_generation, _)| *active_generation == generation_id)
+        {
+            self.active_current.remove(stream_id);
+        }
+        None
+    }
+
+    /// Revoke only promotion authority derived from one stale exact claim.
+    ///
+    /// Nonterminal payload generations remain available for Q6 payload-only
+    /// retry, but a durably archived terminal generation is retired instead
+    /// of being converted into an unfenced ordinary retry. Generations
+    /// carrying a different fence belong to a newer lifecycle and are left
+    /// untouched.
+    pub(super) fn relinquish_exact_claim_fence(
+        &mut self,
+        stream_id: &str,
+        fence: &super::super::persistence::SmClaimFence,
+    ) -> Vec<super::SmSessionGenerationId> {
+        let matching_generations = self
+            .by_stream
+            .get(stream_id)
+            .into_iter()
+            .flat_map(|generations| generations.iter())
+            .filter_map(|(generation_id, state)| {
+                (state.claim_fence.as_ref() == Some(fence)).then_some(*generation_id)
+            })
+            .collect::<Vec<_>>();
+
+        let mut purged_terminal_generations = Vec::new();
+        for generation_id in matching_generations {
+            if self.purge_terminal_generation(stream_id, generation_id) {
+                purged_terminal_generations.push(generation_id);
+                continue;
+            }
+            if let Some(state) = self
+                .by_stream
+                .get_mut(stream_id)
+                .and_then(|generations| generations.get_mut(&generation_id))
+            {
+                state.claim_fence = None;
+                state.current = false;
+            }
+            self.active_leases
+                .remove(&(stream_id.to_string(), generation_id));
+            if self
+                .active_current
+                .get(stream_id)
+                .is_some_and(|(active_generation, _)| *active_generation == generation_id)
+            {
+                self.active_current.remove(stream_id);
+            }
+        }
+        purged_terminal_generations
+    }
+
+    /// Remove one exact durably archived generation and revoke every local
+    /// lease that could still carry its terminal mutation authority.
+    fn purge_terminal_generation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        let Some(generations) = self.by_stream.get_mut(stream_id) else {
+            return false;
+        };
+        if !generations
+            .get(&generation_id)
+            .is_some_and(|state| state.durability == PendingPromotionDurability::TerminalDurable)
+        {
+            return false;
+        }
+        generations.remove(&generation_id);
+        if generations.is_empty() {
+            self.by_stream.remove(stream_id);
+        }
+        self.active_leases
+            .remove(&(stream_id.to_string(), generation_id));
+        if self
+            .active_current
+            .get(stream_id)
+            .is_some_and(|(active_generation, _)| *active_generation == generation_id)
+        {
+            self.active_current.remove(stream_id);
+        }
+        true
+    }
+
+    /// Replace every promotion authority derived from an older same-stream
+    /// fence after a newer fence is verified as the backend's current shared
+    /// stream claim. Current-row and terminal-row generations rebind to the
+    /// new shared authority; payload-only generations relinquish exact
+    /// authority. Any affected lease is revoked because its value captured
+    /// the superseded fence and must be reacquired before another mutation.
+    pub(super) fn publish_verified_claim_fence(
+        &mut self,
+        stream_id: &str,
+        fence: &super::super::persistence::SmClaimFence,
+    ) -> Vec<super::super::persistence::SmClaimFence> {
+        let mut superseded = Vec::new();
+        let mut affected_generations = Vec::new();
+        let Some(generations) = self.by_stream.get_mut(stream_id) else {
+            return superseded;
+        };
+
+        for (generation_id, state) in generations.iter_mut() {
+            let rebind = state.durability == PendingPromotionDurability::TerminalDurable
+                || (state.durability == PendingPromotionDurability::DurableRow && state.current);
+            let next_fence = rebind.then(|| fence.clone());
+            let demote = !rebind && state.current;
+            if state.claim_fence == next_fence && !demote {
+                continue;
+            }
+            if let Some(old) = state
+                .claim_fence
+                .as_ref()
+                .filter(|old| *old != fence)
+                .cloned()
+            {
+                superseded.push(old);
+            }
+            state.claim_fence = next_fence;
+            if !rebind {
+                state.current = false;
+            }
+            affected_generations.push(*generation_id);
+        }
+
+        for generation_id in affected_generations {
+            self.active_leases
+                .remove(&(stream_id.to_string(), generation_id));
+            if self
+                .active_current
+                .get(stream_id)
+                .is_some_and(|(active_generation, _)| *active_generation == generation_id)
+            {
+                self.active_current.remove(stream_id);
+            }
+        }
+        superseded
+    }
+
+    pub(super) fn restore_current_generation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        if self.current_reservation_active(stream_id) {
+            return false;
+        }
+        let Some(generations) = self.by_stream.get_mut(stream_id) else {
+            return false;
+        };
+        if !generations.get(&generation_id).is_some_and(|state| {
+            state.durability != PendingPromotionDurability::TerminalDurable
+                && state.durability != PendingPromotionDurability::PublicationUnknown
+        }) {
+            return false;
+        }
+        for state in generations.values_mut() {
+            state.current = false;
+        }
+        if let Some(state) = generations.get_mut(&generation_id) {
+            state.current = true;
+        }
+        true
+    }
+
+    pub(super) fn reserve_generation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        let Some(authority) = self.authority(stream_id, generation_id) else {
+            return false;
+        };
+        let current = authority == super::SmSessionPromotionAuthority::CurrentDurable;
+        let key = (stream_id.to_string(), generation_id);
+        if self.active_leases.contains_key(&key)
+            || (current && self.active_current.contains_key(stream_id))
+        {
+            return false;
+        }
+        self.active_leases.insert(key, nonce);
+        if current {
+            self.active_current
+                .insert(stream_id.to_string(), (generation_id, nonce));
+        }
+        true
+    }
+
+    pub(super) fn reservation_matches(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        self.active_leases
+            .get(&(stream_id.to_string(), generation_id))
+            == Some(&nonce)
+    }
+
+    /// Whether the exact lease still owns current-generation mutation
+    /// authority. `active_current` is intentionally part of the predicate:
+    /// external demotion removes it while retaining `active_leases`, so an
+    /// older lease cannot regain authority if a generation is later marked
+    /// current again.
+    pub(super) fn current_reservation_matches(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        self.is_current(stream_id, generation_id) == Some(true)
+            && self.reservation_matches(stream_id, generation_id, nonce)
+            && self.active_current.get(stream_id) == Some(&(generation_id, nonce))
+    }
+
+    pub(super) fn terminal_reservation_matches(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        self.authority(stream_id, generation_id)
+            == Some(super::SmSessionPromotionAuthority::TerminalDurable)
+            && self.reservation_matches(stream_id, generation_id, nonce)
+    }
+
+    pub(super) fn current_reservation_active(&self, stream_id: &str) -> bool {
+        self.active_current.contains_key(stream_id)
+    }
+
+    pub(super) fn generation_reservation_active(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        self.active_leases
+            .contains_key(&(stream_id.to_string(), generation_id))
+    }
+
+    pub(super) fn release_reservation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        if !self.reservation_matches(stream_id, generation_id, nonce) {
+            return false;
+        }
+        self.active_leases
+            .remove(&(stream_id.to_string(), generation_id));
+        if self.active_current.get(stream_id) == Some(&(generation_id, nonce)) {
+            self.active_current.remove(stream_id);
+        }
+        true
+    }
+
+    /// Remove one exact generation only while no promotion lease can be
+    /// using it. Used when an ambiguous atomic replacement is later proven
+    /// definitely uncommitted and the predecessor becomes resumable again.
+    pub(super) fn remove_unreserved_generation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        if self.generation_reservation_active(stream_id, generation_id) {
+            return false;
+        }
+        let Some(generations) = self.by_stream.get_mut(stream_id) else {
+            return false;
+        };
+        if generations.remove(&generation_id).is_none() {
+            return false;
+        }
+        if generations.is_empty() {
+            self.by_stream.remove(stream_id);
+        }
+        if self
+            .active_current
+            .get(stream_id)
+            .is_some_and(|(active_generation, _)| *active_generation == generation_id)
+        {
+            self.active_current.remove(stream_id);
+        }
+        true
+    }
+
+    pub(super) fn contains(&self, stream_id: &str) -> bool {
+        self.active_current.contains_key(stream_id)
+            || self
+                .by_stream
+                .get(stream_id)
+                .is_some_and(|generations| !generations.is_empty())
+    }
+
+    pub(super) fn contains_generation(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        self.by_stream
+            .get(stream_id)
+            .is_some_and(|generations| generations.contains_key(&generation_id))
+    }
+
+    pub(super) fn contains_other_generation(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        self.by_stream.get(stream_id).is_some_and(|generations| {
+            generations
+                .keys()
+                .any(|candidate| *candidate != generation_id)
+        })
+    }
+
+    pub(super) fn is_current(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<bool> {
+        self.by_stream
+            .get(stream_id)?
+            .get(&generation_id)
+            .map(|state| state.current)
+    }
+
+    /// Mutation authority for one exact generation. `None` is distinct from
+    /// absence: publication-unknown inventory intentionally cannot be leased.
+    pub(super) fn authority(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<super::SmSessionPromotionAuthority> {
+        let state = self.by_stream.get(stream_id)?.get(&generation_id)?;
+        match state.durability {
+            PendingPromotionDurability::PublicationUnknown => None,
+            PendingPromotionDurability::TerminalDurable => {
+                Some(super::SmSessionPromotionAuthority::TerminalDurable)
+            }
+            PendingPromotionDurability::DurableRow
+            | PendingPromotionDurability::DefinitelyNeverPublished => Some(if state.current {
+                super::SmSessionPromotionAuthority::CurrentDurable
+            } else {
+                super::SmSessionPromotionAuthority::ObsoleteGeneration
+            }),
+        }
+    }
+
+    pub(super) fn current_durable_generation(
+        &self,
+        stream_id: &str,
+    ) -> Option<super::SmSessionGenerationId> {
+        self.by_stream
+            .get(stream_id)?
+            .iter()
+            .find_map(|(generation_id, state)| {
+                (state.current && state.durability == PendingPromotionDurability::DurableRow)
+                    .then_some(*generation_id)
+            })
+    }
+
+    pub(super) fn retain_claim_fence(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> Option<super::super::persistence::SmClaimFence> {
+        let state = self.by_stream.get_mut(stream_id)?.get_mut(&generation_id)?;
+        if state.claim_fence.is_none() {
+            state.claim_fence = Some(fence);
+        }
+        state.claim_fence.clone()
+    }
+
+    pub(super) fn claim_fence(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<super::super::persistence::SmClaimFence> {
+        self.by_stream
+            .get(stream_id)?
+            .get(&generation_id)?
+            .claim_fence
+            .clone()
+    }
+
+    pub(super) fn retained_claim_fences(
+        &self,
+    ) -> impl Iterator<Item = (&String, &super::super::persistence::SmClaimFence)> {
+        self.by_stream.iter().flat_map(|(stream_id, generations)| {
+            generations
+                .values()
+                .filter_map(|state| state.claim_fence.as_ref())
+                .map(move |fence| (stream_id, fence))
+        })
+    }
+
+    /// Exact claim responsibility that is safe to report as abandoned at a
+    /// shutdown deadline. A publication-unknown payload may retain a copied
+    /// fence only as conservative recovery context; that carrier is not proof
+    /// that this process still owns the claim.
+    pub(super) fn shutdown_claim_fences(
+        &self,
+    ) -> impl Iterator<Item = (&String, &super::super::persistence::SmClaimFence)> {
+        self.by_stream.iter().flat_map(|(stream_id, generations)| {
+            generations
+                .values()
+                .filter(|state| state.durability != PendingPromotionDurability::PublicationUnknown)
+                .filter_map(|state| state.claim_fence.as_ref())
+                .map(move |fence| (stream_id, fence))
+        })
+    }
+
+    fn retains_claim_fence(
+        &self,
+        stream_id: &str,
+        fence: &super::super::persistence::SmClaimFence,
+    ) -> bool {
+        self.by_stream.get(stream_id).is_some_and(|generations| {
+            generations
+                .values()
+                .any(|state| state.claim_fence.as_ref() == Some(fence))
+        })
+    }
+
+    pub(super) fn is_definitely_never_published(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> bool {
+        self.by_stream
+            .get(stream_id)
+            .and_then(|generations| generations.get(&generation_id))
+            .is_some_and(|state| {
+                state.durability == PendingPromotionDurability::DefinitelyNeverPublished
+            })
+    }
+
+    /// Give up durable-row authority without retiring the payload token.
+    /// This is valid for a carrier whose snapshot was proven never to have
+    /// committed, or a normal generation already unlinked by external local
+    /// demotion. Its next Q6 attempt is payload-only while retaining the
+    /// exact stanza generation for retry.
+    pub(super) fn demote_for_payload_retry_under_reservation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> bool {
+        if !self.reservation_matches(stream_id, generation_id, nonce) {
+            return false;
+        }
+        let Some(state) = self
+            .by_stream
+            .get_mut(stream_id)
+            .and_then(|generations| generations.get_mut(&generation_id))
+        else {
+            return false;
+        };
+        if state.current && state.durability != PendingPromotionDurability::DefinitelyNeverPublished
+        {
+            return false;
+        }
+        state.current = false;
+        self.active_leases
+            .remove(&(stream_id.to_string(), generation_id));
+        if self.active_current.get(stream_id) == Some(&(generation_id, nonce)) {
+            self.active_current.remove(stream_id);
+        }
+        true
+    }
+
+    pub(super) fn record_failure_under_reservation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> Option<u32> {
+        if !self.reservation_matches(stream_id, generation_id, nonce) {
+            return None;
+        }
+        let state = self.by_stream.get_mut(stream_id)?.get_mut(&generation_id)?;
+        state.failures = state.failures.saturating_add(1);
+        Some(state.failures)
+    }
+
+    pub(super) fn retire_under_reservation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+        nonce: super::SmPromotionLeaseNonce,
+    ) -> Option<bool> {
+        if !self.reservation_matches(stream_id, generation_id, nonce) {
+            return None;
+        }
+        let generations = self.by_stream.get_mut(stream_id)?;
+        let current = generations.remove(&generation_id)?.current;
+        if generations.is_empty() {
+            self.by_stream.remove(stream_id);
+        }
+        self.active_leases
+            .remove(&(stream_id.to_string(), generation_id));
+        if self.active_current.get(stream_id) == Some(&(generation_id, nonce)) {
+            self.active_current.remove(stream_id);
+        }
+        Some(current)
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &String> {
+        self.by_stream
+            .keys()
+            .chain(self.active_current.keys())
+            .chain(self.active_leases.keys().map(|(stream_id, _)| stream_id))
+    }
+}
+
+/// Retry payloads keyed by the exact promotion generation. A bare stream id
+/// can temporarily have both an obsolete carrier and a current durable
+/// successor, so cancellation must not overwrite either payload.
+#[derive(Debug, Default)]
+pub(super) struct PendingPromotionRetries {
+    by_stream: HashMap<String, HashMap<super::SmSessionGenerationId, DetachedSession>>,
+}
+
+impl PendingPromotionRetries {
+    pub(super) fn insert(&mut self, session: DetachedSession) -> Option<DetachedSession> {
+        self.by_stream
+            .entry(session.stream_id.clone())
+            .or_default()
+            .insert(session.generation_id, session)
+    }
+
+    pub(super) fn get_generation(
+        &self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<&DetachedSession> {
+        self.by_stream.get(stream_id)?.get(&generation_id)
+    }
+
+    pub(super) fn get_generation_mut(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<&mut DetachedSession> {
+        self.by_stream.get_mut(stream_id)?.get_mut(&generation_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains_key(&self, stream_id: &str) -> bool {
+        self.by_stream
+            .get(stream_id)
+            .is_some_and(|generations| !generations.is_empty())
+    }
+
+    pub(super) fn remove_generation(
+        &mut self,
+        stream_id: &str,
+        generation_id: super::SmSessionGenerationId,
+    ) -> Option<DetachedSession> {
+        let sessions = self.by_stream.get_mut(stream_id)?;
+        let removed = sessions.remove(&generation_id);
+        if sessions.is_empty() {
+            self.by_stream.remove(stream_id);
+        }
+        removed
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&String, &DetachedSession)> {
+        self.by_stream.iter().flat_map(|(stream_id, sessions)| {
+            sessions.values().map(move |session| (stream_id, session))
+        })
+    }
+
+    pub(super) fn generation_keys(
+        &self,
+    ) -> impl Iterator<Item = (&String, super::SmSessionGenerationId)> {
+        self.by_stream.iter().flat_map(|(stream_id, sessions)| {
+            sessions
+                .keys()
+                .copied()
+                .map(move |generation_id| (stream_id, generation_id))
+        })
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.by_stream.values().map(HashMap::len).sum()
+    }
+}
 
 /// Operation-owned capacity marker for a reclaimed SM claim mutation.
 /// Only the operation holding this token may consume, cancel, or defer its
@@ -57,33 +940,86 @@ impl ReclaimedClaimReservation {
 /// Count distinct bounded ownership responsibilities across the three exact
 /// fence inventories. A reservation paired with an active, non-terminal
 /// fence is only an ambiguity marker for that same responsibility; counting
-/// both would reject otherwise usable session capacity. A reservation next
-/// to a pending-release fence remains distinct because that release may have
-/// committed and a subsequent acquisition may mint a new generation.
+/// both would reject otherwise usable session capacity. A reservation can
+/// likewise reuse a retained durable-recovery handoff, but remains distinct
+/// from `ReleaseMayComplete` because that release may have committed and a
+/// subsequent acquisition may mint a new generation.
 fn occupied_claim_fence_capacity(
+    promotions: &PendingPromotions,
     reservations: &HashSet<String>,
     reclaimed_reservations: &HashMap<String, ReclaimedClaimReservation>,
-    pending: &HashSet<(String, super::super::persistence::SmClaimFence)>,
+    pending: &HashMap<
+        (String, super::super::persistence::SmClaimFence),
+        PendingClaimReleaseDisposition,
+    >,
     fences: &HashMap<String, super::super::persistence::SmClaimFence>,
 ) -> usize {
     let current_not_pending = fences
         .iter()
-        .filter(|(id, fence)| !pending.contains(&(id.to_string(), (*fence).clone())))
+        .filter(|(id, fence)| !pending.contains_key(&(id.to_string(), (*fence).clone())))
         .count();
     let unrepresented_reservations = reservations
         .iter()
         .chain(reclaimed_reservations.keys())
-        .filter(|id| {
-            fences
-                .get(*id)
-                .is_none_or(|fence| pending.contains(&((*id).clone(), fence.clone())))
-        })
+        .filter(|id| claim_reservation_requires_independent_capacity(pending, fences, id))
         .count();
+    let retained_unrepresented = promotions
+        .retained_claim_fences()
+        .filter(|(stream_id, fence)| {
+            fences.get(*stream_id) != Some(*fence)
+                && !pending.contains_key(&((*stream_id).clone(), (*fence).clone()))
+        })
+        .map(|(stream_id, fence)| (stream_id.clone(), fence.clone()))
+        .collect::<HashSet<_>>()
+        .len();
 
     pending
         .len()
         .saturating_add(current_not_pending)
+        .saturating_add(retained_unrepresented)
         .saturating_add(unrepresented_reservations)
+}
+
+/// Whether a fence-less reservation represents an independently generational
+/// shutdown/capacity responsibility rather than the acquisition side of an
+/// already-counted active or retained exact fence.
+pub(super) fn claim_reservation_requires_independent_capacity(
+    pending: &HashMap<
+        (String, super::super::persistence::SmClaimFence),
+        PendingClaimReleaseDisposition,
+    >,
+    fences: &HashMap<String, super::super::persistence::SmClaimFence>,
+    stream_id: &str,
+) -> bool {
+    let represented_by_active_fence = fences
+        .get(stream_id)
+        .is_some_and(|fence| !pending.contains_key(&(stream_id.to_string(), fence.clone())));
+    !represented_by_active_fence && !pending_claim_reservation_reuses_capacity(pending, stream_id)
+}
+
+/// A same-stream ownership mutation can reuse a retained handoff's capacity
+/// only while every pending exact fence is still known not to have entered a
+/// release attempt. Any `ReleaseMayComplete` fence may already be absent in
+/// the backend, so a subsequent acquisition can mint another generation and
+/// needs independently-counted capacity.
+fn pending_claim_reservation_reuses_capacity(
+    pending: &HashMap<
+        (String, super::super::persistence::SmClaimFence),
+        PendingClaimReleaseDisposition,
+    >,
+    stream_id: &str,
+) -> bool {
+    let mut retained = false;
+    for ((pending_stream_id, _), disposition) in pending {
+        if pending_stream_id != stream_id {
+            continue;
+        }
+        match disposition {
+            PendingClaimReleaseDisposition::RetainedForDurableRecovery => retained = true,
+            PendingClaimReleaseDisposition::ReleaseMayComplete => return false,
+        }
+    }
+    retained
 }
 
 /// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
@@ -171,11 +1107,15 @@ pub struct InMemorySmSessionRegistry {
     /// bookkeeping — the `ClaimStore` implementation itself is the
     /// authority on what epoch is actually current.
     pub(super) claim_fences: RwLock<HashMap<String, super::super::persistence::SmClaimFence>>,
-    /// Exact terminal releases whose backend outcome was not confirmed.
-    /// Separate from `claim_fences`: a session drained for promotion is absent
-    /// from both maps but is not releasable until its durable delete commits.
-    pub(super) pending_claim_releases:
-        RwLock<HashSet<(String, super::super::persistence::SmClaimFence)>>,
+    /// Exact claims handed out of live authority, together with whether their
+    /// durable recovery work has been proven complete. Separate from
+    /// `claim_fences`: a session drained for promotion is absent from the
+    /// active map but its claim remains retained until durable inventory is
+    /// empty; an attempted release is monotonic `ReleaseMayComplete` because
+    /// its backend mutation may already have committed.
+    pub(super) pending_claim_releases: RwLock<
+        HashMap<(String, super::super::persistence::SmClaimFence), PendingClaimReleaseDisposition>,
+    >,
     /// Acquisitions whose timeout made commit status ambiguous. The typed
     /// disposition distinguishes rejected enable admission (recover then
     /// release) from detach after durable snapshot publication (recover and
@@ -187,12 +1127,12 @@ pub struct InMemorySmSessionRegistry {
     /// across displacement, expiry, shutdown, invalidation, retry
     /// reinsertion, and caller cancellation until durable deletion is
     /// confirmed.
-    pub(super) pending_promotions: RwLock<HashSet<String>>,
+    pub(super) pending_promotions: Arc<RwLock<PendingPromotions>>,
     /// Full payloads handed back by cancellation guards. They remain outside
     /// the resumable map until `drain_expired` reconciles them against the
     /// durable row, preventing stale pre-tombstone queues from being
     /// republished directly from `Drop`.
-    pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
+    pub(super) pending_promotion_retries: RwLock<PendingPromotionRetries>,
     /// Claimed ISR sessions whose follow-up epoch lookup failed before the
     /// route could prove that the recorded exact fence still owns the backend
     /// row. Kept out of `sessions` until a read-only reconciliation proves
@@ -261,6 +1201,13 @@ impl std::fmt::Debug for InMemorySmSessionRegistry {
             .field("node_identity", &self.node_identity.current())
             .finish()
     }
+}
+
+/// Result of persisting a same-id replacement whose terminal predecessor is
+/// also the transaction's durable commit marker.
+pub(super) enum PersistDetachedReplacementOutcome {
+    Committed,
+    PublicationUnknown(super::super::persistence::SmPersistenceError),
 }
 
 impl InMemorySmSessionRegistry {
@@ -344,7 +1291,7 @@ impl InMemorySmSessionRegistry {
             || promotion_pending;
         let matching_reservation = reclaimed.get(&entity.id) == Some(&reservation);
         let matching_active_fence = fences.get(&entity.id) == Some(fence);
-        let matching_pending_release = pending.contains(&key);
+        let matching_pending_release = pending.contains_key(&key);
         let conflicting_generic_reservation = reservations.contains(&entity.id);
         let conflicting_reservation = reclaimed
             .get(&entity.id)
@@ -369,7 +1316,9 @@ impl InMemorySmSessionRegistry {
         if matching_active_fence {
             fences.remove(&entity.id);
         }
-        pending.insert(key);
+        pending
+            .entry(key)
+            .or_insert(PendingClaimReleaseDisposition::RetainedForDurableRecovery);
         drop(fences);
         drop(pending);
         drop(reclaimed);
@@ -380,14 +1329,34 @@ impl InMemorySmSessionRegistry {
         Ok(true)
     }
 
-    pub(super) fn complete_terminal_claim_release(
+    /// Advance one exact retained handoff to terminal release eligibility.
+    ///
+    /// This also records a release issued directly from an active exact fence.
+    /// A same-stream acquisition reservation blocks the first transition: an
+    /// issued release could otherwise complete after that acquisition
+    /// republishes the same fence. Repeating an already-issued transition is
+    /// idempotent, and no caller can downgrade it afterward.
+    pub(super) fn mark_claim_release_may_complete(
         &self,
         stream_id: &str,
         fence: &super::super::persistence::SmClaimFence,
-    ) {
-        if let Ok(mut pending) = self.pending_claim_releases.write() {
-            pending.remove(&(stream_id.to_string(), fence.clone()));
+    ) -> bool {
+        let (Ok(reservations), Ok(reclaimed), Ok(mut pending)) = (
+            self.claim_fence_reservations.read(),
+            self.reclaimed_claim_reservations.read(),
+            self.pending_claim_releases.write(),
+        ) else {
+            return false;
+        };
+        let key = (stream_id.to_string(), fence.clone());
+        if pending.get(&key) == Some(&PendingClaimReleaseDisposition::ReleaseMayComplete) {
+            return true;
         }
+        if reservations.contains(stream_id) || reclaimed.contains_key(stream_id) {
+            return false;
+        }
+        pending.insert(key, PendingClaimReleaseDisposition::ReleaseMayComplete);
+        true
     }
 
     pub(super) fn reserve_claim_fence_capacity(&self, stream_id: &str) -> bool {
@@ -398,7 +1367,8 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Option<ReclaimedClaimReservation> {
-        let (Ok(reservations), Ok(mut reclaimed), Ok(pending), Ok(fences)) = (
+        let (Ok(promotions), Ok(reservations), Ok(mut reclaimed), Ok(pending), Ok(fences)) = (
+            self.pending_promotions.read(),
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.write(),
             self.pending_claim_releases.read(),
@@ -409,11 +1379,19 @@ impl InMemorySmSessionRegistry {
         if reservations.contains(stream_id) || reclaimed.contains_key(stream_id) {
             return None;
         }
-        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
+        let occupied = occupied_claim_fence_capacity(
+            &promotions,
+            &reservations,
+            &reclaimed,
+            &pending,
+            &fences,
+        );
         let active_nonterminal = fences
             .get(stream_id)
-            .is_some_and(|fence| !pending.contains(&(stream_id.to_string(), fence.clone())));
-        if !active_nonterminal && occupied >= self.max_sessions {
+            .is_some_and(|fence| !pending.contains_key(&(stream_id.to_string(), fence.clone())));
+        let reuses_retained_handoff =
+            pending_claim_reservation_reuses_capacity(&pending, stream_id);
+        if !active_nonterminal && !reuses_retained_handoff && occupied >= self.max_sessions {
             return None;
         }
         let token = ReclaimedClaimReservation(
@@ -471,7 +1449,10 @@ impl InMemorySmSessionRegistry {
                 });
                 let has_uncertain_detach = pending.iter().any(|(id, _, disposition)| {
                     id == stream_id
-                        && *disposition == PendingClaimAcquisitionDisposition::RetainDetachedSession
+                        && matches!(
+                            disposition,
+                            PendingClaimAcquisitionDisposition::RetainDetachedSession(_)
+                        )
                 });
                 has_rejected_enable && !has_uncertain_detach
             });
@@ -493,7 +1474,8 @@ impl InMemorySmSessionRegistry {
         // can leave only `pending_reclaimed_hydrations` behind.
         // Counting those retry maps separately would double-charge the same
         // ownership responsibility and reject usable capacity.
-        let (Ok(mut reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
+        let (Ok(promotions), Ok(mut reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
+            self.pending_promotions.read(),
             self.claim_fence_reservations.write(),
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.read(),
@@ -514,7 +1496,7 @@ impl InMemorySmSessionRegistry {
             // release timed out is different: the release may have committed,
             // so the next ensure can mint a new generation and must reserve a
             // second exact-fence slot before touching the backend.
-            if !pending.contains(&(stream_id.to_string(), fence.clone())) {
+            if !pending.contains_key(&(stream_id.to_string(), fence.clone())) {
                 // Even an idempotent self-ensure can be cancelled before its
                 // outcome is observed. Publish an in-flight marker paired
                 // with this already-counted fence so demotion can transfer
@@ -524,8 +1506,16 @@ impl InMemorySmSessionRegistry {
                 return true;
             }
         }
-        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
-        if occupied >= capacity {
+        let occupied = occupied_claim_fence_capacity(
+            &promotions,
+            &reservations,
+            &reclaimed,
+            &pending,
+            &fences,
+        );
+        let reuses_retained_handoff =
+            pending_claim_reservation_reuses_capacity(&pending, stream_id);
+        if !reuses_retained_handoff && occupied >= capacity {
             return false;
         }
         reservations.insert(stream_id.to_string());
@@ -538,6 +1528,7 @@ impl InMemorySmSessionRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn has_claim_fence_reservation(&self, stream_id: &str) -> bool {
         self.claim_fence_reservations
             .read()
@@ -546,7 +1537,8 @@ impl InMemorySmSessionRegistry {
 
     #[cfg(test)]
     pub(super) fn claim_fence_capacity_used(&self) -> usize {
-        let (Ok(reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
+        let (Ok(promotions), Ok(reservations), Ok(reclaimed), Ok(pending), Ok(fences)) = (
+            self.pending_promotions.read(),
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.read(),
@@ -554,7 +1546,7 @@ impl InMemorySmSessionRegistry {
         ) else {
             return self.max_sessions;
         };
-        occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences)
+        occupied_claim_fence_capacity(&promotions, &reservations, &reclaimed, &pending, &fences)
     }
 
     pub(super) fn try_record_claim_fence(
@@ -562,25 +1554,100 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
+        let mut superseded = Vec::new();
+        let (
+            Ok(mut promotions),
+            Ok(mut reservations),
+            Ok(reclaimed),
+            Ok(mut pending),
+            Ok(mut fences),
+            Ok(mut hydrations),
+        ) = (
+            self.pending_promotions.write(),
             self.claim_fence_reservations.write(),
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
             self.claim_fences.write(),
-        ) else {
+            self.pending_reclaimed_hydrations.write(),
+        )
+        else {
             return false;
         };
-        if fences.get(stream_id) == Some(&fence) {
-            reservations.remove(stream_id);
-            return true;
-        }
-        let reserved = reservations.remove(stream_id);
-        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
-        if !reserved && occupied >= self.max_sessions {
+        let key = (stream_id.to_string(), fence.clone());
+        if pending.get(&key) == Some(&PendingClaimReleaseDisposition::ReleaseMayComplete) {
             return false;
         }
-        if let Some(previous) = fences.insert(stream_id.to_string(), fence) {
-            pending.insert((stream_id.to_string(), previous));
+        if fences.get(stream_id) == Some(&fence) {
+            reservations.remove(stream_id);
+            pending.retain(|(id, old), _| {
+                if id == stream_id {
+                    if old != &fence {
+                        superseded.push(old.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            superseded.extend(promotions.publish_verified_claim_fence(stream_id, &fence));
+        } else {
+            let represented_by_promotion = promotions.retains_claim_fence(stream_id, &fence);
+            let reserved = reservations.remove(stream_id);
+            let occupied = occupied_claim_fence_capacity(
+                &promotions,
+                &reservations,
+                &reclaimed,
+                &pending,
+                &fences,
+            );
+            if !reserved && !represented_by_promotion && occupied >= self.max_sessions {
+                return false;
+            }
+            if let Some(previous) = fences.remove(stream_id) {
+                if previous != fence {
+                    superseded.push(previous);
+                }
+            }
+            pending.retain(|(id, old), _| {
+                if id == stream_id {
+                    if old != &fence {
+                        superseded.push(old.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            superseded.extend(promotions.publish_verified_claim_fence(stream_id, &fence));
+            fences.insert(stream_id.to_string(), fence.clone());
+        }
+        hydrations.retain(|(id, old, _), _| {
+            if id == stream_id && old != &fence {
+                superseded.push(old.clone());
+                false
+            } else {
+                true
+            }
+        });
+        drop(hydrations);
+        drop(fences);
+        drop(pending);
+        drop(reclaimed);
+        drop(reservations);
+        drop(promotions);
+        if let Some(storage) = &self.persistence {
+            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            superseded.sort_by(|left, right| {
+                left.owner()
+                    .node_id
+                    .cmp(&right.owner().node_id)
+                    .then_with(|| left.owner().node_epoch.cmp(&right.owner().node_epoch))
+                    .then_with(|| left.epoch().cmp(&right.epoch()))
+            });
+            superseded.dedup();
+            for old in superseded {
+                storage.evict_claim_cache(&session_id, &old);
+            }
         }
         true
     }
@@ -595,7 +1662,55 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
+        self.try_record_terminal_claim_fence_with_reservation_policy(stream_id, fence, false)
+    }
+
+    /// Retire a stale detach fence without consuming a rejected-enable
+    /// ambiguity marker borrowed by that detach. The marker represents a
+    /// different acquisition whose CAS outcome is still unknown, so the
+    /// exact old-fence release and the generic acquisition reservation must
+    /// remain independently capacity-counted after an authority rejection.
+    pub(super) fn try_record_terminal_claim_fence_for_detach(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+        reservation: DetachClaimFenceReservation,
+    ) -> bool {
+        self.try_record_terminal_claim_fence_with_reservation_policy(
+            stream_id,
+            fence,
+            reservation.preserves_rejected_enable(),
+        )
+    }
+
+    pub(super) fn try_record_terminal_claim_fence_preserving_reservation(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        self.try_record_terminal_claim_fence_with_reservation_policy(stream_id, fence, true)
+    }
+
+    /// Atomically convert an active claim or its acquisition reservation into
+    /// an exact durable-recovery handoff. Callers that still need a distinct
+    /// same-stream acquisition reservation must use the preserving variant
+    /// explicitly.
+    pub(super) fn try_record_durable_claim_handoff(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+    ) -> bool {
+        self.try_record_terminal_claim_fence_with_reservation_policy(stream_id, fence, false)
+    }
+
+    fn try_record_terminal_claim_fence_with_reservation_policy(
+        &self,
+        stream_id: &str,
+        fence: super::super::persistence::SmClaimFence,
+        preserve_reservation: bool,
+    ) -> bool {
+        let (Ok(promotions), Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
+            self.pending_promotions.read(),
             self.claim_fence_reservations.write(),
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
@@ -603,38 +1718,43 @@ impl InMemorySmSessionRegistry {
         ) else {
             return false;
         };
-        if pending.contains(&(stream_id.to_string(), fence.clone())) {
-            reservations.remove(stream_id);
+        if pending.contains_key(&(stream_id.to_string(), fence.clone())) {
+            if !preserve_reservation {
+                reservations.remove(stream_id);
+            }
             if fences.get(stream_id) == Some(&fence) {
                 fences.remove(stream_id);
             }
             return true;
         }
-        let reserved = reservations.remove(stream_id);
+        let represented_by_reservation = if preserve_reservation {
+            reservations.contains(stream_id)
+        } else {
+            reservations.remove(stream_id)
+        };
         let converts_active = fences.get(stream_id) == Some(&fence);
-        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
-        if !reserved && !converts_active && occupied >= self.max_sessions {
+        let converts_retained = promotions.retains_claim_fence(stream_id, &fence);
+        let occupied = occupied_claim_fence_capacity(
+            &promotions,
+            &reservations,
+            &reclaimed,
+            &pending,
+            &fences,
+        );
+        if !represented_by_reservation
+            && !converts_active
+            && !converts_retained
+            && occupied >= self.max_sessions
+        {
             return false;
         }
         if converts_active {
             fences.remove(stream_id);
         }
-        pending.insert((stream_id.to_string(), fence));
+        pending
+            .entry((stream_id.to_string(), fence))
+            .or_insert(PendingClaimReleaseDisposition::RetainedForDurableRecovery);
         true
-    }
-
-    /// Convert a generic commit-unknown acquisition reservation into the
-    /// exact terminal fence returned by a later successful `ensure_claimed`.
-    /// That read/write result is authoritative and therefore directionally
-    /// supersedes every older same-stream fence; retaining an older active
-    /// fence after the local lifecycle disappeared would leak bounded
-    /// ownership capacity forever.
-    pub(super) fn try_record_verified_terminal_claim_fence(
-        &self,
-        stream_id: &str,
-        fence: super::super::persistence::SmClaimFence,
-    ) -> bool {
-        self.try_record_verified_acquisition_fence(stream_id, fence, true)
     }
 
     /// Publish a later verified acquisition as the active fence while
@@ -645,25 +1765,38 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        self.try_record_verified_acquisition_fence(stream_id, fence, false)
+        self.try_record_verified_acquisition_fence(stream_id, fence)
     }
 
     fn try_record_verified_acquisition_fence(
         &self,
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
-        terminal: bool,
     ) -> bool {
         let mut superseded = Vec::new();
         {
-            let (Ok(mut reservations), Ok(reclaimed), Ok(mut pending), Ok(mut fences)) = (
+            let (
+                Ok(mut promotions),
+                Ok(mut reservations),
+                Ok(reclaimed),
+                Ok(mut pending),
+                Ok(mut fences),
+                Ok(mut hydrations),
+            ) = (
+                self.pending_promotions.write(),
                 self.claim_fence_reservations.write(),
                 self.reclaimed_claim_reservations.read(),
                 self.pending_claim_releases.write(),
                 self.claim_fences.write(),
-            ) else {
+                self.pending_reclaimed_hydrations.write(),
+            )
+            else {
                 return false;
             };
+            let key = (stream_id.to_string(), fence.clone());
+            if pending.get(&key) == Some(&PendingClaimReleaseDisposition::ReleaseMayComplete) {
+                return false;
+            }
             if reclaimed.contains_key(stream_id) || !reservations.remove(stream_id) {
                 return false;
             }
@@ -672,7 +1805,7 @@ impl InMemorySmSessionRegistry {
                     superseded.push(old);
                 }
             }
-            pending.retain(|(id, old)| {
+            pending.retain(|(id, old), _| {
                 if id == stream_id {
                     if old != &fence {
                         superseded.push(old.clone());
@@ -682,11 +1815,16 @@ impl InMemorySmSessionRegistry {
                     true
                 }
             });
-            if terminal {
-                pending.insert((stream_id.to_string(), fence.clone()));
-            } else {
-                fences.insert(stream_id.to_string(), fence.clone());
-            }
+            superseded.extend(promotions.publish_verified_claim_fence(stream_id, &fence));
+            hydrations.retain(|(id, old, _), _| {
+                if id == stream_id && old != &fence {
+                    superseded.push(old.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            fences.insert(stream_id.to_string(), fence.clone());
         }
         if let Some(storage) = &self.persistence {
             let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
@@ -726,7 +1864,9 @@ impl InMemorySmSessionRegistry {
         if fences.get(stream_id) == Some(&fence) {
             fences.remove(stream_id);
         }
-        pending.insert((stream_id.to_string(), fence));
+        pending
+            .entry((stream_id.to_string(), fence))
+            .or_insert(PendingClaimReleaseDisposition::RetainedForDurableRecovery);
         true
     }
 
@@ -740,7 +1880,8 @@ impl InMemorySmSessionRegistry {
         stream_id: &str,
         fence: super::super::persistence::SmClaimFence,
     ) -> bool {
-        let (Ok(reservations), Ok(reclaimed), Ok(mut pending), Ok(fences)) = (
+        let (Ok(promotions), Ok(reservations), Ok(reclaimed), Ok(mut pending), Ok(fences)) = (
+            self.pending_promotions.read(),
             self.claim_fence_reservations.read(),
             self.reclaimed_claim_reservations.read(),
             self.pending_claim_releases.write(),
@@ -749,25 +1890,37 @@ impl InMemorySmSessionRegistry {
             return false;
         };
         let key = (stream_id.to_string(), fence.clone());
-        if pending.contains(&key) {
+        if pending.contains_key(&key) {
             return true;
         }
-        let represented_exact = fences.get(stream_id) == Some(&fence);
+        let represented_exact = fences.get(stream_id) == Some(&fence)
+            || promotions.retains_claim_fence(stream_id, &fence);
         let represented_other = fences.contains_key(stream_id)
-            || pending.iter().any(|(id, _)| id == stream_id)
+            || pending.keys().any(|(id, _)| id == stream_id)
             || reservations.contains(stream_id)
-            || reclaimed.contains_key(stream_id);
+            || reclaimed.contains_key(stream_id)
+            || promotions
+                .retained_claim_fences()
+                .any(|(id, _)| id == stream_id);
         if represented_other && !represented_exact {
             // Direction cannot be inferred from numeric epochs across node
             // incarnations. Only the verified-hydration path may replace a
             // same-stream generation.
             return false;
         }
-        let occupied = occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
+        let occupied = occupied_claim_fence_capacity(
+            &promotions,
+            &reservations,
+            &reclaimed,
+            &pending,
+            &fences,
+        );
         if !represented_exact && occupied >= self.max_sessions {
             return false;
         }
-        pending.insert(key);
+        pending
+            .entry(key)
+            .or_insert(PendingClaimReleaseDisposition::RetainedForDurableRecovery);
         true
     }
 
@@ -783,23 +1936,42 @@ impl InMemorySmSessionRegistry {
     ) -> bool {
         let mut superseded = Vec::new();
         let recorded = {
-            let (Ok(reservations), Ok(mut reclaimed), Ok(mut pending), Ok(mut fences)) = (
+            let (
+                Ok(mut promotions),
+                Ok(reservations),
+                Ok(mut reclaimed),
+                Ok(mut pending),
+                Ok(mut fences),
+                Ok(mut hydrations),
+            ) = (
+                self.pending_promotions.write(),
                 self.claim_fence_reservations.read(),
                 self.reclaimed_claim_reservations.write(),
                 self.pending_claim_releases.write(),
                 self.claim_fences.write(),
-            ) else {
+                self.pending_reclaimed_hydrations.write(),
+            )
+            else {
                 return false;
             };
+            let key = (stream_id.to_string(), fence.clone());
+            if pending.get(&key) == Some(&PendingClaimReleaseDisposition::ReleaseMayComplete) {
+                return false;
+            }
             let reserved = reclaimed.get(stream_id) == Some(&reservation);
             if reserved {
                 reclaimed.remove(stream_id);
             }
             let represented = reserved
                 || fences.contains_key(stream_id)
-                || pending.iter().any(|(id, _)| id == stream_id);
-            let occupied =
-                occupied_claim_fence_capacity(&reservations, &reclaimed, &pending, &fences);
+                || pending.keys().any(|(id, _)| id == stream_id);
+            let occupied = occupied_claim_fence_capacity(
+                &promotions,
+                &reservations,
+                &reclaimed,
+                &pending,
+                &fences,
+            );
             if !represented && occupied >= self.max_sessions {
                 return false;
             }
@@ -808,11 +1980,20 @@ impl InMemorySmSessionRegistry {
                     superseded.push(old);
                 }
             }
-            pending.retain(|(id, old)| {
+            pending.retain(|(id, old), _| {
                 if id == stream_id {
                     if old != &fence {
                         superseded.push(old.clone());
                     }
+                    false
+                } else {
+                    true
+                }
+            });
+            superseded.extend(promotions.publish_verified_claim_fence(stream_id, &fence));
+            hydrations.retain(|(id, old, _), _| {
+                if id == stream_id && old != &fence {
+                    superseded.push(old.clone());
                     false
                 } else {
                     true
@@ -855,10 +2036,10 @@ impl InMemorySmSessionRegistry {
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
-            pending_claim_releases: RwLock::new(HashSet::new()),
+            pending_claim_releases: RwLock::new(HashMap::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
-            pending_promotions: RwLock::new(HashSet::new()),
-            pending_promotion_retries: RwLock::new(HashMap::new()),
+            pending_promotions: Arc::new(RwLock::new(PendingPromotions::default())),
+            pending_promotion_retries: RwLock::new(PendingPromotionRetries::default()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -881,10 +2062,10 @@ impl InMemorySmSessionRegistry {
             claim_store: Arc::new(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
-            pending_claim_releases: RwLock::new(HashSet::new()),
+            pending_claim_releases: RwLock::new(HashMap::new()),
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
-            pending_promotions: RwLock::new(HashSet::new()),
-            pending_promotion_retries: RwLock::new(HashMap::new()),
+            pending_promotions: Arc::new(RwLock::new(PendingPromotions::default())),
+            pending_promotion_retries: RwLock::new(PendingPromotionRetries::default()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -1022,159 +2203,436 @@ impl InMemorySmSessionRegistry {
     /// raced into memory ahead of this scan reaching the same row is
     /// skipped rather than overwritten with a stale durable read.
     ///
-    /// Returns the number of sessions hydrated. No-op when no
+    /// Returns the total number of newly hydrated durable generations:
+    /// resumable heads plus non-resumable terminal generations. Terminal
+    /// rows enter only the pending promotion/retry inventory, so
+    /// [`Self::session_count`] remains a resumable-head count. No-op when no
     /// persistence is attached.
     pub async fn restore_from_persistence(&self) -> Result<usize, SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(0);
         };
         let now = chrono::Utc::now();
-        // Single round-trip — replaces an N+1 (1 list_all_sessions +
-        // N list_unacked) with a single SELECT … LEFT JOIN sm_unacked
-        // on backends that override (libSQL/Postgres). In-memory
-        // backends fall back to the trait-default N+1 path. Issue
-        // #209 PR #405. This read is unfenced/unscoped by necessity (see
-        // this method's doc comment) — the per-row `ensure_claimed` call
-        // below is what scopes which rows this node is actually allowed to
-        // hydrate.
-        let stored = storage
-            .list_all_sessions_with_unacked()
+        // The unfenced global read is discovery-only. Reading typed stream
+        // ids directly keeps a corrupt current row discoverable; the old
+        // joined snapshot API could best-effort omit the entire group when
+        // its queue was poison. Every value and queue is read exactly only
+        // after the per-stream claim below.
+        let current_stream_ids = storage
+            .list_session_ids()
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        // Terminal generations are a separate, generation-keyed outbox.
+        // Startup is the only lifecycle path allowed to scan it globally;
+        // reclaimed live traffic uses the targeted per-stream query below.
+        let terminal_generations = storage
+            .list_terminal_generations()
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
         let mut hydrated = 0usize;
+        let mut terminal_hydrated = 0usize;
         let mut expired = 0usize;
-        let mut bad_rows = 0usize;
         let mut foreign_claims = 0usize;
         let mut already_present = 0usize;
-        // Read once per call, not once per row: `restore_from_persistence`
-        // only ever runs at startup, well before this node could have
-        // self-fenced and re-registered under a fresh identity, but reading
-        // through `.current()` here (rather than caching a snapshot for the
-        // whole call) keeps this consistent with every other call site's
-        // discipline of never holding a stale identity across an `.await`.
-        for (persisted, unacked) in stored {
+        // Both whole-table scans are discovery hints only. Their values were
+        // read before ownership was established, so hydrating either snapshot
+        // after `ensure_claimed` would resurrect work a prior owner deleted in
+        // the scan-to-claim window. Group the hinted stream ids, claim each
+        // shared entity once, then re-read its current row and authoritative
+        // terminal inventory under that fence and its stream shard.
+        let mut hinted_streams =
+            Vec::with_capacity(current_stream_ids.len() + terminal_generations.len());
+        let mut seen_streams = HashSet::new();
+        for current_stream_id in current_stream_ids {
+            let stream_id = current_stream_id.as_str().to_string();
+            if seen_streams.insert(stream_id.clone()) {
+                hinted_streams.push(stream_id);
+            }
+        }
+        for terminal in terminal_generations {
+            let stream_id = terminal.stream_id().as_str().to_string();
+            if seen_streams.insert(stream_id.clone()) {
+                hinted_streams.push(stream_id);
+            }
+        }
+
+        for stream_id in hinted_streams {
+            // Read once per stream, immediately before `ensure_claimed`.
+            // Every current head and terminal generation for this stream
+            // shares the resulting immutable owner+epoch fence.
             let identity = self.node_identity.current();
-            let entity = Entity::new(
-                EntityType::SmSession,
-                persisted.stream_id.as_str().to_string(),
-            );
+            let entity = Entity::new(EntityType::SmSession, stream_id.clone());
             let epoch = match self.claim_store.ensure_claimed(&entity, &identity).await {
                 Ok(epoch) => epoch,
-                Err(crate::ownership::ClaimError::AlreadyClaimed) => {
-                    // Another (live) node already holds this entity's
-                    // claim — never hydrate a second in-memory copy. The
-                    // orphan reaper, not this pass, is what reclaims a row
-                    // whose owner has actually died.
+                Err(
+                    crate::ownership::ClaimError::AlreadyClaimed
+                    | crate::ownership::ClaimError::Conflict,
+                ) => {
                     foreign_claims += 1;
                     continue;
                 }
-                Err(error) => {
-                    // A transient backend failure: skip this row rather
-                    // than failing the whole restore pass. It is retried
-                    // on this node's next restart, or reclaimed by the
-                    // orphan reaper if its owner (this node, under a
-                    // now-superseded identity) is later found stale.
+                Err(error @ crate::ownership::ClaimError::Draining) => {
                     debug!(
-                        stream_id = %persisted.stream_id,
+                        stream_id,
                         %error,
-                        "restore_from_persistence: ClaimStore ensure_claimed failed; \
-                         skipping this row for this pass"
+                        "restore_from_persistence: node definitively refused a new claim; \
+                         skipping every generation for this stream in this pass"
                     );
                     continue;
                 }
-            };
-            // Expired-during-downtime sessions (detached_at +
-            // max_resume_duration <= now) are hydrated too (issue
-            // #1098): deleting their rows here would silently discard
-            // their unacked queues, violating XEP-0198 §5 ("treat
-            // unacknowledged stanzas … like stanzas to an unavailable
-            // resource"). They are not resumable on the wire —
-            // peek/take/claim all gate on `is_expired()` — and the
-            // SM-expiry janitor's next `drain_expired` pass runs the
-            // promote → confirm chain, which is what finally deletes
-            // the durable rows via `confirm_drained`.
-            let expires_at = persisted.detached_at
-                + chrono::Duration::from_std(persisted.max_resume_duration)
-                    .unwrap_or(chrono::Duration::seconds(0));
-            if expires_at <= now {
-                expired += 1;
-            }
-            let session = match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => session,
                 Err(error) => {
-                    debug!(
-                        stream_id = %persisted.stream_id,
-                        error = %error,
-                        "skipping persisted session: row decode failed (poison pill)"
+                    tracing::error!(
+                        stream_id,
+                        %error,
+                        "restore_from_persistence: ClaimStore ensure_claimed outcome may be \
+                         ambiguous; aborting startup before serving with untracked ownership"
                     );
-                    // Claimed above but never hydrated (a genuine
-                    // poison-pill row, not a claim conflict) — release the
-                    // now-unused claim rather than leak it, so a future
-                    // pass (or the orphan reaper, once this identity is
-                    // stale) can act on the row again.
-                    self.release_claim_store_entry_under(
-                        persisted.stream_id.as_str(),
-                        super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
-                    )
-                    .await;
-                    bad_rows += 1;
-                    continue;
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: claim acquisition for {stream_id} was not \
+                         proven unsuccessful: {error}"
+                    )));
                 }
             };
-            if self.node_identity.current() != identity {
-                self.release_claim_store_entry_under(
-                    persisted.stream_id.as_str(),
-                    super::super::persistence::SmClaimFence::new(identity, epoch),
-                )
-                .await;
-                continue;
+            let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
+            self.claim_fences
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .insert(stream_id.clone(), fence.clone());
+            if self.node_identity.current() != *fence.owner() {
+                return Err(SmRegistryError::Internal(format!(
+                    "restore_from_persistence: node identity changed after claiming stream \
+                     {stream_id}; exact fence retained"
+                )));
             }
-            // FIX 2: per-row stream-shard-lock discipline (see this
-            // method's doc comment) — take this row's own shard lock and
-            // re-check both maps immediately before inserting, rather than
-            // batching every hydrated row into one insert pass after the
-            // loop (the previous shape, which held no lock at all across
-            // the whole scan).
-            let stream_id = session.stream_id.clone();
+
             let stream_lock = self.stream_lock(&stream_id)?;
             let _stream_guard = stream_lock.lock().await;
-            let present = {
-                let sessions = self
-                    .sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                let claimed = self
-                    .claimed_sessions
-                    .read()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+            let typed_stream_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+
+            // The global current-row value is stale by construction. Re-read
+            // both the head and its queue only after ownership, and stage the
+            // decoded session until every exact terminal key has also been
+            // validated. A group-level failure therefore cannot publish a
+            // healthy prefix while a later sibling remains invisible.
+            let exact_current = match storage.get_session(&typed_stream_id).await {
+                Ok(Some(persisted)) if persisted.stream_id != typed_stream_id => {
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: exact current read for {typed_stream_id} \
+                         returned foreign stream {}; exact fence retained",
+                        persisted.stream_id
+                    )));
+                }
+                Ok(Some(persisted)) => match storage.list_unacked(&typed_stream_id).await {
+                    Ok(unacked) => Some((persisted, unacked)),
+                    Err(super::super::persistence::SmPersistenceError::Corrupt {
+                        stream_id: corrupt_stream_id,
+                        detail,
+                    }) => {
+                        if corrupt_stream_id != typed_stream_id {
+                            return Err(SmRegistryError::Internal(format!(
+                                "restore_from_persistence: exact current queue read for \
+                                 {typed_stream_id} reported foreign corrupt stream \
+                                 {corrupt_stream_id}; exact fence retained"
+                            )));
+                        }
+                        if let Err(error) =
+                            storage.quarantine_session(&typed_stream_id, &fence).await
+                        {
+                            tracing::error!(
+                                stream_id,
+                                %detail,
+                                %error,
+                                "restore_from_persistence: corrupt current queue quarantine \
+                                 failed; retaining the shared fence and aborting startup recovery"
+                            );
+                            return Err(SmRegistryError::Persistence(error));
+                        }
+                        debug!(
+                            stream_id,
+                            %detail,
+                            "restore_from_persistence: quarantined corrupt current queue"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            stream_id,
+                            %error,
+                            "restore_from_persistence: claimed current queue read failed; \
+                             retaining the shared fence and aborting startup recovery"
+                        );
+                        return Err(SmRegistryError::Persistence(error));
+                    }
+                },
+                Ok(None) => None,
+                Err(super::super::persistence::SmPersistenceError::Corrupt {
+                    stream_id: corrupt_stream_id,
+                    detail,
+                }) => {
+                    if corrupt_stream_id != typed_stream_id {
+                        return Err(SmRegistryError::Internal(format!(
+                            "restore_from_persistence: exact current read for {typed_stream_id} \
+                             reported foreign corrupt stream {corrupt_stream_id}; exact fence \
+                             retained"
+                        )));
+                    }
+                    if let Err(error) = storage.quarantine_session(&typed_stream_id, &fence).await {
+                        tracing::error!(
+                            stream_id,
+                            %detail,
+                            %error,
+                            "restore_from_persistence: corrupt current generation quarantine \
+                             failed; retaining the shared fence and aborting startup recovery"
+                        );
+                        return Err(SmRegistryError::Persistence(error));
+                    }
+                    debug!(
+                        stream_id,
+                        %detail,
+                        "restore_from_persistence: quarantined corrupt current generation"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::error!(
+                        stream_id,
+                        %error,
+                        "restore_from_persistence: claimed current generation read failed; \
+                         retaining the shared fence and aborting startup recovery"
+                    );
+                    return Err(SmRegistryError::Persistence(error));
+                }
             };
-            if present {
-                already_present += 1;
-                continue;
-            }
+            let staged_current = match exact_current {
+                Some((persisted, unacked)) => {
+                    let expires_at = persisted.detached_at
+                        + chrono::Duration::from_std(persisted.max_resume_duration)
+                            .unwrap_or(chrono::Duration::seconds(0));
+                    if expires_at <= now {
+                        expired += 1;
+                    }
+                    match persisted_to_detached(&persisted, &unacked) {
+                        Ok(session) => Some(session),
+                        Err(error) => {
+                            tracing::error!(
+                                stream_id,
+                                %error,
+                                "restore_from_persistence: claimed current generation decode \
+                                 failed; retaining the shared fence and aborting startup \
+                                 recovery"
+                            );
+                            return Err(SmRegistryError::Internal(format!(
+                                "restore_from_persistence: current stream {stream_id} decode \
+                                     failed after claiming it: {error}"
+                            )));
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            // Re-scan this one stream after the claim. This captures siblings
+            // inserted between the global discovery scan and ownership. The
+            // targeted values are still treated as keys only: exact reads
+            // distinguish a current healthy generation, an already-deleted
+            // generation, and a structurally identifiable poison row.
+            let terminal_entries = match storage
+                .list_terminal_generations_for_stream(&typed_stream_id)
+                .await
             {
-                let mut sessions = self
-                    .sessions
-                    .write()
-                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-                sessions.insert(stream_id.clone(), session);
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::error!(
+                        stream_id,
+                        %error,
+                        "restore_from_persistence: claimed terminal inventory read failed; \
+                         retaining the shared fence and aborting startup recovery"
+                    );
+                    return Err(SmRegistryError::Persistence(error));
+                }
+            };
+            let mut seen_terminal_keys = HashSet::new();
+            let mut staged_terminals = Vec::with_capacity(terminal_entries.len());
+            for terminal_entry in terminal_entries {
+                let terminal_key = terminal_entry.key().clone();
+                if terminal_key.stream_id() != &typed_stream_id {
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: targeted terminal scan for {stream_id} \
+                         returned foreign key {terminal_key}; exact fence retained"
+                    )));
+                }
+                if !seen_terminal_keys.insert(terminal_key.clone()) {
+                    continue;
+                }
+                let terminal = match storage.get_terminal_generation(&terminal_key).await {
+                    Ok(Some(terminal)) => terminal,
+                    Ok(None) => continue,
+                    Err(super::super::persistence::SmPersistenceError::CorruptTerminal {
+                        key,
+                        detail,
+                    }) => {
+                        if key != terminal_key {
+                            return Err(SmRegistryError::Internal(format!(
+                                "restore_from_persistence: exact terminal read for \
+                                 {terminal_key} reported foreign corrupt key {key}; exact fence \
+                                 retained"
+                            )));
+                        }
+                        if let Err(error) = storage
+                            .quarantine_terminal_generation(&terminal_key, &fence)
+                            .await
+                        {
+                            tracing::error!(
+                                terminal_generation = %terminal_key,
+                                %detail,
+                                %error,
+                                "restore_from_persistence: exact terminal poison quarantine \
+                                 failed; retaining the shared fence and aborting startup recovery"
+                            );
+                            return Err(SmRegistryError::Persistence(error));
+                        }
+                        debug!(
+                            terminal_generation = %terminal_key,
+                            %detail,
+                            "restore_from_persistence: quarantined one corrupt exact terminal \
+                             generation"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            terminal_generation = %terminal_key,
+                            %error,
+                            "restore_from_persistence: exact terminal generation read failed; \
+                             retaining the shared fence and aborting startup recovery"
+                        );
+                        return Err(SmRegistryError::Persistence(error));
+                    }
+                };
+                if terminal.key() != &terminal_key {
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: exact terminal read for {terminal_key} \
+                         returned {}; exact fence retained",
+                        terminal.key()
+                    )));
+                }
+                let session = match persisted_terminal_to_detached(&terminal) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::error!(
+                            stream_id,
+                            generation_id = %terminal_key.generation_id(),
+                            %error,
+                            "restore_from_persistence: claimed terminal generation decode \
+                             failed; retaining the shared fence and aborting startup recovery"
+                        );
+                        return Err(SmRegistryError::Internal(format!(
+                            "restore_from_persistence: terminal generation {terminal_key} \
+                             decode failed after claiming its stream: {error}"
+                        )));
+                    }
+                };
+                staged_terminals.push((session, terminal.promotion_attempts()));
             }
-            if let Ok(mut claim_fences) = self.claim_fences.write() {
-                claim_fences.insert(
-                    stream_id,
-                    super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
-                );
+
+            match tokio::time::timeout(
+                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+                self.claim_store
+                    .fence(&entity, fence.owner(), fence.epoch()),
+            )
+            .await
+            {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    if let (Ok(mut promotions), Ok(mut retries)) = (
+                        self.pending_promotions.write(),
+                        self.pending_promotion_retries.write(),
+                    ) {
+                        for generation_id in
+                            promotions.demote_for_external_claim_loss(&stream_id, Some(&fence))
+                        {
+                            retries.remove_generation(&stream_id, generation_id);
+                        }
+                    }
+                    self.forget_claim_locally_locked(&stream_id, None);
+                    foreign_claims += 1;
+                    continue;
+                }
+                Ok(Err(error)) => {
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: final exact fence check for {stream_id} \
+                         failed; exact cleanup retained: {error}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(SmRegistryError::Internal(format!(
+                        "restore_from_persistence: final exact fence check for {stream_id} \
+                         timed out after {CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT:?}; exact cleanup \
+                         retained"
+                    )));
+                }
             }
-            hydrated += 1;
+            let Some(publication_guard) = self.node_identity.guard_if_current(fence.owner()).await
+            else {
+                return Err(SmRegistryError::Internal(format!(
+                    "restore_from_persistence: node identity changed between its final fence \
+                     check and publication for stream {stream_id}; exact cleanup retained"
+                )));
+            };
+
+            if let Some(session) = staged_current {
+                let present = {
+                    let sessions = self
+                        .sessions
+                        .read()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    let claimed = self
+                        .claimed_sessions
+                        .read()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                    sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id)
+                };
+                if present {
+                    already_present += 1;
+                } else {
+                    self.sessions
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                        .insert(stream_id.clone(), session);
+                    hydrated += 1;
+                }
+            }
+            for (session, promotion_attempts) in staged_terminals {
+                if self.retain_terminal_durable_promotion(
+                    session,
+                    promotion_attempts,
+                    fence.clone(),
+                )? {
+                    terminal_hydrated += 1;
+                    hydrated += 1;
+                } else {
+                    already_present += 1;
+                }
+            }
+            drop(publication_guard);
+
+            // A corrupt-only or stale discovery group may leave no work at
+            // all. Release at most once, after every authoritative key was
+            // revalidated and only when both local state and a final durable
+            // probe prove the shared entity empty. Probe failures retain the
+            // exact fence for a later recovery pass.
+            if !self.any_durable_work_may_remain(&stream_id).await {
+                self.release_claim_store_entry_under(&stream_id, fence)
+                    .await;
+            }
         }
         debug!(
             hydrated,
+            terminal_hydrated,
             expired,
-            bad_rows,
             foreign_claims,
             already_present,
-            "restored detached SM sessions from persistence"
+            "restored resumable heads and terminal SM generations from persistence"
         );
         Ok(hydrated)
     }
@@ -1263,7 +2721,7 @@ impl InMemorySmSessionRegistry {
         );
         let represented = reservations.get(&entity.id) == Some(&reservation)
             || fences.get(&entity.id) == Some(caller_fence)
-            || releases.contains(&(entity.id.clone(), caller_fence.clone()));
+            || releases.contains_key(&(entity.id.clone(), caller_fence.clone()));
         if represented {
             hydrations.insert(
                 (entity.id.clone(), caller_fence.clone(), reservation),
@@ -1300,25 +2758,44 @@ impl InMemorySmSessionRegistry {
                 .pending_claim_releases
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .contains(&(entity.id.clone(), caller_fence.clone()));
-        if !pending || !represented {
+                .contains_key(&(entity.id.clone(), caller_fence.clone()));
+        if !pending {
             self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
             return Ok(ReclaimedHydrationOutcome::LostClaim);
+        }
+        if !represented {
+            return Ok(
+                if self.complete_lost_reclaimed_claim(entity, caller_fence, reservation) {
+                    ReclaimedHydrationOutcome::LostClaim
+                } else {
+                    ReclaimedHydrationOutcome::TransientFailure
+                },
+            );
         }
 
         let outcome = self
             .hydrate_reclaimed_once(entity, caller_fence, reservation)
             .await?;
+        if outcome == ReclaimedHydrationOutcome::StaleIdentity
+            && !self.abandon_stale_reclaimed_hydration(entity, caller_fence, reservation)
+        {
+            // `StaleIdentity` is a completed-handoff contract for every
+            // caller. If local bookkeeping could not be relinquished, keep
+            // the work retryable instead of falsely reporting completion.
+            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+        }
+        if outcome == ReclaimedHydrationOutcome::LostClaim
+            && !self.complete_lost_reclaimed_claim(entity, caller_fence, reservation)
+        {
+            // A lost backend fence is terminal only after its exact local
+            // authority and retry inventory have been relinquished together.
+            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+        }
         if matches!(
             outcome,
-            ReclaimedHydrationOutcome::Hydrated
-                | ReclaimedHydrationOutcome::AlreadyPresent
-                | ReclaimedHydrationOutcome::LostClaim
+            ReclaimedHydrationOutcome::Hydrated | ReclaimedHydrationOutcome::AlreadyPresent
         ) {
             self.clear_pending_reclaimed_hydration(entity, caller_fence, reservation);
-        }
-        if outcome == ReclaimedHydrationOutcome::LostClaim {
-            self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
         }
         Ok(outcome)
     }
@@ -1334,6 +2811,124 @@ impl InMemorySmSessionRegistry {
         }
     }
 
+    /// Hand stale-incarnation hydration back to global orphan discovery.
+    ///
+    /// Identity rotation makes the local work item permanently unable to
+    /// publish under `fence`. Remove only that exact hydration, its matching
+    /// operation reservation, its matching active fence, and any promotion
+    /// authority retained under that exact fence in one local critical
+    /// section. Nonterminal promotion payloads remain as unowned work, while
+    /// durably archived terminal retry carriers retire with their exact
+    /// fence. The backend claim is deliberately untouched and no pending
+    /// release is created: a fresh owner-scoped orphan pass must be able to
+    /// observe and steal the durable old-incarnation claim.
+    pub fn abandon_stale_reclaimed_hydration(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+    ) -> bool {
+        let key = (entity.id.clone(), fence.clone(), reservation);
+        let (
+            Ok(mut promotions),
+            Ok(mut retries),
+            Ok(mut reservations),
+            Ok(mut fences),
+            Ok(mut hydrations),
+        ) = (
+            self.pending_promotions.write(),
+            self.pending_promotion_retries.write(),
+            self.reclaimed_claim_reservations.write(),
+            self.claim_fences.write(),
+            self.pending_reclaimed_hydrations.write(),
+        )
+        else {
+            return false;
+        };
+        if !hydrations.contains_key(&key) {
+            return false;
+        }
+        hydrations.remove(&key);
+        if reservations.get(&entity.id) == Some(&reservation) {
+            reservations.remove(&entity.id);
+        }
+        if fences.get(&entity.id) == Some(fence) {
+            fences.remove(&entity.id);
+        }
+        for generation_id in promotions.relinquish_exact_claim_fence(&entity.id, fence) {
+            retries.remove_generation(&entity.id, generation_id);
+        }
+        drop(hydrations);
+        drop(fences);
+        drop(reservations);
+        drop(retries);
+        drop(promotions);
+        if let Some(storage) = &self.persistence {
+            let stream_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
+            storage.evict_claim_cache(&stream_id, fence);
+        }
+        true
+    }
+
+    /// Complete a reclaimed hydration whose exact backend fence was lost.
+    ///
+    /// The caller holds the stream shard. Remove only bookkeeping tied to the
+    /// exact `(stream, fence, reservation)` operation: its hydration work,
+    /// matching reservation, active or pending exact fence, promotion
+    /// authority, and persistence cache. The backend is deliberately
+    /// untouched because the observed fence is no longer authoritative.
+    pub fn complete_lost_reclaimed_claim(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+    ) -> bool {
+        let key = (entity.id.clone(), fence.clone(), reservation);
+        let (
+            Ok(mut promotions),
+            Ok(mut retries),
+            Ok(mut reservations),
+            Ok(mut releases),
+            Ok(mut fences),
+            Ok(mut hydrations),
+        ) = (
+            self.pending_promotions.write(),
+            self.pending_promotion_retries.write(),
+            self.reclaimed_claim_reservations.write(),
+            self.pending_claim_releases.write(),
+            self.claim_fences.write(),
+            self.pending_reclaimed_hydrations.write(),
+        )
+        else {
+            return false;
+        };
+        if !hydrations.contains_key(&key) {
+            return false;
+        }
+        hydrations.remove(&key);
+        if reservations.get(&entity.id) == Some(&reservation) {
+            reservations.remove(&entity.id);
+        }
+        if fences.get(&entity.id) == Some(fence) {
+            fences.remove(&entity.id);
+        }
+        releases.remove(&(entity.id.clone(), fence.clone()));
+        for generation_id in promotions.relinquish_exact_claim_fence(&entity.id, fence) {
+            retries.remove_generation(&entity.id, generation_id);
+        }
+        drop(hydrations);
+        drop(fences);
+        drop(releases);
+        drop(reservations);
+        drop(retries);
+        drop(promotions);
+        if let Some(storage) = &self.persistence {
+            let stream_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
+            storage.evict_claim_cache(&stream_id, fence);
+        }
+        true
+    }
+
     async fn hydrate_reclaimed_once(
         &self,
         entity: &Entity,
@@ -1347,8 +2942,7 @@ impl InMemorySmSessionRegistry {
             return Ok(ReclaimedHydrationOutcome::StaleIdentity);
         }
         let stream_id = entity.id.clone();
-
-        let present = {
+        let (current_present, any_present) = {
             let sessions = self
                 .sessions
                 .read()
@@ -1361,175 +2955,218 @@ impl InMemorySmSessionRegistry {
                 .pending_promotions
                 .read()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-            sessions.contains_key(&stream_id)
-                || claimed.contains_key(&stream_id)
-                || promotions.contains(&stream_id)
-        };
-        if present {
-            match tokio::time::timeout(
-                CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                self.claim_store
-                    .fence(entity, caller_fence.owner(), caller_fence.epoch()),
+            let current_present =
+                sessions.contains_key(&stream_id) || claimed.contains_key(&stream_id);
+            (
+                current_present,
+                current_present || promotions.contains(&stream_id),
             )
-            .await
-            {
-                Ok(Ok(true)) if self.node_identity.current() == *caller_fence.owner() => {}
-                Ok(Ok(true)) => return Ok(ReclaimedHydrationOutcome::StaleIdentity),
-                Ok(Ok(_)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
-                Ok(Err(_)) | Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
-            }
-            if !self.try_record_verified_reclaimed_fence(
-                &stream_id,
-                caller_fence.clone(),
-                reservation,
-            ) {
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-            debug!(
-                stream_id = %stream_id,
-                "hydrate_reclaimed: already present in-memory (live session, or already \
-                 hydrated by an overlapping sweep); skipping"
-            );
-            return Ok(ReclaimedHydrationOutcome::AlreadyPresent);
-        }
-
-        // FIX 5: bounded — see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s
-        // doc comment. On timeout or a lost self-reacquire, skip this
-        // entity for this pass rather than insert a session this node
-        // can no longer prove it owns; the entity remains eligible for
-        // a future sweep.
-        let epoch = match tokio::time::timeout(
+        };
+        // The caller already won this exact owner+epoch before entering the
+        // registry. Revalidate that immutable fence; never call a fresh-
+        // acquiring primitive here. If the won claim disappeared,
+        // `ensure_claimed` could mint a new epoch and leave it untracked when
+        // the caller fence no longer matched (or when its response was lost).
+        match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
             self.claim_store
-                .ensure_claimed(entity, caller_fence.owner()),
+                .fence(entity, caller_fence.owner(), caller_fence.epoch()),
         )
         .await
         {
-            Ok(Ok(epoch)) => epoch,
-            Ok(Err(
-                error @ (ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining),
-            )) => {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return Ok(ReclaimedHydrationOutcome::LostClaim),
+            Ok(Err(error)) => {
                 debug!(
                     stream_id = %stream_id,
                     %error,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed self-reacquire failed \
-                     (claim lost again since the caller's steal_stale); skipping"
-                );
-                return Ok(ReclaimedHydrationOutcome::LostClaim);
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed could not verify the \
-                     already-won claim; retaining reclaimed responsibility for repair"
+                    "hydrate_reclaimed: exact ClaimStore fence check failed"
                 );
                 return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
-            Err(_timeout) => {
-                tracing::warn!(
-                    stream_id = %stream_id,
-                    timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                    "hydrate_reclaimed: ClaimStore ensure_claimed timed out while holding \
-                     this stream's shard lock; skipping this entity for this pass"
-                );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-        };
-        if epoch != caller_fence.epoch() {
-            debug!(
-                stream_id = %stream_id,
-                expected_epoch = caller_fence.epoch().0,
-                actual_epoch = epoch.0,
-                "hydrate_reclaimed: caller work belongs to a superseded claim epoch"
-            );
-            return Ok(ReclaimedHydrationOutcome::LostClaim);
+            Err(_) => return Ok(ReclaimedHydrationOutcome::TransientFailure),
         }
+        let Some(initial_publication_guard) = self
+            .node_identity
+            .guard_if_current(caller_fence.owner())
+            .await
+        else {
+            return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+        };
         if !self.try_record_verified_reclaimed_fence(&stream_id, caller_fence.clone(), reservation)
         {
             return Ok(ReclaimedHydrationOutcome::TransientFailure);
         }
+        drop(initial_publication_guard);
         let Some(storage) = &self.persistence else {
-            return Ok(ReclaimedHydrationOutcome::MissingDurable);
+            return Ok(if any_present {
+                ReclaimedHydrationOutcome::AlreadyPresent
+            } else {
+                ReclaimedHydrationOutcome::MissingDurable
+            });
         };
 
         let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
-        let persisted = match storage.get_session(&session_id).await {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                debug!(
-                    stream_id = %stream_id,
-                    "hydrate_reclaimed: no durable row (already promoted/deleted by a \
-                     concurrent sweep); skipping"
-                );
-                return Ok(ReclaimedHydrationOutcome::MissingDurable);
-            }
-            Err(super::super::persistence::SmPersistenceError::Corrupt {
-                stream_id: corrupt_stream,
-                detail,
-            }) if corrupt_stream == session_id => {
-                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable session row");
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
-            }
-            Err(error) => {
-                debug!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: get_session failed; skipping this entity for this pass"
-                );
-                return Ok(ReclaimedHydrationOutcome::TransientFailure);
-            }
-        };
-        let unacked = match storage.list_unacked(&session_id).await {
+        // Targeted reclaim must never run the startup-global terminal scan.
+        // One claimed stream can own a current resumable head, terminal-only
+        // work, or both, so read the exact generation-keyed outbox even when
+        // the bare current row is absent.
+        let terminal_rows = match storage
+            .list_terminal_generations_for_stream(&session_id)
+            .await
+        {
             Ok(rows) => rows,
-            Err(super::super::persistence::SmPersistenceError::Corrupt {
-                stream_id: corrupt_stream,
-                detail,
-            }) if corrupt_stream == session_id => {
-                debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable unacked row");
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
-            }
             Err(error) => {
                 debug!(
                     stream_id = %stream_id,
                     %error,
-                    "hydrate_reclaimed: list_unacked failed; skipping this entity for this pass"
+                    "hydrate_reclaimed: targeted terminal-generation read failed"
                 );
                 return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
         };
-        let session = match persisted_to_detached(&persisted, &unacked) {
-            Ok(session) => session,
-            Err(error) => {
-                debug!(
-                    stream_id = %stream_id,
-                    %error,
-                    "hydrate_reclaimed: row decode failed (poison pill); skipping"
-                );
-                return self
-                    .quarantine_reclaimed_poison(
-                        storage.as_ref(),
-                        entity,
-                        caller_fence,
-                        &session_id,
-                    )
-                    .await;
+        let mut terminal_sessions = Vec::with_capacity(terminal_rows.len());
+        let mut terminal_poison_released = false;
+        for terminal_entry in terminal_rows {
+            match terminal_entry {
+                super::super::persistence::TerminalGenerationScanEntry::Persisted(terminal) => {
+                    match persisted_terminal_to_detached(&terminal) {
+                        Ok(session) => {
+                            terminal_sessions.push((session, terminal.promotion_attempts()));
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                stream_id = %stream_id,
+                                generation_id = %terminal.key().generation_id(),
+                                %error,
+                                "hydrate_reclaimed: typed terminal generation decode failed; \
+                                 retaining the shared claim for retry"
+                            );
+                            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                        }
+                    }
+                }
+                super::super::persistence::TerminalGenerationScanEntry::Corrupt { key, detail } => {
+                    match storage
+                        .quarantine_terminal_generation(&key, caller_fence)
+                        .await
+                    {
+                        Ok(()) => {
+                            terminal_poison_released = true;
+                            debug!(
+                                terminal_generation = %key,
+                                %detail,
+                                "hydrate_reclaimed: quarantined one corrupt exact terminal generation"
+                            );
+                        }
+                        Err(super::super::persistence::SmPersistenceError::NotOwner { .. }) => {
+                            return Ok(ReclaimedHydrationOutcome::LostClaim);
+                        }
+                        Err(error) => {
+                            debug!(
+                                terminal_generation = %key,
+                                %detail,
+                                %error,
+                                "hydrate_reclaimed: exact terminal poison quarantine failed"
+                            );
+                            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                        }
+                    }
+                }
             }
-        };
+        }
+
+        let mut current_session = None;
+        let mut current_poison_released = false;
+        if !current_present {
+            match storage.get_session(&session_id).await {
+                Ok(Some(persisted)) => {
+                    let unacked = match storage.list_unacked(&session_id).await {
+                        Ok(rows) => rows,
+                        Err(super::super::persistence::SmPersistenceError::Corrupt {
+                            stream_id: corrupt_stream,
+                            detail,
+                        }) if corrupt_stream == session_id => {
+                            debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable unacked row");
+                            match self
+                                .quarantine_reclaimed_poison(
+                                    storage.as_ref(),
+                                    entity,
+                                    caller_fence,
+                                    &session_id,
+                                )
+                                .await?
+                            {
+                                ReclaimedHydrationOutcome::PoisonReleased => {
+                                    current_poison_released = true;
+                                    Vec::new()
+                                }
+                                outcome => return Ok(outcome),
+                            }
+                        }
+                        Err(error) => {
+                            debug!(stream_id = %stream_id, %error, "hydrate_reclaimed: list_unacked failed");
+                            return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                        }
+                    };
+                    if !current_poison_released {
+                        current_session = match persisted_to_detached(&persisted, &unacked) {
+                            Ok(session) => Some(session),
+                            Err(error) => {
+                                debug!(stream_id = %stream_id, %error, "hydrate_reclaimed: current row decode failed");
+                                match self
+                                    .quarantine_reclaimed_poison(
+                                        storage.as_ref(),
+                                        entity,
+                                        caller_fence,
+                                        &session_id,
+                                    )
+                                    .await?
+                                {
+                                    ReclaimedHydrationOutcome::PoisonReleased => {
+                                        current_poison_released = true;
+                                        None
+                                    }
+                                    outcome => return Ok(outcome),
+                                }
+                            }
+                        };
+                    }
+                }
+                Ok(None) => {}
+                Err(super::super::persistence::SmPersistenceError::Corrupt {
+                    stream_id: corrupt_stream,
+                    detail,
+                }) if corrupt_stream == session_id => {
+                    debug!(stream_id = %stream_id, %detail, "hydrate_reclaimed: corrupt durable session row");
+                    match self
+                        .quarantine_reclaimed_poison(
+                            storage.as_ref(),
+                            entity,
+                            caller_fence,
+                            &session_id,
+                        )
+                        .await?
+                    {
+                        ReclaimedHydrationOutcome::PoisonReleased => {
+                            current_poison_released = true;
+                        }
+                        outcome => return Ok(outcome),
+                    }
+                }
+                Err(error) => {
+                    debug!(stream_id = %stream_id, %error, "hydrate_reclaimed: get_session failed");
+                    return Ok(ReclaimedHydrationOutcome::TransientFailure);
+                }
+            }
+        }
+        if !any_present && current_session.is_none() && terminal_sessions.is_empty() {
+            return Ok(if current_poison_released || terminal_poison_released {
+                ReclaimedHydrationOutcome::PoisonReleased
+            } else {
+                ReclaimedHydrationOutcome::MissingDurable
+            });
+        }
         // Every persistence read above is an await point. Re-prove both the
         // node incarnation and exact claim epoch immediately before the
         // synchronous in-memory publication.
@@ -1559,17 +3196,31 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(ReclaimedHydrationOutcome::StaleIdentity);
         };
-        {
+        let mut hydrated = false;
+        if let Some(session) = current_session {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             sessions.insert(stream_id.clone(), session);
+            hydrated = true;
         }
-        if let Ok(mut claim_fences) = self.claim_fences.write() {
-            claim_fences.insert(stream_id, caller_fence.clone());
+        for (session, promotion_attempts) in terminal_sessions {
+            hydrated |= self.retain_terminal_durable_promotion(
+                session,
+                promotion_attempts,
+                caller_fence.clone(),
+            )?;
         }
-        Ok(ReclaimedHydrationOutcome::Hydrated)
+        if hydrated {
+            Ok(ReclaimedHydrationOutcome::Hydrated)
+        } else if any_present {
+            Ok(ReclaimedHydrationOutcome::AlreadyPresent)
+        } else if current_poison_released || terminal_poison_released {
+            Ok(ReclaimedHydrationOutcome::PoisonReleased)
+        } else {
+            Ok(ReclaimedHydrationOutcome::MissingDurable)
+        }
     }
 
     async fn quarantine_reclaimed_poison(
@@ -1641,6 +3292,23 @@ impl InMemorySmSessionRegistry {
     /// future scan — owns retry until hydration succeeds, ownership is
     /// disproved, or terminal cleanup completes.
     pub async fn retry_pending_reclaimed_hydrations(&self, limit: usize) -> usize {
+        self.retry_pending_reclaimed_hydrations_observing(limit, |_| {})
+            .await
+    }
+
+    /// Retry reclaimed hydration while synchronously reporting each observed
+    /// exact backend release reached by terminal hydration cleanup. A
+    /// transfer back to a live lifecycle and backend `NotOwned` remain
+    /// metric-neutral. The observer runs immediately after the release future
+    /// completes, before this pass can reach another cancellation point.
+    pub async fn retry_pending_reclaimed_hydrations_observing<F>(
+        &self,
+        limit: usize,
+        mut observe: F,
+    ) -> usize
+    where
+        F: FnMut(super::SmClaimReleaseRetryOutcome),
+    {
         let lookups = self
             .pending_reclaimed_claim_lookups
             .read()
@@ -1672,7 +3340,7 @@ impl InMemorySmSessionRegistry {
             }
             let snapshot = match tokio::time::timeout(
                 CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-                self.claim_store.current_claim(&entity),
+                self.claim_store.current_claim_after_pending_writes(&entity),
             )
             .await
             {
@@ -1694,16 +3362,18 @@ impl InMemorySmSessionRegistry {
                 } else {
                     Ok(ReclaimedHydrationOutcome::LostClaim)
                 };
-                let terminal = matches!(
-                    outcome,
-                    Ok(ReclaimedHydrationOutcome::MissingDurable
-                        | ReclaimedHydrationOutcome::PoisonReleased
-                        | ReclaimedHydrationOutcome::StaleIdentity)
-                );
+                let terminal = outcome
+                    .as_ref()
+                    .is_ok_and(|outcome| outcome.is_release_terminal());
                 drop(stream_guard);
                 if terminal {
                     let _ = self
-                        .release_reclaimed_claim(&entity, &fence, reservation)
+                        .release_reclaimed_claim_observing(
+                            &entity,
+                            &fence,
+                            reservation,
+                            &mut observe,
+                        )
                         .await;
                 }
             } else {
@@ -1729,26 +3399,20 @@ impl InMemorySmSessionRegistry {
             .unwrap_or_default();
         for (entity, fence, reservation) in pending {
             attempted += 1;
-            match self
+            if let Ok(outcome) = self
                 .hydrate_reclaimed_typed(&entity, &fence, reservation)
                 .await
             {
-                Ok(
-                    ReclaimedHydrationOutcome::MissingDurable
-                    | ReclaimedHydrationOutcome::PoisonReleased
-                    | ReclaimedHydrationOutcome::StaleIdentity,
-                ) => {
+                if outcome.is_release_terminal() {
                     let _ = self
-                        .release_reclaimed_claim(&entity, &fence, reservation)
+                        .release_reclaimed_claim_observing(
+                            &entity,
+                            &fence,
+                            reservation,
+                            &mut observe,
+                        )
                         .await;
                 }
-                Ok(
-                    ReclaimedHydrationOutcome::Hydrated
-                    | ReclaimedHydrationOutcome::AlreadyPresent
-                    | ReclaimedHydrationOutcome::LostClaim
-                    | ReclaimedHydrationOutcome::TransientFailure,
-                )
-                | Err(_) => {}
             }
         }
         attempted
@@ -1767,6 +3431,25 @@ impl InMemorySmSessionRegistry {
         fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
     ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+        self.release_reclaimed_claim_observing(entity, fence, reservation, |_| {})
+            .await
+    }
+
+    /// Release one reclaimed exact fence while reporting only a result
+    /// returned by the backend `release_exact` call. A concurrent transfer
+    /// back to a live lifecycle returns `NotOwned` to the legacy caller but
+    /// deliberately emits no observer outcome because no backend release or
+    /// ownership proof occurred.
+    pub async fn release_reclaimed_claim_observing<F>(
+        &self,
+        entity: &Entity,
+        fence: &super::super::persistence::SmClaimFence,
+        reservation: ReclaimedClaimReservation,
+        mut observe: F,
+    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError>
+    where
+        F: FnMut(super::SmClaimReleaseRetryOutcome),
+    {
         let stream_lock = self.stream_lock(&entity.id)?;
         let _stream_guard = stream_lock.lock().await;
         match self.stream_liveness(&entity.id) {
@@ -1807,6 +3490,11 @@ impl InMemorySmSessionRegistry {
                 ));
             }
         }
+        if !self.mark_claim_release_may_complete(&entity.id, fence) {
+            return Err(SmRegistryError::Internal(
+                "release_reclaimed_claim: failed to issue-mark the exact release".to_string(),
+            ));
+        }
         let outcome = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
             self.claim_store
@@ -1816,13 +3504,10 @@ impl InMemorySmSessionRegistry {
         {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) | Err(_) => {
-                if let Ok(mut pending) = self.pending_claim_releases.write() {
-                    pending.insert((entity.id.clone(), fence.clone()));
-                }
                 return Err(SmRegistryError::Internal(
                     "release_reclaimed_claim: exact release failed and was retained for retry"
                         .to_string(),
-                ));
+                ))
             }
         };
         if let Ok(mut fences) = self.claim_fences.write() {
@@ -1838,25 +3523,35 @@ impl InMemorySmSessionRegistry {
             storage.evict_claim_cache(&session_id, fence);
         }
         self.clear_pending_reclaimed_hydration(entity, fence, reservation);
+        observe(match outcome {
+            crate::ownership::ExactReleaseOutcome::Released => {
+                super::SmClaimReleaseRetryOutcome::Released
+            }
+            crate::ownership::ExactReleaseOutcome::NotOwned => {
+                super::SmClaimReleaseRetryOutcome::Disproved
+            }
+        });
         Ok(outcome)
     }
 
-    /// Resolve an ownership CAS whose result was dropped without ever
-    /// hydrating the session locally. This is the terminal self-fence path:
-    /// a read-only claim lookup discovers whether `attempted_owner` won, and
-    /// an exact release retires only that observed generation. Until that
-    /// generation is observed, the CAS may still commit after the lookup, so
-    /// every lookup failure or non-matching snapshot keeps the local capacity
-    /// reservation and forces the caller to remain self-fenced.
+    /// Resolve an ownership CAS whose result was dropped before its claimed
+    /// durable work was classified.
+    ///
+    /// A read-only claim lookup discovers the exact epoch won by
+    /// `attempted_owner`, then normal exact-fence hydration decides whether
+    /// durable recovery work remains. Only an empty or poison-quarantined
+    /// durable inventory is released. Hydrated/live work keeps the claim, and
+    /// every lookup or hydration failure retains the local capacity
+    /// responsibility so the caller remains self-fenced.
     pub async fn retire_uncertain_reclaimed_claim(
         &self,
         entity: &Entity,
         attempted_owner: &NodeIdentity,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+    ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
             self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
-            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+            return Ok(ReclaimedHydrationOutcome::LostClaim);
         }
         let snapshot = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -1887,8 +3582,24 @@ impl InMemorySmSessionRegistry {
             attempted_owner.clone(),
             snapshot.claim_epoch,
         );
-        self.release_reclaimed_claim(entity, &fence, reservation)
-            .await
+        let outcome = self
+            .hydrate_reclaimed_typed(entity, &fence, reservation)
+            .await?;
+        match outcome {
+            ReclaimedHydrationOutcome::MissingDurable
+            | ReclaimedHydrationOutcome::PoisonReleased => {
+                self.release_reclaimed_claim(entity, &fence, reservation)
+                    .await?;
+                Ok(outcome)
+            }
+            ReclaimedHydrationOutcome::Hydrated
+            | ReclaimedHydrationOutcome::AlreadyPresent
+            | ReclaimedHydrationOutcome::LostClaim
+            | ReclaimedHydrationOutcome::StaleIdentity => Ok(outcome),
+            ReclaimedHydrationOutcome::TransientFailure => Err(SmRegistryError::Internal(
+                "retire_uncertain_reclaimed_claim: exact hydration remains transient".to_string(),
+            )),
+        }
     }
 }
 
@@ -1901,6 +3612,17 @@ pub enum ReclaimedHydrationOutcome {
     StaleIdentity,
     TransientFailure,
     PoisonReleased,
+}
+
+impl ReclaimedHydrationOutcome {
+    /// Only outcomes that prove every durable carrier absent or quarantined
+    /// authorize releasing the shared claim. A transient failure retains
+    /// local retry ownership. `StaleIdentity` instead means exact local
+    /// authority was already relinquished so global orphan discovery can
+    /// reclaim the untouched backend claim under the fresh identity.
+    pub fn is_release_terminal(self) -> bool {
+        matches!(self, Self::MissingDurable | Self::PoisonReleased)
+    }
 }
 
 impl InMemorySmSessionRegistry {
@@ -1945,6 +3667,23 @@ impl InMemorySmSessionRegistry {
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 
+    pub(super) async fn persist_delete_session_under_fence(
+        &self,
+        stream_id: &str,
+        expected_fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<(), SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(());
+        };
+        storage
+            .delete_session_under_fence(
+                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+                expected_fence,
+            )
+            .await
+            .map_err(SmRegistryError::Persistence)
+    }
+
     pub(super) async fn persist_detached_session_snapshot(
         &self,
         session: &DetachedSession,
@@ -1952,21 +3691,115 @@ impl InMemorySmSessionRegistry {
         let Some(storage) = &self.persistence else {
             return Ok(());
         };
-        let persisted = detached_to_persisted(session)?;
+        let definitely_not_committed = |error: SmRegistryError| {
+            SmRegistryError::Persistence(
+                super::super::persistence::SmPersistenceError::SnapshotDefinitelyNotCommitted(
+                    error.to_string(),
+                ),
+            )
+        };
+        let persisted = detached_to_persisted(session).map_err(&definitely_not_committed)?;
         let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
         for entry in &session.unacked_stanzas {
-            unacked_rows.push(parse_xml_to_persisted_unacked(
-                &session.stream_id,
-                entry.sequence,
-                &entry.stanza_xml,
-                entry.original_receipt_at,
-                entry.purpose,
-            )?);
+            unacked_rows.push(
+                parse_xml_to_persisted_unacked(
+                    &session.stream_id,
+                    entry.sequence,
+                    &entry.stanza_xml,
+                    entry.original_receipt_at,
+                    entry.purpose,
+                )
+                .map_err(&definitely_not_committed)?,
+            );
         }
         storage
             .store_session_atomic(persisted, unacked_rows)
             .await
-            .map_err(|e| SmRegistryError::Internal(e.to_string()))
+            .map_err(SmRegistryError::Persistence)
+    }
+
+    /// Atomically publish a resumable successor and archive its exact same-id
+    /// predecessor as terminal work. The terminal key is also the commit
+    /// marker used to reconcile an acknowledgement failure without guessing
+    /// from the bare `sm_sessions` row.
+    pub(super) async fn persist_detached_session_replacement(
+        &self,
+        successor: &DetachedSession,
+        predecessor: &DetachedSession,
+    ) -> Result<PersistDetachedReplacementOutcome, SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(PersistDetachedReplacementOutcome::Committed);
+        };
+        let definitely_not_committed = |error: SmRegistryError| {
+            SmRegistryError::Persistence(
+                super::super::persistence::SmPersistenceError::SnapshotDefinitelyNotCommitted(
+                    error.to_string(),
+                ),
+            )
+        };
+        let successor =
+            detached_to_persisted_snapshot(successor).map_err(&definitely_not_committed)?;
+        let predecessor =
+            detached_to_terminal_generation(predecessor).map_err(&definitely_not_committed)?;
+        let predecessor_key = predecessor.key().clone();
+
+        match storage
+            .replace_resumable_session_atomic(successor, Some(predecessor))
+            .await
+        {
+            Ok(()) => Ok(PersistDetachedReplacementOutcome::Committed),
+            Err(
+                error @ (super::super::persistence::SmPersistenceError::SnapshotDefinitelyNotCommitted(
+                    _,
+                ) | super::super::persistence::SmPersistenceError::NotOwner { .. }),
+            ) => Err(SmRegistryError::Persistence(error)),
+            Err(write_error) => match storage.get_terminal_generation(&predecessor_key).await {
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        terminal_key = %predecessor_key,
+                        persistence_error = %write_error,
+                        "same-id SM replacement commit was confirmed by its exact terminal marker"
+                    );
+                    Ok(PersistDetachedReplacementOutcome::Committed)
+                }
+                Err(super::super::persistence::SmPersistenceError::CorruptTerminal {
+                    key,
+                    detail,
+                }) if key == predecessor_key => {
+                    tracing::warn!(
+                        terminal_key = %predecessor_key,
+                        %detail,
+                        persistence_error = %write_error,
+                        "same-id SM replacement committed with a corrupt exact terminal marker; \
+                         retaining the valid in-memory predecessor payload for fenced promotion"
+                    );
+                    Ok(PersistDetachedReplacementOutcome::Committed)
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        terminal_key = %predecessor_key,
+                        persistence_error = %write_error,
+                        "same-id SM replacement marker is not yet visible after an ambiguous \
+                         write; parking both generations because a late commit may still publish"
+                    );
+                    Ok(PersistDetachedReplacementOutcome::PublicationUnknown(
+                        write_error,
+                    ))
+                }
+                Err(read_error) => {
+                    tracing::warn!(
+                        terminal_key = %predecessor_key,
+                        persistence_error = %write_error,
+                        reconciliation_error = %read_error,
+                        "same-id SM replacement publication remains unknown; parking both \
+                         generations until durable reconciliation or restart"
+                    );
+                    Ok(PersistDetachedReplacementOutcome::PublicationUnknown(
+                        write_error,
+                    ))
+                }
+            },
+        }
     }
 
     /// Durably delete the named unacked rows for a stream — exact
@@ -1985,6 +3818,7 @@ impl InMemorySmSessionRegistry {
     /// detached-append full snapshots that could otherwise resurrect
     /// the rows. No in-memory mutation happens here — the caller owns
     /// the drained session and drops the entries from its local copy.
+    #[cfg(test)]
     pub async fn delete_unacked_sequences(
         &self,
         stream_id: &str,
@@ -2005,6 +3839,50 @@ impl InMemorySmSessionRegistry {
             )
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    /// Delete promoted durable rows only under the exact current generation.
+    pub async fn delete_unacked_sequences_under(
+        &self,
+        lease: &super::SmSessionPromotionLease,
+        sequences: &[u32],
+    ) -> Result<u64, SmRegistryError> {
+        let expected_shard = self.stream_lock(lease.stream_id.as_str())?;
+        let _stream_guard = expected_shard.lock().await;
+        let authorized = self
+            .pending_promotions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .current_reservation_matches(
+                lease.stream_id.as_str(),
+                lease.generation_id,
+                lease.nonce,
+            );
+        if lease.authority != super::SmSessionPromotionAuthority::CurrentDurable || !authorized {
+            return Err(SmRegistryError::Internal(
+                "unacked-row delete lacks exact current-generation authority".to_string(),
+            ));
+        }
+        let Some(storage) = &self.persistence else {
+            return Ok(0);
+        };
+        if sequences.is_empty() {
+            return Ok(0);
+        }
+        let session_id = lease.stream_id.clone();
+        match lease.claim_fence.as_ref() {
+            Some(fence) => storage
+                .delete_unacked_under_fence(&session_id, sequences, fence)
+                .await
+                .map_err(SmRegistryError::Persistence),
+            None if !storage.requires_exact_claim_fence() => storage
+                .delete_unacked(&session_id, sequences)
+                .await
+                .map_err(SmRegistryError::Persistence),
+            None => Err(SmRegistryError::Internal(
+                "unacked-row delete lacks an exact captured claim fence".to_string(),
+            )),
+        }
     }
 
     pub(super) fn stream_lock(

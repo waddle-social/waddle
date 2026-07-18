@@ -5947,6 +5947,7 @@ async fn detached_invalidation_skips_muc_cleanup_when_live_replacement_exists() 
     // holds) gets invalidated.
     let detached = waddle_xmpp::stream_management::DetachedSession {
         stream_id: "stale-stream".to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
         inbound_count: 0,
@@ -6028,6 +6029,7 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
 
     let detached = waddle_xmpp::stream_management::DetachedSession {
         stream_id: "stale-stream-fresh-bind".to_string(),
+        generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
         inbound_count: 0,

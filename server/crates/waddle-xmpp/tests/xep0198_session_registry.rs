@@ -10,11 +10,13 @@ use async_trait::async_trait;
 use jid::{BareJid, FullJid, Jid};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    InMemorySmPersistence, PersistedSession, PersistedUnackedStanza, SmPersistenceError,
-    SmPersistenceStorage, SmUnackedStanzaPurpose,
+    InMemorySmPersistence, PersistedSession, PersistedSmSnapshot, PersistedTerminalGeneration,
+    PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage, SmUnackedStanzaPurpose,
+    TerminalGenerationScanEntry,
 };
 use waddle_xmpp::stream_management::{
     DetachedSession, DetachedSessionSnapshot, InMemorySmSessionRegistry, SmClaimCompletion,
+    SmSessionDrainConfirmation, SmSessionGenerationId, SmSessionPromotionAuthority,
     SmSessionRegistry, StreamManagementState,
 };
 use waddle_xmpp::Stanza;
@@ -60,6 +62,7 @@ fn live_recording_preserves_explicit_resume_barrier_purpose() {
 fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
     DetachedSession {
         stream_id: stream_id.to_string(),
+        generation_id: SmSessionGenerationId::new(),
         user_id: jid.to_string(),
         jid: jid.parse().expect("valid full jid"),
         inbound_count: 7,
@@ -79,6 +82,290 @@ fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
         presence_payloads: Vec::new(),
         pending_subscribes_flushed: false,
     }
+}
+
+#[tokio::test]
+async fn xep0198_same_id_terminal_generation_is_exclusive_and_cannot_delete_successor() {
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+
+    registry
+        .store_session(detached_session(
+            "same-id-generation",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("store first generation");
+    let displaced = registry
+        .store_session(detached_session(
+            "same-id-generation",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("store successor");
+    let terminal = displaced.into_iter().next().expect("old generation");
+
+    let lease = registry
+        .acquire_promotion_lease(&terminal)
+        .await
+        .expect("acquire terminal lease")
+        .expect("generation-keyed durable predecessor remains terminal work");
+    assert_eq!(
+        lease.authority(),
+        SmSessionPromotionAuthority::TerminalDurable
+    );
+    assert!(registry
+        .acquire_promotion_lease(&terminal)
+        .await
+        .expect("duplicate acquire")
+        .is_none());
+    drop(lease);
+
+    let mut reacquired = registry
+        .acquire_promotion_lease(&terminal)
+        .await
+        .expect("reacquire after drop")
+        .expect("drop releases exact terminal reservation");
+    assert_eq!(
+        registry.confirm_drained_under(&mut reacquired).await,
+        SmSessionDrainConfirmation::TerminalDurableConfirmed
+    );
+    assert!(persistence
+        .get_session(&SmSessionId::new("same-id-generation"))
+        .await
+        .expect("read successor")
+        .is_some());
+}
+
+#[tokio::test]
+async fn xep0198_same_id_terminal_and_successor_restart_with_exact_queue_isolation() {
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let stream_id = "same-id-terminal-restart";
+    let predecessor_generation = {
+        let registry = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+        registry
+            .store_session(detached_session(stream_id, "alice@example.test/phone"))
+            .await
+            .expect("store predecessor");
+        registry
+            .record_outbound_for_detached_stream_at(
+                stream_id,
+                6,
+                late_drain_message_xml("predecessor", "predecessor payload"),
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("record predecessor queue");
+        let predecessor_generation = registry
+            .peek_session(stream_id)
+            .await
+            .expect("peek predecessor")
+            .expect("predecessor is resumable before replacement")
+            .generation_id;
+        registry
+            .store_session(detached_session(stream_id, "alice@example.test/phone"))
+            .await
+            .expect("atomically replace predecessor");
+        registry
+            .record_outbound_for_detached_stream_at(
+                stream_id,
+                6,
+                late_drain_message_xml("successor", "successor payload"),
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("record same-sequence successor queue");
+        predecessor_generation
+    };
+
+    let restored = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    assert_eq!(
+        restored
+            .restore_from_persistence()
+            .await
+            .expect("restore successor and terminal predecessor"),
+        2
+    );
+    assert_eq!(restored.session_count().await, 1);
+    let successor = restored
+        .peek_session(stream_id)
+        .await
+        .expect("peek successor")
+        .expect("only successor remains resumable");
+    assert_eq!(successor.unacked_stanzas.len(), 1);
+    assert!(successor.unacked_stanzas[0]
+        .stanza_xml
+        .contains("successor payload"));
+    assert!(!successor.unacked_stanzas[0]
+        .stanza_xml
+        .contains("predecessor payload"));
+
+    let terminal = restored
+        .drain_expired()
+        .await
+        .expect("drain terminal predecessor")
+        .into_iter()
+        .find(|session| session.generation_id == predecessor_generation)
+        .expect("exact predecessor generation recovered");
+    assert_eq!(terminal.unacked_stanzas.len(), 1);
+    assert!(terminal.unacked_stanzas[0]
+        .stanza_xml
+        .contains("predecessor payload"));
+    assert!(!terminal.unacked_stanzas[0]
+        .stanza_xml
+        .contains("successor payload"));
+    let mut lease = restored
+        .acquire_promotion_lease(&terminal)
+        .await
+        .expect("lease terminal predecessor")
+        .expect("terminal predecessor is independently leasable");
+    assert_eq!(
+        lease.authority(),
+        SmSessionPromotionAuthority::TerminalDurable
+    );
+    assert_eq!(
+        restored.confirm_drained_under(&mut lease).await,
+        SmSessionDrainConfirmation::TerminalDurableConfirmed
+    );
+    let successor_rows = persistence
+        .list_unacked(&SmSessionId::new(stream_id))
+        .await
+        .expect("read successor queue after terminal confirmation");
+    assert_eq!(successor_rows.len(), 1);
+    assert_eq!(successor_rows[0].sequence, 6);
+    assert!(successor_rows[0]
+        .stanza
+        .to_element()
+        .children()
+        .any(|child| child.text().contains("successor payload")));
+}
+
+#[tokio::test]
+async fn xep0198_distinct_terminal_generations_can_retire_concurrently() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(detached_session(
+            "multi-terminal",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("store first");
+    let first = registry
+        .store_session(detached_session(
+            "multi-terminal",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("store second")
+        .into_iter()
+        .next()
+        .expect("first displaced");
+    let second = registry
+        .store_session(detached_session(
+            "multi-terminal",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("store third")
+        .into_iter()
+        .next()
+        .expect("second displaced");
+    let successor_generation = registry
+        .peek_session("multi-terminal")
+        .await
+        .expect("peek successor")
+        .expect("third generation remains resumable")
+        .generation_id;
+
+    // Without a persistence adapter, TerminalDurable denotes the registry's
+    // exact process-local terminal inventory. Retiring A and B must still use
+    // generation-keyed authority and cannot inspect or delete current C.
+    let mut first_lease = registry
+        .acquire_promotion_lease(&first)
+        .await
+        .expect("first lease")
+        .expect("first terminal generation");
+    let mut second_lease = registry
+        .acquire_promotion_lease(&second)
+        .await
+        .expect("second lease")
+        .expect("distinct terminal generation is independently leasable");
+    assert_eq!(
+        first_lease.authority(),
+        SmSessionPromotionAuthority::TerminalDurable
+    );
+    assert_eq!(
+        second_lease.authority(),
+        SmSessionPromotionAuthority::TerminalDurable
+    );
+    assert_eq!(
+        registry.confirm_drained_under(&mut first_lease).await,
+        SmSessionDrainConfirmation::TerminalDurableConfirmed
+    );
+    assert_eq!(
+        registry.confirm_drained_under(&mut second_lease).await,
+        SmSessionDrainConfirmation::TerminalDurableConfirmed
+    );
+    assert_eq!(
+        registry
+            .peek_session("multi-terminal")
+            .await
+            .expect("peek successor after terminal retirement")
+            .expect("terminal retirement cannot delete current successor")
+            .generation_id,
+        successor_generation
+    );
+}
+
+#[tokio::test]
+async fn xep0198_current_terminal_retirement_clears_shutdown_work_and_allows_same_id_store() {
+    let registry = InMemorySmSessionRegistry::new();
+    let mut session = detached_session("terminal-current", "alice@example.test/phone");
+    session.max_resume_time = Some(0);
+    registry
+        .store_session(session)
+        .await
+        .expect("store expired current generation");
+    let drained = registry.drain_expired().await.expect("drain current");
+    assert_eq!(drained.len(), 1);
+    let mut lease = registry
+        .acquire_promotion_lease(&drained[0])
+        .await
+        .expect("lease current")
+        .expect("current promotion token");
+    assert_eq!(
+        lease.authority(),
+        SmSessionPromotionAuthority::CurrentDurable
+    );
+    assert!(registry
+        .drain_all_for_shutdown()
+        .await
+        .expect("active lease is skipped")
+        .is_empty());
+    assert_eq!(
+        registry
+            .pending_shutdown_recovery_count()
+            .expect("recovery count"),
+        1,
+        "an active terminal lease must keep shutdown nonquiet"
+    );
+    assert_eq!(
+        registry.confirm_drained_under(&mut lease).await,
+        SmSessionDrainConfirmation::CurrentDurableConfirmed
+    );
+    assert_eq!(
+        registry
+            .pending_shutdown_recovery_count()
+            .expect("empty recovery count"),
+        0
+    );
+    registry
+        .store_session(detached_session(
+            "terminal-current",
+            "alice@example.test/phone",
+        ))
+        .await
+        .expect("terminal confirmation removed current publication marker");
 }
 
 fn expiring_detached_session(stream_id: &str, jid: &str) -> DetachedSession {
@@ -199,12 +486,10 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
     }
 }
 
-/// Storage double that mislabels rows: its
-/// `list_all_sessions_with_unacked` attaches a foreign-stream
-/// unacked stanza to every session's queue. Models the class of
-/// grouping bug fixed in #1157 arising again in any backend, so the
-/// registry-side defense can be exercised through the public
-/// restore path.
+/// Storage double that mislabels rows returned by the exact unacked-queue
+/// read. Models the class of grouping bug fixed in #1157 arising again in any
+/// backend, so the registry-side defense can be exercised through the public
+/// post-claim restore path.
 struct MislabelingStore {
     inner: InMemorySmPersistence,
 }
@@ -253,7 +538,16 @@ impl SmPersistenceStorage for MislabelingStore {
         &self,
         stream_id: &SmSessionId,
     ) -> Result<Vec<PersistedUnackedStanza>, SmPersistenceError> {
-        self.inner.list_unacked(stream_id).await
+        let mut unacked = self.inner.list_unacked(stream_id).await?;
+        let to: FullJid = "mallory@example.test/phone".parse().expect("valid jid");
+        unacked.push(PersistedUnackedStanza {
+            stream_id: SmSessionId::new("attacker-stream"),
+            sequence: 99,
+            stanza: Box::new(chat_stanza(&to, "leaked secret")),
+            original_receipt_at: chrono::Utc::now(),
+            purpose: SmUnackedStanzaPurpose::Application,
+        });
+        Ok(unacked)
     }
 
     async fn list_expired_sessions(
@@ -265,6 +559,30 @@ impl SmPersistenceStorage for MislabelingStore {
 
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
         self.inner.list_all_sessions().await
+    }
+
+    async fn replace_resumable_session_atomic(
+        &self,
+        successor: PersistedSmSnapshot,
+        displaced_same_id: Option<PersistedTerminalGeneration>,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner
+            .replace_resumable_session_atomic(successor, displaced_same_id)
+            .await
+    }
+
+    async fn store_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner.store_session_atomic(session, unacked).await
+    }
+
+    async fn list_terminal_generations(
+        &self,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        self.inner.list_terminal_generations().await
     }
 
     async fn list_all_sessions_with_unacked(
@@ -838,7 +1156,7 @@ async fn xep0198_drain_expired_does_not_delete_durable_row_until_confirmed() {
     );
 
     // Confirm: now the durable row is deleted.
-    registry.confirm_drained("stream-drain-no-delete").await;
+    registry.confirm_drained(&drained[0]).await;
     let after = persistence
         .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
             "stream-drain-no-delete",
@@ -890,7 +1208,7 @@ async fn xep0198_drain_all_for_shutdown_does_not_delete_durable_row_until_confir
          so restart can restore it (PR #346 Copilot review)"
     );
 
-    registry.confirm_drained("stream-shutdown-no-delete").await;
+    registry.confirm_drained(&drained[0]).await;
     let after = persistence
         .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
             "stream-shutdown-no-delete",

@@ -2245,26 +2245,27 @@ mod tests {
         .expect("force-expire row");
     }
 
-    async fn seed_detached_sm_session_row(db: &crate::db::Database, stream_id: &str) {
+    async fn seed_terminal_sm_generation_row(db: &crate::db::Database, stream_id: &str) {
         let conn = db.guard().await.expect("guard");
         conn.execute(
             r#"
-            INSERT INTO sm_sessions (
-                stream_id, user_id, full_jid, inbound_count, outbound_count,
-                last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms,
-                carbons_enabled, roster_interested, blocklist_interested,
-                presence_available, presence_priority
-            ) VALUES (?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
-            ON CONFLICT (stream_id) DO NOTHING
+            INSERT INTO sm_terminal_generations (
+                stream_id, generation_id, user_id, full_jid, inbound_count,
+                outbound_count, last_acked, max_resume_secs, detached_at_ms,
+                max_resume_duration_ms, carbons_enabled, roster_interested,
+                blocklist_interested, presence_available, presence_priority
+            ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL, 0, 60000, 0, 0, 0, 0, 0)
+            ON CONFLICT (stream_id, generation_id) DO NOTHING
             "#,
             crate::db_params![
                 stream_id.to_string(),
+                "self-fence-terminal-generation".to_string(),
                 "alice".to_string(),
                 "alice@example.com/web".to_string(),
             ],
         )
         .await
-        .expect("seed sm_sessions row");
+        .expect("seed sm_terminal_generations row");
     }
 
     async fn wait_until(mut condition: impl FnMut() -> bool, step: Duration, deadline: Duration) {
@@ -3569,7 +3570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fix4_inline_post_fence_reclaim_hydrates_this_nodes_own_expired_sm_session_claims() {
+    async fn inline_post_fence_reclaim_hydrates_terminal_generation_claims() {
         use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
         use crate::db::{
             Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE,
@@ -3590,8 +3591,24 @@ mod tests {
         .expect("open test postgres");
         let store = PostgresClaimStore::new(db.clone());
         store.ensure_schema().await.expect("ensure schema");
+        crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+            db.clone(),
+            Arc::new(PostgresClaimStore::new(db.clone())),
+            SharedNodeIdentity::new(NodeIdentity::new(
+                format!("self-fence-schema-{}", uuid::Uuid::new_v4()),
+                uuid::Uuid::new_v4().to_string(),
+            )),
+        )
+        .await
+        .expect("ensure SM persistence schema");
         {
             let conn = db.guard().await.expect("guard");
+            conn.execute("DELETE FROM sm_terminal_unacked", ())
+                .await
+                .expect("clean terminal unacked rows");
+            conn.execute("DELETE FROM sm_terminal_generations", ())
+                .await
+                .expect("clean terminal generations");
             conn.execute("DELETE FROM clustering_claims", ())
                 .await
                 .expect("clean claims");
@@ -3609,15 +3626,14 @@ mod tests {
             .await
             .expect("register initial identity");
 
-        // Seed an SM-session claim owned by the identity that is about to
-        // self-fence — standing in for a session this node detached and
-        // self-claimed before the fence (deviation 29's "claim held
-        // continuously" invariant).
+        // Seed terminal-generation work under an SM-session claim owned by
+        // the identity that is about to self-fence. Terminal-only work must
+        // remain visible to the same inline recovery path as resumable state.
         let entity = Entity::new(
             waddle_xmpp::ownership::EntityType::SmSession,
             format!("stream-fix4-{}", uuid::Uuid::new_v4()),
         );
-        seed_detached_sm_session_row(&db, &entity.id).await;
+        seed_terminal_sm_generation_row(&db, &entity.id).await;
         store
             .acquire(&entity, &initial_identity)
             .await
@@ -3703,8 +3719,8 @@ mod tests {
         assert_eq!(
             hydrated.lock().expect("lock").as_slice(),
             std::slice::from_ref(&entity),
-            "the inline post-fence reclaim must hydrate this node's own just-expired \
-             identity's sm_session claim, not leave it for the general reaper's slower cadence"
+            "the inline post-fence reclaim must hydrate this node's terminal-generation \
+             claim, not leave it for the general reaper's slower cadence"
         );
         assert!(
             !stale_hydration_observed.load(Ordering::SeqCst),

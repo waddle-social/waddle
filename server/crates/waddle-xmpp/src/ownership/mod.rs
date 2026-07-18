@@ -594,15 +594,20 @@ pub trait ClaimStore: Send + Sync {
     /// call.
     async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError>;
 
-    /// Observe a claim only after any detached write already mutating that
-    /// claim row has committed or rolled back. Terminal recovery uses this
-    /// as an ordering barrier after cancellation may have dropped a steal
+    /// Observe a claim only after any detached per-entity mutation already
+    /// in flight has committed or rolled back. This includes a first acquire
+    /// inserting a claim while no committed row exists yet, not only writes
+    /// that update or delete an existing row. Terminal recovery uses this as
+    /// an ordering barrier after cancellation may have dropped the mutation
     /// future while its backend statement remained in flight.
     ///
     /// In-process stores execute claim mutations synchronously and therefore
     /// need no stronger operation than [`Self::current_claim`]. Stores that
-    /// can outlive a dropped future must override this method with a row-lock
-    /// or equivalent serialization barrier.
+    /// can outlive a dropped future must override this method with an
+    /// absent-key-safe serialization barrier. At READ COMMITTED, a blocking
+    /// lock statement followed by a separate lookup statement in the same
+    /// transaction is one valid shape: the lookup then receives a fresh
+    /// post-wait snapshot. A row lock alone cannot cover an absent claim.
     async fn current_claim_after_pending_writes(
         &self,
         entity: &Entity,

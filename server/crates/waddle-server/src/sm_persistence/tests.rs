@@ -34,16 +34,27 @@ fn fixture_session(stream_id: &str) -> PersistedSession {
 }
 
 fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
+    fixture_unacked_with_body(stream_id, sequence, &format!("m{sequence}"))
+}
+
+fn fixture_unacked_with_body(stream_id: &str, sequence: u32, body: &str) -> PersistedUnackedStanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message
         .bodies
-        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
+        .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     PersistedUnackedStanza {
         stream_id: SmSessionId::new(stream_id),
         sequence,
         stanza: Box::new(Stanza::Message(message)),
         original_receipt_at: fixed_time(),
         purpose: SmUnackedStanzaPurpose::Application,
+    }
+}
+
+fn message_body(row: &PersistedUnackedStanza) -> Option<&str> {
+    match row.stanza.as_ref() {
+        Stanza::Message(message) => message.bodies.values().next().map(String::as_str),
+        Stanza::Iq(_) | Stanza::Presence(_) => None,
     }
 }
 
@@ -60,6 +71,47 @@ async fn clustering_refuses_portable_sm_persistence() {
     assert!(matches!(
         error,
         SmPersistenceError::ClusterRequiresPostgres { .. }
+    ));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustering_rejects_sm_colocation_mismatch_before_network_open() {
+    let global_db = crate::db::Database::in_memory("cluster-sm-colocation-rejected")
+        .await
+        .expect("in-memory global database");
+    let unreachable_postgres = "postgres://127.0.0.1:1/must-not-connect";
+    let error = match open_for_cluster_mode(Some(unreachable_postgres), true, None, &global_db)
+        .await
+    {
+        Ok(_) => panic!("co-location mismatch must fail before opening the configured database"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SmPersistenceError::ClusterColocationMismatch { .. }
+    ));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustering_rejects_missing_claim_handles_for_same_postgres_dsn() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let global_db = crate::db::Database::from_config(
+        "cluster-sm-missing-handles",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, database_url.clone()),
+    )
+    .await
+    .expect("open test Postgres");
+    let error = match open_for_cluster_mode(Some(&database_url), true, None, &global_db).await {
+        Ok(_) => panic!("cluster mode requires live claim handles"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SmPersistenceError::ClusterClaimHandlesUnavailable
     ));
 }
 
@@ -802,6 +854,11 @@ async fn poison_session_rows_do_not_leak_into_preceding_sessions_queue() {
         .await
         .expect("corrupt beta session row");
 
+    assert_eq!(
+        storage.list_session_ids().await.unwrap(),
+        vec![SmSessionId::new("alpha"), SmSessionId::new("beta")],
+        "key-only discovery must retain a stream whose payload is corrupt"
+    );
     let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
     // The poison group is fully dropped...
     assert_eq!(grouped.len(), 1);
@@ -812,6 +869,32 @@ async fn poison_session_rows_do_not_leak_into_preceding_sessions_queue() {
     assert_eq!(unacked.len(), 1);
     assert_eq!(unacked[0].sequence, 1);
     assert_eq!(unacked[0].stream_id.as_str(), "alpha");
+}
+
+#[tokio::test]
+async fn session_id_scan_fails_closed_on_unreadable_identity() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("readable-id"))
+        .await
+        .unwrap();
+    let unreadable = "x".repeat(waddle_xmpp::pending_delivery::SM_SESSION_ID_MAX_LEN + 1);
+    storage
+        .execute(
+            "UPDATE sm_sessions SET stream_id = ? WHERE stream_id = ?",
+            crate::db_params![unreadable, "readable-id".to_string()],
+        )
+        .await
+        .expect("corrupt current session identity");
+
+    let error = storage
+        .list_session_ids()
+        .await
+        .expect_err("an unreadable durable identity must fail discovery closed");
+    assert!(matches!(
+        error,
+        SmPersistenceError::Other(detail) if detail.contains("unreadable SM session identity")
+    ));
 }
 
 /// Regression for #456: existing Postgres SM tables created before
@@ -923,4 +1006,371 @@ async fn delete_unacked_removes_only_named_sequences_for_stream() {
         .await
         .unwrap();
     assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn atomic_same_id_replacement_keeps_terminal_and_resumable_queues_independent() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("same-id-sql");
+    storage
+        .store_session_atomic(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked_with_body(
+                stream_id.as_str(),
+                1,
+                "predecessor",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.record_promotion_failure(&stream_id).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        storage.record_promotion_failure(&stream_id).await.unwrap(),
+        2
+    );
+
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let mut terminal_unacked = fixture_unacked_with_body(stream_id.as_str(), 1, "predecessor");
+    terminal_unacked.purpose = SmUnackedStanzaPurpose::ResumeBarrier;
+    let predecessor = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), vec![terminal_unacked])
+            .unwrap(),
+    )
+    .unwrap();
+    let successor = PersistedSmSnapshot::new(
+        fixture_session(stream_id.as_str()),
+        vec![fixture_unacked_with_body(
+            stream_id.as_str(),
+            1,
+            "successor",
+        )],
+    )
+    .unwrap();
+    storage
+        .replace_resumable_session_atomic(successor, Some(predecessor))
+        .await
+        .unwrap();
+
+    let current = storage.list_unacked(&stream_id).await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(message_body(&current[0]), Some("successor"));
+    let terminal = storage
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .expect("terminal predecessor");
+    assert_eq!(terminal.promotion_attempts(), 2);
+    assert_eq!(terminal.snapshot().unacked().len(), 1);
+    assert_eq!(
+        terminal.snapshot().unacked()[0].purpose,
+        SmUnackedStanzaPurpose::ResumeBarrier,
+        "terminal archival must preserve the typed replay policy"
+    );
+    assert_eq!(
+        message_body(&terminal.snapshot().unacked()[0]),
+        Some("predecessor")
+    );
+    assert_eq!(
+        storage
+            .list_terminal_generations_for_stream(&stream_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(storage.has_durable_work(&stream_id).await.unwrap());
+
+    // Retry accounting and tombstone pruning are generation-exact.
+    assert_eq!(
+        storage.record_promotion_failure(&stream_id).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        storage
+            .record_terminal_promotion_failure(&key)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        storage.delete_terminal_unacked(&key, &[1]).await.unwrap(),
+        1
+    );
+    assert!(storage
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .snapshot()
+        .unacked()
+        .is_empty());
+    assert_eq!(
+        message_body(&storage.list_unacked(&stream_id).await.unwrap()[0]),
+        Some("successor")
+    );
+}
+
+#[tokio::test]
+async fn failed_terminal_archive_rolls_back_successor_and_predecessor_together() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("terminal-rollback");
+    storage
+        .store_session_atomic(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked_with_body(stream_id.as_str(), 1, "original")],
+        )
+        .await
+        .unwrap();
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let predecessor = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(
+            fixture_session(stream_id.as_str()),
+            vec![
+                fixture_unacked_with_body(stream_id.as_str(), 1, "duplicate-one"),
+                fixture_unacked_with_body(stream_id.as_str(), 1, "duplicate-two"),
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let successor = PersistedSmSnapshot::new(
+        fixture_session(stream_id.as_str()),
+        vec![fixture_unacked_with_body(
+            stream_id.as_str(),
+            1,
+            "successor",
+        )],
+    )
+    .unwrap();
+
+    let result = storage
+        .replace_resumable_session_atomic(successor, Some(predecessor))
+        .await;
+    assert!(matches!(
+        result,
+        Err(SmPersistenceError::SnapshotDefinitelyNotCommitted(_))
+    ));
+    assert!(storage
+        .get_terminal_generation(&key)
+        .await
+        .unwrap()
+        .is_none());
+    let current = storage.list_unacked(&stream_id).await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(message_body(&current[0]), Some("original"));
+}
+
+#[tokio::test]
+async fn targeted_terminal_listing_and_durable_work_cover_terminal_only_streams() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut keys = Vec::new();
+    for stream in ["target-a", "target-b"] {
+        let stream_id = SmSessionId::new(stream);
+        let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+        let terminal = PersistedTerminalGeneration::new(
+            key.clone(),
+            PersistedSmSnapshot::new(fixture_session(stream), vec![fixture_unacked(stream, 1)])
+                .unwrap(),
+        )
+        .unwrap();
+        storage
+            .replace_resumable_session_atomic(
+                PersistedSmSnapshot::new(fixture_session(stream), Vec::new()).unwrap(),
+                Some(terminal),
+            )
+            .await
+            .unwrap();
+        keys.push(key);
+    }
+
+    assert_eq!(storage.list_terminal_generations().await.unwrap().len(), 2);
+    assert_eq!(
+        storage
+            .list_terminal_generations_for_stream(&SmSessionId::new("target-a"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(storage
+        .list_terminal_generations_for_stream(&SmSessionId::new("missing"))
+        .await
+        .unwrap()
+        .is_empty());
+
+    let stream_id = SmSessionId::new("target-a");
+    storage.delete_session(&stream_id).await.unwrap();
+    assert!(
+        storage.has_durable_work(&stream_id).await.unwrap(),
+        "terminal-only work must retain the bare stream claim"
+    );
+    storage.delete_terminal_generation(&keys[0]).await.unwrap();
+    assert!(!storage.has_durable_work(&stream_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn terminal_scan_surfaces_parseable_poison_with_healthy_sibling() {
+    use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("terminal-siblings");
+    let mut keys = Vec::new();
+    for body in ["healthy-terminal", "poison-terminal"] {
+        let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+        let terminal = PersistedTerminalGeneration::new(
+            key.clone(),
+            PersistedSmSnapshot::new(
+                fixture_session(stream_id.as_str()),
+                vec![fixture_unacked_with_body(stream_id.as_str(), 1, body)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        storage
+            .replace_resumable_session_atomic(
+                PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), Vec::new()).unwrap(),
+                Some(terminal),
+            )
+            .await
+            .unwrap();
+        keys.push(key);
+    }
+    let poison_key = &keys[1];
+    storage
+        .execute(
+            "UPDATE sm_terminal_unacked SET purpose = ?, stanza_xml = ? \
+             WHERE stream_id = ? AND generation_id = ?",
+            crate::db_params![
+                "unknown-purpose".to_string(),
+                "not xml <<<".to_string(),
+                poison_key.stream_id().as_str().to_string(),
+                poison_key.generation_id().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let recovered = storage.list_terminal_generations().await.unwrap();
+    assert_eq!(recovered.len(), 2);
+    assert!(recovered.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Persisted(terminal) if terminal.key() == &keys[0]
+    )));
+    assert!(recovered.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Corrupt { key, detail }
+            if key == poison_key && detail.contains("unknown value")
+    )));
+
+    let targeted = storage
+        .list_terminal_generations_for_stream(&stream_id)
+        .await
+        .unwrap();
+    assert_eq!(targeted.len(), 2);
+    assert!(targeted.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Persisted(terminal) if terminal.key() == &keys[0]
+    )));
+    assert!(targeted.iter().any(|entry| matches!(
+        entry,
+        TerminalGenerationScanEntry::Corrupt { key, .. } if key == poison_key
+    )));
+
+    let error = storage
+        .get_terminal_generation(poison_key)
+        .await
+        .expect_err("an exact read must expose the corrupt generation");
+    assert!(matches!(
+        error,
+        SmPersistenceError::CorruptTerminal { key, .. } if &key == poison_key
+    ));
+
+    storage.delete_session(&stream_id).await.unwrap();
+    storage.delete_terminal_generation(&keys[0]).await.unwrap();
+    assert!(
+        storage.has_durable_work(&stream_id).await.unwrap(),
+        "a corrupt but exactly identifiable generation remains durable work"
+    );
+    let remaining = storage
+        .list_terminal_generations_for_stream(&stream_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        remaining.as_slice(),
+        [TerminalGenerationScanEntry::Corrupt { key, .. }] if key == poison_key
+    ));
+
+    let fence = SmClaimFence::new(NodeIdentity::new("node", "epoch"), ClaimEpoch(1));
+    storage
+        .quarantine_terminal_generation(poison_key, &fence)
+        .await
+        .unwrap();
+    assert!(storage
+        .get_terminal_generation(poison_key)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!storage.has_durable_work(&stream_id).await.unwrap());
+    assert!(storage
+        .list_terminal_generations()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn unreadable_terminal_generation_identity_fails_recovery_closed() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("invalid-terminal-identity");
+    let key = SmTerminalGenerationKey::new(stream_id.clone(), SmSessionGenerationId::new());
+    let terminal = PersistedTerminalGeneration::new(
+        key.clone(),
+        PersistedSmSnapshot::new(
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked(stream_id.as_str(), 1)],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    storage
+        .replace_resumable_session_atomic(
+            PersistedSmSnapshot::new(fixture_session(stream_id.as_str()), Vec::new()).unwrap(),
+            Some(terminal),
+        )
+        .await
+        .unwrap();
+    for table in ["sm_terminal_unacked", "sm_terminal_generations"] {
+        storage
+            .execute(
+                &format!(
+                    "UPDATE {table} SET generation_id = ? \
+                     WHERE stream_id = ? AND generation_id = ?"
+                ),
+                crate::db_params![
+                    "not-a-uuid".to_string(),
+                    stream_id.as_str().to_string(),
+                    key.generation_id().to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    let error = storage
+        .list_terminal_generations()
+        .await
+        .expect_err("unkeyable terminal work must not be silently abandoned");
+    assert!(matches!(
+        error,
+        SmPersistenceError::CorruptTerminalIdentity {
+            stream_id: corrupt_stream,
+            ..
+        } if corrupt_stream == stream_id
+    ));
 }

@@ -66,12 +66,13 @@ pub(crate) use flush::FLUSH_BATCH_SIZE;
 /// `sm_persistence::open_for_cluster_mode`'s identical
 /// co-location-then-construct pattern, one table over.
 ///
-/// When clustering is enabled AND the resolved `database_url` is a
-/// Postgres DSN, the co-location invariant is checked BEFORE anything
-/// else: the resolved URL must be an EXACT string match for
+/// When clustering is enabled, an explicit Postgres `database_url`, exact
+/// co-location, and live claim/identity handles are mandatory. These
+/// requirements are checked BEFORE this storage is opened: the resolved URL
+/// must be an EXACT string match for
 /// `global_db.database_url()` (deliberately no DSN normalization — see
 /// `sm_persistence::open_for_cluster_mode`'s identical comment) — the
-/// fencing `SELECT ... FOR SHARE` [`DatabasePendingDeliveryStorage::insert_fenced`]
+/// fencing `SELECT ... FOR SHARE` used by exact-fence pending mutations
 /// issues targets `clustering_claims`, which only exists in the
 /// clustering global database. A mismatch fails startup with
 /// [`waddle_xmpp::pending_delivery::storage::PendingStorageError::ClusterColocationMismatch`]
@@ -79,11 +80,9 @@ pub(crate) use flush::FLUSH_BATCH_SIZE;
 /// silently NOT fencing) against a table that may not exist wherever
 /// `database_url` actually points.
 ///
-/// When clustering is disabled, `database_url` is not a
-/// `postgres://`/`postgresql://` DSN, or the clustering subsystem
-/// produced no live `ClaimStore`/identity handles, this is exactly
-/// [`DatabasePendingDeliveryStorage::open`] + `quota` — no fencing
-/// attached, the unfenced path exactly as before.
+/// When clustering is disabled, this is exactly
+/// [`DatabasePendingDeliveryStorage::open`] + `quota`, with no fencing
+/// attached. A clustered request never falls back to that unfenced path.
 pub async fn open_for_cluster_mode(
     database_url: Option<&str>,
     quota: waddle_xmpp::pending_delivery::QuotaPolicy,
@@ -94,16 +93,22 @@ pub async fn open_for_cluster_mode(
     )>,
     global_db: &Database,
 ) -> Result<DatabasePendingDeliveryStorage, PendingStorageError> {
-    let storage = DatabasePendingDeliveryStorage::open(database_url, quota).await?;
     #[cfg(feature = "clustering")]
     {
-        let resolved_url = database_url
-            .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
-        if let (true, Some(resolved_url)) = (clustering_enabled, resolved_url) {
+        if clustering_enabled {
+            let Some(resolved_url) = database_url
+                .filter(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
+            else {
+                return Err(PendingStorageError::ClusterDatabaseRequired {
+                    configured_database_url: database_url
+                        .map(crate::db::redact_database_url)
+                        .unwrap_or_else(|| "<unset>".to_string()),
+                });
+            };
             // FIX 3 — co-location invariant, checked before this storage's
             // fencing is ever attached: clustered pending_delivery and the
             // clustering claims tables must live in the same Postgres
-            // database, or `insert_fenced`'s fencing check would run
+            // database, or exact-fence checks would run
             // against a `clustering_claims` table that does not exist in
             // this storage's own database.
             if resolved_url != global_db.database_url() {
@@ -112,23 +117,21 @@ pub async fn open_for_cluster_mode(
                     global_database_url: crate::db::redact_database_url(global_db.database_url()),
                 });
             }
-            if let Some((claim_store, node_identity)) = claim_pair {
-                return Ok(storage.with_cluster_fencing(claim_store, node_identity));
-            }
-            tracing::warn!(
-                "clustering.enabled with a Postgres pending_delivery database URL, but the \
-                 clustering subsystem produced no live ClaimStore/NodeIdentity handles; \
-                 falling back to the unfenced Q6 promotion insert path. This should only \
-                 happen if clustering startup itself failed before this point (which fails \
-                 the server boot), so seeing this warning indicates a wiring bug."
-            );
+            let Some((_claim_store, node_identity)) = claim_pair else {
+                return Err(PendingStorageError::ClusterClaimHandlesMissing);
+            };
+            let storage = DatabasePendingDeliveryStorage::open(Some(resolved_url), quota).await?;
+            return Ok(storage.with_cluster_fencing(node_identity));
         }
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (clustering_enabled, claim_pair, global_db);
+        let _ = (&claim_pair, global_db);
+        if clustering_enabled {
+            return Err(PendingStorageError::ClusteringFeatureUnavailable);
+        }
     }
-    Ok(storage)
+    DatabasePendingDeliveryStorage::open(database_url, quota).await
 }
 
 #[cfg(test)]

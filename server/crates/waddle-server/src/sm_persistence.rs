@@ -16,15 +16,17 @@ use jid::FullJid;
 use tracing::{debug, info, instrument};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedSession, PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
-    SmUnackedStanzaPurpose,
+    PersistedSession, PersistedSmSnapshot, PersistedTerminalGeneration, PersistedUnackedStanza,
+    SmPersistenceError, SmPersistenceStorage, SmTerminalGenerationKey, SmUnackedStanzaPurpose,
+    TerminalGenerationScanEntry,
 };
+use waddle_xmpp::stream_management::SmSessionGenerationId;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 
-mod atomic_store;
+pub(crate) mod atomic_store;
 /// `pub(crate)` (rather than private, the norm for this module's
 /// siblings) so ADR-0017 Phase 3 Slice 4's `PostgresFencedSmPersistence`
 /// (`crate::sm_persistence_fenced`, a sibling top-level module — not a
@@ -35,10 +37,12 @@ mod atomic_store;
 pub(crate) mod codec;
 mod joined_sessions;
 mod schema;
+pub(crate) mod terminal_generations;
 
 use codec::{
-    decode_session, decode_unacked, decode_unacked_join_row, serialize_presence_payloads,
-    serialize_stanza, show_wire_str, unacked_purpose_wire_str,
+    decode_session, decode_session_id, decode_unacked, decode_unacked_join_row,
+    decode_unacked_parts, serialize_presence_payloads, serialize_stanza, show_wire_str,
+    unacked_purpose_wire_str,
 };
 
 /// Per-stream insert/update mutex map. Serializes writes for the same
@@ -477,6 +481,21 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         Ok(out)
     }
 
+    async fn list_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut rows = self
+            .query("SELECT stream_id FROM sm_sessions ORDER BY stream_id", ())
+            .await?;
+        let mut stream_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            stream_ids.push(decode_session_id(&row)?);
+        }
+        Ok(stream_ids)
+    }
+
     /// Single-query JOIN that fetches every persisted SM session
     /// AND its unacked queue in one round-trip (issue #209 PR #405).
     async fn list_all_sessions_with_unacked(
@@ -495,6 +514,60 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         atomic_store::store_session_atomic(self, session, unacked).await
+    }
+
+    async fn replace_resumable_session_atomic(
+        &self,
+        successor: PersistedSmSnapshot,
+        displaced_same_id: Option<PersistedTerminalGeneration>,
+    ) -> Result<(), SmPersistenceError> {
+        atomic_store::replace_resumable_session_atomic(self, successor, displaced_same_id).await
+    }
+
+    async fn get_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<Option<PersistedTerminalGeneration>, SmPersistenceError> {
+        terminal_generations::get(self, key).await
+    }
+
+    async fn list_terminal_generations(
+        &self,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        terminal_generations::list_all(self).await
+    }
+
+    async fn list_terminal_generations_for_stream(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<TerminalGenerationScanEntry>, SmPersistenceError> {
+        terminal_generations::list_for_stream(self, stream_id).await
+    }
+
+    async fn delete_terminal_generation(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<(), SmPersistenceError> {
+        terminal_generations::delete(self, key).await
+    }
+
+    async fn delete_terminal_unacked(
+        &self,
+        key: &SmTerminalGenerationKey,
+        sequences: &[u32],
+    ) -> Result<u64, SmPersistenceError> {
+        terminal_generations::delete_unacked(self, key, sequences).await
+    }
+
+    async fn record_terminal_promotion_failure(
+        &self,
+        key: &SmTerminalGenerationKey,
+    ) -> Result<u32, SmPersistenceError> {
+        terminal_generations::record_failure(self, key).await
+    }
+
+    async fn has_durable_work(&self, stream_id: &SmSessionId) -> Result<bool, SmPersistenceError> {
+        terminal_generations::has_durable_work(self, stream_id).await
     }
 }
 

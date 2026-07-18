@@ -5253,6 +5253,7 @@ mod tests {
             .sm_session_registry
             .store_session(DetachedSession {
                 stream_id: detached_stream.to_string(),
+                generation_id: waddle_xmpp::stream_management::SmSessionGenerationId::new(),
                 user_id: target_bare().to_string(),
                 jid: target_full(),
                 inbound_count: 0,
