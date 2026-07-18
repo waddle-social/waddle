@@ -5,6 +5,7 @@ import { useDirectMessages } from "../src/dms/messages";
 import { useChannelMessages } from "../src/channels/messages";
 import { BrowserXmppClient as BrowserXmppClientBase, roomBareJidFor, type DmConversationScope, type InboxEntry, type LiveDmMessage, type RoomActivityEvent } from "../src/lib/xmpp-client";
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
+import type { QueueDepthTelemetry } from "../src/lib/xmpp/client-events";
 import { committedOrThrow } from "../src/lib/xmpp-runtime/durable-contract";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
@@ -66,6 +67,13 @@ function session(partial: Partial<WaddleSession> = {}): WaddleSession {
 
 function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function latestQueueDepth(
+  depths: readonly QueueDepthTelemetry[],
+  kind: QueueDepthTelemetry["kind"],
+): QueueDepthTelemetry | undefined {
+  return depths.filter((depth) => depth.kind === kind).at(-1);
 }
 
 function wasmSent(stanzaId: string | undefined) {
@@ -475,7 +483,7 @@ describe("client send readiness", () => {
     };
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     client.onQueueDepthChange((depth) => depths.push(depth));
     client.setQueuedMessageStatusHandler((id, status) => statuses.push({ id, status }));
@@ -489,19 +497,31 @@ describe("client send readiness", () => {
     await expect(client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
       .rejects.toThrow("room socket unavailable");
     expect(queuedIds()).toEqual(["room-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "room")).toMatchObject({
+      kind: "room",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
 
     expect(await client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
       .toEqual({ id: null, state: "queued" });
     expect(queuedIds()).toEqual(["room-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "room")).toMatchObject({
+      kind: "room",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
 
     await expect(client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
       .rejects.toThrow("XMPP send returned a different stanza id");
     expect(queuedIds()).toEqual(["room-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "room")).toMatchObject({
+      kind: "room",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "room-live-retry", status: "queued" });
 
     expect(await client.sendGroupMessage("w1", "c1", "retry", { id: "room-live-retry" }))
@@ -512,7 +532,13 @@ describe("client send readiness", () => {
       .handleMessageAck("room-live-retry");
     await acked;
     expect(queuedIds()).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect({
+      dm: latestQueueDepth(depths, "dm"),
+      room: latestQueueDepth(depths, "room"),
+    }).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("room send rejects typed WASM failures instead of returning a null sending id", async () => {
@@ -1364,7 +1390,7 @@ describe("client send readiness", () => {
       }),
     };
     const client = new BrowserXmppClient(session());
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: QueueDepthTelemetry[] = [];
     const statuses: Array<{ id: string; status: "queued" | "sending" }> = [];
     client.onQueueDepthChange((depth) => depths.push(depth));
     client.setQueuedMessageStatusHandler((id, status) => statuses.push({ id, status }));
@@ -1379,19 +1405,31 @@ describe("client send readiness", () => {
     await expect(client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
       .rejects.toThrow("socket unavailable");
     expect(queuedIds()).toEqual(["dm-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "dm")).toMatchObject({
+      kind: "dm",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
 
     expect(await client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
       .toEqual({ id: null, state: "queued" });
     expect(queuedIds()).toEqual(["dm-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "dm")).toMatchObject({
+      kind: "dm",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
 
     await expect(client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
       .rejects.toThrow("XMPP send returned a different stanza id");
     expect(queuedIds()).toEqual(["dm-live-retry"]);
-    expect(depths.at(-1)?.inflight).toBe(0);
+    expect(latestQueueDepth(depths, "dm")).toMatchObject({
+      kind: "dm",
+      persisted: 1,
+      inflight: 0,
+    });
     expect(statuses.at(-1)).toEqual({ id: "dm-live-retry", status: "queued" });
 
     expect(await client.sendDirectMessage("bob@example.com", "retry", { id: "dm-live-retry" }))
@@ -1401,7 +1439,13 @@ describe("client send readiness", () => {
     (client as unknown as { handleMessageAck: (id: string) => void }).handleMessageAck("dm-live-retry");
     await acked;
     expect(queuedIds()).toEqual([]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect({
+      dm: latestQueueDepth(depths, "dm"),
+      room: latestQueueDepth(depths, "room"),
+    }).toEqual({
+      dm: { kind: "dm", persisted: 0, inflight: 0 },
+      room: { kind: "room", persisted: 0, inflight: 0 },
+    });
   });
 
   test("custom-service MUC-PM sends preserve the occupant resource before room discovery", async () => {
