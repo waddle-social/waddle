@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
+import type {
+  PersistedQueuedDmMessage,
+  PersistedQueuedRoomMessage,
+} from "../src/lib/outbound-queue-store";
 import {
   outboundPayloadDigest,
   validatePersistedRuntimeAccount,
@@ -62,6 +65,41 @@ function accountWithReadyMessage(
           payloadDigest: "digest-1",
         },
         lane: { kind: "direct" },
+        orderKey: `${message.createdAt}\u0000${message.id}`,
+        message,
+        state: { kind: "ready" },
+      },
+    },
+  };
+}
+
+function roomMessage(
+  roomJid: string,
+): PersistedQueuedRoomMessage {
+  return {
+    kind: "room",
+    id: "room-message",
+    createdAt: "2026-07-17T00:00:00.000Z",
+    roomJid,
+    body: "hello room",
+  };
+}
+
+function accountWithReadyRoomMessage(
+  message: PersistedQueuedRoomMessage,
+  laneRoomJid = message.roomJid,
+): Record<string, unknown> {
+  return {
+    ...emptyPersistedAccount(),
+    outbound: {
+      [message.id]: {
+        identity: {
+          accountKey: ACCOUNT,
+          messageId: message.id,
+          incarnation: "room-incarnation",
+          payloadDigest: "room-digest",
+        },
+        lane: { kind: "room", roomJid: laneRoomJid },
         orderKey: `${message.createdAt}\u0000${message.id}`,
         message,
         state: { kind: "ready" },
@@ -147,6 +185,33 @@ describe("durable runtime codec", () => {
     }>;
     ordered[message.id]!.orderKey = "message-1";
     expectCorruptRuntimeAccount(noncanonicalOrder);
+  });
+
+  test("rejects noncanonical timestamps, room targets, and room lanes", () => {
+    for (const createdAt of [
+      "not-a-timestamp",
+      "2026-07-17T00:00:00Z",
+      "+010000-01-01T00:00:00.000Z",
+    ]) {
+      expectCorruptRuntimeAccount(
+        accountWithReadyMessage(directMessage("invalid-time", "hello", createdAt)),
+      );
+    }
+
+    const canonicalRoom = roomMessage("room@muc.example");
+    expect(() => validatePersistedRuntimeAccount(
+      accountWithReadyRoomMessage(canonicalRoom),
+      ACCOUNT,
+    )).not.toThrow();
+    expectCorruptRuntimeAccount(
+      accountWithReadyRoomMessage(
+        roomMessage(" Room@MUC.Example/Resource "),
+        "room@muc.example",
+      ),
+    );
+    expectCorruptRuntimeAccount(
+      accountWithReadyRoomMessage(canonicalRoom, "ROOM@muc.example/Resource"),
+    );
   });
 
   test("digests structural semantics while excluding retry metadata", async () => {

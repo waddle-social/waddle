@@ -12,6 +12,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.toDomain
@@ -525,11 +526,19 @@ class XmppSessionManagerTest {
         assertEquals("live sends are not reported as waiting for replay", false, roomSend.queued)
         val dmSend = harness.manager.sendChatMessage("alice@waddle.test", "hello dm")
         assertEquals(
-            WaddleSendMessageOutcome.Sent(
-                checkNotNull(dmSend.delivery).identity.clientStanzaId,
-            ),
+            WaddleSendMessageOutcome.NotConnected,
             dmSend.outcome,
         )
+        assertTrue("a blocked live send reports durable replay work", dmSend.queued)
+        assertEquals(
+            listOf("general@muc.waddle.test" to "hello room"),
+            client.sendCalls,
+        )
+
+        harness.factory.emitAcked(
+            checkNotNull(roomSend.delivery).identity.clientStanzaId,
+        )
+        runCurrent()
         assertEquals(
             listOf("general@muc.waddle.test" to "hello room", "alice@waddle.test" to "hello dm"),
             client.sendCalls,
@@ -540,25 +549,13 @@ class XmppSessionManagerTest {
         )
         assertTrue(
             "successful live sends remain durable under native ownership until ack",
-            harness.prefs.deliveryJournal.first()
-                .owners["icepuma@waddle.test"]
-                ?.outboundRows
-                .orEmpty()
-                .all {
-                it.ownership is social.waddle.android.client.prefs.OutboundOwnership.NativeOwned
-            },
+            allOutboundRowsAreNativeOwned(harness),
         )
-        client.sendOptions.mapNotNull { it?.stanzaId }.forEach { stanzaId ->
-            harness.factory.emitAcked(stanzaId)
-        }
+        harness.factory.emitAcked(
+            checkNotNull(dmSend.delivery).identity.clientStanzaId,
+        )
         runCurrent()
-        assertTrue(
-            harness.prefs.deliveryJournal.first()
-                .owners["icepuma@waddle.test"]
-                ?.outboundRows
-                .orEmpty()
-                .isEmpty(),
-        )
+        assertTrue(outboundRowsAreEmpty(harness))
 
         // The attempt died → the passthrough must stop targeting the client.
         harness.factory.emit(WaddleClientEvent.Disconnected)
@@ -588,4 +585,18 @@ class XmppSessionManagerTest {
         assertTrue(harness.manager.timelineStore.timeline("alice@waddle.test").value.isEmpty())
         assertEquals(1, harness.factory.clients.single().disconnectCalls)
     }
+
+    private suspend fun allOutboundRowsAreNativeOwned(harness: Harness): Boolean =
+        harness.prefs.deliveryJournal.first()
+            .owners["icepuma@waddle.test"]
+            ?.outboundRows
+            .orEmpty()
+            .all { it.ownership is OutboundOwnership.NativeOwned }
+
+    private suspend fun outboundRowsAreEmpty(harness: Harness): Boolean =
+        harness.prefs.deliveryJournal.first()
+            .owners["icepuma@waddle.test"]
+            ?.outboundRows
+            .orEmpty()
+            .isEmpty()
 }

@@ -2,8 +2,14 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.OutboundQueue.EnqueueResult
 import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
 import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
@@ -39,13 +45,39 @@ internal class OutboundMessenger(
 ) {
     private val terminalWorker =
         DeliveryTerminalWorker(journal, dispatchEvent)
+    private val drainMutex = Mutex()
+
+    @Volatile
+    private var drainWorker: DrainWorkerGeneration? = null
 
     fun start(scope: CoroutineScope, ownerBareJid: String) {
+        check(drainWorker == null) { "outbound drain worker already started" }
         terminalWorker.start(scope, ownerBareJid)
+        val generation = DrainWorkerGeneration(
+            ownerBareJid = ownerBareJid,
+            signals = Channel<DrainWakeSignal>(Channel.CONFLATED),
+        )
+        drainWorker = generation
+        generation.job = scope.launch {
+            for (signal in generation.signals) {
+                try {
+                    drainOutboundQueue(signal.ownerBareJid, signal.attempt)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Throwable) {
+                    LOGGER.log(
+                        Level.WARNING,
+                        "outbound predecessor drain failed; durable work remains queued",
+                        failure,
+                    )
+                }
+            }
+        }
     }
 
     suspend fun prepareAttempt(ownerBareJid: String): OutboundQueue.AttemptBootstrap =
         journal.beginAttempt(ownerBareJid).also { prepared ->
+            bindDrainAttempt(prepared.attempt)
             resume.registerAttempt(prepared.attempt, prepared.smVersion)
         }
 
@@ -63,9 +95,13 @@ internal class OutboundMessenger(
         val owner = attempt?.ownerBareJid
             ?: activeSession.ownBareJid
             ?: return DeliveryTerminalWorker.StopResult.Drained
-        // Close worker admissions and durably drain already-admitted signals
-        // while their exact attempt fence is still valid. Only then revoke
-        // the attempt so no later callback can mutate the journal.
+        if (!stopDrainWorker(owner, attempt)) {
+            if (attempt != null) journal.fenceAttempt(attempt)
+            return DeliveryTerminalWorker.StopResult.Drained
+        }
+        // Cancel and join the exact owner/session drain worker before closing
+        // terminal admissions. Only then revoke the attempt so no queued wake
+        // or callback can cross the replacement boundary.
         val result = terminalWorker.stop(owner)
         if (attempt != null) journal.fenceAttempt(attempt)
         return result
@@ -121,7 +157,7 @@ internal class OutboundMessenger(
                 reconcileInitialOutcome(stored, ownership, outcome)
             }
             is LiveAdmissionResult.Queued -> {
-                wakeOutboundDrain()
+                signalOutboundDrain(attempt)
                 SendResult(
                     outcome = WaddleSendMessageOutcome.NotConnected,
                     delivery = DeliveryOutcomeRef(
@@ -208,18 +244,37 @@ internal class OutboundMessenger(
         null
     }
 
-    private suspend fun wakeOutboundDrain() {
-        try {
-            drainOutboundQueue()
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Throwable) {
-            LOGGER.log(
-                Level.WARNING,
-                "outbound predecessor drain failed; durable work remains queued",
-                failure,
-            )
+    private fun signalOutboundDrain(attempt: DeliveryAttemptRef) {
+        val generation = drainWorker
+        if (
+            generation?.ownerBareJid != attempt.ownerBareJid ||
+            generation.attempt != attempt
+        ) {
+            return
         }
+        generation.signals.trySend(
+            DrainWakeSignal(attempt.ownerBareJid, attempt),
+        )
+    }
+
+    private fun bindDrainAttempt(attempt: DeliveryAttemptRef) {
+        val generation = drainWorker
+        if (generation?.ownerBareJid == attempt.ownerBareJid) {
+            generation.attempt = attempt
+        }
+    }
+
+    private suspend fun stopDrainWorker(
+        ownerBareJid: String,
+        attempt: DeliveryAttemptRef?,
+    ): Boolean {
+        val generation = drainWorker ?: return true
+        if (generation.ownerBareJid != ownerBareJid) return false
+        if (attempt != null && generation.attempt != attempt) return false
+        generation.signals.close()
+        generation.job?.cancelAndJoin()
+        if (drainWorker === generation) drainWorker = null
+        return true
     }
 
     /**
@@ -228,16 +283,35 @@ internal class OutboundMessenger(
      */
     suspend fun drainOutboundQueue() {
         val owner = activeSession.ownBareJid ?: return
-        awaitStartupTerminalDrain(owner)
-        while (true) {
-            val attempt = activeSession.attemptRef ?: return
-            val claimed = journal.claimAbsoluteReadyHead(owner, attempt) ?: return
+        val attempt = activeSession.attemptRef ?: return
+        drainOutboundQueue(owner, attempt)
+    }
+
+    private suspend fun drainOutboundQueue(
+        ownerBareJid: String,
+        expectedAttempt: DeliveryAttemptRef,
+    ) = drainMutex.withLock {
+        if (
+            activeSession.ownBareJid != ownerBareJid ||
+            activeSession.attemptRef != expectedAttempt
+        ) {
+            return@withLock
+        }
+        awaitStartupTerminalDrain(ownerBareJid)
+        while (
+            activeSession.ownBareJid == ownerBareJid &&
+            activeSession.attemptRef == expectedAttempt
+        ) {
+            val attempt = activeSession.attemptRef ?: return@withLock
+            val claimed =
+                journal.claimAbsoluteReadyHead(ownerBareJid, attempt)
+                    ?: return@withLock
             val ownership = claimed.ownership as OutboundOwnership.NativeOwned
             when (val outcome = sendMessage(claimed, attempt)) {
                 is WaddleSendMessageOutcome.Sent -> {
                     if (outcome.stanzaId != claimed.clientStanzaId) {
                         terminalWorker.submitAndAwait(
-                            owner,
+                            ownerBareJid,
                             claimed.clientStanzaId,
                             ownership.attempt,
                             DeliveryTerminalKind.NONRETRYABLE_DELETE,
@@ -248,11 +322,11 @@ internal class OutboundMessenger(
                 WaddleSendMessageOutcome.TransportError,
                 -> {
                     journal.release(claimed.identity, ownership)
-                    return
+                    return@withLock
                 }
                 else -> {
                     terminalWorker.submitAndAwait(
-                        owner,
+                        ownerBareJid,
                         claimed.clientStanzaId,
                         ownership.attempt,
                         DeliveryTerminalKind.NONRETRYABLE_DELETE,
@@ -282,7 +356,9 @@ internal class OutboundMessenger(
             -> return false
         }
         if (!activeSession.acceptResumeTransition(transition)) return false
-        return resume.acceptResumeTransition(transition, smVersion)
+        if (!resume.acceptResumeTransition(transition, smVersion)) return false
+        bindDrainAttempt(transition.fresh)
+        return true
     }
 
     private suspend fun retryResumeTransition(
@@ -364,6 +440,22 @@ internal class OutboundMessenger(
     private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
         outcome == WaddleSendMessageOutcome.NotConnected ||
             outcome == WaddleSendMessageOutcome.TransportError
+
+    private data class DrainWakeSignal(
+        val ownerBareJid: String,
+        val attempt: DeliveryAttemptRef,
+    )
+
+    private class DrainWorkerGeneration(
+        val ownerBareJid: String,
+        val signals: Channel<DrainWakeSignal>,
+    ) {
+        @Volatile
+        var attempt: DeliveryAttemptRef? = null
+
+        @Volatile
+        var job: Job? = null
+    }
 
     private companion object {
         val LOGGER: Logger = Logger.getLogger(OutboundMessenger::class.java.name)

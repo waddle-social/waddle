@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { IDBFactory } from "fake-indexeddb";
-import type { PersistedQueuedDmMessage } from "../src/lib/outbound-queue-store";
+import type {
+  PersistedQueuedDmMessage,
+  PersistedQueuedRoomMessage,
+} from "../src/lib/outbound-queue-store";
 import { IndexedDbDurableOutboundStore } from "../src/lib/xmpp-runtime/indexeddb-durable-store";
 import { MemoryDurableOutboundStore } from "../src/lib/xmpp-runtime/memory-durable-store";
 import {
@@ -16,13 +19,28 @@ const CLOCK = { now: () => 1_000 };
 function directMessage(
   id: string,
   body = "hello",
+  createdAt = "2026-07-17T00:00:00.000Z",
 ): PersistedQueuedDmMessage {
   return {
     kind: "dm",
     id,
-    createdAt: "2026-07-17T00:00:00.000Z",
+    createdAt,
     peerJid: "recipient@example.com",
     body,
+  };
+}
+
+function roomMessage(
+  id: string,
+  roomJid: string,
+  createdAt: string,
+): PersistedQueuedRoomMessage {
+  return {
+    kind: "room",
+    id,
+    createdAt,
+    roomJid,
+    body: id,
   };
 }
 
@@ -78,6 +96,10 @@ for (const adapter of contractAdapters) {
           "existing",
           await harness.store.persistReady(ACCOUNT, directMessage("message-1")),
         );
+        const invalidRetry = await harness.store.persistReady(
+          ACCOUNT,
+          directMessage("message-1", "hello", "2026-07-17T00:00:00Z"),
+        );
         const conflict = committedOrThrow(
           "conflict",
           await harness.store.persistReady(
@@ -88,11 +110,184 @@ for (const adapter of contractAdapters) {
 
         expect(inserted.kind).toBe("inserted");
         expect(existing.kind).toBe("existing");
+        expect(invalidRetry.kind).toBe("failed");
+        if (invalidRetry.kind !== "failed") {
+          throw new Error("expected invalid timestamp failure");
+        }
+        expect(invalidRetry.cause).toBeInstanceOf(DOMException);
+        expect((invalidRetry.cause as DOMException).name).toBe("DataError");
         expect(conflict.kind).toBe("conflict");
         expect(committedOrThrow(
           "list",
           await harness.store.list(ACCOUNT),
         )).toEqual([directMessage("message-1")]);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    test("commits monotonic lane order through rollback, future clocks, and exhaustion", async () => {
+      const harness = adapter.create();
+      try {
+        const first = directMessage(
+          "z-first",
+          "first",
+          "2030-01-01T00:00:00.000Z",
+        );
+        const rollback = directMessage(
+          "a-rollback",
+          "rollback",
+          "2026-01-01T00:00:00.000Z",
+        );
+        const sameTick = directMessage(
+          "b-same-tick",
+          "same tick",
+          "2030-01-01T00:00:00.000Z",
+        );
+        expect(committedOrThrow(
+          "monotonic-first",
+          await harness.store.persistReady(ACCOUNT, first),
+        ).kind).toBe("inserted");
+        const rollbackResult = committedOrThrow(
+          "monotonic-rollback",
+          await harness.store.persistReady(ACCOUNT, rollback),
+        );
+        const sameTickResult = committedOrThrow(
+          "monotonic-same-tick",
+          await harness.store.persistReady(ACCOUNT, sameTick),
+        );
+        expect(rollbackResult).toMatchObject({
+          kind: "inserted",
+          entry: {
+            message: {
+              id: "a-rollback",
+              createdAt: "2030-01-01T00:00:00.001Z",
+            },
+          },
+        });
+        expect(sameTickResult).toMatchObject({
+          kind: "inserted",
+          entry: {
+            message: {
+              id: "b-same-tick",
+              createdAt: "2030-01-01T00:00:00.002Z",
+            },
+          },
+        });
+        expect(committedOrThrow(
+          "monotonic-retry",
+          await harness.store.persistReady(ACCOUNT, rollback),
+        ).kind).toBe("existing");
+
+        const futureRoom = committedOrThrow(
+          "future-room",
+          await harness.store.persistReady(
+            ACCOUNT,
+            roomMessage(
+              "future-room",
+              "General@MUC.Example/Nick",
+              "2040-01-01T00:00:00.000Z",
+            ),
+          ),
+        );
+        expect(futureRoom).toMatchObject({
+          kind: "inserted",
+          entry: {
+            lane: { kind: "room", roomJid: "general@muc.example" },
+            message: { roomJid: "general@muc.example" },
+          },
+        });
+        expect(committedOrThrow(
+          "future-room-canonical-retry",
+          await harness.store.persistReady(
+            ACCOUNT,
+            roomMessage(
+              "future-room",
+              "general@muc.example",
+              "2040-01-01T00:00:00.000Z",
+            ),
+          ),
+        ).kind).toBe("existing");
+        const isolated = committedOrThrow(
+          "isolated-room",
+          await harness.store.persistReady(
+            ACCOUNT,
+            roomMessage(
+              "isolated-room",
+              "random@muc.example/Other",
+              "2025-01-01T00:00:00.000Z",
+            ),
+          ),
+        );
+        expect(isolated).toMatchObject({
+          kind: "inserted",
+          entry: {
+            lane: { kind: "room", roomJid: "random@muc.example" },
+            message: {
+              roomJid: "random@muc.example",
+              createdAt: "2025-01-01T00:00:00.000Z",
+            },
+          },
+        });
+
+        const beforeInvalid = committedOrThrow(
+          "before-invalid-created-at",
+          await harness.store.list(ACCOUNT),
+        );
+        for (const createdAt of [
+          "not-a-timestamp",
+          "2026-01-01T00:00:00Z",
+          "+010000-01-01T00:00:00.000Z",
+        ]) {
+          const invalid = await harness.store.persistReady(
+            ACCOUNT,
+            directMessage(`invalid-${createdAt}`, "invalid", createdAt),
+          );
+          expect(invalid.kind).toBe("failed");
+          if (invalid.kind !== "failed") {
+            throw new Error("expected invalid timestamp failure");
+          }
+          expect(invalid.cause).toBeInstanceOf(DOMException);
+          expect((invalid.cause as DOMException).name).toBe("DataError");
+        }
+        expect(committedOrThrow(
+          "after-invalid-created-at",
+          await harness.store.list(ACCOUNT),
+        )).toEqual(beforeInvalid);
+
+        expect(committedOrThrow(
+          "exhausted-head",
+          await harness.store.persistReady(
+            ACCOUNT,
+            roomMessage(
+              "exhausted-head",
+              "exhausted@muc.example",
+              "9999-12-31T23:59:59.999Z",
+            ),
+          ),
+        ).kind).toBe("inserted");
+        const beforeExhaustion = committedOrThrow(
+          "before-exhaustion",
+          await harness.store.list(ACCOUNT),
+        );
+        const exhausted = await harness.store.persistReady(
+          ACCOUNT,
+          roomMessage(
+            "exhausted-successor",
+            "exhausted@muc.example/Resource",
+            "2026-01-01T00:00:00.000Z",
+          ),
+        );
+        expect(exhausted).toMatchObject({ kind: "failed", reason: "aborted" });
+        if (exhausted.kind !== "failed") {
+          throw new Error("expected exhausted append failure");
+        }
+        expect(exhausted.cause).toBeInstanceOf(DOMException);
+        expect((exhausted.cause as DOMException).name).toBe("AbortError");
+        expect(committedOrThrow(
+          "after-exhaustion",
+          await harness.store.list(ACCOUNT),
+        )).toEqual(beforeExhaustion);
       } finally {
         await harness.close();
       }

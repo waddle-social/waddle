@@ -362,6 +362,29 @@ describe("offline outbound queue replay", () => {
 });
 
 describe("offline outbound queue hydration", () => {
+  test("room projections canonicalize writes and raw lookup keys", () => {
+    enqueueQueuedMessage("alice@example.com", {
+      kind: "room",
+      id: "canonical-room-projection",
+      createdAt: new Date().toISOString(),
+      roomJid: " General@MUC.Example/Resource ",
+      body: "canonical projection",
+    });
+
+    expect(listQueuedRoomMessages(
+      "alice@example.com",
+      "GENERAL@muc.example/Other",
+    )).toEqual([
+      {
+        kind: "room",
+        id: "canonical-room-projection",
+        createdAt: expect.any(String),
+        roomJid: "general@muc.example",
+        body: "canonical projection",
+      },
+    ]);
+  });
+
   test("ambiguous resource-bearing legacy rows fail closed for every DM scope", () => {
     localStorage.setItem(
       "waddle.chat.outbound-queue.alice@example.com",

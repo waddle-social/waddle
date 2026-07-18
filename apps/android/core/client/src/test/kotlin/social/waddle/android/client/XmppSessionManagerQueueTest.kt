@@ -11,12 +11,79 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionManagerQueueTest {
+    @Test
+    fun `pending drain wake is fenced before replacement and next owner gets a fresh worker`() =
+        runTest {
+            val prefs = SessionPrefs(InMemoryPreferencesDataStore())
+            val factory = FakeClientFactory()
+            val manager = manager(prefs, factory)
+            manager.login(testSessionInfo(jid = OWNER_A, username = "alice"))
+            runCurrent()
+            factory.emitReady()
+            runCurrent()
+            val oldClient = factory.clients.single()
+            oldClient.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val oldPredecessor = manager.sendChatMessage(PEER, "old predecessor")
+            val oldPredecessorId =
+                checkNotNull(oldPredecessor.delivery).identity.clientStanzaId
+            val oldTarget = manager.sendChatMessage(PEER, "old target")
+            val oldTargetId = checkNotNull(oldTarget.delivery).identity.clientStanzaId
+            assertEquals(WaddleSendMessageOutcome.NotConnected, oldTarget.outcome)
+            assertEquals(
+                listOf(oldPredecessorId),
+                oldClient.sendOptions.map { it?.stanzaId },
+            )
+
+            manager.login(
+                testSessionInfo(sessionId = "sess-b", username = "bob", jid = OWNER_B),
+            )
+            runCurrent()
+            assertEquals(0, oldClient.sendOptions.count { it?.stanzaId == oldTargetId })
+            val oldRows = prefs.deliveryJournal.first()
+                .owners[OWNER_A]
+                ?.outboundRows
+                .orEmpty()
+            assertEquals(
+                listOf(oldPredecessorId, oldTargetId),
+                oldRows.map { it.clientStanzaId },
+            )
+            assertTrue(oldRows.all { it.ownership == OutboundOwnership.Ready })
+
+            factory.emitReady()
+            runCurrent()
+            val newClient = factory.clients.last()
+            newClient.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+            val newPredecessor = manager.sendChatMessage(PEER, "new predecessor")
+            val newPredecessorId =
+                checkNotNull(newPredecessor.delivery).identity.clientStanzaId
+            newClient.sendOutcomes += WaddleSendMessageOutcome.Error
+
+            val newTarget = manager.sendChatMessage(PEER, "new target")
+            val newTargetId = checkNotNull(newTarget.delivery).identity.clientStanzaId
+            assertEquals(WaddleSendMessageOutcome.NotConnected, newTarget.outcome)
+            assertEquals(
+                listOf(newPredecessorId),
+                newClient.sendOptions.map { it?.stanzaId },
+            )
+
+            runCurrent()
+            assertEquals(
+                listOf(newPredecessorId, newPredecessorId, newTargetId),
+                newClient.sendOptions.map { it?.stanzaId },
+            )
+            assertEquals(1, newClient.sendOptions.count { it?.stanzaId == newTargetId })
+            assertEquals(0, oldClient.sendOptions.count { it?.stanzaId == oldTargetId })
+            manager.logout()
+        }
+
     @Test
     fun `native pull waits for resume snapshot durability`() = runTest {
         val store = FailingPreferencesDataStore()
@@ -144,5 +211,6 @@ class XmppSessionManagerQueueTest {
     private companion object {
         const val OWNER_A = "alice@waddle.test"
         const val OWNER_B = "bob@waddle.test"
+        const val PEER = "carol@waddle.test"
     }
 }

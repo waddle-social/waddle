@@ -143,12 +143,12 @@ async function beginTelemetryAttempt(
         roomJid: string,
         body: string,
         opts: { id: string },
-      ): Promise<unknown>;
+      ): Promise<{ kind: "claimed"; claim: unknown } | { kind: "queued" }>;
       persistPendingDirectSend(
         peerJid: string,
         body: string,
         opts: { id: string },
-      ): Promise<unknown>;
+      ): Promise<{ kind: "claimed"; claim: unknown } | { kind: "queued" }>;
       beginAttempt(id: string, kind: "room" | "dm", claim: unknown): void;
     };
   }).outboundQueue;
@@ -163,7 +163,10 @@ async function beginTelemetryAttempt(
         "telemetry fixture",
         { id },
       );
-  queue.beginAttempt(id, kind, claim);
+  if (claim.kind !== "claimed") {
+    throw new Error("telemetry attempt must own the durable lane head");
+  }
+  queue.beginAttempt(id, kind, claim.claim);
 }
 
 function nextMessageAck(client: BrowserXmppClient, stanzaId: string): Promise<void> {
@@ -967,17 +970,18 @@ describe("BrowserXmppClient telemetry hooks", () => {
     });
     internal.xmpp = stubXmpp;
     internal.wireEvents(stubXmpp);
-    await beginTelemetryAttempt(client, "dm-9", "dm");
-    // Record the pending kind so the failure hook reports it truthfully.
-    await beginTelemetryAttempt(client, "live-1", "dm");
-
     // Ack → Faro event + measurement
+    await beginTelemetryAttempt(client, "dm-9", "dm");
     const acked = nextMessageAck(client, "dm-9");
     stubXmpp.emitMessageDeliveryAcked("dm-9");
+    await acked;
+
     // Fail → Faro event
+    // The first exact ACK releases the direct-lane head before this attempt.
+    await beginTelemetryAttempt(client, "live-1", "dm");
     const failed = nextMessageFailure(client, "live-1");
     stubXmpp.emitMessageDeliveryFailed("live-1");
-    await Promise.all([acked, failed]);
+    await failed;
     // Session lifecycle + status
     internal.emitSessionLifecycle({ type: "resumed" });
     internal.emitStatus({ state: "reconnecting", detail: "ws dropped" });

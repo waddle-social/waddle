@@ -4,6 +4,7 @@ import { decodePersistedSmResumeState } from "../xmpp/sm-resume-types";
 import {
   DurablePredecessorCapacityError,
   outboundLane,
+  roomOutboundLane,
   type DurableAuthorityClock,
   type DurableFailureReason,
   type DurableOutcome,
@@ -36,6 +37,7 @@ import {
 } from "./durable-contract";
 import {
   applyAuthorityClockSample,
+  canonicalOutboundCreationTime,
   checkedDurableCounterIncrement,
   cloneDurableSmState,
   cloneValue,
@@ -469,6 +471,13 @@ export class DurableStoreEngine implements DurableOutboundStore {
     message: PersistedQueuedMessage,
   ): Promise<PreparedOutboundMessage> {
     const durableMessage = cloneValue(message);
+    canonicalOutboundCreationTime(
+      durableMessage.createdAt,
+      "Outbound creation timestamp",
+    );
+    if (durableMessage.kind === "room") {
+      durableMessage.roomJid = roomOutboundLane(durableMessage.roomJid).roomJid;
+    }
     const payloadDigest = await outboundPayloadDigest(durableMessage);
     return {
       identity: {

@@ -5,6 +5,7 @@ import type {
 } from "../src/lib/outbound-queue-store";
 import {
   outboundLane,
+  roomOutboundLane,
   type OutboundClaimRequest,
   type OutboundOwnerContext,
 } from "../src/lib/xmpp-runtime/durable-contract";
@@ -74,6 +75,32 @@ function prepared(
     },
     lane: { kind: "direct" },
     orderKey: `${message.createdAt}\u0000${id}`,
+    message,
+  };
+}
+
+function preparedRoom(
+  id: string,
+  roomJid: string,
+  createdAt = "2026-07-17T00:00:00.000Z",
+): PreparedOutboundMessage {
+  const lane = roomOutboundLane(roomJid);
+  const message: PersistedQueuedRoomMessage = {
+    kind: "room",
+    id,
+    createdAt,
+    roomJid: lane.roomJid,
+    body: id,
+  };
+  return {
+    identity: {
+      accountKey: ACCOUNT,
+      messageId: id,
+      incarnation: `${id}-incarnation`,
+      payloadDigest: `${id}-digest`,
+    },
+    lane,
+    orderKey: `${createdAt}\u0000${id}`,
     message,
   };
 }
@@ -155,6 +182,111 @@ describe("durable outbound transitions", () => {
     expect(account.outbound["a-second"]?.message.createdAt).toBe(
       "2026-07-17T00:00:00.001Z",
     );
+    expect(account.outbound["a-second"]?.orderKey).toBe(
+      "2026-07-17T00:00:00.001Z\u0000a-second",
+    );
+  });
+
+  test("keeps a clock-rollback append behind its lane predecessor", () => {
+    const account = emptyAccount(ACCOUNT);
+    persistReadyTransition(
+      account,
+      prepared("before-rollback", {
+        createdAt: "2026-07-17T00:00:10.000Z",
+      }),
+    );
+    const appended = persistReadyTransition(
+      account,
+      prepared("after-rollback", {
+        createdAt: "2026-07-17T00:00:01.000Z",
+      }),
+    );
+
+    expect(appended.value).toMatchObject({
+      kind: "inserted",
+      entry: {
+        message: {
+          id: "after-rollback",
+          createdAt: "2026-07-17T00:00:10.001Z",
+        },
+      },
+    });
+    expect(listOutboundTransition(account).value.map(({ id }) => id)).toEqual([
+      "before-rollback",
+      "after-rollback",
+    ]);
+  });
+
+  test("orders behind a future-dated predecessor but not another lane", () => {
+    const account = emptyAccount(ACCOUNT);
+    persistReadyTransition(
+      account,
+      preparedRoom(
+        "future-general",
+        "General@MUC.Example/Nick",
+        "2030-01-01T00:00:00.000Z",
+      ),
+    );
+    persistReadyTransition(
+      account,
+      preparedRoom(
+        "random",
+        "RANDOM@muc.example/Other",
+        "2026-01-01T00:00:00.000Z",
+      ),
+    );
+    persistReadyTransition(
+      account,
+      preparedRoom(
+        "general-successor",
+        "general@muc.example",
+        "2026-01-01T00:00:00.000Z",
+      ),
+    );
+
+    expect(account.outbound.random?.message.createdAt).toBe(
+      "2026-01-01T00:00:00.000Z",
+    );
+    expect(account.outbound["general-successor"]?.message.createdAt).toBe(
+      "2030-01-01T00:00:00.001Z",
+    );
+    expect(account.outbound["general-successor"]?.orderKey).toBe(
+      "2030-01-01T00:00:00.001Z\u0000general-successor",
+    );
+  });
+
+  test("fails closed on invalid or exhausted same-lane ordering state", () => {
+    const invalidRequestedAccount = emptyAccount(ACCOUNT);
+    expect(() => persistReadyTransition(
+      invalidRequestedAccount,
+      prepared("invalid-request", { createdAt: "2026-07-17T00:00:00Z" }),
+    )).toThrow("Outbound creation timestamp is invalid");
+    expect(invalidRequestedAccount.outbound["invalid-request"]).toBeUndefined();
+
+    const invalidAccount = emptyAccount(ACCOUNT);
+    persistReadyTransition(invalidAccount, prepared("invalid-predecessor"));
+    const invalidRow = invalidAccount.outbound["invalid-predecessor"]!;
+    invalidRow.message.createdAt = "not-a-timestamp";
+    invalidRow.orderKey = "not-a-timestamp\u0000invalid-predecessor";
+
+    expect(() => persistReadyTransition(
+      invalidAccount,
+      prepared("blocked-by-invalid"),
+    )).toThrow("Persisted outbound lane timestamp is invalid");
+    expect(invalidAccount.outbound["blocked-by-invalid"]).toBeUndefined();
+
+    const exhaustedAccount = emptyAccount(ACCOUNT);
+    persistReadyTransition(
+      exhaustedAccount,
+      prepared("last-timestamp", {
+        createdAt: "9999-12-31T23:59:59.999Z",
+      }),
+    );
+    expect(() => persistReadyTransition(
+      exhaustedAccount,
+      prepared("cannot-follow-last"),
+    )).toThrow("Outbound creation timestamp is exhausted");
+    expect(exhaustedAccount.outbound["cannot-follow-last"]).toBeUndefined();
   });
 
   test("preserves revision finalization, clone isolation, existing rows, and conflicts", () => {
@@ -200,11 +332,11 @@ describe("durable outbound transitions", () => {
     const owner = activate(account);
     persistReadyTransition(
       account,
-      prepared("second", { createdAt: "2026-07-17T00:00:02.000Z" }),
+      prepared("first", { createdAt: "2026-07-17T00:00:01.000Z" }),
     );
     persistReadyTransition(
       account,
-      prepared("first", { createdAt: "2026-07-17T00:00:01.000Z" }),
+      prepared("second", { createdAt: "2026-07-17T00:00:02.000Z" }),
     );
 
     const head = claimHeadTransition(
@@ -426,37 +558,25 @@ describe("durable outbound transitions", () => {
       claim: { claimId: "expired-retry" },
     });
 
-    const room = (
-      id: string,
-      roomJid: string,
-      createdAt: string,
-    ): PreparedOutboundMessage => {
-      const value = prepared(id, { createdAt });
-      const message = {
-        kind: "room" as const,
-        id,
-        createdAt,
-        roomJid,
-        body: id,
-      };
-      return {
-        ...value,
-        lane: { kind: "room", roomJid },
-        orderKey: `${createdAt}\u0000${id}`,
-        message,
-      };
-    };
     const general = persistAndClaimLaneHeadTransition(
       account,
       NOW + 2,
-      room("general-first", "general@muc.example.com", "2026-07-17T00:00:01.000Z"),
+      preparedRoom(
+        "general-first",
+        "general@muc.example.com",
+        "2026-07-17T00:00:01.000Z",
+      ),
       claimRequest(owner, "general-first-claim"),
     );
     expect(general.value.kind).toBe("claimed");
     expect(persistAndClaimLaneHeadTransition(
       account,
       NOW + 2,
-      room("general-second", "general@muc.example.com", "2026-07-17T00:00:02.000Z"),
+      preparedRoom(
+        "general-second",
+        "general@muc.example.com",
+        "2026-07-17T00:00:02.000Z",
+      ),
       claimRequest(owner, "general-second-claim"),
     ).value).toMatchObject({
       kind: "queued",
@@ -465,7 +585,11 @@ describe("durable outbound transitions", () => {
     expect(persistAndClaimLaneHeadTransition(
       account,
       NOW + 2,
-      room("random-first", "random@muc.example.com", "2026-07-17T00:00:03.000Z"),
+      preparedRoom(
+        "random-first",
+        "random@muc.example.com",
+        "2026-07-17T00:00:03.000Z",
+      ),
       claimRequest(owner, "random-first-claim"),
     ).value.kind).toBe("claimed");
   });

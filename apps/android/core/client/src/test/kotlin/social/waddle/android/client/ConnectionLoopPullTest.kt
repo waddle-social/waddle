@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
@@ -141,12 +142,18 @@ class ConnectionLoopPullTest {
             val secondId = checkNotNull(second.delivery).identity.clientStanzaId
             assertEquals(WaddleSendMessageOutcome.NotConnected, second.outcome)
             assertEquals(
-                listOf(firstId, firstId),
+                listOf(firstId),
                 client.sendOptions.map { it?.stanzaId },
             )
             assertEquals(
                 listOf(firstId, secondId),
                 harness.queue.rows(OWNER).map { it.clientStanzaId },
+            )
+
+            runCurrent()
+            assertEquals(
+                listOf(firstId, firstId),
+                client.sendOptions.map { it?.stanzaId },
             )
 
             harness.factory.emitAcked(firstId)
@@ -160,6 +167,176 @@ class ConnectionLoopPullTest {
             harness.factory.emitAcked(secondId)
             runCurrent()
             assertTrue(harness.queue.rows(OWNER).isEmpty())
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `queued admission returns before nonretryable predecessor advances to target`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            harness.start()
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+            client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val predecessor = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "predecessor",
+            )
+            val predecessorId =
+                checkNotNull(predecessor.delivery).identity.clientStanzaId
+            client.sendOutcomes += WaddleSendMessageOutcome.Error
+
+            val target = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "target",
+            )
+            val targetId = checkNotNull(target.delivery).identity.clientStanzaId
+
+            assertEquals(WaddleSendMessageOutcome.NotConnected, target.outcome)
+            assertEquals(
+                listOf(predecessorId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+
+            runCurrent()
+            assertEquals(
+                listOf(predecessorId, predecessorId, targetId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+            assertEquals(1, client.sendOptions.count { it?.stanzaId == targetId })
+            assertEquals(
+                listOf(targetId),
+                harness.queue.rows(OWNER).map { it.clientStanzaId },
+            )
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `queued target nonretryable failure emits one exact effect and never reports sent`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            harness.start()
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+            client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val predecessor = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "predecessor fails",
+            )
+            val predecessorId =
+                checkNotNull(predecessor.delivery).identity.clientStanzaId
+            client.sendOutcomes += WaddleSendMessageOutcome.Error
+            client.sendOutcomes += WaddleSendMessageOutcome.Error
+
+            val target = harness.messenger.sendOrEnqueue(
+                PEER,
+                false,
+                "target fails",
+            )
+            val targetDelivery = checkNotNull(target.delivery)
+            val targetId = targetDelivery.identity.clientStanzaId
+
+            assertEquals(WaddleSendMessageOutcome.NotConnected, target.outcome)
+            assertEquals(
+                listOf(predecessorId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+
+            runCurrent()
+            assertEquals(
+                listOf(predecessorId, predecessorId, targetId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+            assertTrue(harness.queue.rows(OWNER).isEmpty())
+            assertEquals(
+                1,
+                harness.deliveryEvents.count { event ->
+                    event == XmppEvent.DeliveryFailed(targetDelivery)
+                },
+            )
+            assertTrue(
+                harness.deliveryEvents.none { event ->
+                    event == XmppEvent.DeliveryAcked(targetDelivery)
+                },
+            )
+        } finally {
+            harness.shutdown()
+        }
+    }
+
+    @Test
+    fun `concurrent queued wakes stay single flight and preserve exact order`() = runTest {
+        val harness = ConnectionLoopPullHarness(this)
+        try {
+            harness.start()
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+            client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val predecessor =
+                harness.messenger.sendOrEnqueue(PEER, false, "blocked predecessor")
+            val predecessorId =
+                checkNotNull(predecessor.delivery).identity.clientStanzaId
+            val replayStarted = CompletableDeferred<Unit>()
+            val releaseReplay = CompletableDeferred<Unit>()
+            var blockReplay = true
+            client.beforeSendReturns = {
+                if (blockReplay) {
+                    blockReplay = false
+                    replayStarted.complete(Unit)
+                    releaseReplay.await()
+                }
+            }
+            client.sendOutcomes += WaddleSendMessageOutcome.Error
+
+            val second = harness.messenger.sendOrEnqueue(PEER, false, "second")
+            val secondId = checkNotNull(second.delivery).identity.clientStanzaId
+            runCurrent()
+            replayStarted.await()
+
+            val third = async {
+                harness.messenger.sendOrEnqueue(PEER, false, "third")
+            }
+            val fourth = async {
+                harness.messenger.sendOrEnqueue(PEER, false, "fourth")
+            }
+            runCurrent()
+            val thirdResult = third.await()
+            val fourthResult = fourth.await()
+            val thirdId = checkNotNull(thirdResult.delivery).identity.clientStanzaId
+            val fourthId = checkNotNull(fourthResult.delivery).identity.clientStanzaId
+            assertEquals(WaddleSendMessageOutcome.NotConnected, thirdResult.outcome)
+            assertEquals(WaddleSendMessageOutcome.NotConnected, fourthResult.outcome)
+            assertEquals(
+                listOf(predecessorId, predecessorId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+
+            releaseReplay.complete(Unit)
+            runCurrent()
+            assertEquals(1, client.sendOptions.count { it?.stanzaId == secondId })
+            assertEquals(0, client.sendOptions.count { it?.stanzaId == thirdId })
+            assertEquals(0, client.sendOptions.count { it?.stanzaId == fourthId })
+
+            harness.factory.emitAcked(secondId)
+            runCurrent()
+            assertEquals(1, client.sendOptions.count { it?.stanzaId == thirdId })
+            assertEquals(0, client.sendOptions.count { it?.stanzaId == fourthId })
         } finally {
             harness.shutdown()
         }

@@ -177,10 +177,14 @@ export function listQueuedRoomMessages(
   accountKey: string,
   roomJid: string,
 ): PersistedQueuedRoomMessage[] {
-  return readQueue(accountKey).filter(
-    (message): message is PersistedQueuedRoomMessage =>
-      message.kind === "room" && message.roomJid === roomJid,
-  );
+  const requestedRoomJid = bareJidKey(roomJid);
+  if (!requestedRoomJid) return [];
+  return readQueue(accountKey).flatMap((message) => {
+    if (message.kind !== "room") return [];
+    const canonicalRoomJid = bareJidKey(message.roomJid);
+    if (canonicalRoomJid !== requestedRoomJid) return [];
+    return [{ ...message, roomJid: canonicalRoomJid }];
+  });
 }
 
 export function listQueuedDmMessages(
@@ -219,7 +223,10 @@ export function enqueueQueuedMessage(
         ...message,
         peerJid: dmQueuePeerKey(message.peerJid, message.mucPm === true),
       }
-    : message;
+    : {
+        ...message,
+        roomJid: bareJidKey(message.roomJid),
+      };
   writeProjection(s, accountKey, normalized);
 }
 

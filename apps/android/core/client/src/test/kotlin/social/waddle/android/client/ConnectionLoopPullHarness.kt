@@ -20,6 +20,7 @@ import social.waddle.android.client.session.ConnectionLoopCallbacks
 import social.waddle.android.client.session.ConnectionLoopSettings
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.store.SessionStores
+import java.util.concurrent.CopyOnWriteArrayList
 
 internal class ConnectionLoopPullHarness(
     testScope: TestScope,
@@ -30,6 +31,7 @@ internal class ConnectionLoopPullHarness(
     val queue = OutboundQueue(prefs)
     val activeSession = ActiveSession()
     val stores = SessionStores()
+    val deliveryEvents = CopyOnWriteArrayList<XmppEvent>()
 
     private val ownerJob = SupervisorJob()
     private val ownerScope = CoroutineScope(
@@ -54,7 +56,10 @@ internal class ConnectionLoopPullHarness(
         sessionPrefs = prefs,
         journal = queue,
         resume = resume,
-        dispatchEvent = router::dispatch,
+        dispatchEvent = { event ->
+            deliveryEvents += event
+            router.dispatch(event)
+        },
     )
     val loop = ConnectionLoop(
         clientFactory = factory,

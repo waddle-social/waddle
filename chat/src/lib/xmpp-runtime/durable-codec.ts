@@ -3,6 +3,7 @@ import { decodePersistedSmResumeState } from "../xmpp/sm-resume-types";
 import {
   RETAINED_PREDECESSOR_LIMIT,
   outboundLane,
+  roomOutboundLane,
   type DurableOutboundEntryState,
   type OutboundClaim,
   type OutboundLane,
@@ -13,6 +14,7 @@ import {
   type OutboundTerminalIntent,
 } from "./durable-contract";
 import {
+  canonicalOutboundCreationTime,
   claimMatchesIdentity,
   dictionary,
   orderKey,
@@ -340,9 +342,11 @@ function decodeQueuedMessage(
       ? [...commonKeys, "peerJid", "mucPm"]
       : corruptRuntimeAccount(`${detail}.kind is invalid`);
   const record = strictObject(value, allowed, detail);
+  const createdAt = requiredString(record, "createdAt", detail);
+  canonicalOutboundCreationTime(createdAt, `${detail}.createdAt`);
   const base = {
     id: requiredString(record, "id", detail),
-    createdAt: requiredString(record, "createdAt", detail),
+    createdAt,
     body: requiredString(record, "body", detail),
     ...(record.markup === undefined ? {} : { markup: decodeMarkup(record.markup, `${detail}.markup`) }),
     ...(record.references === undefined ? {} : { references: decodeReferences(record.references, `${detail}.references`) }),
@@ -371,6 +375,10 @@ function decodeQueuedMessage(
       : { parentThreadId: record.parentThreadId as string }),
   };
   if (kind === "room") {
+    const roomJid = requiredString(record, "roomJid", detail);
+    if (roomOutboundLane(roomJid).roomJid !== roomJid) {
+      corruptRuntimeAccount(`${detail}.roomJid is not canonical`);
+    }
     let threadCreate: { title: string } | undefined;
     if (record.threadCreate !== undefined) {
       const create = strictObject(record.threadCreate, ["title"], `${detail}.threadCreate`);
@@ -384,7 +392,7 @@ function decodeQueuedMessage(
     return {
       kind: "room",
       ...base,
-      roomJid: requiredString(record, "roomJid", detail),
+      roomJid,
       ...(threadCreate ? { threadCreate } : {}),
       ...(threadReply ? { threadReply } : {}),
     };
@@ -471,7 +479,11 @@ function decodeLane(value: unknown, detail: string): OutboundLane {
   }
   if (kind === "room") {
     const room = strictObject(value, ["kind", "roomJid"], detail);
-    return { kind: "room", roomJid: requiredString(room, "roomJid", detail) };
+    const roomJid = requiredString(room, "roomJid", detail);
+    if (roomOutboundLane(roomJid).roomJid !== roomJid) {
+      corruptRuntimeAccount(`${detail}.roomJid is not canonical`);
+    }
+    return { kind: "room", roomJid };
   }
   return corruptRuntimeAccount(`${detail}.kind is invalid`);
 }

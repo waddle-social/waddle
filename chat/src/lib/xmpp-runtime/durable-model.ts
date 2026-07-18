@@ -21,6 +21,35 @@ import {
 const DEFAULT_SM_RESUME_WINDOW_MS = 300_000;
 export const OUTBOUND_OWNER_RETENTION_MS = 8 * 24 * 60 * 60 * 1_000;
 const AUTHORITY_CLOCK_ROLLBACK_TOLERANCE_MS = 1_000;
+const MAX_CANONICAL_DATE_MS = 253_402_300_799_999;
+
+export function canonicalOutboundCreationTime(
+  value: string,
+  label: string,
+): number {
+  const parsed = Date.parse(value);
+  if (
+    value.length !== 24
+    || !Number.isSafeInteger(parsed)
+    || parsed > MAX_CANONICAL_DATE_MS
+    || new Date(parsed).toISOString() !== value
+  ) {
+    throw new DOMException(`${label} is invalid`, "DataError");
+  }
+  return parsed;
+}
+
+export function outboundCreationTimeSuccessor(
+  value: number,
+): number {
+  if (value >= MAX_CANONICAL_DATE_MS) {
+    throw new DOMException(
+      "Outbound creation timestamp is exhausted",
+      "AbortError",
+    );
+  }
+  return value + 1;
+}
 
 export function checkedDurableCounterIncrement(
   value: number,

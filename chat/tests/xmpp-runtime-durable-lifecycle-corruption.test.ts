@@ -150,7 +150,7 @@ describe("unified XMPP runtime authority", () => {
     expect(collision.kind).toBe("conflict");
   });
 
-  test("claimHead atomically fences the lowest direct-lane sequence", async () => {
+  test("claimHead atomically fences the insertion-stable direct-lane head", async () => {
     const store = new MemoryDurableOutboundStore();
     const owner = (await activate(store)).fence;
     await store.persistReady(
@@ -172,7 +172,7 @@ describe("unified XMPP runtime authority", () => {
     );
     expect(claimed.kind).toBe("claimed");
     if (claimed.kind !== "claimed") throw new Error("expected claim");
-    expect(claimed.entry.identity.messageId).toBe("first");
+    expect(claimed.entry.identity.messageId).toBe("second");
 
     const busy = committedOrThrow(
       "claim-busy",
@@ -183,7 +183,7 @@ describe("unified XMPP runtime authority", () => {
       ),
     );
     expect(busy.kind).toBe("busy");
-    if (busy.kind === "busy") expect(busy.messageId).toBe("first");
+    if (busy.kind === "busy") expect(busy.messageId).toBe("second");
   });
 
   test("one handoff successor wins and the predecessor self-fences", async () => {

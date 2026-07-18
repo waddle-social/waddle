@@ -168,18 +168,22 @@ describe("durable outbound queue TTL", () => {
     expect(scan.entries[0]?.state.kind).toBe("terminal");
   });
 
-  test("unparseable createdAt fails closed and remains durable", async () => {
+  test("unparseable createdAt fails before durable mutation", async () => {
     const store = new MemoryDurableOutboundStore({ now: () => NOW });
-    await store.persistReady(
+    const persisted = await store.persistReady(
       ACCOUNT,
       directMessage("dm-mystery", "not-a-date"),
     );
+    expect(persisted.kind).toBe("failed");
+    if (persisted.kind !== "failed") throw new Error("expected invalid timestamp failure");
+    expect(persisted.cause).toBeInstanceOf(DOMException);
+    expect((persisted.cause as DOMException).name).toBe("DataError");
 
     const scan = committedOrThrow(
       "scan-invalid-created-at",
       await store.scanAndPrune(ACCOUNT, CUTOFF),
     );
     expect(scan.pruned).toEqual([]);
-    expect(scan.entries.map((entry) => entry.identity.messageId)).toEqual(["dm-mystery"]);
+    expect(scan.entries).toEqual([]);
   });
 });

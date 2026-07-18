@@ -40,6 +40,65 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 @OptIn(ExperimentalCoroutinesApi::class)
 class DirectReplyDeliveryTest {
     @Test
+    fun `queued direct reply returns before predecessor drain and preserves exact delivery`() =
+        runTest {
+            val harness = ManagerHarness(this)
+            harness.manager.login(
+                testSessionInfo(username = "alice", jid = OWNER_A),
+            )
+            runCurrent()
+            harness.factory.emitReady()
+            runCurrent()
+            val client = harness.factory.clients.single()
+            client.sendOutcomes += WaddleSendMessageOutcome.NotConnected
+
+            val predecessor = harness.manager.sendDirectReply(
+                expectedOwnerBareJid = OWNER_A,
+                conversationJid = PEER,
+                isGroupchat = false,
+                body = "predecessor",
+            )
+            val predecessorId =
+                checkNotNull(predecessor.delivery).identity.clientStanzaId
+            client.sendOutcomes += WaddleSendMessageOutcome.Error
+
+            val target = harness.manager.sendDirectReply(
+                expectedOwnerBareJid = OWNER_A,
+                conversationJid = PEER,
+                isGroupchat = false,
+                body = "target",
+            )
+            val targetDelivery = checkNotNull(target.delivery)
+            val targetId = targetDelivery.identity.clientStanzaId
+
+            assertEquals(WaddleSendMessageOutcome.NotConnected, target.outcome)
+            assertEquals(
+                DeliverySource.DirectReply(PEER, false),
+                targetDelivery.source,
+            )
+            assertEquals(
+                listOf(predecessorId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+
+            runCurrent()
+            assertEquals(
+                listOf(predecessorId, predecessorId, targetId),
+                client.sendOptions.map { it?.stanzaId },
+            )
+            assertEquals(1, client.sendOptions.count { it?.stanzaId == targetId })
+            assertEquals(
+                listOf(targetId),
+                harness.prefs.deliveryJournal.first()
+                    .owners[OWNER_A]
+                    ?.outboundRows
+                    .orEmpty()
+                    .map { it.clientStanzaId },
+            )
+            harness.manager.logout()
+        }
+
+    @Test
     fun `direct reply context survives process reconstruction on the durable row`() = runTest {
         val harness = ManagerHarness(this)
         harness.manager.login(

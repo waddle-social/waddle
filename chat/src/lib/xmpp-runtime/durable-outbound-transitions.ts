@@ -1,6 +1,7 @@
 import type { PersistedQueuedMessage } from "../outbound-queue-store";
 import {
   OUTBOUND_CLAIM_LEASE_MS,
+  roomOutboundLane,
   type DurableOutboundScan,
   type OutboundClaim,
   type OutboundClaimHeadResult,
@@ -21,6 +22,7 @@ import {
 } from "./durable-contract";
 import {
   OUTBOUND_OWNER_RETENTION_MS,
+  canonicalOutboundCreationTime,
   checkedDurableDeadline,
   claimForRow,
   claimMatchesIdentity,
@@ -30,6 +32,7 @@ import {
   entryFromRow,
   orderKey,
   orderedRows,
+  outboundCreationTimeSuccessor,
   ownerHasDurableReference,
   pruneUnreferencedPredecessors,
   sameClaim,
@@ -79,24 +82,33 @@ function prepareOrderedAppend(
   account: RuntimeAccount,
   prepared: PreparedOutboundMessage,
 ): PreparedOutboundMessage {
-  const requestedAt = Date.parse(prepared.message.createdAt);
-  if (!Number.isSafeInteger(requestedAt)) return prepared;
-  const occupied = new Set<number>();
+  const requestedAt = canonicalOutboundCreationTime(
+    prepared.message.createdAt,
+    "Outbound creation timestamp",
+  );
+  let latestLaneTime: number | null = null;
   for (const row of Object.values(account.outbound)) {
-    const persistedAt = Date.parse(row.message.createdAt);
-    if (Number.isSafeInteger(persistedAt)) occupied.add(persistedAt);
-  }
-  if (!occupied.has(requestedAt)) return prepared;
-  let orderedAt = requestedAt;
-  while (occupied.has(orderedAt)) {
-    if (orderedAt >= 8_640_000_000_000_000) {
+    if (!sameLane(row.lane, prepared.lane)) continue;
+    if (row.orderKey !== orderKey(row.message)) {
       throw new DOMException(
-        "Outbound creation timestamp is exhausted",
-        "AbortError",
+        "Persisted outbound lane order key is invalid",
+        "DataError",
       );
     }
-    orderedAt += 1;
+    const persistedAt = canonicalOutboundCreationTime(
+      row.message.createdAt,
+      "Persisted outbound lane timestamp",
+    );
+    latestLaneTime = latestLaneTime === null
+      ? persistedAt
+      : Math.max(latestLaneTime, persistedAt);
   }
+  if (latestLaneTime === null) return prepared;
+  const orderedAt = Math.max(
+    requestedAt,
+    outboundCreationTimeSuccessor(latestLaneTime),
+  );
+  if (orderedAt === requestedAt) return prepared;
   const message = {
     ...prepared.message,
     createdAt: new Date(orderedAt).toISOString(),
@@ -314,7 +326,12 @@ export function claimHeadTransition(
   if (!currentOwner(account, request, authorityNow)) {
     return { changed: false, value: { kind: "fenced" } };
   }
-  const head = orderedRows(account).find((row) => sameLane(row.lane, lane));
+  const canonicalLane = lane.kind === "room"
+    ? roomOutboundLane(lane.roomJid)
+    : lane;
+  const head = orderedRows(account).find((row) => (
+    sameLane(row.lane, canonicalLane)
+  ));
   if (!head) return { changed: false, value: { kind: "missing" } };
   if (head.state.kind === "terminal") {
     return {

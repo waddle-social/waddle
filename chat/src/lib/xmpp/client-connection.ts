@@ -34,6 +34,7 @@ import {
   type OutboundTerminalApplyResult,
   type OutboundTerminalIntent,
   outboundLane,
+  roomOutboundLane,
 } from "../xmpp-runtime/durable-contract";
 import { IndexedDbDurableOutboundStore } from "../xmpp-runtime/indexeddb-durable-store";
 import { barePeerJid } from "./jid";
@@ -855,9 +856,9 @@ export class OfflineSendQueue {
     if (!this.deps.canUseConnectedSession()) return;
     await this.flushDirect();
     for (const message of this.durableMessages.values()) {
-      if (message.kind === "room" && this.deps.roomIsReady(message.roomJid)) {
-        await this.flushRoom(message.roomJid);
-      }
+      const lane = outboundLane(message);
+      if (lane.kind !== "room" || !this.deps.roomIsReady(lane.roomJid)) continue;
+      await this.flushRoom(lane.roomJid);
     }
   }
 
@@ -1397,11 +1398,12 @@ export class OfflineSendQueue {
   async queueRoomMessage(roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<OutboundSendResult> {
     await this.durableHydration;
     const queuedId = opts.id ?? crypto.randomUUID();
+    const lane = roomOutboundLane(roomJid);
     const message: PersistedQueuedMessage = {
       kind: "room",
       id: queuedId,
       createdAt: new Date().toISOString(),
-      roomJid,
+      roomJid: lane.roomJid,
       body,
       ...(opts.markup?.length ? { markup: opts.markup } : {}),
       ...(opts.references?.length ? { references: opts.references } : {}),
@@ -1477,11 +1479,12 @@ export class OfflineSendQueue {
   ): Promise<PendingSendReservation> {
     await this.durableHydration;
     const owner = await this.revalidateBeforeOwnerMutation("pre-send-room");
+    const lane = roomOutboundLane(roomJid);
     const message: PersistedQueuedMessage = {
       kind: "room",
       id: opts.id,
       createdAt: new Date().toISOString(),
-      roomJid,
+      roomJid: lane.roomJid,
       body,
       ...(opts.markup?.length ? { markup: opts.markup } : {}),
       ...(opts.references?.length ? { references: opts.references } : {}),
@@ -1672,18 +1675,20 @@ export class OfflineSendQueue {
 
   async flushRoom(roomJid: string): Promise<void | undefined> {
     await this.durableHydration;
-    const inflight = this.roomFlushes.get(roomJid);
+    const lane = roomOutboundLane(roomJid);
+    const canonicalRoomJid = lane.roomJid;
+    const inflight = this.roomFlushes.get(canonicalRoomJid);
     if (inflight) return inflight;
-    if (!this.deps.roomIsReady(roomJid)) return;
+    if (!this.deps.roomIsReady(canonicalRoomJid)) return;
     const promise = (async () => {
       await this.terminalTail;
-      while (!this.disposed && this.deps.roomIsReady(roomJid)) {
+      while (!this.disposed && this.deps.roomIsReady(canonicalRoomJid)) {
         const owner = await this.revalidateBeforeOwnerMutation("pre-send-room-flush");
         const claimResult = committedOrThrow(
           "claim-room-head",
           await this.durableStore.claimHead(
             this.deps.queueScope(),
-            { kind: "room", roomJid },
+            lane,
             createOutboundClaim(owner, this.requireConnectionGeneration(), "sending"),
           ),
         );
@@ -1699,7 +1704,7 @@ export class OfflineSendQueue {
           continue;
         }
         if (claimResult.kind === "busy") {
-          this.scheduleLaneWake({ kind: "room", roomJid }, claimResult.leaseUntil);
+          this.scheduleLaneWake(lane, claimResult.leaseUntil);
           break;
         }
         const entry = claimResult.entry.message;
@@ -1711,7 +1716,7 @@ export class OfflineSendQueue {
         this.beginAttempt(entry.id, "room", claimResult.claim);
         let messageId: string | null;
         try {
-          messageId = await this.deps.sendRoom(roomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(roomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
+          messageId = await this.deps.sendRoom(canonicalRoomJid, entry.body, { ...(entry.markup?.length ? { markup: entry.markup } : {}), ...(entry.references?.length ? { references: entry.references } : {}), mentionJidsByNick: { ...(entry.mentionJidsByNick ?? {}), ...this.deps.roomMemberJids(canonicalRoomJid) }, ...(entry.files?.length ? { files: entry.files } : {}), ...(entry.replyTo ? { replyTo: entry.replyTo } : {}), ...(entry.threadId ? { threadId: entry.threadId } : {}), ...(entry.parentThreadId ? { parentThreadId: entry.parentThreadId } : {}), ...(entry.threadCreate ? { threadCreate: entry.threadCreate } : {}), ...(entry.threadReply ? { threadReply: entry.threadReply } : {}), id: entry.id });
         } catch (error) {
           if (isNonRetryableWasmSendFailure(error)) {
             await this.discardNonRetryable(entry.id);
@@ -1731,30 +1736,40 @@ export class OfflineSendQueue {
       }
     })();
     const trackedPromise = promise.finally(() => {
-      if (this.roomFlushes.get(roomJid) === trackedPromise) this.roomFlushes.delete(roomJid);
+      if (this.roomFlushes.get(canonicalRoomJid) === trackedPromise) {
+        this.roomFlushes.delete(canonicalRoomJid);
+      }
     });
-    this.roomFlushes.set(roomJid, trackedPromise);
+    this.roomFlushes.set(canonicalRoomJid, trackedPromise);
     return trackedPromise;
   }
 
   private scheduleLaneWake(lane: ReturnType<typeof outboundLane>, leaseUntil: number): void {
-    const key = lane.kind === "direct" ? "direct" : `room:${lane.roomJid}`;
+    const canonicalLane = lane.kind === "room"
+      ? roomOutboundLane(lane.roomJid)
+      : lane;
+    const key = canonicalLane.kind === "direct"
+      ? "direct"
+      : `room:${canonicalLane.roomJid}`;
     const current = this.leaseWakeTimers.get(key);
     if (current) clearTimeout(current);
     const timer = setTimeout(() => {
       this.leaseWakeTimers.delete(key);
-      this.wakeLane(lane);
+      this.wakeLane(canonicalLane);
     }, Math.max(0, leaseUntil - Date.now()) + 1);
     (timer as { unref?: () => void }).unref?.();
     this.leaseWakeTimers.set(key, timer);
   }
 
   private wakeLane(lane: ReturnType<typeof outboundLane>): void {
+    const canonicalLane = lane.kind === "room"
+      ? roomOutboundLane(lane.roomJid)
+      : lane;
     queueMicrotask(() => {
       if (this.disposed) return;
-      const flush = lane.kind === "direct"
+      const flush = canonicalLane.kind === "direct"
         ? this.flushDirect()
-        : this.flushRoom(lane.roomJid);
+        : this.flushRoom(canonicalLane.roomJid);
       void Promise.resolve(flush).catch((error) => {
         this.backgroundFailures.push(error);
         this.reportAuthorityError("lane wake", error);

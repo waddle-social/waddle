@@ -842,6 +842,96 @@ describe("OfflineSendQueue drain ordering", () => {
     expect(sends).toEqual([{ roomJid: "general@muc.example.com", body: "to general" }]);
   });
 
+  test("noncanonical room ingress coalesces canonical flushes without orphaning rows", async () => {
+    const canonicalRoom = "general@muc.example";
+    const readyChecks: string[] = [];
+    const sends: Array<{ roomJid: string; id: string }> = [];
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    let markSecondStarted!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    expect(committedOrThrow(
+      "seed-noncanonical-first",
+      await durableStore.persistReady(SCOPE, {
+        kind: "room",
+        id: "canonical-first",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        roomJid: " General@MUC.Example/First ",
+        body: "first",
+      }),
+    ).kind).toBe("inserted");
+    expect(committedOrThrow(
+      "seed-noncanonical-second",
+      await durableStore.persistReady(SCOPE, {
+        kind: "room",
+        id: "canonical-second",
+        createdAt: "2026-07-18T00:00:00.001Z",
+        roomJid: "GENERAL@muc.example/Second",
+        body: "second",
+      }),
+    ).kind).toBe("inserted");
+    const { queue } = await createActiveQueue({
+      roomIsReady: (roomJid) => {
+        readyChecks.push(roomJid);
+        return roomJid === canonicalRoom;
+      },
+      sendRoom: async (roomJid, _body, opts) => {
+        sends.push({ roomJid, id: opts.id });
+        if (opts.id === "canonical-first") {
+          markFirstStarted();
+          await firstReleased;
+        } else {
+          markSecondStarted();
+        }
+        return opts.id;
+      },
+    });
+
+    expect(listQueuedMessages(SCOPE).map((message) => ({
+      id: message.id,
+      roomJid: message.kind === "room" ? message.roomJid : null,
+    }))).toEqual([
+      { id: "canonical-first", roomJid: canonicalRoom },
+      { id: "canonical-second", roomJid: canonicalRoom },
+    ]);
+
+    const firstFlush = queue.flushRoom(" GENERAL@MUC.Example/Caller ");
+    const coalescedFlush = queue.flushRoom(canonicalRoom);
+    await firstStarted;
+    expect(sends).toEqual([
+      { roomJid: canonicalRoom, id: "canonical-first" },
+    ]);
+    releaseFirst();
+    await Promise.all([firstFlush, coalescedFlush]);
+    expect(sends).toHaveLength(1);
+
+    await queue.handleAck("canonical-first");
+    await secondStarted;
+    await queue.whenQuiescent();
+    expect(sends).toEqual([
+      { roomJid: canonicalRoom, id: "canonical-first" },
+      { roomJid: canonicalRoom, id: "canonical-second" },
+    ]);
+
+    await queue.handleAck("canonical-second");
+    await queue.whenQuiescent();
+    expect(committedOrThrow(
+      "canonical-room-list",
+      await durableStore.list(SCOPE),
+    )).toEqual([]);
+    expect(listQueuedMessages(SCOPE)).toEqual([]);
+    expect(readyChecks.length).toBeGreaterThan(0);
+    expect(readyChecks.every((roomJid) => roomJid === canonicalRoom)).toBe(true);
+  });
+
   test("queueing while connected (room not joined) does not emit a reconnecting status (#1164)", async () => {
     const { queue, statuses } = await createActiveQueue({
       canUseConnectedSession: () => true,

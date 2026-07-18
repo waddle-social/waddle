@@ -17,11 +17,12 @@ const NOW = 10_000;
 function directMessage(
   id: string,
   body = "hello",
+  createdAt = "2026-07-18T00:00:00.000Z",
 ): PersistedQueuedDmMessage {
   return {
     kind: "dm",
     id,
-    createdAt: "2026-07-18T00:00:00.000Z",
+    createdAt,
     peerJid: "recipient@example.com",
     body,
   };
@@ -86,6 +87,76 @@ describe("durable store engine", () => {
     );
     expect(failedSave.kind).toBe("failed");
     expect(repository.transactionCalls).toBe(1);
+  });
+
+  test("commits one adjusted timestamp and matching canonical order key", async () => {
+    const { store, repository } = recordingDurableStore({ now: () => NOW });
+    const predecessor = directMessage(
+      "future-predecessor",
+      "future",
+      "2030-01-01T00:00:00.000Z",
+    );
+    const rollback = directMessage(
+      "rollback-successor",
+      "rollback",
+      "2026-01-01T00:00:00.000Z",
+    );
+
+    expect(committedOrThrow(
+      "engine-future-predecessor",
+      await store.persistReady(ACCOUNT, predecessor),
+    ).kind).toBe("inserted");
+    const inserted = committedOrThrow(
+      "engine-rollback-successor",
+      await store.persistReady(ACCOUNT, rollback),
+    );
+    if (inserted.kind !== "inserted") {
+      throw new Error("expected rollback successor insertion");
+    }
+    expect(inserted).toMatchObject({
+      kind: "inserted",
+      entry: {
+        message: {
+          id: "rollback-successor",
+          createdAt: "2030-01-01T00:00:00.001Z",
+        },
+      },
+    });
+
+    const persisted = repository.inspect(ACCOUNT);
+    const row = persisted.outbound["rollback-successor"]!;
+    expect(row.message).toEqual(inserted.entry.message);
+    expect(row.orderKey).toBe(
+      "2030-01-01T00:00:00.001Z\u0000rollback-successor",
+    );
+
+    const retry = committedOrThrow(
+      "engine-rollback-retry",
+      await store.persistReady(ACCOUNT, rollback),
+    );
+    expect(retry.kind).toBe("existing");
+    expect(repository.inspect(ACCOUNT).outbound["rollback-successor"])
+      .toEqual(row);
+
+    repository.mutate(ACCOUNT, (account) => {
+      const invalid = account.outbound["future-predecessor"]!;
+      invalid.message.createdAt = "invalid";
+      invalid.orderKey = "invalid\u0000future-predecessor";
+    });
+    const beforeFailure = repository.inspect(ACCOUNT);
+    const commitsBeforeFailure = repository.commits.length;
+    const failed = await store.persistReady(
+      ACCOUNT,
+      directMessage("blocked-by-invalid"),
+    );
+    expect(failed.kind).toBe("failed");
+    if (failed.kind !== "failed") {
+      throw new Error("expected invalid lane state to fail");
+    }
+    expect(failed.cause).toBeInstanceOf(DOMException);
+    expect((failed.cause as DOMException).name).toBe("DataError");
+    expect(repository.commits).toHaveLength(commitsBeforeFailure);
+    expect(repository.inspect(ACCOUNT)).toEqual(beforeFailure);
   });
 
   test("decodes before sampling and commits one clock, revision, finalize, and write decision", async () => {

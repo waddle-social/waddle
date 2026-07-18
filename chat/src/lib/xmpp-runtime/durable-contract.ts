@@ -1,4 +1,5 @@
 import type { PersistedQueuedMessage } from "../outbound-queue-store";
+import { bareJidKey } from "../xmpp/jid";
 import type { PersistedSmResumeState } from "../xmpp/sm-resume-types";
 
 export const OUTBOUND_CLAIM_LEASE_MS = 45_000;
@@ -103,6 +104,8 @@ export type OutboundClaim = OutboundClaimRequest & {
 export type OutboundLane =
   | { kind: "direct" }
   | { kind: "room"; roomJid: string };
+
+export type RoomOutboundLane = Extract<OutboundLane, { kind: "room" }>;
 
 export type DurableOutboundEntryState =
   | { kind: "ready" }
@@ -338,13 +341,17 @@ export interface DurableOutboundStore extends DurableSmResumeStore {
   ): Promise<DurableOutcome<PagehideHandoffCancelResult>>;
 }
 
-export function outboundLane(message: PersistedQueuedMessage): OutboundLane {
-  if (message.kind === "dm") return { kind: "direct" };
-  const roomJid = message.roomJid.split("/")[0]?.trim().toLowerCase() ?? "";
-  if (!roomJid) {
+export function roomOutboundLane(roomJid: string): RoomOutboundLane {
+  const canonicalRoomJid = bareJidKey(roomJid);
+  if (!canonicalRoomJid) {
     throw new DOMException("Outbound room lane requires a room JID", "DataError");
   }
-  return { kind: "room", roomJid };
+  return { kind: "room", roomJid: canonicalRoomJid };
+}
+
+export function outboundLane(message: PersistedQueuedMessage): OutboundLane {
+  if (message.kind === "dm") return { kind: "direct" };
+  return roomOutboundLane(message.roomJid);
 }
 
 export function createOutboundClaim(
