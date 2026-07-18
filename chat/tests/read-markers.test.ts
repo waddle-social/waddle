@@ -10,6 +10,7 @@ import { useReadReceiptPreference } from "../src/preferences/read-receipts";
 import type { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { TimelineMessage } from "../src/lib/chat-ui";
 import type { ChannelSummary } from "../src/lib/chat-types";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const NS_STANZA_ID = "urn:xmpp:sid:0";
 
@@ -37,7 +38,18 @@ function channel(features: string[] = [NS_STANZA_ID]): ChannelSummary {
 
 afterEach(() => {
   useReadReceiptPreference().setReadReceiptPreference("send");
+  __setFaroForTesting(null);
 });
+
+function faroEvents() {
+  const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+  __setFaroForTesting({
+    api: {
+      pushEvent: (name: string, attributes?: Record<string, string>) => events.push({ name, attributes }),
+    },
+  } as never);
+  return events;
+}
 
 describe("useChannelReadMarkers", () => {
   test("markDisplayed does not invent a MUC marker target without a room stanza-id", () => {
@@ -88,6 +100,39 @@ describe("useChannelReadMarkers", () => {
       "room-stanza-id",
       "general@rooms.example.com",
     );
+  });
+
+  test("reports a failed room displayed-marker send without message identifiers", async () => {
+    const events = faroEvents();
+    const sendDisplayed = mock(async () => { throw new Error("write failed"); });
+    const messages = ref<TimelineMessage[]>([{
+      id: "private-message-id",
+      stanzaId: "private-stanza-id",
+      stanzaIdBy: "general@rooms.example.com",
+      createdAt: "2020-01-01T00:00:00Z",
+      body: "private body",
+      nick: "bob",
+    } as TimelineMessage]);
+    const markers = useChannelReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeChannelClient(sendDisplayed)),
+      activeSpaceId: ref("space"),
+      activeChannelId: ref("general"),
+      currentChannel: ref(channel()),
+      messages,
+    });
+
+    markers.markDisplayed("private-message-id");
+    await Promise.resolve();
+
+    expect(events).toEqual([{
+      name: "chat.xmpp.displayed_marker.failed",
+      attributes: {
+        direction: "send",
+        kind: "room",
+        reason: "send-failed",
+        round_trip_latency_band: "over-5s",
+      },
+    }]);
   });
 
   test("read-receipt opt-out suppresses MUC XEP-0333 while preserving MDS", () => {
@@ -240,6 +285,35 @@ describe("useDmReadMarkers", () => {
     expect(sendDmDisplayed).toHaveBeenCalledTimes(1);
     expect(sendDmDisplayed.mock.calls[0]![0]).toBe("bob@example.com");
     expect(sendDmDisplayed.mock.calls[0]![1]).toBe("dm1");
+  });
+
+  test("reports a failed DM displayed-marker send with a latency band", async () => {
+    const events = faroEvents();
+    const sendDmDisplayed = mock(async () => { throw new Error("write failed"); });
+    const markers = useDmReadMarkers({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmDisplayed)),
+      activePeerJid: ref("bob@example.com"),
+      messages: ref<TimelineMessage[]>([{
+        id: "dm-private-id",
+        createdAt: "2020-01-01T00:00:00Z",
+        body: "private body",
+        nick: "bob",
+        displayedMarkerRequested: true,
+      } as TimelineMessage]),
+    });
+
+    markers.markDisplayed("dm-private-id");
+    await Promise.resolve();
+
+    expect(events[0]).toEqual({
+      name: "chat.xmpp.displayed_marker.failed",
+      attributes: {
+        direction: "send",
+        kind: "dm",
+        reason: "send-failed",
+        round_trip_latency_band: "over-5s",
+      },
+    });
   });
 
   test("markDisplayed echoes XEP-0201 thread metadata for threaded DMs", () => {

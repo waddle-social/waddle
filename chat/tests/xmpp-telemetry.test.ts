@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
+import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
 import {
   __clearSensitiveUrlsForTesting,
   __scrubMissingFetchSpanUrlForTesting,
@@ -8,11 +9,14 @@ import {
   __scrubXhrSpanUrlForTesting,
   __sanitizeFaroTransportItemForTesting,
   __setFaroForTesting,
+  __websocketUrlWithTraceparentForTesting,
   initTelemetry,
   markSensitiveUrlForTelemetry,
   reportCallAudioProcessing,
+  reportCallMediaPath,
   reportCatchup,
   reportError,
+  reportDisplayedMarkerFailure,
   reportMessageAcked,
   reportMessageFailed,
   reportQueueDepthChange,
@@ -21,6 +25,8 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  setXmppResourceForTelemetry,
+  websocketUrlWithTraceparent,
 } from "../src/lib/telemetry";
 import { DiscoTimeoutError, discoverChannels } from "../src/lib/xmpp/discovery";
 import { installInstrumentation } from "../src/lib/xmpp/xmpp-instrumentation";
@@ -76,11 +82,22 @@ function createFaroStub() {
     error: Error;
     options?: { type?: string; context?: Record<string, string> };
   }> = [];
+  const sessions: Array<{ attributes?: Record<string, string> }> = [];
+  let currentSession: { id?: string; attributes?: Record<string, string> } = {
+    id: "faro-session",
+    attributes: { retained: "yes" },
+  };
   return {
     events,
     measurements,
     errors,
+    sessions,
     api: {
+      getSession: () => currentSession,
+      setSession: (meta: { attributes?: Record<string, string> }) => {
+        currentSession = meta;
+        sessions.push(meta);
+      },
       pushEvent: (name: string, attributes?: Record<string, string>) => {
         events.push({ name, attributes });
       },
@@ -143,7 +160,7 @@ describe("reportCallAudioProcessing", () => {
           autoGainControl: "unknown",
         },
         aiNoiseFilter: { kind: "active", model: null },
-      }),
+      }, "dm"),
     ).not.toThrow();
   });
 
@@ -159,7 +176,7 @@ describe("reportCallAudioProcessing", () => {
         autoGainControl: "unknown",
       },
       aiNoiseFilter: { kind: "active", model: "rnnoise" },
-    });
+    }, "muc");
 
     expect(stub.events).toEqual([
       {
@@ -170,9 +187,40 @@ describe("reportCallAudioProcessing", () => {
           echo_cancellation: "off",
           auto_gain_control: "unknown",
           ai_noise_filter: "rnnoise",
+          call_kind: "muc",
         },
       },
     ]);
+  });
+});
+
+describe("call beacon kind tagging", () => {
+  test("adds call_kind to media-path events", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportCallMediaPath({
+      direction: "send",
+      source: "camera",
+      codec: "VP9",
+      iceCandidateType: "host",
+      iceTransport: "udp",
+      audioBitrateBand: null,
+      videoResolutionBand: "720p",
+    }, "dm");
+
+    expect(stub.events[0]).toEqual({
+      name: "chat.call.media_path",
+      attributes: {
+        direction: "send",
+        source: "camera",
+        codec: "VP9",
+        ice_candidate_type: "host",
+        ice_transport: "udp",
+        video_resolution_band: "720p",
+        call_kind: "dm",
+      },
+    });
   });
 });
 
@@ -190,11 +238,11 @@ describe("telemetry module no-op behaviour", () => {
       reportMessageAcked({ id: "x", kind: "room", latencyMs: 5 });
       reportMessageFailed({ id: "x", kind: "dm" });
       reportSendEnqueued({ kind: "room", reason: "offline" });
-      reportQueueDepthChange({ persisted: 0, inflight: 0 });
+      reportQueueDepthChange({ kind: "dm", persisted: 0, inflight: 0 });
       reportSessionLifecycle({ type: "fresh" });
       reportStatusChange({ state: "online" });
       reportReconnectScheduled({ attempt: 1, delayMs: 2_000 });
-      reportCatchup({ conversations: 1, pages: 1, messages: 1, durationMs: 10 });
+      reportCatchup({ conversations: 1, pages: 1, pageFailures: 0, messages: 1, durationMs: 10 });
       reportResumeDrain({ buffered: 1, durationMs: 10 });
     }).not.toThrow();
   });
@@ -206,7 +254,7 @@ describe("telemetry module no-op behaviour", () => {
     reportMessageAcked({ id: "m-1", kind: "room", latencyMs: 123.4 });
     reportMessageFailed({ id: "m-2", kind: "dm" });
     reportSendEnqueued({ kind: "dm", reason: "offline" });
-    reportQueueDepthChange({ persisted: 2, inflight: 1 });
+    reportQueueDepthChange({ kind: "room", persisted: 2, inflight: 1 });
     reportSessionLifecycle({ type: "resumed" });
     reportStatusChange({ state: "reconnecting" });
     reportStatusChange({ state: "online", reconnectDurationMs: 4_321 });
@@ -215,6 +263,7 @@ describe("telemetry module no-op behaviour", () => {
       conversations: 2,
       processedConversations: 1,
       pages: 4,
+      pageFailures: 2,
       messages: 12,
       durationMs: 88.6,
       outcome: "aborted",
@@ -252,6 +301,7 @@ describe("telemetry module no-op behaviour", () => {
 
     const depthMeasurement = stub.measurements[1];
     expect(depthMeasurement.values).toEqual({ persisted: 2, inflight: 1 });
+    expect(depthMeasurement.context).toEqual({ kind: "room" });
 
     const reconnectMeasurement = stub.measurements[2];
     expect(reconnectMeasurement.values.duration_ms).toBe(4_321);
@@ -270,6 +320,7 @@ describe("telemetry module no-op behaviour", () => {
       conversations: 2,
       processed_conversations: 1,
       pages: 4,
+      page_failures: 2,
       messages: 12,
       duration_ms: 89,
       hidden_ms: 0,
@@ -283,6 +334,108 @@ describe("telemetry module no-op behaviour", () => {
     const resumeDrain = stub.measurements[5];
     expect(resumeDrain.values).toEqual({ buffered: 5, duration_ms: 12, hidden_ms: 0 });
     expect(resumeDrain.context).toEqual({ visibility: "visible", hidden_bucket: "visible" });
+  });
+
+  test("maps displayed-marker failures to low-cardinality latency bands", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    reportDisplayedMarkerFailure({
+      direction: "send",
+      kind: "dm",
+      reason: "send-failed",
+      roundTripMs: 1_250,
+    });
+    reportDisplayedMarkerFailure({
+      direction: "receive",
+      kind: "room",
+      reason: "receive-processing-failed",
+      roundTripMs: null,
+    });
+
+    expect(stub.events).toEqual([
+      {
+        name: "chat.xmpp.displayed_marker.failed",
+        attributes: {
+          direction: "send",
+          kind: "dm",
+          reason: "send-failed",
+          round_trip_latency_band: "1s-5s",
+        },
+      },
+      {
+        name: "chat.xmpp.displayed_marker.failed",
+        attributes: {
+          direction: "receive",
+          kind: "room",
+          reason: "receive-processing-failed",
+          round_trip_latency_band: "unknown",
+        },
+      },
+    ]);
+  });
+
+  test("records the generated XMPP resource as a Faro session attribute", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const client = new BrowserXmppClient(session({ jid: "alice@example.com" }));
+    installInstrumentation(client);
+
+    expect(client.fullJid).toMatch(/^alice@example\.com\/web-/);
+    expect(stub.sessions).toEqual([{
+      id: "faro-session",
+      attributes: {
+        retained: "yes",
+        xmpp_resource: client.xmppResource,
+      },
+    }]);
+  });
+
+  test("keeps the no-randomUUID XMPP resource fallback UUID-shaped", () => {
+    const stub = createFaroStub();
+    __setFaroForTesting(stub as never);
+
+    const resource = __createFallbackXmppResourceForTesting(new Uint8Array(16));
+    setXmppResourceForTelemetry(resource);
+
+    expect(resource).toBe("web-00000000-0000-4000-8000-000000000000");
+    expect(stub.sessions.at(-1)?.attributes?.xmpp_resource).toBe(resource);
+  });
+
+  test("passes a valid traceparent while dropping session-bearing query values", () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    expect(__scrubSpanUrlForTesting(
+      `wss://xmpp.example/ws?session_id=secret&traceparent=${traceparent}`,
+      ["https://xmpp.example"],
+    )).toBe(`wss://xmpp.example/:route?traceparent=${traceparent}`);
+  });
+
+  test("leaves WebSocket URLs unchanged when there is no active span", () => {
+    expect(websocketUrlWithTraceparent("wss://xmpp.example/ws?transport=websocket"))
+      .toBe("wss://xmpp.example/ws?transport=websocket");
+  });
+
+  test("appends the active trace context without dropping existing WebSocket query values", () => {
+    expect(__websocketUrlWithTraceparentForTesting(
+      "wss://xmpp.example/ws?transport=websocket",
+      {
+        traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+        spanId: "00f067aa0ba902b7",
+        traceFlags: 1,
+      },
+    )).toBe(
+      "wss://xmpp.example/ws?transport=websocket&traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    );
+  });
+
+  test("drops W3C-invalid all-zero trace identifiers", () => {
+    const zeroTraceparent = "00-00000000000000000000000000000000-0000000000000000-01";
+    expect(__scrubSpanUrlForTesting(
+      `wss://xmpp.example/ws?traceparent=${zeroTraceparent}`,
+      ["https://xmpp.example"],
+    )).toBe("wss://xmpp.example/:route");
   });
 
   test("reportError drops identifier-bearing context fields", () => {
@@ -606,6 +759,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       conversations: 1,
       processedConversations: 1,
       pages: 2,
+      pageFailures: 0,
       messages: 3,
       durationMs: 4,
       outcome: "completed",
@@ -635,6 +789,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       conversations: number;
       processedConversations: number;
       pages: number;
+      pageFailures: number;
       messages: number;
       outcome: string;
     }> = [];
@@ -681,6 +836,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
       conversations: 2,
       processedConversations: 2,
       pages: 1,
+      pageFailures: 1,
       messages: 1,
       outcome: "failed",
     });
@@ -803,7 +959,10 @@ describe("BrowserXmppClient telemetry hooks", () => {
         detail: string;
         cause?: unknown;
         condition?: string;
-        errorType?: string;
+      errorType?: string;
+      errorText?: string;
+      roomLocalpart?: string;
+        roomLocalpart?: string;
         errorText?: string;
       }) => void;
     };
@@ -876,6 +1035,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
       detail: "room join rejected — room@muc.example.com",
       condition: "registration-required",
       errorType: "auth",
+      errorText: "private invitation for alice@example.com says secret words",
+      roomLocalpart: "room",
     });
 
     expect(stub.errors).toHaveLength(1);
@@ -884,7 +1045,10 @@ describe("BrowserXmppClient telemetry hooks", () => {
     expect(joinErr.options?.context?.detail).toBe("room-join-registration-required");
     expect(joinErr.options?.context?.condition).toBe("registration-required");
     expect(joinErr.options?.context?.errorType).toBe("auth");
+    expect(joinErr.options?.context?.errorText).toBeUndefined();
     expect(joinErr.options?.context?.errorSource).toBe("server");
+    expect(joinErr.options?.context?.roomLocalpart).toBe("room");
+    expect(joinErr.options?.context?.roomLocalpart).not.toContain("@");
   });
 
   test("disco failures report to Faro with condition or local-timeout attribution", async () => {
@@ -1130,7 +1294,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     });
 
     const enqueued: Array<{ kind: string; reason: string }> = [];
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     client.onSendEnqueued((info) => enqueued.push(info));
     client.onQueueDepthChange((d) => depths.push(d));
 
@@ -1138,8 +1302,9 @@ describe("BrowserXmppClient telemetry hooks", () => {
 
     expect(enqueued).toHaveLength(1);
     expect(enqueued[0].kind).toBe("dm");
-    expect(depths).toHaveLength(1);
-    expect(depths[0].persisted).toBe(1);
+    expect(depths).toHaveLength(2);
+    expect(depths.find((depth) => depth.kind === "dm")?.persisted).toBe(1);
+    expect(depths.find((depth) => depth.kind === "room")?.persisted).toBe(0);
   });
 
   test("hook exceptions are swallowed and do not break chat", () => {
@@ -1180,7 +1345,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     const client = new BrowserXmppClient(session());
 
     const fails: Array<{ id: string; kind: "room" | "dm" }> = [];
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     client.onMessageDeliveryFailed((id, meta) => fails.push({ id, kind: meta.kind }));
     client.onQueueDepthChange((d) => depths.push(d));
 
@@ -1211,8 +1376,8 @@ describe("BrowserXmppClient telemetry hooks", () => {
     stubXmpp.emit("message:failed", { id: "dm-fail-1" });
 
     expect(fails).toEqual([{ id: "dm-fail-1", kind: "dm" }]);
-    expect(depths).toHaveLength(1);
-    expect(depths[0].inflight).toBe(0);
+    expect(depths).toHaveLength(2);
+    expect(depths.find((depth) => depth.kind === "dm")?.inflight).toBe(0);
   });
 
   test("message:failed without a recorded pending entry does not fire the failure hook", () => {

@@ -42,7 +42,7 @@ const RECONNECT_CATCHUP_MAX_PAGES_PER_CONVERSATION = 5;
 
 export type DmCallActivityHydrationOptions = { since?: string; pageSize?: number; maxPages?: number };
 
-type CatchupRunStats = { pages: number; messages: number };
+type CatchupRunStats = { pages: number; pageFailures: number; messages: number };
 type CatchupOutcome = "completed" | "aborted" | "failed";
 
 /**
@@ -594,7 +594,7 @@ export class MamPager {
     // long it took (background-tab HUNG investigation). Keep stats local
     // because old/new xmpp handles can briefly overlap during reconnects.
     const startedAt = performance.now();
-    const stats: CatchupRunStats = { pages: 0, messages: 0 };
+    const stats: CatchupRunStats = { pages: 0, pageFailures: 0, messages: 0 };
     let processedConversations = 0;
     let outcome: CatchupOutcome = "completed";
     try {
@@ -667,6 +667,7 @@ export class MamPager {
         conversations: entries.length,
         processedConversations,
         pages: stats.pages,
+        pageFailures: stats.pageFailures,
         messages: stats.messages,
         durationMs: performance.now() - startedAt,
         outcome,
@@ -696,6 +697,7 @@ export class MamPager {
         try {
           page = await xmpp.fetch_dm_history_page(archivePeerJid, 100, { type: "after", after });
         } catch (error) {
+          stats.pageFailures += 1;
           if (isMamCursorNotFound(classifyMamError(error))) {
             const since = entry.since ?? this.deps.catchup.getDmLastSeen(entry.key);
             if (since) await this.runDmTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats, entry.scope);
@@ -739,6 +741,7 @@ export class MamPager {
         try {
           page = await xmpp.fetch_room_history_page(entry.key, 100, { type: "after", after });
         } catch (error) {
+          stats.pageFailures += 1;
           if (isMamCursorNotFound(classifyMamError(error))) {
             const since = entry.since ?? this.deps.catchup.getRoomLastSeen(entry.key);
             if (since) await this.runRoomTimestampCatchup(xmpp, entry.key, since, sessionJid, entry.seenIds, stats);
@@ -789,7 +792,13 @@ export class MamPager {
       }
     };
     while (true) {
-      const page = await xmpp.fetch_dm_history_page?.(archivePeerJid, 100, pageParam);
+      let page: WasmMamPage | null | undefined;
+      try {
+        page = await xmpp.fetch_dm_history_page?.(archivePeerJid, 100, pageParam);
+      } catch (error) {
+        if (stats) stats.pageFailures += 1;
+        throw error;
+      }
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;
@@ -826,7 +835,13 @@ export class MamPager {
       }
     };
     while (true) {
-      const page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam);
+      let page: WasmMamPage | null | undefined;
+      try {
+        page = await xmpp.fetch_room_history_page?.(roomJid, 100, pageParam);
+      } catch (error) {
+        if (stats) stats.pageFailures += 1;
+        throw error;
+      }
       if (!this.deps.isCurrentConnected(xmpp, sessionJid)) return;
       if (page) pages.push(page);
       if (isMamPageComplete(page) || pageCrossesSince(page, since)) break;

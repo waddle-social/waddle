@@ -10,6 +10,7 @@ import {
   isSameCallBareJid,
 } from "./tie-break";
 import type { CallEvent, CallState } from "./types";
+import { reportDeclinedCallAttempt } from "./call-lifecycle-telemetry";
 
 /**
  * Side-effect handler invoked by the chat-side `on_call` wrapper
@@ -65,6 +66,7 @@ export async function handleCallEventSideEffect(
         await outboundCalls.retractTieBreak(sender, event.from, prev.sid);
         acceptIncomingTieBreakPropose(event);
       } else {
+        reportDeclinedCallAttempt(event.sid);
         await outboundCalls.rejectTieBreak(sender, event.from, event.sid);
       }
     } catch (err) {
@@ -107,6 +109,7 @@ export async function handleCallEventSideEffect(
     prev.phase !== "idle" &&
     prev.phase !== "ended"
   ) {
+    reportDeclinedCallAttempt(event.sid);
     try {
       await outboundCalls.reject(sender, event.from, event.sid);
     } catch (err) {

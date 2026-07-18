@@ -53,6 +53,13 @@ import {
   setCallConnectionQuality,
 } from "./connection-quality";
 import { resetCallActiveSince, setCallActiveSince } from "./call-duration";
+import {
+  observeCallConnectionPhase,
+  observeCallConnectionQuality,
+  observeCallStats,
+  finishCallAttemptForTransportDisconnect,
+  type CallKind,
+} from "./call-lifecycle-telemetry";
 
 /**
  * Process-wide singleton: only one call engine should ever exist
@@ -166,7 +173,17 @@ function resetActiveSpeakers(): void {
  * no-op when Faro isn't configured. Reset on disconnect so the next call
  * re-arms from scratch.
  */
-const micAudioProcessingBeacon = createCallAudioProcessingBeacon(reportCallAudioProcessing);
+function currentCallKind(): CallKind | null {
+  const state = $callState.get();
+  if (state.phase === "active" || state.phase === "muc-pending") return state.kind;
+  if (state.phase === "incoming" || state.phase === "outgoing") return "dm";
+  return null;
+}
+
+const micAudioProcessingBeacon = createCallAudioProcessingBeacon((state) => {
+  const callKind = currentCallKind();
+  if (callKind) reportCallAudioProcessing(state, callKind);
+});
 
 /**
  * Fleet-measurement beacon for the media path each call track actually got
@@ -176,7 +193,10 @@ const micAudioProcessingBeacon = createCallAudioProcessingBeacon(reportCallAudio
  * silent "stuck on TCP relay" rate — is captured on every call. De-dupes to at
  * most one event per distinct path per call; reset on disconnect.
  */
-const callMediaPathBeacon = createCallMediaPathBeacon(reportCallMediaPath);
+const callMediaPathBeacon = createCallMediaPathBeacon((snapshot) => {
+  const callKind = currentCallKind();
+  if (callKind) reportCallMediaPath(snapshot, callKind);
+});
 
 /** Cadence of the observational media-path poll. Codec/ICE settle within the
  * first seconds and then rarely change, and the beacon de-dupes, so a slow 5 s
@@ -207,13 +227,15 @@ const audioMediaPathSamples = new Map<string, CallStatSample>();
 async function sampleTrackMediaPath(
   track: LocalMediaTrack | RemoteMediaTrack,
   direction: CallStatDirection,
-): Promise<CallMediaPathSnapshot | null> {
+): Promise<{ snapshot: CallMediaPathSnapshot | null; rttMs: number | null; packetLossPct: number | null } | null> {
   try {
     const report = await track.track.getRTCStatsReport();
     if (!report) return null;
     const { summary } = summarizeVideoStats(report, direction);
-    if (summary.codec === null && summary.iceCandidateType === null) return null;
-    return {
+    if (summary.codec === null && summary.iceCandidateType === null) {
+      return { snapshot: null, rttMs: summary.rttMs, packetLossPct: summary.packetLossPct };
+    }
+    return { snapshot: {
       direction,
       source: track.source === "screen_share" ? "screen" : "camera",
       codec: summary.codec,
@@ -223,7 +245,7 @@ async function sampleTrackMediaPath(
       // The negotiated top-layer resolution bucket: a fleet shift from 1080p to
       // 720p is the camera-cap egress signal (#1001).
       videoResolutionBand: videoResolutionBand(summary.resolution),
-    };
+    }, rttMs: summary.rttMs, packetLossPct: summary.packetLossPct };
   } catch {
     return null;
   }
@@ -235,6 +257,8 @@ type AudioMediaPathResult = {
   snapshot: CallMediaPathSnapshot | null;
   key: string;
   sample: CallStatSample | null;
+  rttMs: number | null;
+  packetLossPct: number | null;
 };
 
 /**
@@ -279,7 +303,13 @@ async function sampleAudioTrackMediaPath(
             audioBitrateBand: band,
             videoResolutionBand: null, // audio paths carry no resolution band
           };
-    return { snapshot, key, sample };
+    return {
+      snapshot,
+      key,
+      sample,
+      rttMs: summary.rttMs,
+      packetLossPct: summary.packetLossPct,
+    };
   } catch {
     return null;
   }
@@ -316,11 +346,14 @@ async function sampleMediaPaths(generation: number): Promise<void> {
     // to a torn-down call and must not observe into the (reset) beacon or seed
     // the next call's bitrate samples.
     if (generation !== mediaPathGeneration) return;
-    for (const snapshot of videoSnapshots) {
-      if (snapshot) callMediaPathBeacon.observe(snapshot);
+    for (const result of videoSnapshots) {
+      if (!result) continue;
+      observeCallStats({ rttMs: result.rttMs, packetLossPct: result.packetLossPct });
+      if (result.snapshot) callMediaPathBeacon.observe(result.snapshot);
     }
     for (const result of audioResults) {
       if (!result) continue;
+      observeCallStats({ rttMs: result.rttMs, packetLossPct: result.packetLossPct });
       if (result.sample) audioMediaPathSamples.set(result.key, result.sample);
       if (result.snapshot) callMediaPathBeacon.observe(result.snapshot);
     }
@@ -450,11 +483,13 @@ export function useCallEngine(): {
       // LiveKit re-scored the local participant's connection — drives the
       // ambient signal-bars chip on the call bar.
       setCallConnectionQuality(quality);
+      observeCallConnectionQuality(quality);
     });
     singletonEngine.on("connectionPhaseChanged", (phase) => {
       // Transport phase (connected ↔ reconnecting) — overrides the quality
       // bars with a "Reconnecting…" label while the path is re-establishing.
       setCallConnectionPhase(phase);
+      observeCallConnectionPhase(phase);
     });
     singletonEngine.on("activeSpeakersChanged", (identities) => {
       // LiveKit re-derived who is speaking. Feed it through the brief hold so
@@ -475,7 +510,11 @@ export function useCallEngine(): {
       if (!roomJid) return;
       removeLiveCallParticipant(roomJid, identity);
     });
-    singletonEngine.on("disconnected", () => {
+    singletonEngine.on("disconnected", (reason) => {
+      const disconnectedCall = $callState.get();
+      if (reason !== "local" && disconnectedCall.phase === "active") {
+        finishCallAttemptForTransportDisconnect(disconnectedCall.sid);
+      }
       remoteTracks.value = [];
       localTracks.value = [];
       // Drop the active-speaker highlight + its pending sweep so a stale
