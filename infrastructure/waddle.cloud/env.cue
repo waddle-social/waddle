@@ -72,6 +72,12 @@ schema.#Project & {
 			GRAFANA_CLOUD_RULER_TOKEN: schema.#OnePasswordRef & {
 				ref: "op://waddle-production/Grafana-Cloud-Alerting/ruler-token"
 			}
+			GRAFANA_CLOUD_URL: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Dashboards/url"
+			}
+			GRAFANA_CLOUD_DASHBOARDS_TOKEN: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Dashboards/service-account-token"
+			}
 		}
 	}
 
@@ -97,12 +103,12 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush, _t.rulesSync]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesSync, _t.dashboardsSync]
 		}
 		pullRequest: {
 			derivePaths: true
 			when: pullRequest: true
-			tasks: [_t.rulesLint]
+			tasks: [_t.rulesLint, _t.dashboardsLint]
 		}
 	}
 
@@ -161,6 +167,41 @@ schema.#Project & {
 				"""#]
 			inputs: ["gitops/**", "env.cue"]
 		}
+		// Record the GitOps artifact push as a Grafana organization
+		// annotation. Flux reconciliation is asynchronous, so this marks the
+		// rollout handoff rather than claiming the pods are already ready.
+		deployAnnotation: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${GRAFANA_CLOUD_URL:?missing — create the Grafana-Cloud-Dashboards 1Password item (see dashboards/README.md)}"
+					: "${GRAFANA_CLOUD_DASHBOARDS_TOKEN:?missing 1Password field service-account-token}"
+					grafana_url="${GRAFANA_CLOUD_URL%/}"
+					revision="$(git rev-parse --short HEAD)"
+					timestamp_ms="$(( $(date +%s) * 1000 ))"
+					annotation_response="$(mktemp)"
+					trap 'rm -f "${annotation_response}"' EXIT
+					annotation_status="$(jq -n \
+					  --arg text "waddle infra deploy ${revision}" \
+					  --argjson time "${timestamp_ms}" \
+					  '{text: $text, tags: ["deploy", "waddle"], time: $time}' \
+					  | curl -sS -o "${annotation_response}" -w '%{http_code}' \
+					      -X POST "${grafana_url}/api/annotations" \
+					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					      -H 'Content-Type: application/json' \
+					      --data-binary @-)"
+					case "${annotation_status}" in
+					  2??) ;;
+					  *)
+					    echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
+					    cat "${annotation_response}" >&2
+					    exit 1
+					    ;;
+					esac
+					echo "Grafana deploy annotation posted for ${revision}."
+				"""#]
+			inputs: ["gitops/**", "charts/**", "env.cue"]
+		}
 		// Lint every alert-rule file (alerts-as-code, #1324). Runs on
 		// every PR touching rules/** so a broken rule fails the PR,
 		// not the pager.
@@ -173,6 +214,16 @@ schema.#Project & {
 					echo "All alert rule files lint clean."
 				"""#]
 			inputs: ["rules/**", "env.cue"]
+		}
+		// Validate every dashboard document on PRs. The skeleton exemption is
+		// declared in the dashboard's own tags rather than hidden in CI logic.
+		dashboardsLint: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					./scripts/validate-dashboards.sh
+				"""#]
+			inputs: ["dashboards/**", "env.cue"]
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push
 		// only). Sync is authoritative within the `waddle` namespace;
@@ -201,6 +252,59 @@ schema.#Project & {
 					echo "Alert rules synced to Grafana Cloud rulers."
 				"""#]
 			inputs: ["rules/**", "env.cue"]
+		}
+		// Publish dashboards to the stable Waddle folder. Folder lookup plus
+		// stable dashboard UIDs and overwrite=true make repeated syncs safe.
+		dashboardsSync: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${GRAFANA_CLOUD_URL:?missing — create the Grafana-Cloud-Dashboards 1Password item (see dashboards/README.md)}"
+					: "${GRAFANA_CLOUD_DASHBOARDS_TOKEN:?missing 1Password field service-account-token}"
+					grafana_url="${GRAFANA_CLOUD_URL%/}"
+					folder_response="$(mktemp)"
+					trap 'rm -f "${folder_response}"' EXIT
+
+					folder_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					  -X POST "${grafana_url}/api/folders" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					  -H 'Content-Type: application/json' \
+					  --data '{"uid":"waddle","title":"Waddle"}')"
+					case "${folder_status}" in
+					  200|201|409) ;;
+					  *)
+					    echo "Grafana folder creation failed with HTTP ${folder_status}:" >&2
+					    cat "${folder_response}" >&2
+					    exit 1
+					    ;;
+					esac
+
+					folder_uid="$(curl --fail-with-body -sS "${grafana_url}/api/folders" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					  | jq -er '[.[] | select(.title == "Waddle")] | if length == 1 then .[0].uid else error("expected exactly one Waddle folder") end')"
+
+					for dashboard_file in dashboards/*.json; do
+					  dashboard_status="$(jq -c --arg folder_uid "${folder_uid}" \
+					    '{dashboard: (. + {id: null}), folderUid: $folder_uid, overwrite: true}' \
+					    "${dashboard_file}" \
+					    | curl -sS -o "${folder_response}" -w '%{http_code}' \
+					        -X POST "${grafana_url}/api/dashboards/db" \
+					        -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					        -H 'Content-Type: application/json' \
+					        --data-binary @-)"
+					  case "${dashboard_status}" in
+					    2??) ;;
+					    *)
+					      echo "Grafana dashboard sync failed for ${dashboard_file} with HTTP ${dashboard_status}:" >&2
+					      cat "${folder_response}" >&2
+					      exit 1
+					      ;;
+					  esac
+					  echo "Synced ${dashboard_file} to Grafana folder Waddle."
+					done
+					echo "All dashboards synced to Grafana Cloud."
+				"""#]
+			inputs: ["dashboards/**", "env.cue"]
 		}
 	}
 }

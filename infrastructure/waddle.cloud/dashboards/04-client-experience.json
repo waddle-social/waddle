@@ -1,0 +1,175 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Browser experience signals emitted by Grafana Faro and queried from the waddle-chat Loki stream.",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Exceptions by value template",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "sum by (value_template) (count_over_time({service_name=\"waddle-chat\", kind=\"exception\"}[5m]))",
+          "legendFormat": "{{value_template}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconnect duration p50 / p95",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "quantile_over_time(0.50, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.reconnect.duration_ms\" | json | unwrap values_duration_ms [5m])",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "quantile_over_time(0.95, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.reconnect.duration_ms\" | json | unwrap values_duration_ms [5m])",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Catch-up duration and outcomes",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "quantile_over_time(0.95, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.catchup\" | json | unwrap values_duration_ms [5m])",
+          "legendFormat": "duration p95",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (context_outcome) (count_over_time({service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.catchup\" | json [5m]))",
+          "legendFormat": "outcome: {{context_outcome}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "A" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbound queue depth",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "max_over_time({service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.queue.depth\" | json | unwrap values_persisted [5m])",
+          "legendFormat": "persisted",
+          "refId": "A"
+        },
+        {
+          "expr": "max_over_time({service_name=\"waddle-chat\", kind=\"measurements\"} |= \"chat.xmpp.queue.depth\" | json | unwrap values_inflight [5m])",
+          "legendFormat": "in flight",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Session lifecycle: fresh vs resumed",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "sum by (attributes_type) (count_over_time({service_name=\"waddle-chat\", kind=\"event\"} |= \"chat.xmpp.session.lifecycle\" | json [5m]))",
+          "legendFormat": "{{attributes_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Room-join failures by condition",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "sum by (value_template) (count_over_time({service_name=\"waddle-chat\", kind=\"exception\"} |= \"room-join-\" [5m]))",
+          "legendFormat": "{{value_template}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Web vitals",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "quantile_over_time(0.75, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"web-vitals\" | json | unwrap values_lcp [5m])",
+          "legendFormat": "LCP p75",
+          "refId": "A"
+        },
+        {
+          "expr": "quantile_over_time(0.75, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"web-vitals\" | json | unwrap values_inp [5m])",
+          "legendFormat": "INP p75",
+          "refId": "B"
+        },
+        {
+          "expr": "quantile_over_time(0.75, {service_name=\"waddle-chat\", kind=\"measurements\"} |= \"web-vitals\" | json | unwrap values_cls [5m])",
+          "legendFormat": "CLS p75",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [{ "id": "unit", "value": "none" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["waddle", "client"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_LOKI",
+        "type": "datasource",
+        "query": "loki"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Waddle client experience",
+  "uid": "waddle-client-experience",
+  "version": 1
+}

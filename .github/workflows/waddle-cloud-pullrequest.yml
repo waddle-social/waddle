@@ -7,6 +7,7 @@ on:
     paths:
     - .github/workflows/waddle-cloud-pullrequest.yml
     - cue.mod/**
+    - infrastructure/waddle.cloud/dashboards/**
     - infrastructure/waddle.cloud/env.cue
     - infrastructure/waddle.cloud/env.cue/**
     - infrastructure/waddle.cloud/rules/**
