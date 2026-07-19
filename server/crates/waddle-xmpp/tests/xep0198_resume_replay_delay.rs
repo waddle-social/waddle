@@ -19,7 +19,9 @@ use waddle_xmpp::stream_management::{stamp_replay_delay, StreamManagementState};
 use waddle_xmpp::xep::xep0203::{build_delay_element, DelayInfo};
 use waddle_xmpp::xep::NS_DELAY;
 use waddle_xmpp::Stanza;
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 fn fixed_receipt() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 1, 9, 15, 30).unwrap()
@@ -48,6 +50,35 @@ fn delay_children(stanza: &Stanza) -> Vec<Element> {
         .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
         .cloned()
         .collect()
+}
+
+fn iq_error(id: &str, payload: Option<Element>) -> Stanza {
+    Stanza::Iq(Box::new(Iq::Error {
+        from: Some("example.com".parse().expect("from JID")),
+        to: Some("alice@example.com/r".parse().expect("to JID")),
+        id: id.to_owned(),
+        error: StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            "en",
+            "service unavailable",
+        ),
+        payload,
+    }))
+}
+
+fn replay_one(stanza: Stanza) -> Stanza {
+    let mut state = StreamManagementState::new();
+    state.enable("stream-iq-error".to_owned(), true, Some(300));
+    let _ = state.record_outbound_with_receipt_at(
+        stanza,
+        fixed_receipt(),
+        SmUnackedStanzaPurpose::Application,
+    );
+
+    let mut replay = state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 1, "the unacked IQ must be replayed");
+    replay.remove(0).stanza
 }
 
 #[test]
@@ -87,6 +118,63 @@ fn replayed_iq_is_not_stamped() {
         "iq replay is unchanged"
     );
     assert!(delay_children(&stamped).is_empty(), "iq gains no delay");
+}
+
+#[test]
+fn replay_serialization_preserves_payload_bearing_iq_error() {
+    let payload = Element::builder("ping", "urn:xmpp:ping").build();
+    let replayed = replay_one(iq_error("payload-error", Some(payload.clone())));
+
+    let Stanza::Iq(iq) = &replayed else {
+        panic!("the resend queue must preserve the IQ stanza variant")
+    };
+    let Iq::Error {
+        id,
+        payload: replayed_payload,
+        error,
+        ..
+    } = iq.as_ref()
+    else {
+        panic!("the resend queue must preserve the IQ error variant")
+    };
+    assert_eq!(id, "payload-error");
+    assert_eq!(replayed_payload.as_ref(), Some(&payload));
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ServiceUnavailable
+    );
+
+    let xml = stanza_to_xml(&replayed);
+    let element: Element = xml.parse().expect("serialized replayed IQ parses");
+    let child_names: Vec<&str> = element.children().map(Element::name).collect();
+    assert_eq!(
+        child_names,
+        vec!["ping", "error"],
+        "RFC 6120 IQ errors echo the request payload before <error/>"
+    );
+}
+
+#[test]
+fn replay_serialization_preserves_payloadless_iq_error() {
+    let replayed = replay_one(iq_error("payloadless-error", None));
+
+    let Stanza::Iq(iq) = &replayed else {
+        panic!("the resend queue must preserve the IQ stanza variant")
+    };
+    let Iq::Error { id, payload, .. } = iq.as_ref() else {
+        panic!("the resend queue must preserve the IQ error variant")
+    };
+    assert_eq!(id, "payloadless-error");
+    assert!(payload.is_none());
+
+    let xml = stanza_to_xml(&replayed);
+    let element: Element = xml.parse().expect("serialized replayed IQ parses");
+    let child_names: Vec<&str> = element.children().map(Element::name).collect();
+    assert_eq!(
+        child_names,
+        vec!["error"],
+        "payload-less IQ errors serialize with only their error child"
+    );
 }
 
 #[test]

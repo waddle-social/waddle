@@ -342,6 +342,30 @@ fn parse_countable_stanza_preserves_thread_parent_for_replay() {
     );
 }
 
+#[test]
+fn parse_countable_stanza_preserves_iq_error_payload_order_for_replay() {
+    let error = xmpp_parsers::stanza_error::StanzaError::new(
+        xmpp_parsers::stanza_error::ErrorType::Cancel,
+        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+        "en",
+        "service unavailable",
+    );
+    let frame = element_to_xml(
+        Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "err1")
+            .append(Element::builder("ping", "urn:xmpp:ping").build())
+            .append(Element::from(error))
+            .build(),
+    );
+
+    let stanza = parse_countable_stanza(&frame).expect("typed countable IQ error");
+    let replay = Element::from_str(&stanza_to_xml(&stanza)).expect("serialized replay stanza");
+    let child_names: Vec<&str> = replay.children().map(Element::name).collect();
+
+    assert_eq!(child_names, vec!["ping", "error"]);
+}
+
 #[tokio::test]
 async fn handle_xmpp_frame_drops_oversized_sm_nonza_before_parse() {
     let state = create_test_websocket_state().await;

@@ -136,7 +136,7 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedSession, PersistedUnackedStanza, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage, SmUnackedStanzaPurpose,
+    SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
@@ -358,32 +358,11 @@ impl PostgresFencedSmPersistence {
         )
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        // The portable implementation and this fenced implementation share
-        // `sm_unacked`. Existing Postgres tables may therefore predate the
-        // typed replay-purpose column even though the fresh-table DDL above
-        // includes it. Stage add -> backfill -> enforce so this also repairs a
-        // partially-applied nullable column, without leaving a default that
-        // could hide a future writer omitting its typed purpose.
-        conn.execute(
-            "ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS purpose TEXT",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            "UPDATE sm_unacked SET purpose = ? WHERE purpose IS NULL",
-            crate::db_params![
-                unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application).to_string()
-            ],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        conn.execute(
-            "ALTER TABLE sm_unacked ALTER COLUMN purpose SET NOT NULL",
-            (),
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        // The portable and fenced implementations share `sm_unacked`, so use
+        // the same metadata-gated migration. Fully migrated replicas avoid a
+        // redundant `ACCESS EXCLUSIVE` lock at every startup; legacy missing
+        // or partially-applied nullable columns are still repaired.
+        crate::sm_persistence::schema::ensure_postgres_unacked_purpose(&self.db).await?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sm_sessions_detached ON sm_sessions (detached_at_ms)",
             (),

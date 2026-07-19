@@ -38,26 +38,105 @@ async fn ensure_unacked_purpose(storage: &DatabaseSmPersistence) -> Result<(), S
             .await
         }
         DatabaseDriver::Postgres => {
-            // Stage the Postgres migration so a partially-applied nullable
-            // column is repaired too: add, backfill, then enforce. Deliberately
-            // leave no permanent default; every current writer supplies its
-            // typed purpose explicitly.
-            add_column_if_missing(storage, "sm_unacked", "purpose TEXT").await?;
-            storage
-                .execute(
-                    "UPDATE sm_unacked SET purpose = ? WHERE purpose IS NULL",
-                    crate::db_params![application.to_string()],
-                )
-                .await?;
-            storage
-                .execute(
-                    "ALTER TABLE sm_unacked ALTER COLUMN purpose SET NOT NULL",
-                    (),
-                )
-                .await?;
+            ensure_postgres_unacked_purpose(&storage.db).await?;
             Ok(())
         }
     }
+}
+
+/// Add/backfill/enforce the PostgreSQL replay-purpose column when needed.
+///
+/// Returns `true` when migration DDL ran and `false` when the column was
+/// already `NOT NULL`. The metadata gate is operationally important:
+/// PostgreSQL takes an `ACCESS EXCLUSIVE` table lock even for a redundant
+/// `ALTER COLUMN ... SET NOT NULL`, so fully migrated replicas must take a
+/// metadata-only path without table DDL.
+pub(crate) async fn ensure_postgres_unacked_purpose(
+    db: &crate::db::Database,
+) -> Result<bool, SmPersistenceError> {
+    let mut transaction = db
+        .begin()
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    // Serialize first-upgrade replicas, then re-read metadata while holding
+    // the transaction-scoped lock. The two signed int4 keys encode
+    // 0x77616464 ("wadd") / 0x736d7072 ("smpr") and are reserved for this
+    // schema transition. A
+    // transaction-scoped advisory lock is cancellation-safe: rollback on
+    // drop releases it instead of returning a session lock to the pool.
+    transaction
+        .execute("SELECT pg_advisory_xact_lock(2002871396, 1936552050)", ())
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    let mut rows = transaction
+        .query(
+            "SELECT is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'sm_unacked' \
+               AND column_name = 'purpose'",
+            (),
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    let nullability: Option<String> = match rows
+        .next()
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+    {
+        Some(row) => Some(
+            row.get(0)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let needs_migration = match nullability.as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("NO") => false,
+        Some(value) if value.eq_ignore_ascii_case("YES") => true,
+        None => {
+            transaction
+                .execute(
+                    "ALTER TABLE sm_unacked ADD COLUMN IF NOT EXISTS purpose TEXT",
+                    (),
+                )
+                .await
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            true
+        }
+        Some(value) => {
+            return Err(SmPersistenceError::Other(format!(
+                "unexpected sm_unacked.purpose nullability metadata: {value}"
+            )));
+        }
+    };
+
+    if needs_migration {
+        // Repair both the legacy missing-column shape and a partially-applied
+        // nullable migration. Deliberately leave no permanent default: every
+        // current writer supplies its typed purpose explicitly.
+        transaction
+            .execute(
+                "UPDATE sm_unacked SET purpose = ? WHERE purpose IS NULL",
+                crate::db_params![
+                    unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application).to_string()
+                ],
+            )
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        transaction
+            .execute(
+                "ALTER TABLE sm_unacked ALTER COLUMN purpose SET NOT NULL",
+                (),
+            )
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+    Ok(needs_migration)
 }
 
 pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {

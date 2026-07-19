@@ -250,11 +250,7 @@ fn parse_show(raw: &str) -> Result<Show, SmPersistenceError> {
 }
 
 pub(crate) fn serialize_stanza(stanza: &Stanza) -> Result<String, SmPersistenceError> {
-    let element: xmpp_parsers::minidom::Element = match stanza {
-        Stanza::Message(m) => m.clone().into(),
-        Stanza::Iq(iq) => (*iq.clone()).into(),
-        Stanza::Presence(p) => p.clone().into(),
-    };
+    let element = stanza.to_element();
     let mut buf = Vec::new();
     element
         .write_to(&mut buf)

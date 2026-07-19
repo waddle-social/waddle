@@ -355,10 +355,91 @@ async fn legacy_unacked_rows_gain_non_null_application_purpose() {
         .ensure_schema()
         .await
         .expect("migrate fenced sm_unacked purpose");
-    f.fenced
-        .ensure_schema()
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    assert!(
+        !crate::sm_persistence::schema::ensure_postgres_unacked_purpose(&f.claims_db)
+            .await
+            .expect("probe completed purpose migration"),
+        "a completed purpose migration must take the metadata-only no-op path"
+    );
+    let mut rows = conn
+        .query(
+            "SELECT purpose FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+            crate::db_params![stream_id, 1i64],
+        )
         .await
-        .expect("repeat fenced purpose migration idempotently");
+        .expect("query migrated legacy row");
+    let row = rows
+        .next()
+        .await
+        .expect("read migrated row")
+        .expect("migrated row exists");
+    let purpose: String = row.get(0).expect("purpose text");
+    assert_eq!(
+        purpose,
+        unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application)
+    );
+
+    let mut columns = conn
+        .query(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'sm_unacked' \
+               AND column_name = 'purpose'",
+            (),
+        )
+        .await
+        .expect("inspect purpose nullability");
+    let column = columns
+        .next()
+        .await
+        .expect("read purpose metadata")
+        .expect("purpose column metadata");
+    let is_nullable: String = column.get(0).expect("is_nullable");
+    assert_eq!(is_nullable, "NO");
+}
+
+#[tokio::test]
+async fn concurrent_missing_purpose_migrations_single_flight_and_backfill() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = format!("missing-purpose-{}", uuid::Uuid::new_v4());
+    let legacy_xml = serialize_stanza(fixture_unacked(&stream_id, 1).stanza.as_ref())
+        .expect("serialize typed legacy stanza");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute("ALTER TABLE sm_unacked DROP COLUMN purpose", ())
+        .await
+        .expect("remove purpose to simulate the pre-purpose schema");
+    conn.execute(
+        "INSERT INTO sm_unacked \
+         (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+         VALUES (?, ?, ?, ?)",
+        crate::db_params![
+            stream_id.clone(),
+            1i64,
+            legacy_xml,
+            stale_caller_supplied_time().timestamp_millis(),
+        ],
+    )
+    .await
+    .expect("insert pre-purpose unacked row");
+    drop(conn);
+
+    let (first, second) = tokio::join!(
+        crate::sm_persistence::schema::ensure_postgres_unacked_purpose(&f.claims_db),
+        crate::sm_persistence::schema::ensure_postgres_unacked_purpose(&f.claims_db),
+    );
+    let mut outcomes = [
+        first.expect("first concurrent purpose migration"),
+        second.expect("second concurrent purpose migration"),
+    ];
+    outcomes.sort_unstable();
+    assert_eq!(
+        outcomes,
+        [false, true],
+        "the advisory lock and in-lock metadata recheck allow exactly one migrator"
+    );
 
     let conn = f.claims_db.guard().await.expect("guard");
     let mut rows = conn
@@ -367,7 +448,7 @@ async fn legacy_unacked_rows_gain_non_null_application_purpose() {
             crate::db_params![stream_id, 1i64],
         )
         .await
-        .expect("query migrated legacy row");
+        .expect("query migrated missing-column row");
     let row = rows
         .next()
         .await

@@ -94,7 +94,19 @@ impl<'a> PendingPromotionRetryLease<'a> {
     }
 
     fn discard(mut self) {
-        self.session.take();
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        if let Err(error) = self
+            .registry
+            .clear_leased_pending_promotion_retry(&session.stream_id)
+        {
+            tracing::warn!(
+                stream_id = %session.stream_id,
+                %error,
+                "terminal retry reconciliation could not clear its promotion lease"
+            );
+        }
     }
 }
 
@@ -1117,6 +1129,9 @@ impl InMemorySmSessionRegistry {
                     if let Ok(mut retries) = self.pending_promotion_retries.write() {
                         retries.remove(stream_id);
                     }
+                    if let Ok(mut leases) = self.leased_pending_promotion_retries.write() {
+                        leases.remove(stream_id);
+                    }
                     self.release_claim_store_entry_under(stream_id, fence).await;
                 } else {
                     self.forget_claim_locally_locked(stream_id, None);
@@ -1125,6 +1140,9 @@ impl InMemorySmSessionRegistry {
                     }
                     if let Ok(mut retries) = self.pending_promotion_retries.write() {
                         retries.remove(stream_id);
+                    }
+                    if let Ok(mut leases) = self.leased_pending_promotion_retries.write() {
+                        leases.remove(stream_id);
                     }
                 }
                 true
@@ -1212,10 +1230,16 @@ impl InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .remove(stream_id.as_str());
-        self.pending_promotion_retries
+        let mut leases = self
+            .leased_pending_promotion_retries
             .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .insert(stream_id.to_string(), session);
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut parked = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        leases.remove(stream_id.as_str());
+        parked.insert(stream_id.to_string(), session);
         Ok(attempts)
     }
 
@@ -1240,6 +1264,14 @@ impl InMemorySmSessionRegistry {
             .get(&stream_id)
             .cloned();
         let Some(retry) = retry else {
+            if self
+                .leased_pending_promotion_retries
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .contains(stream_id.as_str())
+            {
+                return Ok(None);
+            }
             return Ok(Some(session.clone()));
         };
         if retry.next_attempt_at > tokio::time::Instant::now() {
@@ -1251,26 +1283,49 @@ impl InMemorySmSessionRegistry {
             if !is_pending {
                 return Err(SmRegistryError::NotFound(stream_id.to_string()));
             }
-            self.pending_promotion_retries
+            let leases = self
+                .leased_pending_promotion_retries
                 .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut parked = self
+                .pending_promotion_retries
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if leases.contains(stream_id.as_str()) {
+                return Ok(None);
+            }
+            parked
                 .entry(stream_id.to_string())
                 .or_insert_with(|| session.clone());
             return Ok(None);
         }
-        let due = self
-            .pending_promotion_retries
-            .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .remove(stream_id.as_str())
-            .unwrap_or_else(|| session.clone());
+        let due = {
+            let mut leases = self
+                .leased_pending_promotion_retries
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            let mut parked = self
+                .pending_promotion_retries
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+            if leases.contains(stream_id.as_str()) {
+                return Ok(None);
+            }
+            let due = parked
+                .remove(stream_id.as_str())
+                .unwrap_or_else(|| session.clone());
+            leases.insert(stream_id.to_string());
+            due
+        };
         let mut lease = PendingPromotionRetryLease::new(self, due);
         self.reconcile_retry_payload(lease.session_mut()).await;
         Ok(Some(lease.finish()))
     }
 
-    /// Clear any quarantine backoff for a pending promotion. Returns whether
-    /// an entry existed. Terminal confirmation also clears this state.
+    /// Clear only the quarantine backoff for a pending promotion. An active
+    /// payload lease remains authoritative until terminal confirmation or a
+    /// retry path moves it back into a registry-owned inventory. Returns
+    /// whether a backoff entry existed.
     pub async fn clear_quarantine_retry(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
@@ -1328,13 +1383,23 @@ impl InMemorySmSessionRegistry {
             if !self.quarantine_retry_is_due_locked(&typed_stream_id, now)? {
                 continue;
             }
-            let Some(session) = self
-                .pending_promotion_retries
-                .write()
-                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-                .remove(&stream_id)
-            else {
-                continue;
+            let session = {
+                let mut leases = self
+                    .leased_pending_promotion_retries
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                let mut parked = self
+                    .pending_promotion_retries
+                    .write()
+                    .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+                if leases.contains(&stream_id) {
+                    continue;
+                }
+                let Some(session) = parked.remove(&stream_id) else {
+                    continue;
+                };
+                leases.insert(stream_id.clone());
+                session
             };
             let mut retry = PendingPromotionRetryLease::new(self, session);
             self.reconcile_retry_payload(retry.session_mut()).await;
@@ -1526,8 +1591,18 @@ impl InMemorySmSessionRegistry {
             .pending_promotions
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut leases = self
+            .leased_pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut parked = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
         sessions.insert(stream_id.clone(), session);
-        promotions.insert(stream_id);
+        promotions.insert(stream_id.clone());
+        leases.remove(&stream_id);
+        parked.remove(&stream_id);
         Ok(())
     }
 
@@ -1546,11 +1621,19 @@ impl InMemorySmSessionRegistry {
         if !promotions.contains(&stream_id) {
             return Ok(());
         }
-        self.pending_promotion_retries
+        let mut leases = self
+            .leased_pending_promotion_retries
             .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .entry(stream_id)
-            .or_insert(session);
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut parked = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if leases.remove(&stream_id) {
+            parked.insert(stream_id, session);
+        } else {
+            parked.entry(stream_id).or_insert(session);
+        }
         Ok(())
     }
 
@@ -1569,11 +1652,28 @@ impl InMemorySmSessionRegistry {
         if !promotions.contains(&stream_id) {
             return Ok(());
         }
-        self.pending_promotion_retries
+        let mut leases = self
+            .leased_pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        let mut parked = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        leases.remove(&stream_id);
+        parked.insert(stream_id, session);
+        Ok(())
+    }
+
+    fn clear_leased_pending_promotion_retry(
+        &self,
+        stream_id: &str,
+    ) -> Result<bool, SmRegistryError> {
+        Ok(self
+            .leased_pending_promotion_retries
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .insert(stream_id, session);
-        Ok(())
+            .remove(stream_id))
     }
 
     /// Ensure this node holds `stream_id`'s `ClaimStore` claim at

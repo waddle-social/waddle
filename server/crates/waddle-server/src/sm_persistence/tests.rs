@@ -47,6 +47,113 @@ fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
     }
 }
 
+fn iq_error(id: &str, payload: Option<xmpp_parsers::minidom::Element>) -> xmpp_parsers::iq::Iq {
+    xmpp_parsers::iq::Iq::Error {
+        from: None,
+        to: None,
+        id: id.to_owned(),
+        error: xmpp_parsers::stanza_error::StanzaError::new(
+            xmpp_parsers::stanza_error::ErrorType::Cancel,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
+            "en",
+            "service unavailable",
+        ),
+        payload,
+    }
+}
+
+#[test]
+fn serialize_stanza_uses_canonical_iq_error_child_order() {
+    let stanza = Stanza::Iq(Box::new(iq_error(
+        "err1",
+        Some(xmpp_parsers::minidom::Element::builder("ping", "urn:xmpp:ping").build()),
+    )));
+
+    let xml = serialize_stanza(&stanza).expect("serialize IQ error for persistence");
+    let element: xmpp_parsers::minidom::Element = xml.parse().expect("serialized IQ error parses");
+    let child_names: Vec<&str> = element
+        .children()
+        .map(xmpp_parsers::minidom::Element::name)
+        .collect();
+
+    assert_eq!(child_names, vec!["ping", "error"]);
+}
+
+#[tokio::test]
+async fn round_trip_unacked_preserves_iq_errors_and_thread_parent() {
+    use xmpp_parsers::message::{Message, Thread};
+    use xmpp_parsers::minidom::Element;
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = "typed-stanza-round-trip";
+    let iq_payload = Element::builder("ping", "urn:xmpp:ping").build();
+    let payload_error = iq_error("payload-error", Some(iq_payload.clone()));
+    let payloadless_error = iq_error("payloadless-error", None);
+
+    let mut threaded_message = Message::new(None::<jid::Jid>);
+    threaded_message.thread = Some(Thread {
+        parent: Some("root-thread".to_owned()),
+        id: "child-thread".to_owned(),
+    });
+
+    for (sequence, stanza) in [
+        Stanza::Iq(Box::new(payload_error.clone())),
+        Stanza::Iq(Box::new(payloadless_error.clone())),
+        Stanza::Message(threaded_message.clone()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        storage
+            .append_unacked(PersistedUnackedStanza {
+                stream_id: SmSessionId::new(stream_id),
+                sequence: u32::try_from(sequence + 1).expect("fixture sequence fits u32"),
+                stanza: Box::new(stanza),
+                original_receipt_at: fixed_time(),
+                purpose: SmUnackedStanzaPurpose::Application,
+            })
+            .await
+            .unwrap();
+    }
+
+    let rows = storage
+        .list_unacked(&SmSessionId::new(stream_id))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+
+    let Stanza::Iq(loaded_payload_error) = rows[0].stanza.as_ref() else {
+        panic!("first durable stanza must remain an IQ")
+    };
+    assert_eq!(loaded_payload_error.as_ref(), &payload_error);
+    let payload_error_element = rows[0].stanza.to_element();
+    let payload_error_children: Vec<&str> = payload_error_element
+        .children()
+        .map(Element::name)
+        .collect();
+    assert_eq!(payload_error_children, vec!["ping", "error"]);
+
+    let Stanza::Iq(loaded_payloadless_error) = rows[1].stanza.as_ref() else {
+        panic!("second durable stanza must remain an IQ")
+    };
+    assert_eq!(loaded_payloadless_error.as_ref(), &payloadless_error);
+    let payloadless_element = rows[1].stanza.to_element();
+    let payloadless_children: Vec<&str> =
+        payloadless_element.children().map(Element::name).collect();
+    assert_eq!(payloadless_children, vec!["error"]);
+
+    let Stanza::Message(loaded_threaded_message) = rows[2].stanza.as_ref() else {
+        panic!("third durable stanza must remain a message")
+    };
+    assert_eq!(loaded_threaded_message.thread, threaded_message.thread);
+    let loaded_thread = loaded_threaded_message
+        .thread
+        .as_ref()
+        .expect("typed XEP-0201 thread survives persistence");
+    assert_eq!(loaded_thread.id, "child-thread");
+    assert_eq!(loaded_thread.parent.as_deref(), Some("root-thread"));
+}
+
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn clustering_refuses_portable_sm_persistence() {

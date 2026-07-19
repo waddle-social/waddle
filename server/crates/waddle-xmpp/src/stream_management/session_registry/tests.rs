@@ -5148,6 +5148,197 @@ async fn quarantine_retry_blocks_other_handoffs_until_exact_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn drained_due_quarantine_lease_blocks_a_stale_displacement_handoff() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    registry
+        .store_session(realistic_test_session("stream-quarantine-drain-lease"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let stale_handoff = session.clone();
+    let mut authoritative = session;
+    authoritative.unacked_stanzas.remove(0);
+    registry
+        .quarantine_for_retry(authoritative.clone(), |_| Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let due = registry.drain_expired().await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0]
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        authoritative
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        registry
+            .take_displaced_promotion_if_quarantine_due(&stale_handoff)
+            .await
+            .unwrap()
+            .is_none(),
+        "a due payload already leased to the janitor must block a stale handoff"
+    );
+    assert!(registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains("stream-quarantine-drain-lease"));
+
+    let stream_id =
+        crate::pending_delivery::SmSessionId::new("stream-quarantine-drain-lease".to_string());
+    assert!(registry.clear_quarantine_retry(&stream_id).await.unwrap());
+    assert!(
+        registry
+            .take_displaced_promotion_if_quarantine_due(&stale_handoff)
+            .await
+            .unwrap()
+            .is_none(),
+        "clearing only the backoff must not revoke an active payload lease"
+    );
+
+    registry
+        .reinsert_for_retry(due.into_iter().next().unwrap())
+        .await
+        .unwrap();
+    assert!(!registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains(stream_id.as_str()));
+    assert!(registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .is_empty());
+    let retried = registry.drain_expired().await.unwrap();
+    assert_eq!(retried.len(), 1);
+    assert!(registry.confirm_drained(stream_id.as_str()).await);
+    assert!(registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .is_empty());
+    assert!(registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .is_empty());
+    assert!(registry
+        .store_session(realistic_test_session("stream-after-quarantine-lease"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_due_quarantine_lease_moves_authoritative_payload_back_to_parked() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(realistic_test_session("stream-quarantine-lease-cancel"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let stale_handoff = session.clone();
+    let mut authoritative = session;
+    authoritative.unacked_stanzas.remove(0);
+    registry
+        .quarantine_for_retry(authoritative.clone(), |_| Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let due = registry.drain_expired().await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert!(registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains("stream-quarantine-lease-cancel"));
+
+    registry
+        .retain_pending_promotion_for_retry(due.into_iter().next().unwrap())
+        .unwrap();
+    assert!(!registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains("stream-quarantine-lease-cancel"));
+    let parked = registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .get("stream-quarantine-lease-cancel")
+        .cloned()
+        .expect("cancelled lease returns its payload to parked state");
+    assert_eq!(
+        parked
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        authoritative
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>()
+    );
+
+    let leased_again = registry
+        .take_displaced_promotion_if_quarantine_due(&stale_handoff)
+        .await
+        .unwrap()
+        .expect("a later retry leases the authoritative parked payload");
+    assert_eq!(
+        leased_again
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        authoritative
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>()
+    );
+    assert!(registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains("stream-quarantine-lease-cancel"));
+    assert!(
+        registry
+            .confirm_drained("stream-quarantine-lease-cancel")
+            .await
+    );
+    assert!(registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn capacity_admission_cannot_displace_a_parked_quarantine_before_deadline() {
     let registry = InMemorySmSessionRegistry::with_capacity(1);
     registry
@@ -5448,6 +5639,11 @@ async fn cancelled_quarantine_due_reconciliation_restores_authoritative_lease_pa
     storage.reached.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!registry
+        .leased_pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains("stream-quarantine-reconcile-cancel"));
 
     // Whichever cancellation guard runs last, the leased payload must win.
     registry

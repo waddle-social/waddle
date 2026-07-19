@@ -199,6 +199,15 @@ pub struct InMemorySmSessionRegistry {
     /// durable row, preventing stale pre-tombstone queues from being
     /// republished directly from `Drop`.
     pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
+    /// Due quarantine payloads temporarily handed to a promotion caller.
+    /// A retry is `Parked` while its payload is present in
+    /// `pending_promotion_retries`, then moves to `Leased` here before that
+    /// payload leaves the registry. Stream-shard serialization keeps the two
+    /// inventories mutually exclusive; cancellation guards synchronously
+    /// move a leased id back to the parked payload map. Lease ids are a
+    /// subset of `pending_promotions`, so they consume no independent session
+    /// capacity and remain bounded by `max_sessions`.
+    pub(super) leased_pending_promotion_retries: RwLock<HashSet<String>>,
     /// Retry backoff for quarantined promotion work. Entries exist only while
     /// the same stream id remains in `pending_promotions`; the stream-shard
     /// lock serializes schedule changes with drain and terminal confirmation.
@@ -870,6 +879,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashSet::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            leased_pending_promotion_retries: RwLock::new(HashSet::new()),
             quarantine_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
@@ -897,6 +907,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashSet::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            leased_pending_promotion_retries: RwLock::new(HashSet::new()),
             quarantine_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),

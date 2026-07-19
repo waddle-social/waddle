@@ -37,7 +37,58 @@ impl Stanza {
                 element
             }
             Stanza::Presence(presence) => presence.clone().into(),
-            Stanza::Iq(iq) => (**iq).clone().into(),
+            Stanza::Iq(iq) => {
+                let mut element: minidom::Element = (**iq).clone().into();
+                if matches!(
+                    iq.as_ref(),
+                    xmpp_parsers::iq::Iq::Error {
+                        payload: Some(_),
+                        ..
+                    }
+                ) {
+                    // The upstream xso-derived serializer follows field order
+                    // and emits `<error/>` before the echoed request payload.
+                    // Waddle's canonical live IQ-error shape places that
+                    // payload first, so typed replay serialization must do the
+                    // same.
+                    let stanza_ns = element.ns().to_owned();
+                    if let Some(error) = element.remove_child("error", stanza_ns.as_str()) {
+                        element.append_child(error);
+                    }
+                }
+                element
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Stanza;
+    use xmpp_parsers::{
+        iq::Iq,
+        minidom::Element,
+        stanza_error::{DefinedCondition, ErrorType, StanzaError},
+    };
+
+    #[test]
+    fn iq_error_payload_precedes_error() {
+        let stanza = Stanza::Iq(Box::new(Iq::Error {
+            from: None,
+            to: None,
+            id: "err1".to_owned(),
+            error: StanzaError::new(
+                ErrorType::Cancel,
+                DefinedCondition::ServiceUnavailable,
+                "en",
+                "service unavailable",
+            ),
+            payload: Some(Element::builder("ping", "urn:xmpp:ping").build()),
+        }));
+
+        let element = stanza.to_element();
+        let child_names: Vec<&str> = element.children().map(Element::name).collect();
+
+        assert_eq!(child_names, vec!["ping", "error"]);
     }
 }

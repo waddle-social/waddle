@@ -5238,6 +5238,104 @@ fn record_sm_drain_outcome(released: bool) {
     }
 }
 
+/// Remember every SM stream owned during the shutdown window. A concurrent
+/// expiry janitor may confirm a stream before this task drains it; retaining
+/// the observed cohort lets the terminal reconciliation still record that
+/// stream as released instead of silently omitting its outcome.
+fn accumulate_sm_drain_candidates(
+    outcomes: &mut std::collections::HashMap<String, bool>,
+    owned_claim_ids: Option<Vec<String>>,
+) {
+    if let Some(owned_claim_ids) = owned_claim_ids {
+        for stream_id in owned_claim_ids {
+            outcomes.entry(stream_id).or_insert(false);
+        }
+    }
+}
+
+/// Resolve the observed shutdown cohort against the registry's terminal
+/// ownership snapshot. Active enable-time claims and pending exact-release
+/// retries remain abandoned; an observed claim that disappeared has completed
+/// its release and is upgraded to released. A failed snapshot stays
+/// fail-closed at abandoned.
+fn reconcile_sm_drain_candidates(
+    outcomes: &mut std::collections::HashMap<String, bool>,
+    owned_claim_ids: Option<Vec<String>>,
+) {
+    let Some(owned_claim_ids) = owned_claim_ids else {
+        for released in outcomes.values_mut() {
+            *released = false;
+        }
+        return;
+    };
+    let remaining = owned_claim_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    for (stream_id, released) in outcomes.iter_mut() {
+        *released = !remaining.contains(stream_id);
+    }
+    for stream_id in remaining {
+        outcomes.entry(stream_id).or_insert(false);
+    }
+}
+
+#[cfg(test)]
+mod sm_drain_outcome_tests {
+    use super::{accumulate_sm_drain_candidates, reconcile_sm_drain_candidates};
+
+    #[test]
+    fn independently_confirmed_shutdown_candidate_keeps_a_terminal_outcome() {
+        let mut outcomes = std::collections::HashMap::new();
+        accumulate_sm_drain_candidates(&mut outcomes, Some(vec!["expiry-won-race".to_string()]));
+
+        // The independent expiry janitor confirmed the stream before the
+        // shutdown task's first drain, so it is absent from the final owned
+        // snapshot. The remembered cohort still emits one released outcome.
+        reconcile_sm_drain_candidates(&mut outcomes, Some(Vec::new()));
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes.get("expiry-won-race"), Some(&true));
+    }
+
+    #[test]
+    fn unresolved_owned_claims_remain_abandoned() {
+        let owned = vec![
+            "active-enable-claim".to_string(),
+            "pending-exact-release".to_string(),
+        ];
+        let mut outcomes = std::collections::HashMap::new();
+        accumulate_sm_drain_candidates(&mut outcomes, Some(owned.clone()));
+
+        reconcile_sm_drain_candidates(&mut outcomes, Some(owned));
+
+        assert_eq!(outcomes.get("active-enable-claim"), Some(&false));
+        assert_eq!(outcomes.get("pending-exact-release"), Some(&false));
+    }
+
+    #[test]
+    fn retained_exact_release_overrides_an_optimistic_drain_result() {
+        let mut outcomes =
+            std::collections::HashMap::from([("pending-exact-release".to_string(), true)]);
+
+        reconcile_sm_drain_candidates(
+            &mut outcomes,
+            Some(vec!["pending-exact-release".to_string()]),
+        );
+
+        assert_eq!(outcomes.get("pending-exact-release"), Some(&false));
+    }
+
+    #[test]
+    fn failed_final_ownership_snapshot_is_fail_closed() {
+        let mut outcomes =
+            std::collections::HashMap::from([("unverified-release".to_string(), true)]);
+
+        reconcile_sm_drain_candidates(&mut outcomes, None);
+
+        assert_eq!(outcomes.get("unverified-release"), Some(&false));
+    }
+}
+
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
@@ -5263,6 +5361,15 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         // both independent drain mechanisms.
         #[cfg(feature = "clustering")]
         let sm_drain_started = std::time::Instant::now();
+        let mut drain_outcomes = std::collections::HashMap::<String, bool>::new();
+        accumulate_sm_drain_candidates(
+            &mut drain_outcomes,
+            websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .locally_owned_claim_ids(),
+        );
         // Issue #1091: live sessions observe the same stop token, send
         // <system-shutdown/> and detach into the SmSessionRegistry.
         // Wait for every connection guard to drop before the Q6 passes
@@ -5295,17 +5402,32 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 remaining_connections = websocket_state.deps.shutdown.active_connections(),
                 "Graceful shutdown: connection drain timed out; promoting \
                  whatever detached in time. Remaining sessions keep their \
-                 durable SM rows for next-startup retry."
+                durable SM rows for next-startup retry."
             );
         }
+        accumulate_sm_drain_candidates(
+            &mut drain_outcomes,
+            websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .locally_owned_claim_ids(),
+        );
         info!("Graceful shutdown: starting SM session Q6 drain");
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         const QUIET_WINDOW_PASSES: u32 = 8;
         let mut empty_passes = 0u32;
         let mut total_drained = 0usize;
         let mut shutdown_entry_pending = true;
-        let mut drain_outcomes = std::collections::HashMap::<String, bool>::new();
         loop {
+            accumulate_sm_drain_candidates(
+                &mut drain_outcomes,
+                websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .locally_owned_claim_ids(),
+            );
             if std::time::Instant::now() >= drain_deadline {
                 waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
                 // ADR-0017 Phase 3 Slice 10: whatever this node still
@@ -5591,28 +5713,14 @@ pub(crate) fn spawn_graceful_shutdown_drain(
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-        if let Some(remaining) = websocket_state
-            .deps
-            .protocol
-            .sm_session_registry
-            .live_session_ids()
-        {
-            let remaining = remaining
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>();
-            for (stream_id, released) in &mut drain_outcomes {
-                if !*released && !remaining.contains(stream_id) {
-                    // The independent expiry janitor may have confirmed a
-                    // retry while shutdown was still polling. A pending
-                    // promotion disappears only after terminal confirmation,
-                    // so absence upgrades the final per-stream outcome.
-                    *released = true;
-                }
-            }
-            for stream_id in remaining {
-                drain_outcomes.entry(stream_id).or_insert(false);
-            }
-        }
+        reconcile_sm_drain_candidates(
+            &mut drain_outcomes,
+            websocket_state
+                .deps
+                .protocol
+                .sm_session_registry
+                .locally_owned_claim_ids(),
+        );
         for released in drain_outcomes.into_values() {
             record_sm_drain_outcome(released);
         }

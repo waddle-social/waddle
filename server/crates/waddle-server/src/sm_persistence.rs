@@ -34,7 +34,7 @@ mod atomic_store;
 /// that could silently drift from this one.
 pub(crate) mod codec;
 mod joined_sessions;
-mod schema;
+pub(crate) mod schema;
 
 use codec::{
     decode_session, decode_unacked, decode_unacked_join_row, serialize_presence_payloads,
