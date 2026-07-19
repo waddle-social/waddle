@@ -136,9 +136,9 @@ internal class ConnectionLoopPullHarness(
             terminalWorkerStopped = false
         }
 
-    suspend fun recoverFencedTerminal(
+    suspend fun recoverFencedWorkers(
         fencedLifecycle: SessionLifecycleRef,
-    ): Boolean = messenger.recoverFencedTerminal(fencedLifecycle)
+    ): WorkerRecoveryOutcome = messenger.recoverFencedWorkers(fencedLifecycle)
 
     suspend fun stopReplacementLifecycle(): LifecycleShutdownOutcome {
         messenger.beginShutdown(lifecycle)

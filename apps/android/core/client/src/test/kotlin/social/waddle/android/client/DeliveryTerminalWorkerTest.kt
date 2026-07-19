@@ -263,7 +263,10 @@ class DeliveryTerminalWorkerTest {
         assertEquals(run.ownership.lifecycle, exit.lifecycle)
         assertEquals(run.ownership.generation, exit.generation)
         assertEquals(WorkerKind.DELIVERY_TERMINAL, exit.kind)
-        assertTrue(exit.reason is WorkerExitReason.UnexpectedFailure)
+        assertEquals(
+            WorkerFailureKind.DEPENDENCY_FAILURE,
+            (exit.reason as WorkerExitReason.UnexpectedFailure).kind,
+        )
     }
 
     @Test

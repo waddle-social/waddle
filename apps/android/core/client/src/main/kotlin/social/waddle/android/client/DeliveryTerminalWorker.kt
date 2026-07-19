@@ -34,11 +34,18 @@ internal class DeliveryTerminalWorker(
         scope: CoroutineScope,
         ownership: WorkerOwnership,
         onExit: suspend (WorkerExit) -> Unit,
+    ): Run = start(scope, ownership, {}, onExit)
+
+    fun start(
+        scope: CoroutineScope,
+        ownership: WorkerOwnership,
+        onReady: suspend (WorkerOwnership) -> Unit,
+        onExit: suspend (WorkerExit) -> Unit,
     ): Run {
         check(ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
             "delivery terminal worker requires a terminal ownership"
         }
-        return Run(journal, dispatchEvent, commandCapacity, ownership, onExit, scope)
+        return Run(journal, dispatchEvent, commandCapacity, ownership, onReady, onExit, scope)
     }
 
     internal class Run internal constructor(
@@ -46,10 +53,12 @@ internal class DeliveryTerminalWorker(
         private val dispatchEvent: (XmppEvent) -> Unit,
         commandCapacity: Int,
         val ownership: WorkerOwnership,
+        private val onReady: suspend (WorkerOwnership) -> Unit,
         private val onExit: suspend (WorkerExit) -> Unit,
         scope: CoroutineScope,
     ) {
         private val commands = Channel<TerminalSignal>(commandCapacity)
+        private val ready = CompletableDeferred<Unit>()
         private val startupDrain = CompletableDeferred<Unit>()
         private val exit = CompletableDeferred<WorkerExit>()
         private val pendingCommands = AtomicInteger()
@@ -60,6 +69,8 @@ internal class DeliveryTerminalWorker(
         private val job: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
 
         suspend fun awaitStartupDrain() = startupDrain.await()
+
+        suspend fun awaitReady() = ready.await()
 
         suspend fun submitAndAwait(
             clientStanzaId: String,
@@ -100,6 +111,8 @@ internal class DeliveryTerminalWorker(
             var activeSignal: TerminalSignal? = null
             try {
                 yield()
+                withContext(NonCancellable) { onReady(ownership) }
+                ready.complete(Unit)
                 drainPersisted()
                 startupDrain.complete(Unit)
                 for (signal in commands) {
@@ -111,6 +124,7 @@ internal class DeliveryTerminalWorker(
                     activeSignal = null
                 }
             } catch (cancellation: CancellationException) {
+                ready.cancel(cancellation)
                 startupDrain.cancel(cancellation)
                 activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
                 if (activeSignal != null) pendingCommands.decrementAndGet()
@@ -121,8 +135,9 @@ internal class DeliveryTerminalWorker(
                     WorkerExitReason.OwnerScopeCancelled
                 }
             } catch (failure: Throwable) {
+                ready.completeExceptionally(failure)
                 startupDrain.completeExceptionally(failure)
-                val cause = WorkerFailureCause.from(failure)
+                val cause = WorkerFailureKind.DEPENDENCY_FAILURE
                 activeSignal?.committed?.complete(
                     TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)),
                 )

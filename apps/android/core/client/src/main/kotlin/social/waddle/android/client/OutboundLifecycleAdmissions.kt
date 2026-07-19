@@ -20,6 +20,8 @@ internal fun classifyOutboundReservation(
     val attempt = when (state) {
         is OutboundLifecycleState.Active -> state.attempt
         is OutboundLifecycleState.Open -> null
+        is OutboundLifecycleState.Bootstrapping,
+        is OutboundLifecycleState.Fenced,
         is OutboundLifecycleState.Closing,
         is OutboundLifecycleState.Handoff,
         OutboundLifecycleState.Stopped,
@@ -46,6 +48,8 @@ internal fun createAdmissionReservation(
     val attempt = when (state) {
         is OutboundLifecycleState.Active -> state.attempt
         is OutboundLifecycleState.Open -> if (requireActive) return null else null
+        is OutboundLifecycleState.Bootstrapping,
+        is OutboundLifecycleState.Fenced,
         is OutboundLifecycleState.Closing,
         is OutboundLifecycleState.Handoff,
         OutboundLifecycleState.Stopped,

@@ -7,10 +7,12 @@ import java.util.UUID
 
 internal fun OutboundLifecycleState.lifecycleOrNull(): SessionLifecycleRef? =
     when (this) {
+        is OutboundLifecycleState.Bootstrapping -> lifecycle
         is OutboundLifecycleState.Open -> lifecycle
         is OutboundLifecycleState.Active -> lifecycle
         is OutboundLifecycleState.Handoff -> lifecycle
         is OutboundLifecycleState.Closing -> lifecycle
+        is OutboundLifecycleState.Fenced -> lifecycle
         OutboundLifecycleState.Stopped -> null
     }
 
@@ -19,6 +21,8 @@ internal fun OutboundLifecycleState.attemptOrNull(): DeliveryAttemptRef? =
         is OutboundLifecycleState.Active -> attempt
         is OutboundLifecycleState.Handoff -> nextAttempt ?: previousAttempt
         is OutboundLifecycleState.Closing -> attempt
+        is OutboundLifecycleState.Bootstrapping,
+        is OutboundLifecycleState.Fenced,
         is OutboundLifecycleState.Open,
         OutboundLifecycleState.Stopped,
         -> null
@@ -73,18 +77,22 @@ internal data class OperationCapability(
 internal class LifecycleOperationRegistry(
     private val lifecycle: SessionLifecycleRef,
 ) {
+    private var admissionsOpen = true
     private val retained = mutableMapOf<UUID, OperationCapability>()
     private var emptyWaiter: CompletableDeferred<Unit>? = null
     private var retentionChanged: CompletableDeferred<Unit>? = null
 
     fun retain(capability: OperationCapability): Boolean {
+        if (!admissionsOpen) return false
         if (capability.lifecycle != lifecycle) return false
         retained[capability.operationId] = capability
         return true
     }
 
-    fun release(capability: OperationCapability) {
-        if (retained[capability.operationId] != capability) return
+    fun release(capability: OperationCapability): LifecycleReleaseOutcome {
+        if (capability.lifecycle != lifecycle) return LifecycleReleaseOutcome.NotOwned
+        if (retained[capability.operationId] == null) return LifecycleReleaseOutcome.AlreadyReleased
+        if (retained[capability.operationId] != capability) return LifecycleReleaseOutcome.NotOwned
         retained.remove(capability.operationId)
         retentionChanged?.complete(Unit)
         retentionChanged = null
@@ -92,6 +100,11 @@ internal class LifecycleOperationRegistry(
             emptyWaiter?.complete(Unit)
             emptyWaiter = null
         }
+        return LifecycleReleaseOutcome.Released
+    }
+
+    fun closeAdmissions() {
+        admissionsOpen = false
     }
 
     fun owns(capability: OperationCapability): Boolean =
@@ -114,6 +127,12 @@ internal class LifecycleOperationRegistry(
         }
 
     fun retainedCount(): Int = retained.size
+}
+
+internal enum class LifecycleReleaseOutcome {
+    Released,
+    AlreadyReleased,
+    NotOwned,
 }
 
 internal data class TransportConstructionClaim(
@@ -199,19 +218,6 @@ internal fun decideAttemptClose(
             attempt = currentAttempt.attempt,
         ),
     )
-}
-
-internal fun isTerminalRecoveryEligible(
-    state: OutboundLifecycleState,
-    pending: LifecycleShutdownOutcome.FencedWithPending?,
-    lifecycle: SessionLifecycleRef,
-    leasesEmpty: Boolean,
-): Boolean {
-    if (state !is OutboundLifecycleState.Closing) return false
-    if (state.lifecycle != lifecycle) return false
-    if (pending?.lifecycle != lifecycle) return false
-    if (pending.component != LifecyclePendingComponent.TERMINAL_DRAIN) return false
-    return leasesEmpty
 }
 
 internal fun pendingLifecycleShutdown(

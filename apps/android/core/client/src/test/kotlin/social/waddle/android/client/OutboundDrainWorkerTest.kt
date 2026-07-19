@@ -67,7 +67,10 @@ class OutboundDrainWorkerTest {
         assertEquals(ownership.lifecycle, exit.lifecycle)
         assertEquals(ownership.generation, exit.generation)
         assertEquals(ownership.kind, exit.kind)
-        assertTrue(exit.reason is WorkerExitReason.UnexpectedFailure)
+        assertEquals(
+            WorkerFailureKind.DEPENDENCY_FAILURE,
+            (exit.reason as WorkerExitReason.UnexpectedFailure).kind,
+        )
     }
 
     @Test

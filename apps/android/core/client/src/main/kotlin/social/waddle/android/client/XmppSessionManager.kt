@@ -403,7 +403,7 @@ class XmppSessionManager(
         var failure: Throwable? = null
         try {
             if (lifecycle != null) {
-                if (recoverPendingTerminal(lifecycle)) return
+                if (recoverFencedWorkers(lifecycle)) return
                 messenger.beginShutdown(lifecycle)
                 val loopJob = sessionLoopJob
                 loopJob?.cancel()
@@ -453,19 +453,13 @@ class XmppSessionManager(
         }
     }
 
-    private suspend fun recoverPendingTerminal(
+    private suspend fun recoverFencedWorkers(
         lifecycle: SessionLifecycleRef,
     ): Boolean {
-        val pending = pendingLifecycleShutdown ?: return false
-        if (
-            pending.lifecycle != lifecycle ||
-            pending.component != LifecyclePendingComponent.TERMINAL_DRAIN
-        ) {
-            return false
-        }
-        cancelSessionScope()
-        check(messenger.recoverFencedTerminal(lifecycle)) {
-            "fenced terminal lifecycle is not safe to recover"
+        when (val recovered = messenger.recoverFencedWorkers(lifecycle)) {
+            WorkerRecoveryOutcome.NotFenced -> return false
+            WorkerRecoveryOutcome.Recovered -> Unit
+            else -> throw IllegalStateException("fenced worker lifecycle remains unavailable: $recovered")
         }
         sessionLoopJob = null
         sessionLifecycle = null

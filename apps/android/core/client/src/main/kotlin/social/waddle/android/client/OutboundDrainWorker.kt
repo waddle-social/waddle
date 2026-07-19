@@ -27,11 +27,18 @@ internal class OutboundDrainWorker(
         scope: CoroutineScope,
         ownership: WorkerOwnership,
         onExit: suspend (WorkerExit) -> Unit,
+    ): Run = start(scope, ownership, {}, onExit)
+
+    fun start(
+        scope: CoroutineScope,
+        ownership: WorkerOwnership,
+        onReady: suspend (WorkerOwnership) -> Unit,
+        onExit: suspend (WorkerExit) -> Unit,
     ): Run {
         check(ownership.kind == WorkerKind.OUTBOUND_DRAIN) {
             "outbound drain worker requires a drain ownership"
         }
-        return Run(drain, ownership, onExit, scope)
+        return Run(drain, ownership, onReady, onExit, scope)
     }
 
     internal class Run internal constructor(
@@ -41,10 +48,12 @@ internal class OutboundDrainWorker(
             DeliveryAttemptRef,
         ) -> Unit,
         val ownership: WorkerOwnership,
+        private val onReady: suspend (WorkerOwnership) -> Unit,
         private val onExit: suspend (WorkerExit) -> Unit,
         scope: CoroutineScope,
     ) {
         private val signals = Channel<DrainWakeSignal>(Channel.CONFLATED)
+        private val ready = CompletableDeferred<Unit>()
         private val exit = CompletableDeferred<WorkerExit>()
 
         @Volatile
@@ -81,21 +90,27 @@ internal class OutboundDrainWorker(
             withTimeoutOrNull(timeoutMillis) { WorkerAwaitOutcome.Exited(exit.await()) }
                 ?: WorkerAwaitOutcome.TimedOut
 
+        suspend fun awaitReady() = ready.await()
+
         private suspend fun runWorker() {
             var reason: WorkerExitReason? = null
             try {
                 yield()
+                withContext(NonCancellable) { onReady(ownership) }
+                ready.complete(Unit)
                 for (signal in signals) {
                     drain(ownership.lifecycle, signal.handle, signal.attempt)
                 }
             } catch (cancellation: CancellationException) {
+                ready.cancel(cancellation)
                 reason = if (stopRequested) {
                     WorkerExitReason.RequestedStop
                 } else {
                     WorkerExitReason.OwnerScopeCancelled
                 }
             } catch (failure: Throwable) {
-                val cause = WorkerFailureCause.from(failure)
+                ready.completeExceptionally(failure)
+                val cause = WorkerFailureKind.DEPENDENCY_FAILURE
                 reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "outbound predecessor drain worker stopped", failure)
             } finally {

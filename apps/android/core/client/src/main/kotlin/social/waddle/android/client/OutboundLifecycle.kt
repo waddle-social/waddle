@@ -42,13 +42,9 @@ internal data class WorkerOwnership(
     val generation: WorkerGeneration,
 )
 
-internal class WorkerFailureCause private constructor(
-    val source: Class<out Throwable>,
-) {
-    companion object {
-        fun from(failure: Throwable): WorkerFailureCause =
-            WorkerFailureCause(failure.javaClass)
-    }
+/** Structured worker failure information deliberately excludes the Throwable. */
+internal enum class WorkerFailureKind {
+    DEPENDENCY_FAILURE,
 }
 
 internal sealed interface WorkerExitReason {
@@ -57,7 +53,7 @@ internal sealed interface WorkerExitReason {
     data object UnexpectedReturn : WorkerExitReason
 
     data class UnexpectedFailure(
-        val cause: WorkerFailureCause,
+        val kind: WorkerFailureKind,
     ) : WorkerExitReason
 }
 
@@ -77,7 +73,7 @@ internal sealed interface WorkerAwaitOutcome {
 }
 
 internal data class TerminalWorkerFailure(
-    val cause: WorkerFailureCause,
+    val kind: WorkerFailureKind,
 )
 
 internal sealed interface TerminalCommandOutcome {
@@ -103,23 +99,95 @@ internal fun requireTerminalCommitted(outcome: TerminalCommandOutcome) {
     }
 }
 
+internal data class WorkerFence(
+    val exit: WorkerExit,
+)
+
+internal sealed interface LifecycleFenceCause {
+    data class WorkerExited(val fence: WorkerFence) : LifecycleFenceCause
+    data class AwaitingRequestedWorkerExit(val ownership: WorkerOwnership) : LifecycleFenceCause
+}
+
+@JvmInline
+internal value class WorkerRecoveryToken private constructor(val value: UUID) {
+    companion object {
+        fun random(): WorkerRecoveryToken = WorkerRecoveryToken(UUID.randomUUID())
+    }
+}
+
+internal data class WorkerRecoveryClaim(
+    val lifecycle: SessionLifecycleRef,
+    val fence: WorkerFence,
+    val token: WorkerRecoveryToken,
+)
+
+internal sealed interface WorkerRecoveryOutcome {
+    data object Recovered : WorkerRecoveryOutcome
+    data object NotFenced : WorkerRecoveryOutcome
+    data object OwnershipMismatch : WorkerRecoveryOutcome
+    data object RecoveryInProgress : WorkerRecoveryOutcome
+    data object RetainedOperationsPending : WorkerRecoveryOutcome
+    data object WorkerExitPending : WorkerRecoveryOutcome
+    data class DurableCleanupPending(
+        val component: LifecyclePendingComponent,
+        val pending: Int,
+    ) : WorkerRecoveryOutcome
+}
+
 internal class OwnerWorkers(
     val lifecycle: SessionLifecycleRef,
 ) {
+    val terminalOwnership = WorkerOwnership(lifecycle, WorkerKind.DELIVERY_TERMINAL, WorkerGeneration.random())
+    val drainOwnership = WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random())
+
     lateinit var terminal: DeliveryTerminalWorker.Run
         internal set
     lateinit var drain: OutboundDrainWorker.Run
         internal set
 
-    private val exits = mutableListOf<WorkerExit>()
+    private var terminalReady = false
+    private var drainReady = false
+    private var terminalExit: WorkerExit? = null
+    private var drainExit: WorkerExit? = null
 
-    suspend fun recordExit(exit: WorkerExit) {
-        check(exit.lifecycle == lifecycle) { "worker exit belongs to another lifecycle" }
-        synchronized(exits) { exits += exit }
+    fun install(terminal: DeliveryTerminalWorker.Run, drain: OutboundDrainWorker.Run) {
+        check(terminal.ownership == terminalOwnership)
+        check(drain.ownership == drainOwnership)
+        this.terminal = terminal
+        this.drain = drain
     }
 
-    fun exits(): List<WorkerExit> = synchronized(exits) { exits.toList() }
+    fun markReady(ownership: WorkerOwnership): Boolean = when (ownership) {
+        terminalOwnership -> !terminalReady.also { terminalReady = true }
+        drainOwnership -> !drainReady.also { drainReady = true }
+        else -> false
+    }
+
+    fun bothReady(): Boolean = terminalReady && drainReady
+
+    fun recordExactExit(exit: WorkerExit): Boolean = when (exit.ownership()) {
+        terminalOwnership -> if (terminalExit == null) { terminalExit = exit; true } else false
+        drainOwnership -> if (drainExit == null) { drainExit = exit; true } else false
+        else -> false
+    }
+
+    fun exitFor(ownership: WorkerOwnership): WorkerExit? = when (ownership) {
+        terminalOwnership -> terminalExit
+        drainOwnership -> drainExit
+        else -> null
+    }
+
+    fun owns(ownership: WorkerOwnership): Boolean =
+        ownership == terminalOwnership || ownership == drainOwnership
+
+    fun siblingOf(ownership: WorkerOwnership): WorkerOwnership? = when (ownership) {
+        terminalOwnership -> drainOwnership
+        drainOwnership -> terminalOwnership
+        else -> null
+    }
 }
+
+internal fun WorkerExit.ownership(): WorkerOwnership = WorkerOwnership(lifecycle, kind, generation)
 
 @JvmInline
 internal value class ConnectionAttemptHandle private constructor(
@@ -132,6 +200,10 @@ internal value class ConnectionAttemptHandle private constructor(
 
 internal sealed interface OutboundLifecycleState {
     data object Stopped : OutboundLifecycleState
+
+    data class Bootstrapping(
+        val lifecycle: SessionLifecycleRef,
+    ) : OutboundLifecycleState
 
     data class Open(
         val lifecycle: SessionLifecycleRef,
@@ -154,6 +226,11 @@ internal sealed interface OutboundLifecycleState {
         val lifecycle: SessionLifecycleRef,
         val handle: ConnectionAttemptHandle?,
         val attempt: DeliveryAttemptRef?,
+    ) : OutboundLifecycleState
+
+    data class Fenced(
+        val lifecycle: SessionLifecycleRef,
+        val cause: LifecycleFenceCause,
     ) : OutboundLifecycleState
 }
 

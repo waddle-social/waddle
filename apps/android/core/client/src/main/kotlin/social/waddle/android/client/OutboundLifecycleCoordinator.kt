@@ -61,6 +61,7 @@ internal class OutboundLifecycleCoordinator(
     private var currentAttempt: AttemptRecord? = null
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
+    private var recoveryClaim: WorkerRecoveryClaim? = null
 
     @Volatile
     private var state: OutboundLifecycleState = OutboundLifecycleState.Stopped
@@ -72,18 +73,67 @@ internal class OutboundLifecycleCoordinator(
         // Mint identity before the first suspension so replacement can never
         // inherit a partially-created generation.
         val lifecycle = SessionLifecycleRef.create(ownerBareJid)
-        return gate.withLock {
+        val workers = gate.withLock {
             check(state == OutboundLifecycleState.Stopped) {
                 "outbound lifecycle is not restartable from $state"
             }
-            ownerWorkers = finalizationOperations.startWorkers(scope, lifecycle)
+            val createdWorkers = OwnerWorkers(lifecycle)
+            ownerWorkers = createdWorkers
             retainedOperations = LifecycleOperationRegistry(lifecycle)
             rotationMutationLease = null
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
+            recoveryClaim = null
+            state = OutboundLifecycleState.Bootstrapping(lifecycle)
+            createdWorkers
+        }
+        finalizationOperations.startWorkers(
+            scope = scope,
+            workers = workers,
+            onReady = ::onWorkerReady,
+            onExit = ::onWorkerExit,
+        )
+        workers.terminal.awaitReady()
+        workers.drain.awaitReady()
+        gate.withLock {
+            check(state == OutboundLifecycleState.Bootstrapping(lifecycle) && workers.bothReady()) {
+                "worker startup lost lifecycle authority"
+            }
             state = OutboundLifecycleState.Open(lifecycle)
-            lifecycle
+        }
+        return lifecycle
+    }
+
+    private suspend fun onWorkerReady(ownership: WorkerOwnership) {
+        gate.withLock {
+            val workers = ownerWorkers ?: return@withLock
+            if (workers.lifecycle != ownership.lifecycle || !workers.markReady(ownership)) return@withLock
+        }
+    }
+
+    /** Callback completes only after this exact exit has closed future admission. */
+    private suspend fun onWorkerExit(exit: WorkerExit) {
+        gate.withLock {
+            val workers = ownerWorkers ?: return@withLock
+            if (workers.lifecycle != exit.lifecycle || !workers.recordExactExit(exit)) return@withLock
+            val ordinaryStop = state is OutboundLifecycleState.Closing &&
+                exit.reason is WorkerExitReason.RequestedStop
+            if (!ordinaryStop && exit.reason !is WorkerExitReason.RequestedStop) {
+                retainedOperations?.closeAdmissions()
+                state = OutboundLifecycleState.Fenced(
+                    exit.lifecycle,
+                    LifecycleFenceCause.WorkerExited(WorkerFence(exit)),
+                )
+            } else if ((state as? OutboundLifecycleState.Fenced)?.cause
+                    .let { it as? LifecycleFenceCause.AwaitingRequestedWorkerExit }
+                    ?.ownership == exit.ownership()
+            ) {
+                state = OutboundLifecycleState.Fenced(
+                    exit.lifecycle,
+                    LifecycleFenceCause.WorkerExited(WorkerFence(exit)),
+                )
+            }
         }
     }
 
@@ -166,7 +216,7 @@ internal class OutboundLifecycleCoordinator(
         if (
             record?.handle != handle ||
             state.lifecycleOrNull() != record.lifecycle ||
-            state is OutboundLifecycleState.Closing
+            state !is OutboundLifecycleState.Active
         ) {
             return@withLock false
         }
@@ -286,6 +336,7 @@ internal class OutboundLifecycleCoordinator(
     suspend fun beginShutdown(lifecycle: SessionLifecycleRef): Boolean =
         gate.withLock {
             if (state.lifecycleOrNull() != lifecycle) return@withLock false
+            retainedOperations?.closeAdmissions()
             val record = currentAttempt
             state = OutboundLifecycleState.Closing(
                 lifecycle = lifecycle,
@@ -380,7 +431,7 @@ internal class OutboundLifecycleCoordinator(
         reservation
     }
 
-    suspend fun releaseAdmission(lease: OutboundAdmissionLease) =
+    suspend fun releaseAdmission(lease: OutboundAdmissionLease): LifecycleReleaseOutcome =
         releaseReservation(
             token = lease.token,
             lifecycle = lease.lifecycle,
@@ -395,13 +446,12 @@ internal class OutboundLifecycleCoordinator(
         token: UUID,
         lifecycle: SessionLifecycleRef,
         attempt: DeliveryAttemptRef?,
-    ) {
+    ): LifecycleReleaseOutcome =
         gate.withLock {
             retainedOperations?.release(
                 OperationCapability(lifecycle, attempt, token),
-            )
+            ) ?: LifecycleReleaseOutcome.NotOwned
         }
-    }
 
     suspend fun rotate(
         handle: ConnectionAttemptHandle,
@@ -616,6 +666,7 @@ internal class OutboundLifecycleCoordinator(
             if (state.lifecycleOrNull() != lifecycle) {
                 return LifecycleShutdownOutcome.Stale
             }
+            retainedOperations?.closeAdmissions()
             val activeRecord = currentAttempt
             state = OutboundLifecycleState.Closing(
                 lifecycle = lifecycle,
@@ -631,6 +682,19 @@ internal class OutboundLifecycleCoordinator(
         if (shutdown != null) {
             gate.withLock {
                 pendingShutdown = shutdown
+                val workers = ownerWorkers
+                val awaiting = when (shutdown.component) {
+                    LifecyclePendingComponent.TERMINAL_DRAIN -> workers?.terminalOwnership
+                    LifecyclePendingComponent.OUTBOUND_DRAIN -> workers?.drainOwnership
+                    else -> null
+                }
+                if (awaiting != null) {
+                    retainedOperations?.closeAdmissions()
+                    state = OutboundLifecycleState.Fenced(
+                        lifecycle,
+                        LifecycleFenceCause.AwaitingRequestedWorkerExit(awaiting),
+                    )
+                }
             }
             return shutdown
         }
@@ -645,46 +709,89 @@ internal class OutboundLifecycleCoordinator(
         return LifecycleShutdownOutcome.Stopped
     }
 
-    /**
-     * Explicit recovery gate for a terminal worker that stopped with durable
-     * intents retained. Ordinary start remains forbidden while Closing; this
-     * transition is allowed only after all transports/attempts are fenced and
-     * the old worker is fully gone. The next lifecycle drains the journal
-     * before admitting outbound replay.
-     */
-    suspend fun recoverFencedTerminal(
-        lifecycle: SessionLifecycleRef,
-    ): Boolean {
-        val eligible = gate.withLock {
-            isTerminalRecoveryEligible(
-                state,
-                pendingShutdown,
-                lifecycle,
-                retainedOperations?.retainedCount() == 0,
-            )
+    suspend fun recoverFencedWorkers(lifecycle: SessionLifecycleRef): WorkerRecoveryOutcome {
+        val awaitingExit = gate.withLock {
+            (state as? OutboundLifecycleState.Fenced)
+                ?.takeIf { it.lifecycle == lifecycle }
+                ?.cause is LifecycleFenceCause.AwaitingRequestedWorkerExit
         }
-        if (!eligible) return false
-        val workers = gate.withLock { ownerWorkers } ?: return false
-        if (!finalizationOperations.terminalRecoveryReady(workers, lifecycle.ownerBareJid)) {
-            return false
+        if (awaitingExit) return WorkerRecoveryOutcome.WorkerExitPending
+        val claimed = gate.withLock {
+            val fenced = state as? OutboundLifecycleState.Fenced
+                ?: return@withLock null
+            if (fenced.lifecycle != lifecycle) return@withLock null
+            val cause = fenced.cause as? LifecycleFenceCause.WorkerExited
+                ?: return@withLock null
+            val workers = ownerWorkers ?: return@withLock null
+            if (!workers.owns(cause.fence.exit.ownership())) return@withLock WorkerRecoveryClaim(
+                lifecycle,
+                cause.fence,
+                WorkerRecoveryToken.random(),
+            ) to null
+            if (recoveryClaim != null) return@withLock WorkerRecoveryClaim(
+                lifecycle,
+                cause.fence,
+                WorkerRecoveryToken.random(),
+            ) to workers
+            retainedOperations?.closeAdmissions()
+            WorkerRecoveryClaim(lifecycle, cause.fence, WorkerRecoveryToken.random()).also {
+                recoveryClaim = it
+            } to workers
+        }
+        if (claimed == null) return WorkerRecoveryOutcome.NotFenced
+        val (claim, workers) = claimed
+        if (workers == null) return WorkerRecoveryOutcome.OwnershipMismatch
+        if (gate.withLock { recoveryClaim != claim }) return WorkerRecoveryOutcome.RecoveryInProgress
+
+        workers.siblingOf(claim.fence.exit.ownership())?.let { sibling ->
+            if (workers.exitFor(sibling) == null) {
+                when (sibling.kind) {
+                    WorkerKind.DELIVERY_TERMINAL -> workers.terminal.requestStop()
+                    WorkerKind.OUTBOUND_DRAIN -> workers.drain.requestStop()
+                }
+            }
+        }
+        val exits = listOf(
+            workers.terminal.awaitExit(transitionTimeoutMillis),
+            workers.drain.awaitExit(transitionTimeoutMillis),
+        )
+        if (exits.any { it is WorkerAwaitOutcome.TimedOut }) {
+            clearRecoveryClaim(claim)
+            return WorkerRecoveryOutcome.WorkerExitPending
+        }
+        if (!awaitLeaseDrain()) {
+            clearRecoveryClaim(claim)
+            return WorkerRecoveryOutcome.RetainedOperationsPending
+        }
+        if (!ownsRecoveryClaim(claim, workers)) {
+            return WorkerRecoveryOutcome.OwnershipMismatch
+        }
+        val cleanup = finalizationOperations.recoverDurableState(workers, lifecycle)
+        if (cleanup is OwnerFinalizationResult.Pending) {
+            clearRecoveryClaim(claim)
+            return WorkerRecoveryOutcome.DurableCleanupPending(cleanup.component, cleanup.count)
         }
         return gate.withLock {
-            val stillEligible = isTerminalRecoveryEligible(
-                state,
-                pendingShutdown,
-                lifecycle,
-                retainedOperations?.retainedCount() == 0,
-            )
-            if (!stillEligible) {
-                return@withLock false
-            }
+            if (!ownsRecoveryClaimLocked(claim, workers)) return@withLock WorkerRecoveryOutcome.OwnershipMismatch
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
             ownerWorkers = null
+            recoveryClaim = null
             state = OutboundLifecycleState.Stopped
-            true
+            WorkerRecoveryOutcome.Recovered
         }
+    }
+
+    private suspend fun ownsRecoveryClaim(claim: WorkerRecoveryClaim, workers: OwnerWorkers): Boolean =
+        gate.withLock { ownsRecoveryClaimLocked(claim, workers) }
+
+    private fun ownsRecoveryClaimLocked(claim: WorkerRecoveryClaim, workers: OwnerWorkers): Boolean =
+        recoveryClaim == claim && ownerWorkers === workers &&
+            state == OutboundLifecycleState.Fenced(claim.lifecycle, LifecycleFenceCause.WorkerExited(claim.fence))
+
+    private suspend fun clearRecoveryClaim(claim: WorkerRecoveryClaim) {
+        gate.withLock { if (recoveryClaim == claim) recoveryClaim = null }
     }
 
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) =

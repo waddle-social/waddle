@@ -114,9 +114,9 @@ internal class OutboundMessenger(
         target: LifecycleShutdownTarget,
     ): LifecycleShutdownOutcome = lifecycle.shutdown(target)
 
-    suspend fun recoverFencedTerminal(
+    suspend fun recoverFencedWorkers(
         sessionLifecycle: SessionLifecycleRef,
-    ): Boolean = lifecycle.recoverFencedTerminal(sessionLifecycle)
+    ): WorkerRecoveryOutcome = lifecycle.recoverFencedWorkers(sessionLifecycle)
 
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) {
         lifecycle.awaitStartupTerminalDrain(ownerBareJid)

@@ -65,7 +65,10 @@ class OutboundTerminalRecoveryTest {
                 "ordinary restart must remain fenced while terminal intents are pending",
                 runCatching { harness.startReplacementLifecycle() }.isFailure,
             )
-            assertTrue(harness.recoverFencedTerminal(fencedLifecycle))
+            assertEquals(WorkerRecoveryOutcome.WorkerExitPending, harness.recoverFencedWorkers(fencedLifecycle))
+            advanceTimeBy(30_000)
+            runCurrent()
+            assertEquals(WorkerRecoveryOutcome.Recovered, harness.recoverFencedWorkers(fencedLifecycle))
             val replacement = harness.startReplacementLifecycle()
             assertTrue(replacement != fencedLifecycle)
             runCurrent()
