@@ -281,9 +281,20 @@ schema.#Project & {
 					    ;;
 					esac
 
-					folder_uid="$(curl --fail-with-body -sS "${grafana_url}/api/folders" \
-					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
-					  | jq -er '[.[] | select(.title == "Waddle")] | if length == 1 then .[0].uid else error("expected exactly one Waddle folder") end')"
+					# Resolve the folder by its stable uid, matching the create
+					# above; the title-based lookup is only a fallback for a
+					# pre-existing folder that was created under another uid
+					# (create then 409s on the duplicate title).
+					folder_lookup_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					  "${grafana_url}/api/folders/uid/waddle" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}")"
+					if [ "${folder_lookup_status}" = "200" ]; then
+					  folder_uid="$(jq -er '.uid' "${folder_response}")"
+					else
+					  folder_uid="$(curl --fail-with-body -sS "${grafana_url}/api/folders" \
+					    -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					    | jq -er '[.[] | select(.title == "Waddle")] | if length == 1 then .[0].uid else error("expected exactly one Waddle folder") end')"
+					fi
 
 					for dashboard_file in dashboards/*.json; do
 					  dashboard_status="$(jq -c --arg folder_uid "${folder_uid}" \
@@ -309,11 +320,20 @@ schema.#Project & {
 					# dashboards/*.json was deleted or renamed in source control and
 					# is pruned.
 					local_uids="$(jq -r '.uid' dashboards/*.json)"
+					# The jq folderUid re-check is deliberate defense-in-depth for
+					# this destructive loop: if the server ever ignored the
+					# folderUIDs query parameter, the client-side filter still
+					# confines the prune to the Waddle folder.
 					remote_uids="$(curl --fail-with-body -sS \
 					  "${grafana_url}/api/search?type=dash-db&folderUIDs=${folder_uid}&limit=1000" \
 					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
-					  | jq -r '.[].uid')"
+					  | jq -r --arg folder_uid "${folder_uid}" \
+					      '.[] | select(.folderUid == $folder_uid) | .uid')"
 					for remote_uid in ${remote_uids}; do
+					  if [[ ! "${remote_uid}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+					    echo "Skipping prune of dashboard with unexpected uid ${remote_uid@Q} (not URL-safe)." >&2
+					    continue
+					  fi
 					  if ! grep -qx "${remote_uid}" <<< "${local_uids}"; then
 					    delete_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
 					      -X DELETE "${grafana_url}/api/dashboards/uid/${remote_uid}" \
