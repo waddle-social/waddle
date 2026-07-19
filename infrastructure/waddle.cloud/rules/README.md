@@ -61,3 +61,24 @@ vault named **`Grafana-Cloud-Alerting`** with these fields:
 #1294/#1295) fire on known-open bugs by design — an honest pager
 over a silent one. Their runbook annotations link the issues; tighten
 or quiet them when the fixes land.
+
+## Legacy-name aliases (#1330 contract phase)
+
+`mimir/waddle-reliability-aliases.yaml` records every retired
+`waddle_*` text-family name from its OTel successor's translated
+series (`xmpp_*_total`, `waddle_messages_delivered_total`,
+`xmpp_connections_active`), so dashboards and the alert rules above
+keep answering after the text renderer's deletion. Notes:
+
+- `reason`-labeled families (`waddle_push_suppressed_total`,
+  `waddle_push_outbox_retry_scheduled_total`) preserve the label.
+- `waddle_messages_per_second` is now a 1m-window rate recording,
+  not the old "messages in the last full second" gauge — smoother,
+  same intent.
+- `waddle_push_suppressed_unknown_reason_total` is retired without an
+  alias: the sealed reason enum made it structurally unreachable and
+  it was permanently 0.
+- The source names assume Grafana Cloud's OTLP→Prometheus name
+  normalization (unit annotations dropped, `_total` on monotonic
+  sums). Verify against live series before relying on a new alias;
+  see the ClusterHeartbeat runbook for the same caveat.
