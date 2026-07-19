@@ -1,1 +1,93 @@
-« the alias recording rules file: 30 recording rules across waddle-aliases-sm / -push / -pending / -broadcast / -delivery / -dnd / -traffic groups, each `record: waddle_<family>_total` with `expr: sum by (job, instance[, reason]) (xmpp_<family>_total)`; traffic group records waddle_messages_total, waddle_messages_per_second (1m rate), waddle_connected_users from waddle_messages_delivered_total / xmpp_connections_active »
+# Legacy-name aliases (#1330 contract phase). Every rule records a retired
+# waddle_* text-family name from its OTel successor's translated series so
+# existing dashboards and the alert rules in waddle-reliability.yaml keep
+# answering. Source names assume Grafana Cloud OTLP name normalization:
+# dots to underscores, UCUM annotation units ({x}) dropped, _total appended
+# to monotonic sums, gauges unsuffixed. Verify new aliases against live
+# series (see README).
+namespace: waddle-aliases
+groups:
+    - name: waddle-aliases-sm
+      rules:
+        - record: waddle_sm_unacked_evicted_total
+          expr: sum by (job, instance) (xmpp_sm_unacked_evicted_total)
+        - record: waddle_sm_promotion_storage_failed_total
+          expr: sum by (job, instance) (xmpp_sm_promotion_storage_failed_total)
+        - record: waddle_sm_promotion_not_promotable_total
+          expr: sum by (job, instance) (xmpp_sm_promotion_not_promotable_total)
+        - record: waddle_sm_promotion_blocklist_failed_total
+          expr: sum by (job, instance) (xmpp_sm_promotion_blocklist_failed_total)
+        - record: waddle_sm_promotion_dead_lettered_total
+          expr: sum by (job, instance) (xmpp_sm_promotion_dead_lettered_total)
+        - record: waddle_sm_drain_timeout_total
+          expr: sum by (job, instance) (xmpp_sm_drain_timeout_total)
+        - record: waddle_sm_resume_window_clamped_total
+          expr: sum by (job, instance) (xmpp_sm_resume_window_clamped_total)
+        - record: waddle_sm_send_window_pauses_total
+          expr: sum by (job, instance) (xmpp_sm_send_window_pauses_total)
+        - record: waddle_sm_send_window_pause_timeouts_total
+          expr: sum by (job, instance) (xmpp_sm_send_window_pause_timeouts_total)
+        - record: waddle_sm_detached_unacked_evicted_total
+          expr: sum by (job, instance) (xmpp_sm_detached_unacked_evicted_total)
+    - name: waddle-aliases-push
+      rules:
+        - record: waddle_push_candidate_created_total
+          expr: sum by (job, instance) (xmpp_push_candidate_created_total)
+        - record: waddle_push_candidate_coalesced_total
+          expr: sum by (job, instance) (xmpp_push_candidate_coalesced_total)
+        - record: waddle_push_outbox_published_total
+          expr: sum by (job, instance) (xmpp_push_outbox_published_total)
+        - record: waddle_push_outbox_retry_scheduled_total
+          expr: sum by (job, instance, reason) (xmpp_push_outbox_retry_scheduled_total)
+        - record: waddle_push_outbox_dead_lettered_total
+          expr: sum by (job, instance) (xmpp_push_outbox_dead_lettered_total)
+        - record: waddle_push_suppressed_total
+          expr: sum by (job, instance, reason) (xmpp_push_suppressed_total)
+    - name: waddle-aliases-pending
+      rules:
+        - record: waddle_pending_delivery_quota_exceeded_total
+          expr: sum by (job, instance) (xmpp_pending_delivery_quota_exceeded_total)
+        - record: waddle_pending_delivery_orphan_claims_released_total
+          expr: sum by (job, instance) (xmpp_pending_delivery_orphan_claims_released_total)
+        - record: waddle_pending_delivery_aged_out_total
+          expr: sum by (job, instance) (xmpp_pending_delivery_aged_out_total)
+        - record: waddle_pending_delivery_unresolved_poison_pill_total
+          expr: sum by (job, instance) (xmpp_pending_delivery_unresolved_poison_pill_total)
+        - record: waddle_pending_delivery_archive_lookup_transient_failure_total
+          expr: sum by (job, instance) (xmpp_pending_delivery_archive_lookup_transient_failure_total)
+        - record: waddle_pending_flush_batches_total
+          expr: sum by (job, instance) (xmpp_pending_flush_batches_total)
+        - record: waddle_pending_flush_rows_pushed_total
+          expr: sum by (job, instance) (xmpp_pending_flush_rows_pushed_total)
+    - name: waddle-aliases-broadcast
+      rules:
+        - record: waddle_broadcast_delivered_total
+          expr: sum by (job, instance) (xmpp_broadcast_delivered_total)
+        - record: waddle_broadcast_not_connected_total
+          expr: sum by (job, instance) (xmpp_broadcast_not_connected_total)
+        - record: waddle_broadcast_dropped_full_total
+          expr: sum by (job, instance) (xmpp_broadcast_dropped_full_total)
+        - record: waddle_broadcast_dropped_closed_total
+          expr: sum by (job, instance) (xmpp_broadcast_dropped_closed_total)
+    - name: waddle-aliases-delivery
+      rules:
+        - record: waddle_delivery_terminal_error_drop_total
+          expr: sum by (job, instance) (xmpp_delivery_terminal_error_drop_total)
+        - record: waddle_delivery_retry_exhausted_drop_total
+          expr: sum by (job, instance) (xmpp_delivery_retry_exhausted_drop_total)
+        - record: waddle_resolver_affiliation_sync_capacity_drop_total
+          expr: sum by (job, instance) (xmpp_resolver_affiliation_sync_capacity_drop_total)
+        - record: waddle_user_actor_reaped_total
+          expr: sum by (job, instance) (xmpp_user_actor_reaped_total)
+    - name: waddle-aliases-dnd
+      rules:
+        - record: waddle_dnd_projection_read_errored_total
+          expr: sum by (job, instance) (xmpp_dnd_projection_read_errored_total)
+    - name: waddle-aliases-traffic
+      rules:
+        - record: waddle_messages_total
+          expr: sum by (job, instance) (waddle_messages_delivered_total)
+        - record: waddle_messages_per_second
+          expr: sum by (job, instance) (rate(waddle_messages_delivered_total[1m]))
+        - record: waddle_connected_users
+          expr: sum by (job, instance) (xmpp_connections_active)

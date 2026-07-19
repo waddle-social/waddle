@@ -96,7 +96,11 @@ fn ensure_pod_gauges() {
             meter()
                 .i64_observable_gauge("xmpp.connections.active")
                 .with_description("Current number of active XMPP connections")
-                .with_unit("connection")
+                // UCUM annotation: dropped by Prometheus name normalization,
+                // so the backend series is exactly `xmpp_connections_active`
+                // — the source the `waddle_connected_users` alias records
+                // from (#1330). A bare unit would suffix the name.
+                .with_unit("{connection}")
                 .with_callback(|observer| {
                     observer.observe(
                         CONNECTIONS_ACTIVE.load(Ordering::Relaxed),

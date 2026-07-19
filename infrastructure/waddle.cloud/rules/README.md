@@ -78,6 +78,9 @@ keep answering after the text renderer's deletion. Notes:
 - `waddle_push_suppressed_unknown_reason_total` is retired without an
   alias: the sealed reason enum made it structurally unreachable and
   it was permanently 0.
+- `waddle_room_count` was retired earlier (#1136) without an alias: it
+  was dead-driven (always 0) and the live signal is the
+  `xmpp_muc_rooms_active` gauge.
 - The source names assume Grafana Cloud's OTLP→Prometheus name
   normalization (unit annotations dropped, `_total` on monotonic
   sums). Verify against live series before relying on a new alias;

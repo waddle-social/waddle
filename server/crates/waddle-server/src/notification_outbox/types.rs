@@ -591,4 +591,29 @@ mod tests {
             Err(NotificationOutboxError::InvalidSuppressedReason(_))
         ));
     }
+
+    /// Cross-crate lockstep guard (successor of the retired
+    /// `push_suppressed_reasons()` parity check): the persisted
+    /// `SuppressedReason` db values and the sealed
+    /// `PushSuppressReason` metric label values must stay the same
+    /// closed set, so a Loki query on the audit column and a PromQL
+    /// filter on the `reason` label always speak the same vocabulary.
+    #[test]
+    fn suppressed_reason_db_values_match_metric_label_values() {
+        use waddle_xmpp::telemetry::attributes::{MetricAttribute, PushSuppressReason};
+
+        let db_values: Vec<&'static str> = SuppressedReason::ALL
+            .iter()
+            .copied()
+            .map(SuppressedReason::as_db_value)
+            .collect();
+        let metric_values: Vec<&'static str> = PushSuppressReason::ALL
+            .iter()
+            .map(MetricAttribute::value)
+            .collect();
+        assert_eq!(
+            db_values, metric_values,
+            "audit db values and metric reason labels must stay one closed set",
+        );
+    }
 }
