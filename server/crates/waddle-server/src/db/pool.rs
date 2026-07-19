@@ -5,7 +5,9 @@
 use super::actor::{DbActor, DbHealthCheck};
 use super::{Database, DatabaseConfig, DatabaseError};
 use kameo::actor::{ActorRef, Spawn};
+use opentelemetry::trace::Status;
 use tracing::{info, instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Configuration for the database pool.
 #[derive(Debug, Clone, Default)]
@@ -18,7 +20,7 @@ pub struct DatabasePool {
 }
 
 impl DatabasePool {
-    #[instrument(skip_all)]
+    #[instrument(skip_all, err)]
     pub async fn new(
         config: DatabaseConfig,
         _pool_config: PoolConfig,
@@ -52,6 +54,7 @@ impl DatabasePool {
         let global_healthy = match self.global_actor.ask(DbHealthCheck).await {
             Ok(healthy) => healthy,
             Err(e) => {
+                tracing::Span::current().set_status(Status::error(e.to_string()));
                 tracing::warn!(error = %e, "Global DB health check failed");
                 false
             }

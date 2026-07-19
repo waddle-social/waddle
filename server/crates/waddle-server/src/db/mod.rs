@@ -11,10 +11,12 @@ pub mod roster;
 mod schema;
 mod value;
 
+use opentelemetry::trace::Status;
 #[cfg(test)]
 use std::path::Path;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
@@ -200,7 +202,7 @@ impl Database {
         .await
     }
 
-    #[instrument(skip_all, fields(name = %name))]
+    #[instrument(skip_all, fields(name = %name), err)]
     pub async fn from_config(name: &str, config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         if config.control_plane_pool.is_some() && config.driver != DatabaseDriver::Postgres {
             return Err(DatabaseError::ControlPlanePoolRequiresPostgres);
@@ -300,12 +302,13 @@ impl Database {
         &self.database_url
     }
 
-    #[instrument(skip_all, fields(name = %self.name))]
+    #[instrument(skip_all, fields(name = %self.name), err)]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
         let conn = self.guard().await?;
         match conn.query("SELECT 1", ()).await {
             Ok(_) => Ok(true),
             Err(e) => {
+                tracing::Span::current().set_status(Status::error(e.to_string()));
                 tracing::warn!(error = %e, "Database health check failed");
                 Ok(false)
             }

@@ -43,8 +43,8 @@
 //!
 //! # Testing
 //!
-//! Tests assert **exported samples**, not internal state, through the
-//! in-memory reader seam in [`test_support`] (gated behind
+//! Tests assert exported metrics and spans, never internal state, through
+//! the in-memory seams in [`test_support`] (gated behind
 //! `test`/`test-utils`).
 
 pub mod attributes;

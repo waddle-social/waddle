@@ -1,8 +1,7 @@
-//! In-memory metric-reader test seam — the one approved metric test
-//! seam from spec #1323.
+//! In-memory OpenTelemetry metric and span test seams.
 //!
-//! Tests assert **exported samples** (name, unit, attributes, value),
-//! never instrument internals. The pipeline is a process-global
+//! Tests assert exported telemetry, never instrument internals. The metric
+//! pipeline is a process-global
 //! `SdkMeterProvider` backed by an [`InMemoryMetricExporter`] with
 //! **delta temporality**: each [`MetricsTestGuard`] drains the
 //! exporter on acquire, so a test observes only increments made while
@@ -22,12 +21,70 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use opentelemetry::trace::{Status, TracerProvider as _};
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, Metric, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{
     InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
     Temporality,
 };
+use opentelemetry_sdk::trace::{
+    InMemorySpanExporter, InMemorySpanExporterBuilder, SdkTracerProvider, SpanData,
+};
+use tracing_subscriber::prelude::*;
+
+/// Install a thread-scoped tracing subscriber backed by an in-memory OTel
+/// span exporter.
+///
+/// Keep the returned guard alive across the operation under test. Async tests
+/// must use Tokio's current-thread flavor because tracing's default subscriber
+/// guard is thread-local.
+pub fn acquire_spans() -> SpanTestGuard {
+    let exporter = InMemorySpanExporterBuilder::new().build();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("waddle-span-test"))
+            .with_error_events_to_status(true)
+            .with_error_records_to_exceptions(true),
+    );
+    let dispatch_guard = tracing::subscriber::set_default(subscriber);
+
+    SpanTestGuard {
+        exporter,
+        provider,
+        _dispatch_guard: dispatch_guard,
+    }
+}
+
+/// Holds a thread-scoped subscriber and exposes completed exported spans.
+pub struct SpanTestGuard {
+    exporter: InMemorySpanExporter,
+    provider: SdkTracerProvider,
+    _dispatch_guard: tracing::subscriber::DefaultGuard,
+}
+
+impl SpanTestGuard {
+    /// Flush and return every completed span exported since acquisition.
+    pub fn exported(&self) -> Vec<SpanData> {
+        self.provider
+            .force_flush()
+            .expect("in-memory tracer provider must flush");
+        self.exporter
+            .get_finished_spans()
+            .expect("in-memory exporter must yield finished spans")
+    }
+
+    /// Return the exported status of the named span, if present.
+    pub fn status_of(&self, span_name: &str) -> Option<Status> {
+        self.exported()
+            .into_iter()
+            .find(|span| span.name == span_name)
+            .map(|span| span.status)
+    }
+}
 
 struct TestPipeline {
     exporter: InMemoryMetricExporter,

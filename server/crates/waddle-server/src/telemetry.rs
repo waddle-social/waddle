@@ -362,7 +362,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_line_number(true);
 
     // Build the OpenTelemetry tracing layer
-    let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let telemetry_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_error_events_to_status(true)
+        .with_error_records_to_exceptions(true);
 
     // Bridge `tracing` events into the OTLP log pipeline. Scope its
     // own filter so the HTTP/gRPC transports used by the OTLP exporter
