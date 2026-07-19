@@ -533,4 +533,4 @@ pub async fn logout_handler(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

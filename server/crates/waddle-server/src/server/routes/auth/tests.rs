@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use waddle_xmpp::telemetry::test_support;
 
-async fn create_test_auth_state(
+pub(crate) async fn create_test_auth_state(
     server_config: &ServerConfig,
 ) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
     let public_websocket_url =
