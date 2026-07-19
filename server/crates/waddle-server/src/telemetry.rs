@@ -327,6 +327,11 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set global meter provider
     opentelemetry::global::set_meter_provider(meter_provider);
 
+    // Register the pod-wide observable gauges eagerly so a churn-free
+    // pod exports 0 instead of no series (the waddle_connected_users
+    // alias reads absent otherwise — Qodo review on PR #1426).
+    waddle_xmpp::metrics::init_pod_gauges();
+
     // Build OTLP logs exporter + provider. The tracing bridge below
     // feeds every `tracing::{info,warn,error,debug,trace}!` event into
     // this provider as an OTLP log record, in addition to stdout.

@@ -219,26 +219,6 @@ impl PushSuppressReason {
             Self::Xep0444Reaction => "xep0444_reaction",
         }
     }
-
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Xep0357Self => 0,
-            Self::Xep0357NoRegistration => 1,
-            Self::Xep0357RegistrationDisabled => 2,
-            Self::Xep0492Never => 3,
-            Self::Xep0492OnMentionMiss => 4,
-            Self::Xep0191Blocked => 5,
-            Self::Xep0513Noping => 6,
-            Self::Xep0513ActiveMiss => 7,
-            Self::WaddleDnd => 8,
-            Self::ProviderRejected => 9,
-            Self::ProviderTokenExpired => 10,
-            Self::Xep0357PushServiceDegraded => 11,
-            Self::UnreadZeroAtPublish => 12,
-            Self::PolicyRetriesExhausted => 13,
-            Self::Xep0444Reaction => 14,
-        }
-    }
 }
 
 impl sealed::Sealed for PushSuppressReason {}

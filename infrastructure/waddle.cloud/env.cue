@@ -49,7 +49,31 @@ schema.#Project & {
 	let _t = tasks
 
 	ci: providers: ["github"]
-	ci: contributors: [_NamespaceNix, c.#CuenvRelease]
+	ci: contributors: [_NamespaceNix, c.#CuenvRelease, c.#OnePassword]
+
+	// Grafana Cloud ruler credentials for rulesSync (#1324). Resolved
+	// via 1Password on main-push CI (the OnePassword contributor +
+	// pipeline environment), mirroring chat's Cloudflare/Faro pattern.
+	// The operator creates the item once; see rules/README.md.
+	env: {
+		environment: production: {
+			GRAFANA_CLOUD_MIMIR_ADDRESS: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Alerting/mimir-address"
+			}
+			GRAFANA_CLOUD_MIMIR_TENANT_ID: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Alerting/mimir-tenant-id"
+			}
+			GRAFANA_CLOUD_LOKI_ADDRESS: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Alerting/loki-address"
+			}
+			GRAFANA_CLOUD_LOKI_TENANT_ID: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Alerting/loki-tenant-id"
+			}
+			GRAFANA_CLOUD_RULER_TOKEN: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Alerting/ruler-token"
+			}
+		}
+	}
 
 	ci: provider: github: {
 		runner: "namespace-profile-linux-x86"
@@ -63,6 +87,7 @@ schema.#Project & {
 	ci: pipelines: {
 		default: {
 			derivePaths: true
+			environment: "production"
 			when: {
 				branch: ["main"]
 				defaultBranch: true
@@ -72,7 +97,12 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.rulesSync]
+		}
+		pullRequest: {
+			derivePaths: true
+			when: pullRequest: true
+			tasks: [_t.rulesLint]
 		}
 	}
 
@@ -130,6 +160,47 @@ schema.#Project & {
 					  --revision="$(git rev-parse --short HEAD)"
 				"""#]
 			inputs: ["gitops/**", "env.cue"]
+		}
+		// Lint every alert-rule file (alerts-as-code, #1324). Runs on
+		// every PR touching rules/** so a broken rule fails the PR,
+		// not the pager.
+		rulesLint: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					mimirtool rules lint rules/mimir/*.yaml
+					lokitool rules lint --rule-files "$(ls rules/loki/*.yaml | paste -sd, -)"
+					echo "All alert rule files lint clean."
+				"""#]
+			inputs: ["rules/**", "env.cue"]
+		}
+		// Sync the rule trees to the Grafana Cloud rulers (main push
+		// only). Sync is authoritative within the `waddle` namespace;
+		// see rules/README.md for the required secrets.
+		rulesSync: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${GRAFANA_CLOUD_MIMIR_ADDRESS:?missing — create the Grafana-Cloud-Alerting 1Password item (see rules/README.md)}"
+					: "${GRAFANA_CLOUD_MIMIR_TENANT_ID:?missing 1Password field mimir-tenant-id}"
+					: "${GRAFANA_CLOUD_LOKI_ADDRESS:?missing 1Password field loki-address}"
+					: "${GRAFANA_CLOUD_LOKI_TENANT_ID:?missing 1Password field loki-tenant-id}"
+					: "${GRAFANA_CLOUD_RULER_TOKEN:?missing 1Password field ruler-token}"
+					mimirtool rules sync \
+					  --address="${GRAFANA_CLOUD_MIMIR_ADDRESS}" \
+					  --id="${GRAFANA_CLOUD_MIMIR_TENANT_ID}" \
+					  --key="${GRAFANA_CLOUD_RULER_TOKEN}" \
+					  --namespaces=waddle \
+					  rules/mimir/*.yaml
+					lokitool rules sync \
+					  --address="${GRAFANA_CLOUD_LOKI_ADDRESS}" \
+					  --id="${GRAFANA_CLOUD_LOKI_TENANT_ID}" \
+					  --key="${GRAFANA_CLOUD_RULER_TOKEN}" \
+					  --namespaces=waddle \
+					  rules/loki/*.yaml
+					echo "Alert rules synced to Grafana Cloud rulers."
+				"""#]
+			inputs: ["rules/**", "env.cue"]
 		}
 	}
 }

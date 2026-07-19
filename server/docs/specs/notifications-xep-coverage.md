@@ -93,7 +93,7 @@ push_publish_jobs  (durable row, Push Service queue; provider
 |---|---|---|
 | `waddle_push_candidate_created_total` | `insert_candidate` → Inserted arm | `prometheus.rs` HELP text |
 | `waddle_push_candidate_coalesced_total` | `insert_candidate` → Duplicate arm (PRIMARY KEY hit) | `prometheus.rs` HELP text |
-| `waddle_push_suppressed_total{reason=…}` | T0 / T1 typed-evaluator Suppressed arm | `prometheus.rs::push_suppressed_reasons`; lockstep with `SuppressedReason::as_db_value` |
+| `xmpp.push.suppressed{reason=…}` (OTel; Mimir alias `waddle_push_suppressed_total`) | T0 / T1 typed-evaluator Suppressed arm | `telemetry/attributes.rs::PushSuppressReason`; lockstep with `SuppressedReason::as_db_value` |
 | `waddle_push_outbox_published_total` | `drain_due_outbox_jobs` → Published outcome | `prometheus.rs` HELP text |
 | `waddle_push_outbox_retry_scheduled_total` | `drain_due_outbox_jobs` → RetryScheduled outcome (transient failure backoff) | `prometheus.rs` HELP text |
 | `waddle_push_outbox_dead_lettered_total` | `drain_due_outbox_jobs` → Failed outcome (permanent failure → terminal `failed` status) | `prometheus.rs` HELP text |

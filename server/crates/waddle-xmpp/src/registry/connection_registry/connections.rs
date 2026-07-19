@@ -53,7 +53,6 @@ impl ConnectionRegistry {
         if existing.is_some() {
             debug!("Replaced existing connection registration");
         } else {
-            prometheus::increment_connected_users();
             crate::metrics::adjust_connections_active(1);
             debug!("Registered new connection");
         }
@@ -74,7 +73,6 @@ impl ConnectionRegistry {
         if existing.is_some() {
             debug!("Replaced existing connection registration");
         } else {
-            prometheus::increment_connected_users();
             crate::metrics::adjust_connections_active(1);
             debug!("Registered new connection");
         }
@@ -105,7 +103,6 @@ impl ConnectionRegistry {
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 vacant.insert(entry);
-                prometheus::increment_connected_users();
                 crate::metrics::adjust_connections_active(1);
                 debug!("Registered new connection");
                 true
@@ -120,7 +117,6 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove(jid);
         if removed.is_some() {
-            prometheus::decrement_connected_users();
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered connection");
@@ -142,7 +138,6 @@ impl ConnectionRegistry {
             Arc::ptr_eq(&entry.carbons_enabled, carbons_handle)
         });
         if removed.is_some() {
-            prometheus::decrement_connected_users();
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered owned connection");
@@ -172,7 +167,6 @@ impl ConnectionRegistry {
             entry.sm_stream_id().as_ref() == Some(stream_id)
         });
         if removed.is_some() {
-            prometheus::decrement_connected_users();
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!("Unregistered SM-owned connection at expiry");

@@ -207,11 +207,12 @@ async fn muc_presence_fanout_delivers_when_channel_has_capacity() {
 
 /// #1263: when the recipient's channel is STILL full after every bounded
 /// retry, the loss is surfaced through the
-/// `waddle_delivery_retry_exhausted_drop_total` counter instead of
+/// `xmpp.delivery.retry_exhausted_drop` counter (alias
+/// `waddle_delivery_retry_exhausted_drop_total`) instead of
 /// being silently reported as delivered.
 #[tokio::test]
 async fn muc_presence_fanout_counts_exhausted_full_channel_drop() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let jid: FullJid = "dave@example.com/web".parse().unwrap();
     let room: BareJid = "room@muc.example.com".parse().unwrap();
@@ -231,7 +232,6 @@ async fn muc_presence_fanout_counts_exhausted_full_channel_drop() {
         .connection_registry
         .try_send_to(&jid, waddle_xmpp::Stanza::Presence(filler));
 
-    let before = waddle_xmpp::prometheus::delivery_retry_exhausted_drop_count();
     let mut presence =
         xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable);
     presence.to = Some(jid::Jid::from(jid.clone()));
@@ -242,10 +242,9 @@ async fn muc_presence_fanout_counts_exhausted_full_channel_drop() {
         waddle_xmpp::Stanza::Presence(presence),
     )
     .await;
-    let after = waddle_xmpp::prometheus::delivery_retry_exhausted_drop_count();
     assert_eq!(
-        after,
-        before + 1,
+        metrics.counter_sum("xmpp.delivery.retry_exhausted_drop", &[]),
+        Some(1),
         "an exhausted DroppedFull fan-out must be surfaced via the drop counter"
     );
     drop(rx);

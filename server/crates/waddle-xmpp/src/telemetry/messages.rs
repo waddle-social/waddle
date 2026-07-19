@@ -57,11 +57,11 @@ pub fn delivered_message_kind(stanza: &Stanza) -> Option<MessageKind> {
     }
 }
 
-/// Count one delivered message: the legacy flagship
-/// `waddle_messages_total` text counter (wired at last — #1320) and
-/// its kind-labeled OTel successor.
+/// Count one delivered message on the kind-labeled flagship counter.
+/// The retired `waddle_messages_total` / `waddle_messages_per_second`
+/// text names keep answering via the Mimir alias recording rules
+/// (#1330 contract phase).
 pub fn record_delivered_message(kind: MessageKind) {
-    crate::prometheus::record_message_processed();
     crate::counter_add!(
         "waddle.messages.delivered",
         "{message}",
@@ -139,9 +139,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_delivered_message_feeds_both_families() {
+    async fn record_delivered_message_counts_by_kind() {
         let guard = crate::telemetry::test_support::acquire().await;
-        crate::prometheus::reset_metrics_for_test();
 
         record_delivered_message(MessageKind::Dm);
         record_delivered_message(MessageKind::Muc);
@@ -155,7 +154,5 @@ mod tests {
             guard.counter_sum("waddle.messages.delivered", &[("kind", "muc")]),
             Some(2)
         );
-        // The legacy flagship counter must advance in lockstep.
-        assert!(crate::prometheus::render_metrics().contains("waddle_messages_total 3"));
     }
 }

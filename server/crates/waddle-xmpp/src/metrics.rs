@@ -96,7 +96,11 @@ fn ensure_pod_gauges() {
             meter()
                 .i64_observable_gauge("xmpp.connections.active")
                 .with_description("Current number of active XMPP connections")
-                .with_unit("connection")
+                // UCUM annotation: dropped by Prometheus name normalization,
+                // so the backend series is exactly `xmpp_connections_active`
+                // — the source the `waddle_connected_users` alias records
+                // from (#1330). A bare unit would suffix the name.
+                .with_unit("{connection}")
                 .with_callback(|observer| {
                     observer.observe(
                         CONNECTIONS_ACTIVE.load(Ordering::Relaxed),
@@ -107,7 +111,9 @@ fn ensure_pod_gauges() {
             meter()
                 .i64_observable_gauge("xmpp.muc.rooms.active")
                 .with_description("Current number of active MUC rooms")
-                .with_unit("room")
+                // UCUM annotation (dropped by name normalization → the
+                // backend series is `xmpp_muc_rooms_active`; #1330/#1424).
+                .with_unit("{room}")
                 .with_callback(|observer| {
                     observer.observe(MUC_ROOMS_ACTIVE.load(Ordering::Relaxed), &[]);
                 })
@@ -230,11 +236,22 @@ pub fn record_auth_attempt(mechanism: &str, success: bool) {
 }
 
 /// Apply a ±1 delta to the per-pod connection count. Call `+1` exactly
-/// where the legacy connected-users counter increments (a genuinely new
-/// registration) and `-1` where it decrements (unregister or
-/// stale-channel eviction), so both stay in lockstep.
+/// where a genuinely new registration lands and `-1` on unregister or
+/// stale-channel eviction.
 pub fn adjust_connections_active(delta: i64) {
     CONNECTIONS_ACTIVE.fetch_add(delta, Ordering::Relaxed);
+    ensure_pod_gauges();
+}
+
+/// Register the pod-wide observable gauges eagerly at startup, after the
+/// global meter provider is installed. Without this, a pod with zero
+/// churn exports no series at all — and with the legacy always-rendered
+/// text families retired (#1330), PromQL cannot tell "0 connections"
+/// from "gauge never registered": the `waddle_connected_users` alias
+/// would read absent instead of 0. The lazy `ensure_pod_gauges()` calls
+/// on the mutation paths stay as the safety net for hosts that never
+/// call this.
+pub fn init_pod_gauges() {
     ensure_pod_gauges();
 }
 
@@ -457,6 +474,26 @@ mod tests {
                 .contains(&"xmpp.connections.active".to_string()),
             "connections gauge must export after an adjustment",
         );
+    }
+
+    #[tokio::test]
+    async fn init_pod_gauges_exports_zero_valued_series_without_churn() {
+        let guard = test_support::acquire().await;
+        init_pod_gauges();
+
+        // A churn-free pod must still export every pod gauge so PromQL
+        // (and the waddle_connected_users alias) reads 0, not absent.
+        let names = guard.metric_names();
+        for gauge in [
+            "xmpp.connections.active",
+            "xmpp.muc.rooms.active",
+            "xmpp.muc.occupants",
+        ] {
+            assert!(
+                names.contains(&gauge.to_string()),
+                "{gauge} must export after eager init, before any churn",
+            );
+        }
     }
 
     #[tokio::test]
