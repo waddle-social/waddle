@@ -10,7 +10,6 @@ use std::sync::OnceLock;
 use crate::telemetry::attributes::PushSuppressReason;
 
 static CONNECTED_USERS: AtomicU64 = AtomicU64::new(0);
-static ROOM_COUNT: AtomicU64 = AtomicU64::new(0);
 static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND: AtomicU64 = AtomicU64::new(0);
 static CURRENT_SECOND_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -353,16 +352,6 @@ pub fn decrement_connected_users() {
     });
 }
 
-pub fn increment_room_count() {
-    ROOM_COUNT.fetch_add(1, Ordering::AcqRel);
-}
-
-pub fn decrement_room_count() {
-    let _ = ROOM_COUNT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        Some(current.saturating_sub(1))
-    });
-}
-
 pub fn record_message_processed() {
     let now = unix_timestamp_secs();
     rotate_second_bucket(now);
@@ -573,7 +562,6 @@ fn render_push_suppressed_lines(out: &mut String) {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_metrics_for_test() {
     CONNECTED_USERS.store(0, Ordering::Release);
-    ROOM_COUNT.store(0, Ordering::Release);
     MESSAGES_TOTAL.store(0, Ordering::Release);
     CURRENT_SECOND.store(0, Ordering::Release);
     CURRENT_SECOND_MESSAGES.store(0, Ordering::Release);
@@ -619,7 +607,6 @@ pub fn render_metrics() -> String {
     rotate_second_bucket(now);
 
     let connected_users = CONNECTED_USERS.load(Ordering::Acquire);
-    let room_count = ROOM_COUNT.load(Ordering::Acquire);
     let messages_total = MESSAGES_TOTAL.load(Ordering::Acquire);
     let messages_per_second = LAST_SECOND_MESSAGES.load(Ordering::Acquire);
     let broadcast_delivered = BROADCAST_DELIVERED.load(Ordering::Relaxed);
@@ -661,9 +648,6 @@ pub fn render_metrics() -> String {
             "# HELP waddle_connected_users Currently connected users.\n",
             "# TYPE waddle_connected_users gauge\n",
             "waddle_connected_users {connected_users}\n",
-            "# HELP waddle_room_count Active MUC room count.\n",
-            "# TYPE waddle_room_count gauge\n",
-            "waddle_room_count {room_count}\n",
             "# HELP waddle_messages_total Total processed message stanzas.\n",
             "# TYPE waddle_messages_total counter\n",
             "waddle_messages_total {messages_total}\n",
@@ -766,7 +750,6 @@ pub fn render_metrics() -> String {
             "{push_suppressed_lines}",
         ),
         connected_users = connected_users,
-        room_count = room_count,
         messages_total = messages_total,
         messages_per_second = messages_per_second,
         broadcast_delivered = broadcast_delivered,
@@ -818,10 +801,8 @@ mod tests {
         reset_metrics_for_test();
 
         decrement_connected_users();
-        decrement_room_count();
 
         assert_eq!(CONNECTED_USERS.load(Ordering::Acquire), 0);
-        assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
@@ -833,11 +814,7 @@ mod tests {
         increment_connected_users();
         decrement_connected_users();
 
-        increment_room_count();
-        decrement_room_count();
-
         assert_eq!(CONNECTED_USERS.load(Ordering::Acquire), 1);
-        assert_eq!(ROOM_COUNT.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
@@ -861,21 +838,21 @@ mod tests {
         reset_metrics_for_test();
 
         increment_connected_users();
-        increment_room_count();
         record_message_processed();
 
         let rendered = render_metrics();
 
         assert!(rendered.contains("# HELP waddle_connected_users"));
         assert!(rendered.contains("# TYPE waddle_connected_users gauge"));
-        assert!(rendered.contains("# HELP waddle_room_count"));
-        assert!(rendered.contains("# TYPE waddle_room_count gauge"));
+        // #1136: the room-count family was only ever driven by the dead
+        // legacy registry; live room occupancy is the `xmpp.muc.rooms.active`
+        // OTel gauge published by `RoomRegistryActor`.
+        assert!(!rendered.contains("waddle_room_count"));
         assert!(rendered.contains("# HELP waddle_messages_total"));
         assert!(rendered.contains("# TYPE waddle_messages_total counter"));
         assert!(rendered.contains("# HELP waddle_messages_per_second"));
         assert!(rendered.contains("# TYPE waddle_messages_per_second gauge"));
         assert!(rendered.contains("waddle_connected_users 1"));
-        assert!(rendered.contains("waddle_room_count 1"));
         assert!(rendered.contains("waddle_messages_total 1"));
     }
 

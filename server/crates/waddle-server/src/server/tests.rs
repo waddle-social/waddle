@@ -823,7 +823,9 @@ async fn test_metrics_endpoint() {
     let metrics = String::from_utf8(body.to_vec()).unwrap();
     assert!(metrics.contains("waddle_connected_users"));
     assert!(metrics.contains("waddle_messages_per_second"));
-    assert!(metrics.contains("waddle_room_count"));
+    // #1136: room count moved to the `xmpp.muc.rooms.active` OTel gauge;
+    // the dead text family must stay gone.
+    assert!(!metrics.contains("waddle_room_count"));
 }
 
 #[tokio::test]

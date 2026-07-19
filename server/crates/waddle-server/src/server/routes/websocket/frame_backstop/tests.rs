@@ -61,6 +61,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
 
 #[tokio::test(flavor = "current_thread")]
 async fn groupchat_dispatch_span_carries_correlation_and_bound_identity_without_body() {
+    // Every test in this module drives dispatch, which emits OTel metrics;
+    // hold the metric-reader guard so runs under plain `cargo test` (shared
+    // process, parallel threads) serialize against the global provider
+    // instead of racing the export assertions. No-op under nextest.
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let room: xmpp_parsers::jid::Jid = "team@muc.example.com".parse().expect("room jid");
     let mut message = Message::new(Some(room));
     message.type_ = xmpp_parsers::message::MessageType::Groupchat;
@@ -122,6 +127,7 @@ fn responses_and_disposition(
 
 #[tokio::test(start_paused = true)]
 async fn iq_get_timeout_yields_conformant_resource_constraint() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let stanza = iq_get_stanza("disco-1", "alice@example.com/web", "upload.example.com");
     let backstop = StanzaBackstop::capture(&stanza, None);
 
@@ -187,6 +193,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
 
 #[tokio::test(start_paused = true)]
 async fn message_timeout_yields_no_response() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let stanza = message_stanza();
     let backstop = StanzaBackstop::capture(&stanza, None);
 
@@ -204,6 +211,7 @@ async fn message_timeout_yields_no_response() {
 
 #[tokio::test(start_paused = true)]
 async fn presence_timeout_yields_no_response() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let stanza = presence_stanza();
     let backstop = StanzaBackstop::capture(&stanza, None);
 
@@ -220,6 +228,7 @@ async fn iq_result_timeout_yields_no_response() {
     // RFC 6120 §8.2.3: only `get`/`set` owe a response. A timed-out `result`
     // IQ must NOT synthesize an error reply (locks the `_ => None` arm in
     // `capture`).
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let stanza = iq_result_stanza("ack-1");
     let backstop = StanzaBackstop::capture(&stanza, None);
 
@@ -236,7 +245,40 @@ async fn iq_result_timeout_yields_no_response() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stanza_timeout_exports_the_canonical_counter_end_to_end() {
+    // #1136: a synthetic wedge timeout driven through the production
+    // backstop must land on the canonical exported series, proving the
+    // increment site → OTel export chain (the reader seam stands in for
+    // the OTLP exporter; both read the same meter provider).
+    let guard = waddle_xmpp::telemetry::test_support::acquire().await;
+    let stanza = iq_get_stanza(
+        "disco-timeout-metric",
+        "alice@example.com/web",
+        "upload.example.com",
+    );
+    let backstop = StanzaBackstop::capture(&stanza, None);
+
+    let fut = run_with_backstop(backstop, pending::<Vec<String>>());
+    tokio::time::advance(STANZA_HANDLER_WEDGE_TIMEOUT + Duration::from_millis(1)).await;
+    let (_, disposition) = responses_and_disposition(fut.await);
+    assert_eq!(disposition, InboundDisposition::Handled);
+
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.stanza.handler.timeout",
+            &[
+                ("kind", "iq"),
+                ("payload_ns", "http://jabber.org/protocol/disco#info"),
+            ],
+        ),
+        Some(1),
+        "a synthetic wedge timeout must export exactly one canonical sample",
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn fast_dispatch_passes_through_untouched() {
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let stanza = iq_get_stanza("disco-2", "alice@example.com/web", "example.com");
     let backstop = StanzaBackstop::capture(&stanza, None);
 

@@ -1,8 +1,8 @@
 //! MUC Room Registry Actor
 //!
-//! Kameo actor that manages all MUC room actors. Replaces the DashMap-based
-//! `MucRoomRegistry` with a single-writer actor that owns the room map and
-//! spawns per-room `RoomActor` instances on demand.
+//! Kameo actor that manages all MUC room actors. Replaced the DashMap-based
+//! legacy registry (deleted in #1136) with a single-writer actor that owns
+//! the room map and spawns per-room `RoomActor` instances on demand.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
