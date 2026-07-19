@@ -311,6 +311,10 @@ async fn send_blocking_presence_side_effects(
     }
 }
 
+// Fanout here is best-effort: per-resource failures degrade delivery but the
+// IQ operation already succeeded, so they log at warn without marking the
+// dispatch span as failed — `status=error` stays reserved for operations
+// whose outcome actually failed (#1428).
 pub(crate) async fn send_blocking_pushes(
     state: &WebSocketState,
     user_bare: &BareJid,
@@ -326,7 +330,6 @@ pub(crate) async fn send_blocking_pushes(
     {
         Ok(resources) => resources,
         Err(error) => {
-            mark_span_error(&error);
             warn!(jid = %user_bare, error = %error, "Failed to load detached XEP-0191 blocklist-interested resources; continuing with live fanout");
             Vec::new()
         }
@@ -337,7 +340,6 @@ pub(crate) async fn send_blocking_pushes(
             match waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids) {
                 Ok(push) => push,
                 Err(error) => {
-                    mark_span_error(&error);
                     warn!(jid = %user_bare, error = %error, "Skipping invalid detached XEP-0191 block push");
                     continue;
                 }
@@ -361,7 +363,6 @@ pub(crate) async fn send_blocking_pushes(
             }
             Ok(false) => {}
             Err(error) => {
-                mark_span_error(&error);
                 warn!(jid = %resource_jid, error = %error, "Failed to record XEP-0191 blocklist push for detached resource");
             }
         }
@@ -380,7 +381,6 @@ pub(crate) async fn send_blocking_pushes(
             match waddle_xmpp::xep::xep0191::build_block_push(&resource_jid.clone().into(), jids) {
                 Ok(push) => push,
                 Err(error) => {
-                    mark_span_error(&error);
                     warn!(jid = %user_bare, error = %error, "Skipping invalid XEP-0191 block push");
                     continue;
                 }

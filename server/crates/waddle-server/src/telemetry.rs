@@ -438,6 +438,13 @@ pub(crate) fn mark_span_error(description: impl std::fmt::Display) {
         .set_status(opentelemetry::trace::Status::error(description.to_string()));
 }
 
+/// Set when the pre-exit metrics flush failed or timed out, so
+/// [`shutdown`] skips the meter provider instead of burning another
+/// bounded wait on the same stalled exporter (the abandoned
+/// `spawn_blocking` flush may also still hold the reader's worker).
+static METRICS_FLUSH_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Flush metrics recorded during graceful drain before control returns to `main`.
 ///
 /// Local telemetry has no meter provider, so this is a no-op when [`init_local`]
@@ -447,7 +454,11 @@ pub async fn flush_metrics_before_exit() {
         return;
     };
 
-    let _ = waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await;
+    let flushed =
+        waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await;
+    if !flushed {
+        METRICS_FLUSH_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Shutdown telemetry, flushing any pending spans and metrics.
@@ -463,8 +474,13 @@ pub fn shutdown() {
         }
     }
 
-    // Shutdown meter provider
-    if let Some(provider) = METER_PROVIDER.get() {
+    // Shutdown meter provider — unless the pre-exit flush already
+    // failed against a stalled exporter, in which case another export
+    // attempt can only delay exit (the SDK bounds it at ~5s) without
+    // ever succeeding.
+    if METRICS_FLUSH_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!("Skipping meter provider shutdown: pre-exit flush already failed");
+    } else if let Some(provider) = METER_PROVIDER.get() {
         if let Err(e) = provider.shutdown() {
             tracing::error!(error = %e, "Error shutting down meter provider");
         }
