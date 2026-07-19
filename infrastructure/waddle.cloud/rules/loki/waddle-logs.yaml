@@ -1,0 +1,44 @@
+namespace: waddle
+groups:
+    - name: waddle-claims
+      rules:
+        - alert: ClaimStorm
+          expr: (sum(count_over_time({service_name="waddle-server"} |= "ClaimHeldByAnotherNode"[30m])) > 30)
+          for: 1h
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: 'Healthy = 0; storm plateau measured 120-150/30m. KNOWN-FIRING until issues #1294/#1295 land. https://github.com/waddle-social/waddle/issues/1294 https://github.com/waddle-social/waddle/issues/1295'
+            summary: Cross-node claim contention storm — nodes are fighting over entity ownership.
+    - name: waddle-server-errors
+      rules:
+        - alert: ServerErrorLogRate
+          expr: (sum(count_over_time({service_name="waddle-server"} | detected_level="error"[15m])) > 25)
+          for: 15m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Baseline is 2-3 errors/15m (WebSocket resets). Break the spike down by top error messages in Loki before chasing individual lines.
+            summary: Server error-log rate is ~10x the healthy baseline.
+    - name: waddle-client-experience
+      rules:
+        - alert: ClientJoinFailures
+          expr: (sum(count_over_time({service_name="waddle-chat", kind="exception"} |= "room-join-"[30m])) > 10)
+          for: 30m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Measured background is ~1/30m. Break down by room-join-<condition> in the Faro exceptions; correlate with waddle.muc.admission.denied on the server side.
+            summary: Browser clients are failing to join rooms well above background rate.
+        - alert: ClientStreamConflictSpike
+          expr: (sum(count_over_time({service_name="waddle-chat", kind="exception"} |= "stream-conflict"[1h])) > 10)
+          for: 1h
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            runbook: Background is ~0.5/h. Historically meant session fights (same account, multiple tabs/devices with one resource).
+            summary: Spike in client stream-conflict exceptions — sessions are fighting over the same resource.
