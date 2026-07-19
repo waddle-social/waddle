@@ -463,7 +463,10 @@ pub async fn device_verify_submit_handler(
         Ok(url) => {
             record_auth_success(AuthStage::OidcAuthorization);
             info!(provider = %provider.id, "Device flow continuing via provider authorization");
-            axum::response::Redirect::temporary(&url).into_response()
+            // 303 See Other: this handler answers a POSTed form, so the
+            // redirect must switch the browser to GET — a 307 would replay
+            // the POST against the IdP's GET-only authorize endpoint.
+            axum::response::Redirect::to(&url).into_response()
         }
         Err(err) => {
             record_auth_failure(
@@ -483,6 +486,94 @@ pub async fn device_verify_submit_handler(
 #[cfg(test)]
 mod tests {
     use super::render_device_verify_html;
+    use super::router;
+    use crate::auth::{AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
+    use crate::config::ServerConfig;
+    use crate::server::routes::auth::tests::create_test_auth_state;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_oauth2_provider() -> AuthProviderConfig {
+        AuthProviderConfig {
+            id: "test-idp".to_string(),
+            display_name: "Test IdP".to_string(),
+            kind: AuthProviderKind::OAuth2,
+            dynamic_client_registration: false,
+            client_id: "test-client".to_string(),
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: false,
+            scopes: vec!["profile".to_string()],
+            issuer: Some("https://idp.example.com".to_string()),
+            authorization_endpoint: Some("https://idp.example.com/authorize".to_string()),
+            token_endpoint: Some("https://idp.example.com/token".to_string()),
+            userinfo_endpoint: Some("https://idp.example.com/userinfo".to_string()),
+            jwks_uri: None,
+            subject_claim: "sub".to_string(),
+            username_claim: None,
+            email_claim: None,
+        }
+    }
+
+    /// The verify form is a POST; the redirect to the IdP's GET-only
+    /// authorize endpoint must be 303 See Other so the browser switches
+    /// to GET instead of replaying the POST (which 307 would).
+    #[tokio::test]
+    async fn verify_submit_redirects_to_idp_with_303_see_other() {
+        let mut server_config = ServerConfig::test_homeserver();
+        server_config.auth.providers = vec![test_oauth2_provider()];
+        let (auth_state, _actor) = create_test_auth_state(&server_config).await;
+        let app = router(auth_state);
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/device/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"provider":"test-idp"}"#))
+                    .expect("start request"),
+            )
+            .await
+            .expect("start response");
+        assert_eq!(start_response.status(), StatusCode::OK);
+        let start_body = start_response
+            .into_body()
+            .collect()
+            .await
+            .expect("start body")
+            .to_bytes();
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("start json");
+        let user_code = start_json["user_code"].as_str().expect("user_code");
+
+        let verify_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/device/verify")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("user_code={user_code}")))
+                    .expect("verify request"),
+            )
+            .await
+            .expect("verify response");
+
+        assert_eq!(verify_response.status(), StatusCode::SEE_OTHER);
+        let location = verify_response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header")
+            .to_str()
+            .expect("location utf-8");
+        assert!(
+            location.starts_with("https://idp.example.com/authorize?"),
+            "redirect must target the IdP authorize endpoint, got {location}"
+        );
+    }
 
     #[test]
     fn device_verify_html_uses_valid_unescaped_attributes() {
