@@ -821,10 +821,11 @@ async fn test_metrics_endpoint() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let metrics = String::from_utf8(body.to_vec()).unwrap();
-    assert!(metrics.contains("waddle_connected_users"));
-    assert!(metrics.contains("waddle_messages_per_second"));
-    // #1136: room count moved to the `xmpp.muc.rooms.active` OTel gauge;
-    // the dead text family must stay gone.
+    // #1330 contract phase: /metrics is the scrape-liveness stub; every
+    // family lives on the OTel meters and answers via the Mimir aliases.
+    assert!(metrics.contains("waddle_scrape_ok 1"));
+    assert!(!metrics.contains("waddle_connected_users"));
+    assert!(!metrics.contains("waddle_messages_per_second"));
     assert!(!metrics.contains("waddle_room_count"));
 }
 

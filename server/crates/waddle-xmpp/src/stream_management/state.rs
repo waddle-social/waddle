@@ -590,24 +590,14 @@ mod tests {
         assert_eq!(resend.len(), 1); // Only 3 is left in queue after ack(2)
     }
 
-    #[test]
-    fn test_record_outbound_surfaces_eviction_to_metric() {
+    #[tokio::test]
+    async fn test_record_outbound_surfaces_eviction_to_metric() {
         // With a tiny queue cap, the 4th push must evict the 1st — and
-        // that eviction must bump `waddle_sm_unacked_evicted_total` so
+        // that eviction must bump `xmpp.sm.unacked_evicted` (answering
+        // as `waddle_sm_unacked_evicted_total` via the Mimir alias) so
         // operators can distinguish "everything's fine" from "your
         // <resumed/> replays have holes".
-        use crate::prometheus;
-
-        let _metrics_guard = prometheus::metrics_test_lock().blocking_lock();
-
-        // Baseline the counter since other tests run in the same process.
-        let before_render = prometheus::render_metrics();
-        let baseline = before_render
-            .lines()
-            .find(|line| line.starts_with("waddle_sm_unacked_evicted_total "))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let metrics = crate::telemetry::test_support::acquire().await;
 
         let mut state = StreamManagementState::with_config(3, 5);
         state.enable("tiny-cap".to_string(), true, Some(300));
@@ -621,16 +611,9 @@ mod tests {
         let _ = state.record_outbound("<message id='4'/>".to_string());
         assert_eq!(state.queue_len(), 3);
 
-        let after_render = prometheus::render_metrics();
-        let after = after_render
-            .lines()
-            .find(|line| line.starts_with("waddle_sm_unacked_evicted_total "))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|v| v.parse::<u64>().ok())
-            .expect("metric line must render");
         assert_eq!(
-            after - baseline,
-            1,
+            metrics.counter_sum("xmpp.sm.unacked_evicted", &[]),
+            Some(1),
             "one eviction must have bumped the counter by one"
         );
 

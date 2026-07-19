@@ -137,7 +137,8 @@ impl NotificationReason {
 /// push notification. Persisted into `notification_candidates.suppressed_reason`
 /// alongside the existing `class`/`reason` columns whenever the T1
 /// drain decides to mark a candidate outboxed *without* enqueueing a
-/// job. Also labels the `waddle_push_suppressed_total` metric so
+/// job. Also labels the `xmpp.push.suppressed` OTel counter (exported
+/// to Mimir under the `waddle_push_suppressed_total` alias) so
 /// deployments can observe per-rule suppression rates.
 ///
 /// `SuppressedReason` is the **audit shape**, distinct from the
@@ -285,7 +286,7 @@ impl SuppressedReason {
     pub(crate) fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         // Iterate the closed `ALL` set rather than re-listing the
         // variants in a `match` arm — keeps the audit shape, the
-        // schema CHECK list, and the prometheus label set in
+        // schema CHECK list, and the metric `reason` label set in
         // lockstep without three independently-edited match arms.
         Self::ALL
             .iter()
@@ -561,7 +562,7 @@ mod tests {
     /// MUST round-trip through `as_db_value` / `from_db_value` so a
     /// row written today can be decoded tomorrow without ambiguity.
     /// The closed-set discipline is what keeps the CHECK constraint
-    /// + the labeled prometheus counter in lockstep.
+    /// + the `reason`-labeled suppression counter in lockstep.
     #[test]
     fn suppressed_reason_round_trip_covers_every_variant() {
         // Iterate `SuppressedReason::ALL` (the same closed-set array the
@@ -589,40 +590,5 @@ mod tests {
             SuppressedReason::from_db_value("nonsense"),
             Err(NotificationOutboxError::InvalidSuppressedReason(_))
         ));
-    }
-
-    /// Cross-crate lockstep guard: every persisted `SuppressedReason` maps
-    /// exhaustively to a metric `PushSuppressReason`, and both typed enums
-    /// retain byte-identical values. The Prometheus view is derived from the
-    /// metric enum, so the reverse check also prevents metric-only labels.
-    #[test]
-    fn suppressed_reason_values_match_the_typed_metric_enum() {
-        let wire = waddle_xmpp::prometheus::push_suppressed_reasons();
-        for reason in SuppressedReason::ALL.iter().copied() {
-            let db = reason.as_db_value();
-            assert_eq!(
-                reason.telemetry_reason().as_str(),
-                db,
-                "typed telemetry mapping drifted for {reason:?}"
-            );
-            assert!(
-                wire.contains(&db),
-                "`SuppressedReason::{reason:?}` (db value `{db}`) is missing from \
-                 the metric-facing `PushSuppressReason` values"
-            );
-        }
-        // Reverse direction: any metric label that does not round-trip through
-        // the persisted enum is dead weight in the metrics surface.
-        for label in wire.iter().copied() {
-            assert!(
-                SuppressedReason::from_db_value(label).is_ok(),
-                "metric reason `{label}` is not a known persisted `SuppressedReason` value"
-            );
-        }
-        assert_eq!(
-            wire.len(),
-            SuppressedReason::ALL.len(),
-            "wire-contract length must match the typed enum cardinality"
-        );
     }
 }

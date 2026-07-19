@@ -66,7 +66,7 @@ impl DndReader for PepDndReader {
                 // A projection read failure MUST NOT cause a push
                 // dispatch failure — the gate consults DND as one of
                 // many parallel suppression checks. Log AND bump the
-                // alert-worthy `waddle_dnd_projection_read_errored_total`
+                // alert-worthy `xmpp.dnd.projection_read_errored (alias waddle_dnd_projection_read_errored_total)`
                 // counter so SREs can detect the silent-fail-open
                 // pattern (a DND-active user receiving push because
                 // we couldn't read their projection), then default

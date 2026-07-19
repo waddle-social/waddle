@@ -127,8 +127,7 @@ async fn candidate_insert_is_idempotent_and_worker_coalesces_distinct_messages()
 
 #[tokio::test]
 async fn candidate_without_first_party_registration_is_suppressed_and_observable() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -179,8 +178,13 @@ async fn candidate_without_first_party_registration_is_suppressed_and_observable
             .as_deref(),
         Some("xep0357_no_registration"),
     );
-    assert!(waddle_xmpp::prometheus::render_metrics()
-        .contains("waddle_push_suppressed_total{reason=\"xep0357_no_registration\"} 1"));
+    assert_eq!(
+        metrics.counter_sum(
+            "xmpp.push.suppressed",
+            &[("reason", "xep0357_no_registration")]
+        ),
+        Some(1),
+    );
 }
 
 /// T1 race-window regression: a candidate inserted while the
@@ -1247,8 +1251,7 @@ async fn unknown_room_policy_defers_groupchat_candidate_at_t1() {
 
 #[tokio::test]
 async fn policy_deferral_cap_dead_letters_candidate_and_unblocks_fresh_work() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let target = target();
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
@@ -1317,10 +1320,13 @@ async fn policy_deferral_cap_dead_letters_candidate_and_unblocks_fresh_work() {
             .as_deref(),
         Some("policy_retries_exhausted"),
     );
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"policy_retries_exhausted\"} 1"),
-        "metrics render missing policy retry exhaustion counter: {rendered}",
+    assert_eq!(
+        metrics.counter_sum(
+            "xmpp.push.suppressed",
+            &[("reason", "policy_retries_exhausted")]
+        ),
+        Some(1),
+        "policy retry exhaustion counter must increment",
     );
     assert!(
         store.pending_outbox_jobs().await.expect("jobs").is_empty(),

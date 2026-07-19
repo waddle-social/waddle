@@ -216,7 +216,7 @@ impl ConnectionRegistry {
                 // Keep per-recipient detail at debug only — the
                 // aggregated broadcast log at the call site already
                 // reports a per-send `dropped_full` total, and
-                // `waddle_broadcast_dropped_full_total` is always on.
+                // `xmpp.broadcast.dropped_full (alias waddle_broadcast_dropped_full_total)` is always on.
                 // A `warn!` here would turn into a log storm under
                 // sustained fan-out backpressure (125+/s) and drown
                 // out every other signal on the pod.
@@ -296,7 +296,6 @@ impl ConnectionRegistry {
             .connections
             .remove_if(jid, |_, entry| entry.sender.is_closed());
         if removed.is_some() {
-            prometheus::decrement_connected_users();
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
@@ -318,7 +317,6 @@ impl ConnectionRegistry {
             entry.sender.is_closed() && entry.sender.same_channel(sender)
         });
         if removed.is_some() {
-            prometheus::decrement_connected_users();
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");

@@ -6159,11 +6159,9 @@ mod user_reaper_tests {
     /// `waddle_user_actor_reaped_total` metric fires.
     #[tokio::test]
     async fn sweep_reaps_orphaned_empty_user_actor() {
-        // Hold the metrics lock for the whole check: the reaped counter is a
-        // process-wide global, so serialise against other metric-asserting
-        // tests and reset first for a clean baseline.
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+        // Hold the metric-reader guard for the whole check: it serialises
+        // against other metric-asserting tests and drains prior samples.
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
 
         let state = create_test_websocket_state().await;
         let jid = full_jid("alice@example.com/web");
@@ -6202,9 +6200,10 @@ mod user_reaper_tests {
         assert_eq!(counts.reaped, 1);
         assert_eq!(counts.remaining, 0);
 
-        assert!(
-            waddle_xmpp::prometheus::render_metrics().contains("waddle_user_actor_reaped_total 1"),
-            "the reaper must increment waddle_user_actor_reaped_total"
+        assert_eq!(
+            metrics.counter_sum("xmpp.user_actor.reaped", &[]),
+            Some(1),
+            "the reaper must increment the reaped counter"
         );
     }
 

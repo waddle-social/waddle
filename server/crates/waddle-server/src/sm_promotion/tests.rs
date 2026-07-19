@@ -308,19 +308,9 @@ fn sm_promotion_metric_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn prometheus_counter_value(rendered: &str, name: &str) -> u64 {
-    rendered
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix(name)
-                .and_then(|rest| rest.trim().parse::<u64>().ok())
-        })
-        .unwrap_or_else(|| panic!("missing prometheus counter {name}"))
-}
-
 async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     let _guard = sm_promotion_metric_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
 
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -348,13 +338,10 @@ async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     assert_eq!(summary.bounced, 0);
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
     assert_eq!(
-        prometheus_counter_value(&rendered, "waddle_sm_promotion_not_promotable_total"),
-        1
+        metrics.counter_sum("xmpp.sm.promotion_not_promotable", &[]),
+        Some(1)
     );
-
-    waddle_xmpp::prometheus::reset_metrics_for_test();
 }
 
 #[tokio::test]
