@@ -44,8 +44,76 @@ internal class AttemptRecord(
     @Volatile
     var disconnectStarted: Boolean = false
 
+    /**
+     * Production construction records a close proof before its attempt can be
+     * finalized. The legacy attach helper is retained for narrowly-scoped
+     * tests that do not own a closeable transport.
+     */
+    @Volatile
+    var requiresClientCloseProof: Boolean = false
+
     val disconnectResult = CompletableDeferred<Boolean>()
     val producerStopped = CompletableDeferred<Unit>()
+    val clientClosed = CompletableDeferred<Boolean>()
+}
+
+internal data class OperationCapability(
+    val lifecycle: SessionLifecycleRef,
+    val attempt: DeliveryAttemptRef?,
+    val operationId: UUID,
+)
+
+/**
+ * A coordinator creates one registry for one lifecycle only. Consequently a
+ * late completion from a retired lifecycle cannot remove work retained by a
+ * replacement owner, even when both owners have the same bare JID.
+ *
+ * All methods are called under OutboundLifecycleCoordinator's short gate.
+ */
+internal class LifecycleOperationRegistry(
+    private val lifecycle: SessionLifecycleRef,
+) {
+    private val retained = mutableMapOf<UUID, OperationCapability>()
+    private var emptyWaiter: CompletableDeferred<Unit>? = null
+
+    fun retain(capability: OperationCapability): Boolean {
+        if (capability.lifecycle != lifecycle) return false
+        retained[capability.operationId] = capability
+        return true
+    }
+
+    fun release(capability: OperationCapability) {
+        if (retained[capability.operationId] != capability) return
+        retained.remove(capability.operationId)
+        if (retained.isEmpty()) {
+            emptyWaiter?.complete(Unit)
+            emptyWaiter = null
+        }
+    }
+
+    fun owns(capability: OperationCapability): Boolean =
+        retained[capability.operationId] == capability
+
+    fun waiterIfRetained(): CompletableDeferred<Unit>? =
+        if (retained.isEmpty()) null else emptyWaiter ?: CompletableDeferred<Unit>().also {
+            emptyWaiter = it
+        }
+
+    fun retainedCount(): Int = retained.size
+}
+
+internal data class TransportConstructionClaim(
+    val lifecycle: SessionLifecycleRef,
+    val handle: ConnectionAttemptHandle,
+    val attempt: DeliveryAttemptRef,
+    val capability: OperationCapability,
+)
+
+internal sealed interface TransportAttachOutcome {
+    data object Attached : TransportAttachOutcome
+
+    /** The caller still owns and must close the just-constructed client. */
+    data object SupersededAndClose : TransportAttachOutcome
 }
 
 internal data class AdmissionReservation(

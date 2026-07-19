@@ -280,6 +280,71 @@ class OutboundLifecycleCoordinatorTest {
         fixture.retryShutdownAndStartReplacement(lifecycle)
     }
 
+    @Test
+    fun `shutdown retains construction until the superseded client is closed`() = runTest {
+        val fixture = fixture(transitionTimeoutMillis = TEST_TIMEOUT_MILLIS)
+        val lifecycle = fixture.start()
+        val activation = fixture.messenger.activateAttempt(lifecycle)
+        val construction = fixture.messenger.beginTransportConstruction(activation.handle)
+        assertNotNull(construction)
+
+        assertTrue(fixture.messenger.beginShutdown(lifecycle))
+        assertEquals(
+            AttemptCloseOutcome.OwnedBySessionShutdown,
+            fixture.messenger.closeAttempt(activation.handle, producerQuiesced = true),
+        )
+        val fenced = fixture.messenger.shutdown(
+            LifecycleShutdownTarget.CurrentOwner(lifecycle),
+        )
+        assertTrue(fenced is LifecycleShutdownOutcome.FencedWithPending)
+        fenced as LifecycleShutdownOutcome.FencedWithPending
+        assertEquals(LifecyclePendingComponent.ATTEMPT_LEASES, fenced.component)
+
+        fixture.messenger.finishSupersededConstruction(construction!!)
+        assertEquals(
+            LifecycleShutdownOutcome.Stopped,
+            fixture.messenger.shutdown(
+                LifecycleShutdownTarget.CurrentOwner(lifecycle),
+            ),
+        )
+    }
+
+    @Test
+    fun `shutdown requires the attached transport close proof`() = runTest {
+        val fixture = fixture(transitionTimeoutMillis = TEST_TIMEOUT_MILLIS)
+        val lifecycle = fixture.start()
+        val activation = fixture.messenger.activateAttempt(lifecycle)
+        val construction = fixture.messenger.beginTransportConstruction(activation.handle)
+        assertNotNull(construction)
+        assertEquals(
+            TransportAttachOutcome.Attached,
+            fixture.messenger.attachConstructedTransport(
+                construction!!,
+                FakeWaddleClient(),
+            ),
+        )
+
+        assertTrue(fixture.messenger.beginShutdown(lifecycle))
+        assertEquals(
+            AttemptCloseOutcome.OwnedBySessionShutdown,
+            fixture.messenger.closeAttempt(activation.handle, producerQuiesced = true),
+        )
+        val fenced = fixture.messenger.shutdown(
+            LifecycleShutdownTarget.CurrentOwner(lifecycle),
+        )
+        assertTrue(fenced is LifecycleShutdownOutcome.FencedWithPending)
+        fenced as LifecycleShutdownOutcome.FencedWithPending
+        assertEquals(LifecyclePendingComponent.NATIVE_CLIENT_CLOSE, fenced.component)
+
+        fixture.messenger.markTransportClosed(activation.handle, closed = true)
+        assertEquals(
+            LifecycleShutdownOutcome.Stopped,
+            fixture.messenger.shutdown(
+                LifecycleShutdownTarget.CurrentOwner(lifecycle),
+            ),
+        )
+    }
+
     private suspend fun TestScope.fixture(
         dataStore: FailingPreferencesDataStore = FailingPreferencesDataStore(),
         transitionTimeoutMillis: Long = 5_000L,

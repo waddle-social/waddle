@@ -56,8 +56,8 @@ internal class OutboundLifecycleCoordinator(
         terminalWorker,
         transitionTimeoutMillis,
     )
-    private val leases = mutableMapOf<UUID, SessionLifecycleRef>()
-    private var leaseWaiter: CompletableDeferred<Unit>? = null
+    /** Replaced on every start; old completions cannot affect a new owner. */
+    private var retainedOperations: LifecycleOperationRegistry? = null
     private var currentAttempt: AttemptRecord? = null
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
@@ -77,6 +77,7 @@ internal class OutboundLifecycleCoordinator(
                 "outbound lifecycle is not restartable from $state"
             }
             finalizationOperations.startWorkers(scope, lifecycle)
+            retainedOperations = LifecycleOperationRegistry(lifecycle)
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
@@ -172,6 +173,69 @@ internal class OutboundLifecycleCoordinator(
         true
     }
 
+    /**
+     * Retain the exact active attempt before invoking ClientFactory.create.
+     * Shutdown therefore fences and reports the in-flight construction rather
+     * than claiming the owner is stopped while a native client is materialized.
+     */
+    suspend fun beginTransportConstruction(
+        handle: ConnectionAttemptHandle,
+    ): TransportConstructionClaim? = gate.withLock {
+        val active = state as? OutboundLifecycleState.Active ?: return@withLock null
+        val record = currentAttempt
+        if (record?.handle != handle || record.attempt != active.attempt) {
+            return@withLock null
+        }
+        val capability = OperationCapability(
+            lifecycle = active.lifecycle,
+            attempt = active.attempt,
+            operationId = UUID.randomUUID(),
+        )
+        if (retainedOperations?.retain(capability) != true) return@withLock null
+        TransportConstructionClaim(active.lifecycle, handle, active.attempt, capability)
+    }
+
+    /**
+     * Attach transfers ownership to the exact attempt. A fenced construction
+     * remains retained until the caller has closed its unowned client.
+     */
+    suspend fun attachConstructedTransport(
+        claim: TransportConstructionClaim,
+        client: WaddleClientInterface,
+    ): TransportAttachOutcome = gate.withLock {
+        val active = state as? OutboundLifecycleState.Active
+        val record = currentAttempt
+        val attached =
+            active?.lifecycle == claim.lifecycle &&
+                active.handle == claim.handle &&
+                active.attempt == claim.attempt &&
+                record?.handle == claim.handle &&
+                retainedOperations?.owns(claim.capability) == true
+        if (!attached) return@withLock TransportAttachOutcome.SupersededAndClose
+        record.client = client
+        record.requiresClientCloseProof = true
+        retainedOperations?.release(claim.capability)
+        TransportAttachOutcome.Attached
+    }
+
+    /** Complete the retained construction only after its unowned client closes. */
+    suspend fun finishSupersededConstruction(claim: TransportConstructionClaim) {
+        gate.withLock { retainedOperations?.release(claim.capability) }
+    }
+
+    /** Production close proof; completion is idempotent for one exact handle. */
+    suspend fun markTransportClosed(
+        handle: ConnectionAttemptHandle,
+        closed: Boolean,
+    ) {
+        gate.withLock {
+            currentAttempt
+                ?.takeIf { it.handle == handle }
+                ?.clientClosed
+                ?.complete(closed)
+        }
+    }
+
     suspend fun disconnectTransport(
         handle: ConnectionAttemptHandle,
     ): Boolean =
@@ -251,7 +315,7 @@ internal class OutboundLifecycleCoordinator(
         val claim = classifyOutboundReservation(state, expectedOwnerBareJid)
         if (claim is OutboundReservationClaim.Granted) {
             val reservation = claim.reservation
-            leases[reservation.token] = reservation.lifecycle
+            retainReservation(reservation)
         }
         claim
     }
@@ -269,7 +333,11 @@ internal class OutboundLifecycleCoordinator(
         ) ?: return null
         val client = activeSession.clientAtAttempt(expectedAttempt)
         if (client == null) {
-            releaseReservation(reservation.token, reservation.lifecycle)
+            releaseReservation(
+                reservation.token,
+                reservation.lifecycle,
+                reservation.attempt,
+            )
             return null
         }
         return OutboundAdmissionLease.LiveOutbound(
@@ -307,23 +375,30 @@ internal class OutboundLifecycleCoordinator(
             expectedAttempt,
             requireActive,
         ) ?: return@withLock null
-        leases[reservation.token] = reservation.lifecycle
+        retainReservation(reservation)
         reservation
     }
 
     suspend fun releaseAdmission(lease: OutboundAdmissionLease) =
-        releaseReservation(lease.token, lease.lifecycle)
+        releaseReservation(
+            token = lease.token,
+            lifecycle = lease.lifecycle,
+            attempt = when (lease) {
+                is OutboundAdmissionLease.OfflineOutbound -> null
+                is OutboundAdmissionLease.LiveOutbound -> lease.attempt
+                is OutboundAdmissionLease.Terminal -> lease.attempt
+            },
+        )
 
     private suspend fun releaseReservation(
         token: UUID,
         lifecycle: SessionLifecycleRef,
+        attempt: DeliveryAttemptRef?,
     ) {
         gate.withLock {
-            if (leases.remove(token) != lifecycle) return@withLock
-            if (leases.isEmpty()) {
-                leaseWaiter?.complete(Unit)
-                leaseWaiter = null
-            }
+            retainedOperations?.release(
+                OperationCapability(lifecycle, attempt, token),
+            )
         }
     }
 
@@ -444,6 +519,12 @@ internal class OutboundLifecycleCoordinator(
         val preparation =
             finalizationOperations.prepareAttemptClose(record, producerQuiesced)
         if (preparation != null) return preparation
+        if (!finalizationOperations.transportClosed(record)) {
+            return AttemptCloseOutcome.FencedWithPending(
+                LifecyclePendingComponent.NATIVE_CLIENT_CLOSE,
+                1,
+            )
+        }
         if (!awaitLeaseDrain()) {
             return AttemptCloseOutcome.FencedWithPending(
                 LifecyclePendingComponent.ATTEMPT_LEASES,
@@ -528,7 +609,7 @@ internal class OutboundLifecycleCoordinator(
                 state,
                 pendingShutdown,
                 lifecycle,
-                leases.isEmpty(),
+                retainedOperations?.retainedCount() == 0,
             )
         }
         if (!eligible) return false
@@ -540,7 +621,7 @@ internal class OutboundLifecycleCoordinator(
                 state,
                 pendingShutdown,
                 lifecycle,
-                leases.isEmpty(),
+                retainedOperations?.retainedCount() == 0,
             )
             if (!stillEligible) {
                 return@withLock false
@@ -660,8 +741,7 @@ internal class OutboundLifecycleCoordinator(
 
     private suspend fun awaitLeaseDrain(): Boolean {
         val waiter = gate.withLock {
-            if (leases.isEmpty()) return true
-            leaseWaiter ?: CompletableDeferred<Unit>().also { leaseWaiter = it }
+            retainedOperations?.waiterIfRetained() ?: return true
         }
         return withTimeoutOrNull(transitionTimeoutMillis) {
             waiter.await()
@@ -670,7 +750,19 @@ internal class OutboundLifecycleCoordinator(
     }
 
     private suspend fun pendingLeaseCount(): Int =
-        gate.withLock { leases.size.coerceAtLeast(1) }
+        gate.withLock { retainedOperations?.retainedCount()?.coerceAtLeast(1) ?: 1 }
+
+    private fun retainReservation(reservation: AdmissionReservation) {
+        check(
+            retainedOperations?.retain(
+                OperationCapability(
+                    lifecycle = reservation.lifecycle,
+                    attempt = reservation.attempt,
+                    operationId = reservation.token,
+                ),
+            ) == true,
+        ) { "outbound lifecycle lost operation registry" }
+    }
 
     private companion object {
         const val TRANSITION_TIMEOUT_MILLIS = 5_000L

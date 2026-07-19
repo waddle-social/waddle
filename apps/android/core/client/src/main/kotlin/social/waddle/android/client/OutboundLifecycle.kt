@@ -87,6 +87,7 @@ internal enum class LifecyclePendingComponent {
     ATTEMPT_LEASES,
     NATIVE_PRODUCER,
     NATIVE_DISCONNECT,
+    NATIVE_CLIENT_CLOSE,
     OUTBOUND_DRAIN,
     TERMINAL_DRAIN,
 }

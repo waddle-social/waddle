@@ -66,6 +66,26 @@ internal class OutboundMessenger(
         client: WaddleClientInterface,
     ): Boolean = lifecycle.attachTransport(handle, client)
 
+    suspend fun beginTransportConstruction(
+        handle: ConnectionAttemptHandle,
+    ): TransportConstructionClaim? = lifecycle.beginTransportConstruction(handle)
+
+    suspend fun attachConstructedTransport(
+        claim: TransportConstructionClaim,
+        client: WaddleClientInterface,
+    ): TransportAttachOutcome = lifecycle.attachConstructedTransport(claim, client)
+
+    suspend fun finishSupersededConstruction(claim: TransportConstructionClaim) {
+        lifecycle.finishSupersededConstruction(claim)
+    }
+
+    suspend fun markTransportClosed(
+        handle: ConnectionAttemptHandle,
+        closed: Boolean,
+    ) {
+        lifecycle.markTransportClosed(handle, closed)
+    }
+
     suspend fun disconnectTransport(
         handle: ConnectionAttemptHandle,
     ): Boolean = lifecycle.disconnectTransport(handle)

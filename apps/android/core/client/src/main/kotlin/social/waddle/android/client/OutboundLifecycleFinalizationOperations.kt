@@ -116,13 +116,27 @@ internal class OutboundLifecycleFinalizationOperations(
             true
         } == true
         return if (producerStopped) {
-            OwnerFinalizationResult.Finalized
+            if (transportClosed(record)) {
+                OwnerFinalizationResult.Finalized
+            } else {
+                OwnerFinalizationResult.Pending(
+                    LifecyclePendingComponent.NATIVE_CLIENT_CLOSE,
+                    1,
+                )
+            }
         } else {
             OwnerFinalizationResult.Pending(
                 LifecyclePendingComponent.NATIVE_PRODUCER,
                 1,
             )
         }
+    }
+
+    suspend fun transportClosed(record: AttemptRecord): Boolean {
+        if (!record.requiresClientCloseProof) return true
+        return withTimeoutOrNull(transitionTimeoutMillis) {
+            record.clientClosed.await()
+        } == true
     }
 
     suspend fun terminalRecoveryReady(ownerBareJid: String): Boolean {

@@ -187,17 +187,33 @@ internal class ConnectionLoop(
         var activation: AttemptActivation? = null
         var client: WaddleClientInterface? = null
         var activeAttempt: ActiveAttempt? = null
+        var construction: social.waddle.android.client.TransportConstructionClaim? = null
+        var attachedConstruction = false
         try {
             // The teardown guard precedes resource lookup and durable
             // activation, both of which may suspend.
             val resource = attemptClientFactory.resource()
             val prepared = messenger.activateAttempt(lifecycle)
             activation = prepared
+            val constructionClaim =
+                messenger.beginTransportConstruction(prepared.handle)
+                    ?: return AttemptEnd.ConnectFailed
+            construction = constructionClaim
             val liveClient =
                 attemptClientFactory.create(session, resource, prepared.bootstrap)
             client = liveClient
-            if (!messenger.attachTransport(prepared.handle, liveClient)) {
-                return AttemptEnd.ConnectFailed
+            when (messenger.attachConstructedTransport(constructionClaim, liveClient)) {
+                social.waddle.android.client.TransportAttachOutcome.Attached -> {
+                    construction = null
+                    attachedConstruction = true
+                }
+                social.waddle.android.client.TransportAttachOutcome.SupersededAndClose -> {
+                    boundedClose(liveClient)
+                    messenger.finishSupersededConstruction(constructionClaim)
+                    construction = null
+                    client = null
+                    return AttemptEnd.ConnectFailed
+                }
             }
             val connected = withTimeoutOrNull(configuration.connectTimeoutMillis) {
                 try {
@@ -227,6 +243,14 @@ internal class ConnectionLoop(
             }
         } finally {
             withContext(NonCancellable) {
+                construction?.let { claim ->
+                    val constructedClient = client
+                    if (constructedClient != null) {
+                        boundedClose(constructedClient)
+                    }
+                    messenger.finishSupersededConstruction(claim)
+                    client = null
+                }
                 val prepared = activation
                 if (prepared != null) {
                     val disconnected = if (activeAttempt == null) {
@@ -235,6 +259,9 @@ internal class ConnectionLoop(
                         activeAttempt.producerQuiesced
                     }
                     val closed = boundedClose(client)
+                    if (attachedConstruction) {
+                        messenger.markTransportClosed(prepared.handle, closed)
+                    }
                     messenger.closeAttempt(
                         prepared.handle,
                         producerQuiesced = disconnected && closed,
