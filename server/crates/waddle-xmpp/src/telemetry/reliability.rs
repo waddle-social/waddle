@@ -3,7 +3,8 @@
 //! Contract phase of #1330: the legacy `waddle_*` text half of the old
 //! dual-emit is gone; every retired name keeps answering through the
 //! Mimir recording-rule aliases in
-//! `infrastructure/waddle.cloud/rules/mimir/waddle-reliability-aliases.yaml`.
+//! `infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml`
+//! (the `waddle-aliases-*` groups).
 //! OTel names deliberately start with `xmpp`, not `waddle`, so the
 //! translated `xmpp_<rest>_total` series never collided with the legacy
 //! scrape during the dual-emit release.

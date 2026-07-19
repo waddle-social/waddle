@@ -4,7 +4,8 @@
 //! rendered here now lives on the OTel meter family (see
 //! `crate::telemetry`), and every retired `waddle_*` name keeps
 //! answering through the Mimir recording-rule aliases in
-//! `infrastructure/waddle.cloud/rules/mimir/waddle-reliability-aliases.yaml`.
+//! `infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml`
+//! (the `waddle-aliases-*` groups).
 //! `/metrics` stays up so the Alloy scrape keeps generating the `up`
 //! series (the ScrapeAbsent alert's input); the body is a constant
 //! liveness gauge and nothing else. Adding a family back here is
