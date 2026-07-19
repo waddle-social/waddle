@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -58,6 +57,7 @@ internal class OutboundLifecycleCoordinator(
     )
     /** Replaced on every start; old completions cannot affect a new owner. */
     private var retainedOperations: LifecycleOperationRegistry? = null
+    private var rotationMutationLease: RotationMutationLease? = null
     private var currentAttempt: AttemptRecord? = null
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
@@ -78,6 +78,7 @@ internal class OutboundLifecycleCoordinator(
             }
             finalizationOperations.startWorkers(scope, lifecycle)
             retainedOperations = LifecycleOperationRegistry(lifecycle)
+            rotationMutationLease = null
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
@@ -407,7 +408,7 @@ internal class OutboundLifecycleCoordinator(
         transition: DeliveryAttemptTransition,
         affectedStanzaIds: Set<String>,
     ): ResumeHandoffOutcome {
-        val lifecycle = gate.withLock {
+        val lease = gate.withLock {
             val active = state as? OutboundLifecycleState.Active
             if (
                 active?.handle != handle ||
@@ -416,78 +417,121 @@ internal class OutboundLifecycleCoordinator(
             ) {
                 return ResumeHandoffOutcome.Rejected
             }
+            val capability = OperationCapability(
+                lifecycle = active.lifecycle,
+                attempt = transition.old,
+                operationId = UUID.randomUUID(),
+            )
+            check(retainedOperations?.retain(capability) == true) {
+                "outbound lifecycle lost operation registry"
+            }
+            val acquired = RotationMutationLease(
+                lifecycle = active.lifecycle,
+                handle = handle,
+                old = transition.old,
+                fresh = transition.fresh,
+                capability = capability,
+            )
+            rotationMutationLease = acquired
             state = OutboundLifecycleState.Handoff(
                 lifecycle = active.lifecycle,
                 handle = handle,
                 previousAttempt = transition.old,
                 nextAttempt = transition.fresh,
             )
-            active.lifecycle
+            acquired
         }
         return try {
             performRotation(
-                lifecycle,
-                handle,
-                transition,
+                lease,
                 affectedStanzaIds,
             )
         } catch (failure: Throwable) {
             val stillHandoff = gate.withLock {
                 val handoff = state as? OutboundLifecycleState.Handoff
-                handoff?.lifecycle == lifecycle && handoff.handle == handle
+                handoff?.lifecycle == lease.lifecycle && handoff.handle == lease.handle
             }
-            if (stillHandoff) compensateHandoff(lifecycle, handle, transition)
+            if (stillHandoff) {
+                compensateHandoff(lease.lifecycle, lease.handle, transition)
+            }
+            releaseRotationMutation(lease)
             throw failure
         }
     }
 
     private suspend fun performRotation(
-        lifecycle: SessionLifecycleRef,
-        handle: ConnectionAttemptHandle,
-        transition: DeliveryAttemptTransition,
+        lease: RotationMutationLease,
         affectedStanzaIds: Set<String>,
     ): ResumeHandoffOutcome {
-        if (!awaitLeaseDrain()) {
-            transitionToClosing(lifecycle, handle, transition.old)
+        if (!awaitOtherOperations(lease.capability)) {
+            transitionToClosing(lease.lifecycle, lease.handle, lease.old)
             throw LifecycleTransitionException(
-                lifecycle,
+                lease.lifecycle,
                 LifecyclePendingComponent.ATTEMPT_LEASES,
                 pendingLeaseCount(),
             )
         }
 
         val journalOutcome =
-            phaseOperations.journalRotation(transition, affectedStanzaIds)
+            phaseOperations.journalRotation(
+                DeliveryAttemptTransition(lease.old, lease.fresh),
+                affectedStanzaIds,
+            )
         val smVersion = when (journalOutcome) {
             is RotationJournalOutcome.Accepted -> journalOutcome.smVersion
             RotationJournalOutcome.Rejected -> {
                 gate.withLock {
                     val handoff = state as? OutboundLifecycleState.Handoff
-                    if (handoff?.lifecycle == lifecycle && handoff.handle == handle) {
+                    if (
+                        handoff?.lifecycle == lease.lifecycle &&
+                            handoff.handle == lease.handle &&
+                            rotationMutationLease == lease
+                    ) {
                         state = OutboundLifecycleState.Active(
-                            lifecycle,
-                            handle,
-                            transition.old,
+                            lease.lifecycle,
+                            lease.handle,
+                            lease.old,
                         )
                     }
                 }
+                releaseRotationMutation(lease)
                 return ResumeHandoffOutcome.Rejected
             }
         }
 
-        if (!phaseOperations.publishRotation(lifecycle, handle, transition, smVersion)) {
-            compensateHandoff(lifecycle, handle, transition)
+        if (
+            !phaseOperations.publishRotation(
+                lease.lifecycle,
+                lease.handle,
+                DeliveryAttemptTransition(lease.old, lease.fresh),
+                smVersion,
+            )
+        ) {
+            try {
+                compensateHandoff(
+                    lease.lifecycle,
+                    lease.handle,
+                    DeliveryAttemptTransition(lease.old, lease.fresh),
+                )
+            } finally {
+                releaseRotationMutation(lease)
+            }
             return ResumeHandoffOutcome.Rejected
         }
         gate.withLock {
             val handoff = state as? OutboundLifecycleState.Handoff
-            check(handoff?.lifecycle == lifecycle && handoff.handle == handle) {
+            check(
+                handoff?.lifecycle == lease.lifecycle &&
+                    handoff.handle == lease.handle &&
+                    rotationMutationLease == lease,
+            ) {
                 "resume handoff lost lifecycle authority"
             }
-            currentAttempt?.attempt = transition.fresh
-            state = OutboundLifecycleState.Active(lifecycle, handle, transition.fresh)
+            currentAttempt?.attempt = lease.fresh
+            state = OutboundLifecycleState.Active(lease.lifecycle, lease.handle, lease.fresh)
         }
         phaseOperations.rotationPublished()
+        releaseRotationMutation(lease)
         return ResumeHandoffOutcome.Committed
     }
 
@@ -749,6 +793,18 @@ internal class OutboundLifecycleCoordinator(
         } == true
     }
 
+    private suspend fun awaitOtherOperations(
+        excluded: OperationCapability,
+    ): Boolean = withTimeoutOrNull(transitionTimeoutMillis) {
+        while (true) {
+            val waiter = gate.withLock {
+                retainedOperations?.waiterIfOtherRetained(excluded)
+            }
+            if (waiter == null) return@withTimeoutOrNull true
+            waiter.await()
+        }
+    } == true
+
     private suspend fun pendingLeaseCount(): Int =
         gate.withLock { retainedOperations?.retainedCount()?.coerceAtLeast(1) ?: 1 }
 
@@ -762,6 +818,14 @@ internal class OutboundLifecycleCoordinator(
                 ),
             ) == true,
         ) { "outbound lifecycle lost operation registry" }
+    }
+
+    private suspend fun releaseRotationMutation(lease: RotationMutationLease) {
+        gate.withLock {
+            if (rotationMutationLease != lease) return@withLock
+            rotationMutationLease = null
+            retainedOperations?.release(lease.capability)
+        }
     }
 
     private companion object {

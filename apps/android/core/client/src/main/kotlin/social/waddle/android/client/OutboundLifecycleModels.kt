@@ -75,6 +75,7 @@ internal class LifecycleOperationRegistry(
 ) {
     private val retained = mutableMapOf<UUID, OperationCapability>()
     private var emptyWaiter: CompletableDeferred<Unit>? = null
+    private var retentionChanged: CompletableDeferred<Unit>? = null
 
     fun retain(capability: OperationCapability): Boolean {
         if (capability.lifecycle != lifecycle) return false
@@ -85,6 +86,8 @@ internal class LifecycleOperationRegistry(
     fun release(capability: OperationCapability) {
         if (retained[capability.operationId] != capability) return
         retained.remove(capability.operationId)
+        retentionChanged?.complete(Unit)
+        retentionChanged = null
         if (retained.isEmpty()) {
             emptyWaiter?.complete(Unit)
             emptyWaiter = null
@@ -99,6 +102,17 @@ internal class LifecycleOperationRegistry(
             emptyWaiter = it
         }
 
+    fun waiterIfOtherRetained(
+        excluded: OperationCapability,
+    ): CompletableDeferred<Unit>? =
+        if (retained.values.none { it != excluded }) {
+            null
+        } else {
+            retentionChanged ?: CompletableDeferred<Unit>().also {
+                retentionChanged = it
+            }
+        }
+
     fun retainedCount(): Int = retained.size
 }
 
@@ -106,6 +120,15 @@ internal data class TransportConstructionClaim(
     val lifecycle: SessionLifecycleRef,
     val handle: ConnectionAttemptHandle,
     val attempt: DeliveryAttemptRef,
+    val capability: OperationCapability,
+)
+
+/** Owns the complete durable RESUME-to-fresh mutation, including retries. */
+internal data class RotationMutationLease(
+    val lifecycle: SessionLifecycleRef,
+    val handle: ConnectionAttemptHandle,
+    val old: DeliveryAttemptRef,
+    val fresh: DeliveryAttemptRef,
     val capability: OperationCapability,
 )
 

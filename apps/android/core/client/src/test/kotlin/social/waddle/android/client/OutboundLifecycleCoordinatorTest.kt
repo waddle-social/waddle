@@ -134,7 +134,7 @@ class OutboundLifecycleCoordinatorTest {
     }
 
     @Test
-    fun `rotation cancellation after journal commit fences and refuses restart`() = runTest {
+    fun `rotation cancellation after journal commit releases its exact lease`() = runTest {
         val committed = CompletableDeferred<Unit>()
         val fixture = fixture(
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
@@ -168,11 +168,20 @@ class OutboundLifecycleCoordinatorTest {
 
         assertNull(fixture.queue.activeAttempt(OWNER))
         assertNull(fixture.activeSession.attemptRef)
-        assertTrue(
-            runCatching {
-                fixture.messenger.start(backgroundScope, OWNER)
-            }.isFailure,
+        assertEquals(
+            AttemptCloseOutcome.OwnedBySessionShutdown,
+            fixture.messenger.closeAttempt(
+                activation.handle,
+                producerQuiesced = true,
+            ),
         )
+        assertEquals(
+            LifecycleShutdownOutcome.Stopped,
+            fixture.messenger.shutdown(
+                LifecycleShutdownTarget.CurrentOwner(lifecycle),
+            ),
+        )
+        fixture.stop(fixture.start())
     }
 
     @Test
