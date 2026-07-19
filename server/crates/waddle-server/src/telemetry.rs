@@ -426,6 +426,18 @@ pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Mark the current tracing span as failed so it matches Tempo
+/// `status=error` queries (#1428).
+///
+/// The single home for the idiom: every failure site marks its span
+/// through this helper, keeping the "what counts as an error span"
+/// decision in one place.
+pub(crate) fn mark_span_error(description: impl std::fmt::Display) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    tracing::Span::current()
+        .set_status(opentelemetry::trace::Status::error(description.to_string()));
+}
+
 /// Flush metrics recorded during graceful drain before control returns to `main`.
 ///
 /// Local telemetry has no meter provider, so this is a no-op when [`init_local`]

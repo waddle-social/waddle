@@ -1,9 +1,7 @@
 use chrono;
 use jid::{BareJid, FullJid, Jid};
-use opentelemetry::trace::Status;
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, info, warn};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_xmpp::{
     carbons::CARBONS_NS,
     commands::{CommandContext, CommandResult},
@@ -76,9 +74,7 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
-fn mark_dispatch_failed(error: &impl std::fmt::Display) {
-    tracing::Span::current().set_status(Status::error(error.to_string()));
-}
+use crate::telemetry::mark_span_error;
 
 mod archive_inbox_upload;
 pub(crate) mod blocking;

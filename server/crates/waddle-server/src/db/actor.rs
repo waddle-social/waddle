@@ -4,15 +4,13 @@ use std::time::Instant;
 
 use kameo::message::Context;
 use kameo::Actor;
-use opentelemetry::trace::Status;
 use sqlx::query;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::{Database, DatabaseError};
 
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
     if let Err(error) = &result {
-        tracing::Span::current().set_status(Status::error(error.to_string()));
+        crate::telemetry::mark_span_error(error);
     }
     result
 }
@@ -248,8 +246,7 @@ impl kameo::message::Message<DbHealthCheck> for DbActor {
         self.touch();
         let result = mark_actor_result(self.db.health_check().await);
         if matches!(result, Ok(false)) {
-            tracing::Span::current()
-                .set_status(Status::error("database health check returned unhealthy"));
+            crate::telemetry::mark_span_error("database health check returned unhealthy");
         }
         result
     }

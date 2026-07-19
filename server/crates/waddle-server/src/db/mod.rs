@@ -11,12 +11,10 @@ pub mod roster;
 mod schema;
 mod value;
 
-use opentelemetry::trace::Status;
 #[cfg(test)]
 use std::path::Path;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
@@ -308,7 +306,7 @@ impl Database {
         match conn.query("SELECT 1", ()).await {
             Ok(_) => Ok(true),
             Err(e) => {
-                tracing::Span::current().set_status(Status::error(e.to_string()));
+                crate::telemetry::mark_span_error(&e);
                 tracing::warn!(error = %e, "Database health check failed");
                 Ok(false)
             }

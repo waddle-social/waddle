@@ -63,19 +63,19 @@ async fn send_roster_remove_subscription_stanza(
                             .await;
                     }
                     Err(error) => {
-                        mark_dispatch_failed(&error);
+                        mark_span_error(&error);
                         warn!(error = %error, user = %to, contact = %from, "Failed to update contact roster after removal side effect");
                     }
                 }
             }
             Err(error) => {
-                mark_dispatch_failed(&error);
+                mark_span_error(&error);
                 warn!(error = %error, user = %to, contact = %from, "Failed to convert contact roster item after removal side effect");
             }
         },
         Ok(None) => {}
         Err(error) => {
-            mark_dispatch_failed(&error);
+            mark_span_error(&error);
             warn!(error = %error, user = %to, contact = %from, "Failed to load contact roster item for removal side effect");
         }
     }
@@ -118,7 +118,7 @@ async fn send_roster_remove_subscription_stanza(
     {
         Ok(resources) => resources,
         Err(error) => {
-            mark_dispatch_failed(&error);
+            mark_span_error(&error);
             warn!(error = %error, user = %to, "Failed to list detached interested resources for roster removal side effect");
             return;
         }
@@ -152,7 +152,7 @@ async fn send_roster_remove_subscription_stanza(
                 }
             }
             Err(error) => {
-                mark_dispatch_failed(&error);
+                mark_span_error(&error);
                 warn!(error = %error, resource = %resource, "Failed to record roster removal subscription side effect");
             }
         }
@@ -203,7 +203,7 @@ async fn send_roster_push_to_all_resources(
     {
         Ok(resources) => resources,
         Err(error) => {
-            mark_dispatch_failed(&error);
+            mark_span_error(&error);
             warn!(error = %error, user = %user_jid, "Failed to list detached resources for roster push");
             return;
         }
@@ -245,7 +245,7 @@ async fn send_roster_push_to_all_resources(
                 }
             }
             Err(error) => {
-                mark_dispatch_failed(&error);
+                mark_span_error(&error);
                 warn!(error = %error, resource = %resource, "Failed to record detached roster push");
             }
         }
@@ -357,7 +357,7 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
     {
         Ok(resources) => resources,
         Err(error) => {
-            mark_dispatch_failed(&error);
+            mark_span_error(&error);
             warn!(error = %error, user = %user_jid, "Failed to list detached roster-interested resources");
             return;
         }
@@ -407,7 +407,7 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
                 }
             }
             Err(error) => {
-                mark_dispatch_failed(&error);
+                mark_span_error(&error);
                 warn!(error = %error, resource = %resource, "Failed to record detached roster push");
             }
         }

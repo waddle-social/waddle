@@ -31,9 +31,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kameo::actor::ActorRef;
-use opentelemetry::trace::Status;
 use tracing::{debug, instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_xmpp::pending_delivery::flush::{
     build_replay_stanza, MaterializedPayload, ReplayReason,
 };
@@ -188,11 +186,11 @@ pub async fn promote_session_unacked(
         "Q6 promotion: session summary"
     );
     if summary.has_storage_failure() {
-        tracing::Span::current().set_status(Status::error(format!(
+        crate::telemetry::mark_span_error(format!(
             "Q6 promotion: {} of {} unacked stanzas failed durable storage",
             summary.storage_failed,
             session.unacked_stanzas.len(),
-        )));
+        ));
     }
     summary
 }

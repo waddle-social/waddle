@@ -230,6 +230,35 @@ fn prometheus_total_suffix_is_rejected() {
     let _ = validate_metric_name("waddle.messages_total");
 }
 
+#[tokio::test]
+async fn warn_events_leave_span_status_unset_error_events_mark_it() {
+    // The production bridge maps ERROR-level events to span status
+    // (#1428). Benign outcomes are logged at warn or below, so this
+    // pins the contract that keeps `status=error` meaningful: warns
+    // must never mark a span, errors must.
+    let spans = test_support::acquire_spans();
+
+    {
+        let span = tracing::info_span!("benign_op");
+        let _entered = span.enter();
+        tracing::warn!("expected, benign outcome");
+    }
+    {
+        let span = tracing::info_span!("failing_op");
+        let _entered = span.enter();
+        tracing::error!("operation failed");
+    }
+
+    assert_eq!(
+        spans.status_of("benign_op"),
+        Some(opentelemetry::trace::Status::Unset)
+    );
+    assert!(matches!(
+        spans.status_of("failing_op"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
+}
+
 #[test]
 fn attribute_enums_expose_stable_keys_and_values() {
     assert_eq!(MessageKind::Dm.key(), "kind");
