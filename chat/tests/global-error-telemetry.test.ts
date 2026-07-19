@@ -44,6 +44,30 @@ afterEach(() => {
 });
 
 describe("handleWindowErrorEvent", () => {
+  test("drops ResizeObserver undelivered-notification errors", () => {
+    handleWindowErrorEvent({
+      error: new Error("ResizeObserver loop completed with undelivered notifications."),
+    });
+
+    expect(stub.errors).toHaveLength(0);
+  });
+
+  test("drops WebKit ResizeObserver loop-limit errors", () => {
+    handleWindowErrorEvent({
+      error: new Error("ResizeObserver loop limit exceeded"),
+    });
+
+    expect(stub.errors).toHaveLength(0);
+  });
+
+  test("drops benign ResizeObserver messages without an Error object", () => {
+    handleWindowErrorEvent({
+      message: "ResizeObserver loop completed with undelivered notifications.",
+    });
+
+    expect(stub.errors).toHaveLength(0);
+  });
+
   test("pushes a sanitized window-error to Faro", () => {
     handleWindowErrorEvent({
       error: new Error("stream broke for alice@example.com/desktop"),
