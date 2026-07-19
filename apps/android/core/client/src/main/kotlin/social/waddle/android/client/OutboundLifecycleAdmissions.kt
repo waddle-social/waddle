@@ -66,6 +66,7 @@ internal suspend fun materializeOutboundAdmission(
             OutboundAdmissionLease.OfflineOutbound(
                 reservation.lifecycle,
                 source,
+                attempt,
                 reservation.token,
             ),
         )
@@ -75,6 +76,7 @@ internal suspend fun materializeOutboundAdmission(
         OutboundAdmissionLease.OfflineOutbound(
             reservation.lifecycle,
             source,
+            attempt,
             reservation.token,
         )
     } else {

@@ -36,6 +36,9 @@ class OutboundTerminalRecoveryTest {
 
             val sent = harness.messenger.sendOrEnqueue(PEER, false, "persist forever")
             val stanzaId = checkNotNull(sent.delivery).identity.clientStanzaId
+            val activeAttempt = checkNotNull(
+                harness.queue.activeAttempt(ConnectionLoopPullHarness.OWNER),
+            )
             harness.dataStore.failAllUpdates = true
             harness.factory.emitAcked(stanzaId)
             runCurrent()
@@ -52,6 +55,10 @@ class OutboundTerminalRecoveryTest {
             assertEquals(harness.lifecycle, result.lifecycle)
             assertEquals(LifecyclePendingComponent.TERMINAL_DRAIN, result.component)
             assertTrue(result.pending > 0)
+            assertEquals(
+                activeAttempt,
+                harness.queue.activeAttempt(ConnectionLoopPullHarness.OWNER),
+            )
 
             val fencedLifecycle = harness.lifecycle
             assertTrue(

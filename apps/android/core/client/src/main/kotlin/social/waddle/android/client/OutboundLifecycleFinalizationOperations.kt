@@ -25,36 +25,56 @@ internal sealed interface OwnerFinalizationResult {
  */
 internal class OutboundLifecycleFinalizationOperations(
     private val activeSession: ActiveSession,
-    private val drainWorker: OutboundDrainWorker,
     private val journal: OutboundQueue,
     private val resume: ResumePersistence,
+    private val drainWorker: OutboundDrainWorker,
     private val terminalWorker: DeliveryTerminalWorker,
     private val transitionTimeoutMillis: Long,
 ) {
     fun startWorkers(
         scope: CoroutineScope,
         lifecycle: SessionLifecycleRef,
-    ) {
-        terminalWorker.start(scope, lifecycle.ownerBareJid)
-        drainWorker.start(scope, lifecycle)
+    ): OwnerWorkers {
+        val workers = OwnerWorkers(lifecycle)
+        workers.terminal = terminalWorker.start(
+            scope,
+            WorkerOwnership(lifecycle, WorkerKind.DELIVERY_TERMINAL, WorkerGeneration.random()),
+            workers::recordExit,
+        )
+        workers.drain = drainWorker.start(
+            scope,
+            WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random()),
+            workers::recordExit,
+        )
+        return workers
     }
 
-    suspend fun awaitStartupTerminalDrain(ownerBareJid: String) =
-        terminalWorker.awaitStartupDrain(ownerBareJid)
+    suspend fun awaitStartupTerminalDrain(workers: OwnerWorkers, ownerBareJid: String) {
+        if (workers.lifecycle.ownerBareJid == ownerBareJid) workers.terminal.awaitStartupDrain()
+    }
 
     suspend fun submitTerminal(
+        workers: OwnerWorkers,
         ownerBareJid: String,
         clientStanzaId: String,
         attempt: DeliveryAttemptRef,
         kind: DeliveryTerminalKind,
-    ) = terminalWorker.submitAndAwait(ownerBareJid, clientStanzaId, attempt, kind)
+    ): TerminalCommandOutcome =
+        if (workers.lifecycle.ownerBareJid == ownerBareJid) {
+            workers.terminal.submitAndAwait(clientStanzaId, attempt, kind)
+        } else {
+            TerminalCommandOutcome.WorkerUnavailable
+        }
 
     fun signalDrain(
+        workers: OwnerWorkers?,
         active: OutboundLifecycleState.Active?,
         attempt: DeliveryAttemptRef,
     ) {
         if (active?.attempt == attempt) {
-            drainWorker.signal(active.lifecycle, active.handle, attempt)
+            workers?.takeIf { it.lifecycle == active.lifecycle }
+                ?.drain
+                ?.signal(active.handle, attempt)
         }
     }
 
@@ -89,9 +109,12 @@ internal class OutboundLifecycleFinalizationOperations(
         return null
     }
 
-    suspend fun finalizeAttemptClose(record: AttemptRecord): AttemptCloseOutcome =
+    suspend fun finalizeAttemptClose(
+        workers: OwnerWorkers,
+        record: AttemptRecord,
+    ): AttemptCloseOutcome =
         withContext(NonCancellable) {
-            if (finalizeAttempt(record)) {
+            if (finalizeAttempt(workers, record)) {
                 AttemptCloseOutcome.Closed
             } else {
                 AttemptCloseOutcome.FencedWithPending(
@@ -139,24 +162,34 @@ internal class OutboundLifecycleFinalizationOperations(
         } == true
     }
 
-    suspend fun terminalRecoveryReady(ownerBareJid: String): Boolean {
-        if (!terminalWorker.canRestart()) return false
+    suspend fun terminalRecoveryReady(workers: OwnerWorkers, ownerBareJid: String): Boolean {
+        if (workers.terminal.awaitExit(transitionTimeoutMillis) !is WorkerAwaitOutcome.Exited) return false
         return withTimeoutOrNull(transitionTimeoutMillis) {
-            journal.activeAttempt(ownerBareJid) == null &&
-                activeSession.attemptRef == null
+            linkedSetOf<DeliveryAttemptRef>().apply {
+                journal.activeAttempt(ownerBareJid)?.let(::add)
+                activeSession.attemptRef
+                    ?.takeIf { it.ownerBareJid == ownerBareJid }
+                    ?.let(::add)
+            }.forEach { attempt ->
+                journal.fenceAttempt(attempt)
+                resume.retireAttempt(attempt)
+                activeSession.endAttempt(attempt)
+            }
+            true
         } == true
     }
 
-    private suspend fun finalizeAttempt(record: AttemptRecord): Boolean =
+    private suspend fun finalizeAttempt(workers: OwnerWorkers, record: AttemptRecord): Boolean =
         withTimeoutOrNull(transitionTimeoutMillis) {
             journal.fenceAttempt(record.attempt)
             resume.retireAttempt(record.attempt)
-            drainWorker.unbind(record.lifecycle, record.handle, record.attempt)
+            workers.drain.unbind(record.handle, record.attempt)
             activeSession.endAttempt(record.attempt)
             true
         } == true
 
     suspend fun compensateActivation(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         knownAttempt: DeliveryAttemptRef?,
@@ -165,13 +198,14 @@ internal class OutboundLifecycleFinalizationOperations(
         if (attempt != null) {
             journal.fenceAttempt(attempt)
             resume.retireAttempt(attempt)
-            drainWorker.unbind(lifecycle, handle, attempt)
+            workers.drain.unbind(handle, attempt)
             activeSession.endAttempt(attempt)
         }
         true
     } == true
 
     suspend fun compensateHandoff(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         transition: DeliveryAttemptTransition,
@@ -180,30 +214,46 @@ internal class OutboundLifecycleFinalizationOperations(
         journal.fenceAttempt(transition.fresh)
         resume.retireAttempt(transition.old)
         resume.retireAttempt(transition.fresh)
-        drainWorker.unbind(lifecycle, handle, transition.old)
-        drainWorker.unbind(lifecycle, handle, transition.fresh)
+        workers.drain.unbind(handle, transition.old)
+        workers.drain.unbind(handle, transition.fresh)
         activeSession.endAttempt(transition.old)
         activeSession.endAttempt(transition.fresh)
         true
     } == true
 
     suspend fun finalizeOwner(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         record: AttemptRecord?,
     ): OwnerFinalizationResult {
-        val attempts = collectAttempts(lifecycle, record)
+        val attempts = collectAttempts(workers, lifecycle, record)
             ?: return OwnerFinalizationResult.Pending(
                 LifecyclePendingComponent.ATTEMPT_FINALIZATION,
                 1,
             )
-        val drainResult = drainWorker.stop(lifecycle)
-        if (drainResult != OutboundDrainWorker.StopResult.Stopped) {
+        workers.drain.requestStop()
+        val drainResult = workers.drain.awaitExit(transitionTimeoutMillis)
+        if (
+            drainResult !is WorkerAwaitOutcome.Exited ||
+                drainResult.exit.reason !is WorkerExitReason.RequestedStop
+        ) {
             return OwnerFinalizationResult.Pending(
                 LifecyclePendingComponent.OUTBOUND_DRAIN,
                 1,
             )
         }
-        val terminalResult = terminalWorker.stop(lifecycle.ownerBareJid)
+        workers.terminal.requestStop()
+        val terminalResult = workers.terminal.awaitExit(transitionTimeoutMillis)
+        val pendingCommands = workers.terminal.pendingCommandCount()
+        if (terminalResult is WorkerAwaitOutcome.TimedOut && pendingCommands > 0) {
+            return OwnerFinalizationResult.Pending(
+                LifecyclePendingComponent.TERMINAL_DRAIN,
+                maxOf(
+                    pendingCommands,
+                    runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(1),
+                ).coerceAtLeast(1),
+            )
+        }
         val attemptsFinalized = finalizeAttempts(attempts)
         if (!attemptsFinalized) {
             return OwnerFinalizationResult.Pending(
@@ -211,25 +261,37 @@ internal class OutboundLifecycleFinalizationOperations(
                 attempts.size,
             )
         }
-        return when (terminalResult) {
-            is DeliveryTerminalWorker.StopResult.FencedWithPending ->
-                OwnerFinalizationResult.Pending(
-                    LifecyclePendingComponent.TERMINAL_DRAIN,
-                    terminalResult.pendingCommands,
-                )
-            DeliveryTerminalWorker.StopResult.Drained ->
-                OwnerFinalizationResult.Finalized
+        if (terminalResult is WorkerAwaitOutcome.TimedOut) {
+            return OwnerFinalizationResult.Pending(
+                LifecyclePendingComponent.TERMINAL_DRAIN,
+                maxOf(
+                    pendingCommands,
+                    runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(1),
+                ).coerceAtLeast(1),
+            )
         }
+        val terminalPending = maxOf(
+            pendingCommands,
+            runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(0),
+            if (terminalResult is WorkerAwaitOutcome.Exited &&
+                terminalResult.exit.reason is WorkerExitReason.RequestedStop
+            ) 0 else 1,
+        )
+        return if (terminalPending == 0) OwnerFinalizationResult.Finalized else OwnerFinalizationResult.Pending(
+            LifecyclePendingComponent.TERMINAL_DRAIN,
+            terminalPending,
+        )
     }
 
     private suspend fun collectAttempts(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         record: AttemptRecord?,
     ): Set<DeliveryAttemptRef>? = withTimeoutOrNull(transitionTimeoutMillis) {
         linkedSetOf<DeliveryAttemptRef>().apply {
             journal.activeAttempt(lifecycle.ownerBareJid)?.let(::add)
             record?.attempt?.let(::add)
-            drainWorker.boundAttempt(lifecycle)?.let(::add)
+            workers.drain.boundAttempt()?.let(::add)
             activeSession.attemptRef
                 ?.takeIf { it.ownerBareJid == lifecycle.ownerBareJid }
                 ?.let(::add)

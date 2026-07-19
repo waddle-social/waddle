@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -39,17 +40,15 @@ class DeliveryTerminalWorkerTest {
             journal = queue,
             dispatchEvent = { effects += it },
             commandCapacity = 256,
-            stopTimeoutMillis = 1_000,
         )
-        worker.start(this, OWNER)
+        val run = terminalRun(worker, this)
         runCurrent()
-        worker.awaitStartupDrain(OWNER)
+        run.awaitStartupDrain()
         store.failAllUpdates = true
 
         val submissions = rows.map { row ->
             async {
-                worker.submitAndAwait(
-                    OWNER,
+                run.submitAndAwait(
                     row.clientStanzaId,
                     attempt,
                     DeliveryTerminalKind.ACK,
@@ -70,7 +69,7 @@ class DeliveryTerminalWorkerTest {
 
         assertEquals(257, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
         assertEquals(listOf("m-258"), queue.rows(OWNER).map { it.clientStanzaId })
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, worker.stop(OWNER))
+        assertRequested(run)
     }
 
     @Test
@@ -87,15 +86,14 @@ class DeliveryTerminalWorkerTest {
             journal = queue,
             dispatchEvent = {},
         )
-        worker.start(this, OWNER)
+        val run = terminalRun(worker, this)
         runCurrent()
-        worker.awaitStartupDrain(OWNER)
+        run.awaitStartupDrain()
         val baselineAttempts = store.updateAttempts.get()
         store.failAllUpdates = true
 
         val submission = async {
-            worker.submitAndAwait(
-                OWNER,
+            run.submitAndAwait(
                 row.clientStanzaId,
                 attempt,
                 DeliveryTerminalKind.ACK,
@@ -120,7 +118,7 @@ class DeliveryTerminalWorkerTest {
         runCurrent()
         submission.await()
         assertTrue(queue.rows(OWNER).isEmpty())
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, worker.stop(OWNER))
+        assertRequested(run)
     }
 
     @Test
@@ -139,13 +137,13 @@ class DeliveryTerminalWorkerTest {
             dispatchEvent = { effects += it },
         )
 
-        worker.start(this, OWNER)
+        val run = terminalRun(worker, this)
         runCurrent()
-        worker.awaitStartupDrain(OWNER)
+        run.awaitStartupDrain()
 
         assertTrue(queue.rows(OWNER).isEmpty())
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, worker.stop(OWNER))
+        assertRequested(run)
     }
 
     @Test
@@ -166,7 +164,7 @@ class DeliveryTerminalWorkerTest {
         )
         store.failAllUpdates = true
 
-        worker.start(this, OWNER)
+        val run = terminalRun(worker, this)
         runCurrent()
         assertTrue(effects.isEmpty())
         assertTrue(queue.rows(OWNER).single().ownership is OutboundOwnership.Terminal)
@@ -174,10 +172,10 @@ class DeliveryTerminalWorkerTest {
         store.failAllUpdates = false
         advanceTimeBy(250)
         runCurrent()
-        worker.awaitStartupDrain(OWNER)
+        run.awaitStartupDrain()
         assertTrue(queue.rows(OWNER).isEmpty())
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, worker.stop(OWNER))
+        assertRequested(run)
     }
 
     @Test
@@ -200,20 +198,20 @@ class DeliveryTerminalWorkerTest {
             dispatchEvent = { effects += it },
         )
 
-        first.start(this, OWNER)
-        second.start(this, OWNER)
+        val firstRun = terminalRun(first, this)
+        val secondRun = terminalRun(second, this)
         runCurrent()
-        first.awaitStartupDrain(OWNER)
-        second.awaitStartupDrain(OWNER)
+        firstRun.awaitStartupDrain()
+        secondRun.awaitStartupDrain()
 
         assertTrue(queue.rows(OWNER).isEmpty())
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, first.stop(OWNER))
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, second.stop(OWNER))
+        assertRequested(firstRun)
+        assertRequested(secondRun)
     }
 
     @Test
-    fun `bounded shutdown fences pending apply and restart drains it`() = runTest {
+    fun `requested stop times out without cancelling durable terminal work`() = runTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(OWNER, "sess-a")
@@ -227,30 +225,132 @@ class DeliveryTerminalWorkerTest {
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
-            stopTimeoutMillis = 30_000,
         )
         store.failAllUpdates = true
-        worker.start(this, OWNER)
+        val run = terminalRun(worker, this)
         runCurrent()
 
-        val stopping = async { worker.stop(OWNER) }
-        advanceTimeBy(30_001)
-        runCurrent()
-        val stopped = stopping.await()
-        assertTrue(stopped is DeliveryTerminalWorker.StopResult.FencedWithPending)
-        stopped as DeliveryTerminalWorker.StopResult.FencedWithPending
-        assertEquals(OWNER, stopped.ownerBareJid)
-        assertEquals(1, stopped.pendingCommands)
+        run.requestStop()
+        assertEquals(WorkerAwaitOutcome.TimedOut, run.awaitExit(1))
         assertEquals(1, queue.terminalIntentCount(OWNER))
         assertTrue(queue.rows(OWNER).single().ownership is OutboundOwnership.Terminal)
 
         store.failAllUpdates = false
-        worker.start(this, OWNER)
+        advanceTimeBy(250)
         runCurrent()
-        worker.awaitStartupDrain(OWNER)
         assertTrue(queue.rows(OWNER).isEmpty())
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(DeliveryTerminalWorker.StopResult.Drained, worker.stop(OWNER))
+        assertEquals(
+            WorkerExitReason.RequestedStop,
+            (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit.reason,
+        )
+    }
+
+    @Test
+    fun `fatal terminal dependency failure exits with exact ownership`() = runTest {
+        val prefs = SessionPrefs(InMemoryPreferencesDataStore())
+        prefs.activateSession(OWNER, "sess-a")
+        val queue = OutboundQueue(prefs)
+        val attempt = queue.beginAttempt(OWNER).attempt
+        val row = claimed(queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt))
+        queue.recordTerminal(OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
+        val worker = DeliveryTerminalWorker(queue, dispatchEvent = { error("terminal exploded") })
+        val run = terminalRun(worker, this)
+
+        runCurrent()
+
+        val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+        assertEquals(run.ownership.lifecycle, exit.lifecycle)
+        assertEquals(run.ownership.generation, exit.generation)
+        assertEquals(WorkerKind.DELIVERY_TERMINAL, exit.kind)
+        assertTrue(exit.reason is WorkerExitReason.UnexpectedFailure)
+    }
+
+    @Test
+    fun `requested stop drains an admitted terminal command before its exit`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
+        prefs.activateSession(OWNER, "sess-a")
+        val queue = OutboundQueue(prefs)
+        val attempt = queue.beginAttempt(OWNER).attempt
+        val row = claimed(queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt))
+        val effects = mutableListOf<XmppEvent>()
+        val run = terminalRun(DeliveryTerminalWorker(queue, { effects += it }), this)
+        run.awaitStartupDrain()
+        store.failAllUpdates = true
+
+        val admitted = async {
+            run.submitAndAwait(row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
+        }
+        runCurrent()
+        assertTrue(!admitted.isCompleted)
+        run.requestStop()
+
+        store.failAllUpdates = false
+        advanceTimeBy(250)
+        runCurrent()
+
+        assertEquals(TerminalCommandOutcome.Committed, admitted.await())
+        assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
+        assertEquals(
+            WorkerExitReason.RequestedStop,
+            (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit.reason,
+        )
+    }
+
+    @Test
+    fun `terminal requested stop emits one matching exit`() = runTest {
+        val prefs = SessionPrefs(InMemoryPreferencesDataStore())
+        prefs.activateSession(OWNER, "sess-a")
+        val exits = mutableListOf<WorkerExit>()
+        val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), {}), this) { exits += it }
+
+        runCurrent()
+        run.requestStop()
+
+        val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+        assertEquals(run.ownership.lifecycle, exit.lifecycle)
+        assertEquals(run.ownership.generation, exit.generation)
+        assertEquals(WorkerKind.DELIVERY_TERMINAL, exit.kind)
+        assertEquals(WorkerExitReason.RequestedStop, exit.reason)
+        assertEquals(listOf(exit), exits)
+    }
+
+    @Test
+    fun `sequential terminal runs isolate old submission and exit`() = runTest {
+        val prefs = SessionPrefs(InMemoryPreferencesDataStore())
+        prefs.activateSession(OWNER, "sess-a")
+        val queue = OutboundQueue(prefs)
+        val attempt = queue.beginAttempt(OWNER).attempt
+        val row = claimed(queue.enqueueAndClaimAbsoluteHead(draft("m-1"), attempt))
+        val effects = mutableListOf<XmppEvent>()
+        val worker = DeliveryTerminalWorker(queue, dispatchEvent = { effects += it })
+        val firstExits = mutableListOf<WorkerExit>()
+        val first = terminalRun(worker, this) { firstExits += it }
+        first.awaitStartupDrain()
+        first.requestStop()
+        val firstExit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+
+        val secondExits = mutableListOf<WorkerExit>()
+        val second = terminalRun(worker, this) { secondExits += it }
+        second.awaitStartupDrain()
+        assertEquals(
+            TerminalCommandOutcome.WorkerUnavailable,
+            first.submitAndAwait(row.clientStanzaId, attempt, DeliveryTerminalKind.ACK),
+        )
+        assertEquals(
+            TerminalCommandOutcome.Committed,
+            second.submitAndAwait(row.clientStanzaId, attempt, DeliveryTerminalKind.ACK),
+        )
+        second.requestStop()
+        val secondExit = (second.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+
+        assertTrue(first.ownership.generation != second.ownership.generation)
+        assertEquals(1, firstExits.size)
+        assertEquals(firstExit, firstExits.single())
+        assertEquals(1, secondExits.size)
+        assertEquals(secondExit, secondExits.single())
+        assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
     }
 
     private fun draft(id: String): QueuedOutboundDraft = QueuedOutboundDraft.create(
@@ -305,5 +405,26 @@ class DeliveryTerminalWorkerTest {
     private companion object {
         const val OWNER = "alice@waddle.test"
         const val SIGNAL_COUNT = 258
+    }
+
+    private fun terminalRun(
+        worker: DeliveryTerminalWorker,
+        scope: CoroutineScope,
+        onExit: suspend (WorkerExit) -> Unit = {},
+    ): DeliveryTerminalWorker.Run = worker.start(
+        scope,
+        WorkerOwnership(
+            SessionLifecycleRef.create(OWNER),
+            WorkerKind.DELIVERY_TERMINAL,
+            WorkerGeneration.random(),
+        ),
+        onExit,
+    )
+
+    private suspend fun assertRequested(run: DeliveryTerminalWorker.Run) {
+        run.requestStop()
+        val outcome = run.awaitExit(1_000)
+        assertTrue(outcome is WorkerAwaitOutcome.Exited)
+        assertEquals(WorkerExitReason.RequestedStop, (outcome as WorkerAwaitOutcome.Exited).exit.reason)
     }
 }

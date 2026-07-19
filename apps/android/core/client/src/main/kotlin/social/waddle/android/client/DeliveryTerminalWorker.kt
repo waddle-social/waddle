@@ -3,11 +3,15 @@ package social.waddle.android.client
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import social.waddle.android.client.OutboundQueue.TerminalEffect
 import social.waddle.android.client.OutboundQueue.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
@@ -16,273 +20,230 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.logging.Level
 import java.util.logging.Logger
 
-/**
- * One serialized record/apply worker per authenticated owner.
- *
- * The ordered native pull lane awaits each command's durable record/apply
- * barrier before polling Rust again. Other message-send paths use the same
- * worker, so both the one-shot signal record and persisted-intent apply use
- * the required bounded retry cadence and then retry every five seconds until
- * success or stale fencing.
- */
+/** Creates isolated terminal workers; each [Run] belongs to one lifecycle generation. */
 internal class DeliveryTerminalWorker(
     private val journal: OutboundQueue,
     private val dispatchEvent: (XmppEvent) -> Unit,
     private val commandCapacity: Int = COMMAND_CAPACITY,
-    private val stopTimeoutMillis: Long = STOP_TIMEOUT_MILLIS,
 ) {
     init {
         require(commandCapacity > 0) { "terminal command capacity must be positive" }
-        require(stopTimeoutMillis > 0) { "terminal stop timeout must be positive" }
     }
 
-    sealed interface StopResult {
-        data object Drained : StopResult
-
-        data class FencedWithPending(
-            val ownerBareJid: String,
-            val pendingCommands: Int,
-        ) : StopResult
+    fun start(
+        scope: CoroutineScope,
+        ownership: WorkerOwnership,
+        onExit: suspend (WorkerExit) -> Unit,
+    ): Run {
+        check(ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
+            "delivery terminal worker requires a terminal ownership"
+        }
+        return Run(journal, dispatchEvent, commandCapacity, ownership, onExit, scope)
     }
 
-    @Volatile
-    private var commands = Channel<TerminalSignal>(commandCapacity)
+    internal class Run internal constructor(
+        private val journal: OutboundQueue,
+        private val dispatchEvent: (XmppEvent) -> Unit,
+        commandCapacity: Int,
+        val ownership: WorkerOwnership,
+        private val onExit: suspend (WorkerExit) -> Unit,
+        scope: CoroutineScope,
+    ) {
+        private val commands = Channel<TerminalSignal>(commandCapacity)
+        private val startupDrain = CompletableDeferred<Unit>()
+        private val exit = CompletableDeferred<WorkerExit>()
+        private val pendingCommands = AtomicInteger()
 
-    @Volatile
-    private var workerJob: Job? = null
+        @Volatile
+        private var stopRequested = false
 
-    @Volatile
-    private var activeOwnerBareJid: String? = null
+        private val job: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
 
-    @Volatile
-    private var startupDrain = CompletableDeferred<Unit>()
+        suspend fun awaitStartupDrain() = startupDrain.await()
 
-    @Volatile
-    private var workerFailure: Throwable? = null
-
-    private val pendingCommands = AtomicInteger()
-
-    fun start(scope: CoroutineScope, ownerBareJid: String) {
-        check(workerJob == null) { "delivery terminal worker already started" }
-        activeOwnerBareJid = ownerBareJid
-        workerFailure = null
-        pendingCommands.set(0)
-        commands = Channel(commandCapacity)
-        startupDrain = CompletableDeferred()
-        val commandStream = commands
-        val barrier = startupDrain
-        workerJob = scope.launch {
+        suspend fun submitAndAwait(
+            clientStanzaId: String,
+            attempt: DeliveryAttemptRef,
+            kind: DeliveryTerminalKind,
+        ): TerminalCommandOutcome {
+            if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || stopRequested) {
+                return TerminalCommandOutcome.WorkerUnavailable
+            }
+            val committed = CompletableDeferred<TerminalCommandOutcome>()
+            val signal = TerminalSignal(clientStanzaId, attempt, kind, committed)
+            pendingCommands.incrementAndGet()
             try {
-                drainPersisted(ownerBareJid)
-                barrier.complete(Unit)
-                for (signal in commandStream) {
-                    try {
-                        check(signal.ownerBareJid == ownerBareJid) {
-                            "terminal command owner changed inside one worker"
-                        }
-                        record(signal)
-                        drainPersisted(ownerBareJid)
-                        signal.committed?.complete(Unit)
-                    } catch (cancellation: CancellationException) {
-                        signal.committed?.cancel(cancellation)
-                        throw cancellation
-                    } catch (failure: Throwable) {
-                        // A malformed command cannot kill the supervised
-                        // owner worker or strand later bounded admissions.
-                        signal.committed?.completeExceptionally(failure)
-                        LOGGER.log(Level.SEVERE, "delivery terminal command failed", failure)
-                    } finally {
-                        pendingCommands.decrementAndGet()
-                    }
+                commands.send(signal)
+            } catch (cancellation: CancellationException) {
+                pendingCommands.decrementAndGet()
+                throw cancellation
+            } catch (_: Throwable) {
+                pendingCommands.decrementAndGet()
+                return TerminalCommandOutcome.WorkerUnavailable
+            }
+            return committed.await()
+        }
+
+        fun requestStop() {
+            stopRequested = true
+            commands.close()
+        }
+
+        suspend fun awaitExit(timeoutMillis: Long): WorkerAwaitOutcome =
+            withTimeoutOrNull(timeoutMillis) { WorkerAwaitOutcome.Exited(exit.await()) }
+                ?: WorkerAwaitOutcome.TimedOut
+
+        fun pendingCommandCount(): Int = pendingCommands.get().coerceAtLeast(0)
+
+        private suspend fun runWorker() {
+            var reason: WorkerExitReason? = null
+            var activeSignal: TerminalSignal? = null
+            try {
+                yield()
+                drainPersisted()
+                startupDrain.complete(Unit)
+                for (signal in commands) {
+                    activeSignal = signal
+                    record(signal)
+                    drainPersisted()
+                    signal.committed.complete(TerminalCommandOutcome.Committed)
+                    pendingCommands.decrementAndGet()
+                    activeSignal = null
                 }
             } catch (cancellation: CancellationException) {
-                barrier.cancel(cancellation)
-                throw cancellation
+                startupDrain.cancel(cancellation)
+                activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
+                if (activeSignal != null) pendingCommands.decrementAndGet()
+                activeSignal = null
+                reason = if (stopRequested) {
+                    WorkerExitReason.RequestedStop
+                } else {
+                    WorkerExitReason.OwnerScopeCancelled
+                }
             } catch (failure: Throwable) {
-                // Defensive last boundary: operation failures are retried
-                // below, but a programming/runtime failure must not cancel
-                // the sibling connection loop under the SupervisorJob.
-                barrier.completeExceptionally(failure)
-                workerFailure = failure
+                startupDrain.completeExceptionally(failure)
+                val cause = WorkerFailureCause.from(failure)
+                activeSignal?.committed?.complete(
+                    TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)),
+                )
+                if (activeSignal != null) pendingCommands.decrementAndGet()
+                activeSignal = null
+                reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "delivery terminal worker stopped", failure)
             } finally {
-                rejectQueuedCommands(commandStream)
-            }
-        }
-    }
-
-    suspend fun awaitStartupDrain(ownerBareJid: String) {
-        if (activeOwnerBareJid != ownerBareJid) return
-        startupDrain.await()
-    }
-
-    fun canRestart(): Boolean =
-        workerJob == null && activeOwnerBareJid == null
-
-    /**
-     * Ordered native-poll barrier: record and apply the callback before the
-     * connection loop asks Rust for another event.
-     */
-    suspend fun submitAndAwait(
-        ownerBareJid: String,
-        clientStanzaId: String,
-        attempt: DeliveryAttemptRef,
-        kind: DeliveryTerminalKind,
-    ) {
-        val committed = CompletableDeferred<Unit>()
-        val signal = TerminalSignal(ownerBareJid, clientStanzaId, attempt, kind, committed)
-        pendingCommands.incrementAndGet()
-        try {
-            commands.send(signal)
-        } catch (failure: Throwable) {
-            pendingCommands.decrementAndGet()
-            throw failure
-        }
-        committed.await()
-    }
-
-    suspend fun stop(ownerBareJid: String): StopResult {
-        if (activeOwnerBareJid != ownerBareJid) return StopResult.Drained
-        activeOwnerBareJid = null
-        commands.close()
-        val job = workerJob
-        val drained = withTimeoutOrNull(stopTimeoutMillis) {
-            job?.join()
-            true
-        } == true
-        if (drained) {
-            val unresolved = maxOf(
-                pendingCommands.get().coerceAtLeast(0),
-                runCatching { journal.terminalIntentCount(ownerBareJid) }.getOrDefault(0),
-                if (workerFailure == null) 0 else 1,
-            )
-            workerJob = null
-            if (unresolved == 0) return StopResult.Drained
-            LOGGER.log(
-                Level.SEVERE,
-                "delivery terminal worker stopped with unresolved work; owner={0}, pending={1}",
-                arrayOf<Any>(ownerBareJid, unresolved),
-            )
-            return StopResult.FencedWithPending(ownerBareJid, unresolved)
-        }
-
-        val pendingAtFence = maxOf(
-            pendingCommands.get().coerceAtLeast(0),
-            runCatching { journal.terminalIntentCount(ownerBareJid) }.getOrDefault(0),
-        )
-        LOGGER.log(
-            Level.SEVERE,
-            "delivery terminal shutdown timed out; owner={0}, pending={1}; journal retained for restart",
-            arrayOf<Any>(ownerBareJid, pendingAtFence),
-        )
-        job?.cancel()
-        val cancelled = withTimeoutOrNull(stopTimeoutMillis) {
-            job?.join()
-            true
-        } == true
-        if (cancelled) workerJob = null
-        return StopResult.FencedWithPending(ownerBareJid, pendingAtFence)
-    }
-
-    private fun rejectQueuedCommands(commandStream: Channel<TerminalSignal>) {
-        while (true) {
-            val signal = commandStream.tryReceive().getOrNull() ?: return
-            signal.committed?.completeExceptionally(
-                IllegalStateException(
-                    "delivery terminal worker fenced before durable command completion",
-                ),
-            )
-            pendingCommands.decrementAndGet()
-        }
-    }
-
-    private suspend fun record(signal: TerminalSignal) {
-        retrying("terminal signal record") {
-            when (
-                journal.recordTerminal(
-                    ownerBareJid = signal.ownerBareJid,
-                    clientStanzaId = signal.clientStanzaId,
-                    attempt = signal.attempt,
-                    kind = signal.kind,
+                rejectQueuedCommands()
+                val exactExit = WorkerExit(
+                    lifecycle = ownership.lifecycle,
+                    generation = ownership.generation,
+                    kind = ownership.kind,
+                    reason = reason ?: if (stopRequested) {
+                        WorkerExitReason.RequestedStop
+                    } else {
+                        WorkerExitReason.UnexpectedReturn
+                    },
                 )
-            ) {
-                is TerminalRecordResult.Recorded,
-                TerminalRecordResult.Stale,
-                -> true
+                val exitCallbackFailure = try {
+                    withContext(NonCancellable) { onExit(exactExit) }
+                    null
+                } catch (failure: Throwable) {
+                    failure
+                }
+                if (exitCallbackFailure == null) {
+                    exit.complete(exactExit)
+                } else {
+                    exit.completeExceptionally(exitCallbackFailure)
+                }
             }
         }
-    }
 
-    private suspend fun drainPersisted(ownerBareJid: String) {
-        while (
-            retryingResult("terminal intent inspection") {
-                journal.hasTerminalIntents(ownerBareJid)
-            }
-        ) {
-            val effect = retryingResult("terminal intent apply") {
-                journal.applyNextTerminal(ownerBareJid)
-            }
-            if (effect != null) applyEffect(effect)
-        }
-    }
-
-    private suspend fun applyEffect(effect: TerminalEffect) {
-        when (effect) {
-            is TerminalEffect.Acknowledged -> dispatchEvent(
-                XmppEvent.DeliveryAcked(
-                    DeliveryOutcomeRef(effect.row.identity, effect.row.source),
-                ),
-            )
-            is TerminalEffect.Failed -> dispatchEvent(
-                XmppEvent.DeliveryFailed(
-                    DeliveryOutcomeRef(effect.row.identity, effect.row.source),
-                ),
-            )
-        }
-    }
-
-    private suspend fun retrying(label: String, operation: suspend () -> Boolean): Boolean {
-        var retryIndex = 0
-        while (true) {
-            try {
-                return operation()
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Throwable) {
-                LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
-                delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
-                if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
+        private fun rejectQueuedCommands() {
+            while (true) {
+                val signal = commands.tryReceive().getOrNull() ?: return
+                signal.committed.complete(TerminalCommandOutcome.WorkerUnavailable)
+                pendingCommands.decrementAndGet()
             }
         }
-    }
 
-    private suspend fun <T> retryingResult(label: String, operation: suspend () -> T): T {
-        var retryIndex = 0
-        while (true) {
-            try {
-                return operation()
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Throwable) {
-                LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
-                delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
-                if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
+        private suspend fun record(signal: TerminalSignal) {
+            retrying("terminal signal record") {
+                when (
+                    journal.recordTerminal(
+                        ownerBareJid = ownership.lifecycle.ownerBareJid,
+                        clientStanzaId = signal.clientStanzaId,
+                        attempt = signal.attempt,
+                        kind = signal.kind,
+                    )
+                ) {
+                    is TerminalRecordResult.Recorded,
+                    TerminalRecordResult.Stale,
+                    -> true
+                }
             }
         }
-    }
 
-    private data class TerminalSignal(
-        val ownerBareJid: String,
-        val clientStanzaId: String,
-        val attempt: DeliveryAttemptRef,
-        val kind: DeliveryTerminalKind,
-        val committed: CompletableDeferred<Unit>?,
-    )
+        private suspend fun drainPersisted() {
+            while (retryingResult("terminal intent inspection") {
+                journal.hasTerminalIntents(ownership.lifecycle.ownerBareJid)
+            }) {
+                val effect = retryingResult("terminal intent apply") {
+                    journal.applyNextTerminal(ownership.lifecycle.ownerBareJid)
+                }
+                if (effect != null) applyEffect(effect)
+            }
+        }
+
+        private fun applyEffect(effect: TerminalEffect) {
+            when (effect) {
+                is TerminalEffect.Acknowledged -> dispatchEvent(
+                    XmppEvent.DeliveryAcked(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
+                )
+                is TerminalEffect.Failed -> dispatchEvent(
+                    XmppEvent.DeliveryFailed(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
+                )
+            }
+        }
+
+        private suspend fun retrying(label: String, operation: suspend () -> Boolean): Boolean {
+            var retryIndex = 0
+            while (true) {
+                try {
+                    return operation()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Throwable) {
+                    LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
+                    delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
+                    if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
+                }
+            }
+        }
+
+        private suspend fun <T> retryingResult(label: String, operation: suspend () -> T): T {
+            var retryIndex = 0
+            while (true) {
+                try {
+                    return operation()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Throwable) {
+                    LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
+                    delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
+                    if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
+                }
+            }
+        }
+
+        private data class TerminalSignal(
+            val clientStanzaId: String,
+            val attempt: DeliveryAttemptRef,
+            val kind: DeliveryTerminalKind,
+            val committed: CompletableDeferred<TerminalCommandOutcome>,
+        )
+    }
 
     private companion object {
         val LOGGER: Logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
         val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
         const val COMMAND_CAPACITY = 256
-        const val STOP_TIMEOUT_MILLIS = 30_000L
     }
 }

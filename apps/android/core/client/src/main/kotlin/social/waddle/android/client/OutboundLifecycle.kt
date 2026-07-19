@@ -22,6 +22,105 @@ internal data class SessionLifecycleRef(
     }
 }
 
+internal enum class WorkerKind {
+    OUTBOUND_DRAIN,
+    DELIVERY_TERMINAL,
+}
+
+@JvmInline
+internal value class WorkerGeneration private constructor(
+    val value: UUID,
+) {
+    companion object {
+        fun random(): WorkerGeneration = WorkerGeneration(UUID.randomUUID())
+    }
+}
+
+internal data class WorkerOwnership(
+    val lifecycle: SessionLifecycleRef,
+    val kind: WorkerKind,
+    val generation: WorkerGeneration,
+)
+
+internal class WorkerFailureCause private constructor(
+    val source: Class<out Throwable>,
+) {
+    companion object {
+        fun from(failure: Throwable): WorkerFailureCause =
+            WorkerFailureCause(failure.javaClass)
+    }
+}
+
+internal sealed interface WorkerExitReason {
+    data object RequestedStop : WorkerExitReason
+    data object OwnerScopeCancelled : WorkerExitReason
+    data object UnexpectedReturn : WorkerExitReason
+
+    data class UnexpectedFailure(
+        val cause: WorkerFailureCause,
+    ) : WorkerExitReason
+}
+
+internal data class WorkerExit(
+    val lifecycle: SessionLifecycleRef,
+    val generation: WorkerGeneration,
+    val kind: WorkerKind,
+    val reason: WorkerExitReason,
+)
+
+internal sealed interface WorkerAwaitOutcome {
+    data class Exited(
+        val exit: WorkerExit,
+    ) : WorkerAwaitOutcome
+
+    data object TimedOut : WorkerAwaitOutcome
+}
+
+internal data class TerminalWorkerFailure(
+    val cause: WorkerFailureCause,
+)
+
+internal sealed interface TerminalCommandOutcome {
+    data object Committed : TerminalCommandOutcome
+    data object WorkerUnavailable : TerminalCommandOutcome
+
+    data class Failed(
+        val failure: TerminalWorkerFailure,
+    ) : TerminalCommandOutcome
+}
+
+internal class TerminalWorkerUnavailableException : IllegalStateException()
+
+internal class TerminalWorkerCommandFailedException(
+    val failure: TerminalWorkerFailure,
+) : IllegalStateException()
+
+internal fun requireTerminalCommitted(outcome: TerminalCommandOutcome) {
+    when (outcome) {
+        TerminalCommandOutcome.Committed -> Unit
+        TerminalCommandOutcome.WorkerUnavailable -> throw TerminalWorkerUnavailableException()
+        is TerminalCommandOutcome.Failed -> throw TerminalWorkerCommandFailedException(outcome.failure)
+    }
+}
+
+internal class OwnerWorkers(
+    val lifecycle: SessionLifecycleRef,
+) {
+    lateinit var terminal: DeliveryTerminalWorker.Run
+        internal set
+    lateinit var drain: OutboundDrainWorker.Run
+        internal set
+
+    private val exits = mutableListOf<WorkerExit>()
+
+    suspend fun recordExit(exit: WorkerExit) {
+        check(exit.lifecycle == lifecycle) { "worker exit belongs to another lifecycle" }
+        synchronized(exits) { exits += exit }
+    }
+
+    fun exits(): List<WorkerExit> = synchronized(exits) { exits.toList() }
+}
+
 @JvmInline
 internal value class ConnectionAttemptHandle private constructor(
     val value: UUID,
@@ -131,6 +230,7 @@ internal sealed interface OutboundAdmissionLease {
     data class OfflineOutbound(
         override val lifecycle: SessionLifecycleRef,
         val source: social.waddle.android.client.prefs.DeliverySource,
+        val attempt: DeliveryAttemptRef?,
         override val token: UUID,
     ) : OutboundAdmissionLease
 

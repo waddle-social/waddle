@@ -42,21 +42,21 @@ internal class OutboundLifecycleCoordinator(
     private val terminalWorker = DeliveryTerminalWorker(journal, dispatchEvent)
     private val phaseOperations = OutboundLifecyclePhaseOperations(
         activeSession,
-        drainWorker,
         journal,
         phaseObserver,
         resume,
     )
     private val finalizationOperations = OutboundLifecycleFinalizationOperations(
         activeSession,
-        drainWorker,
         journal,
         resume,
+        drainWorker,
         terminalWorker,
         transitionTimeoutMillis,
     )
     /** Replaced on every start; old completions cannot affect a new owner. */
     private var retainedOperations: LifecycleOperationRegistry? = null
+    private var ownerWorkers: OwnerWorkers? = null
     private var rotationMutationLease: RotationMutationLease? = null
     private var currentAttempt: AttemptRecord? = null
     private var lastClosedAttempt: AttemptRecord? = null
@@ -76,7 +76,7 @@ internal class OutboundLifecycleCoordinator(
             check(state == OutboundLifecycleState.Stopped) {
                 "outbound lifecycle is not restartable from $state"
             }
-            finalizationOperations.startWorkers(scope, lifecycle)
+            ownerWorkers = finalizationOperations.startWorkers(scope, lifecycle)
             retainedOperations = LifecycleOperationRegistry(lifecycle)
             rotationMutationLease = null
             currentAttempt = null
@@ -97,7 +97,7 @@ internal class OutboundLifecycleCoordinator(
             val bootstrap = phaseOperations.journalActivation(lifecycle)
             attempt = bootstrap.attempt
             recordActivation(lifecycle, handle, bootstrap.attempt)
-            val active = phaseOperations.publishActivation(lifecycle, handle, bootstrap)
+            val active = phaseOperations.publishActivation(requireNotNull(ownerWorkers), lifecycle, handle, bootstrap)
             publishActivation(lifecycle, handle, bootstrap.attempt)
             phaseOperations.attemptPublished()
             return AttemptActivation(lifecycle, handle, bootstrap, active.bridge)
@@ -385,7 +385,7 @@ internal class OutboundLifecycleCoordinator(
             token = lease.token,
             lifecycle = lease.lifecycle,
             attempt = when (lease) {
-                is OutboundAdmissionLease.OfflineOutbound -> null
+                is OutboundAdmissionLease.OfflineOutbound -> lease.attempt
                 is OutboundAdmissionLease.LiveOutbound -> lease.attempt
                 is OutboundAdmissionLease.Terminal -> lease.attempt
             },
@@ -501,6 +501,7 @@ internal class OutboundLifecycleCoordinator(
 
         if (
             !phaseOperations.publishRotation(
+                requireNotNull(ownerWorkers),
                 lease.lifecycle,
                 lease.handle,
                 DeliveryAttemptTransition(lease.old, lease.fresh),
@@ -575,7 +576,12 @@ internal class OutboundLifecycleCoordinator(
                 pendingLeaseCount(),
             )
         }
-        val finalized = finalizationOperations.finalizeAttemptClose(record)
+        val workers = gate.withLock { ownerWorkers }
+            ?: return AttemptCloseOutcome.FencedWithPending(
+                LifecyclePendingComponent.OUTBOUND_DRAIN,
+                1,
+            )
+        val finalized = finalizationOperations.finalizeAttemptClose(workers, record)
         if (finalized != AttemptCloseOutcome.Closed) return finalized
         gate.withLock {
             if (currentAttempt === record && state is OutboundLifecycleState.Closing) {
@@ -633,6 +639,7 @@ internal class OutboundLifecycleCoordinator(
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
+            ownerWorkers = null
             state = OutboundLifecycleState.Stopped
         }
         return LifecycleShutdownOutcome.Stopped
@@ -657,7 +664,8 @@ internal class OutboundLifecycleCoordinator(
             )
         }
         if (!eligible) return false
-        if (!finalizationOperations.terminalRecoveryReady(lifecycle.ownerBareJid)) {
+        val workers = gate.withLock { ownerWorkers } ?: return false
+        if (!finalizationOperations.terminalRecoveryReady(workers, lifecycle.ownerBareJid)) {
             return false
         }
         return gate.withLock {
@@ -673,23 +681,30 @@ internal class OutboundLifecycleCoordinator(
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
+            ownerWorkers = null
             state = OutboundLifecycleState.Stopped
             true
         }
     }
 
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) =
-        finalizationOperations.awaitStartupTerminalDrain(ownerBareJid)
+        finalizationOperations.awaitStartupTerminalDrain(requireNotNull(ownerWorkers), ownerBareJid)
 
     suspend fun submitTerminal(
         ownerBareJid: String,
         clientStanzaId: String,
         attempt: DeliveryAttemptRef,
         kind: DeliveryTerminalKind,
-    ) = finalizationOperations.submitTerminal(ownerBareJid, clientStanzaId, attempt, kind)
+    ): TerminalCommandOutcome = finalizationOperations.submitTerminal(
+        requireNotNull(ownerWorkers),
+        ownerBareJid,
+        clientStanzaId,
+        attempt,
+        kind,
+    )
 
     fun signalDrain(attempt: DeliveryAttemptRef) =
-        finalizationOperations.signalDrain(active(), attempt)
+        finalizationOperations.signalDrain(ownerWorkers, active(), attempt)
 
     private suspend fun stopCurrentOwner(
         lifecycle: SessionLifecycleRef,
@@ -722,9 +737,9 @@ internal class OutboundLifecycleCoordinator(
                 pendingLeaseCount(),
             )
         }
-        return when (
-            val result = finalizationOperations.finalizeOwner(lifecycle, record)
-        ) {
+        val workers = ownerWorkers
+            ?: return pendingLifecycleShutdown(lifecycle, LifecyclePendingComponent.OUTBOUND_DRAIN, 1)
+        return when (val result = finalizationOperations.finalizeOwner(workers, lifecycle, record)) {
             OwnerFinalizationResult.Finalized -> null
             is OwnerFinalizationResult.Pending ->
                 pendingLifecycleShutdown(lifecycle, result.component, result.count)
@@ -741,7 +756,12 @@ internal class OutboundLifecycleCoordinator(
         }
         transitionToClosing(lifecycle, handle, knownAttempt)
         val completed =
-            finalizationOperations.compensateActivation(lifecycle, handle, knownAttempt)
+            finalizationOperations.compensateActivation(
+                requireNotNull(ownerWorkers),
+                lifecycle,
+                handle,
+                knownAttempt,
+            )
         if (completed) {
             gate.withLock {
                 currentAttempt = null
@@ -763,7 +783,12 @@ internal class OutboundLifecycleCoordinator(
     ) = withContext(NonCancellable) {
         transitionToClosing(lifecycle, handle, transition.fresh)
         val completed =
-            finalizationOperations.compensateHandoff(lifecycle, handle, transition)
+            finalizationOperations.compensateHandoff(
+                requireNotNull(ownerWorkers),
+                lifecycle,
+                handle,
+                transition,
+            )
         if (!completed) {
             throw LifecycleTransitionException(
                 lifecycle,

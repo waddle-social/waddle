@@ -24,7 +24,6 @@ internal sealed interface RotationJournalOutcome {
  */
 internal class OutboundLifecyclePhaseOperations(
     private val activeSession: ActiveSession,
-    private val drainWorker: OutboundDrainWorker,
     private val journal: OutboundQueue,
     private val phaseObserver: OutboundLifecyclePhaseObserver,
     private val resume: ResumePersistence,
@@ -39,13 +38,14 @@ internal class OutboundLifecyclePhaseOperations(
     }
 
     suspend fun publishActivation(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         bootstrap: OutboundQueue.AttemptBootstrap,
     ): ActiveSession.Attempt {
         resume.registerAttempt(bootstrap.attempt, bootstrap.smVersion)
         phaseObserver.after(OutboundLifecyclePhase.RESUME_REGISTERED)
-        check(drainWorker.bind(lifecycle, handle, bootstrap.attempt)) {
+        check(workers.drain.bind(handle, bootstrap.attempt)) {
             "outbound drain worker rejected attempt binding"
         }
         phaseObserver.after(OutboundLifecyclePhase.DRAIN_BOUND)
@@ -74,6 +74,7 @@ internal class OutboundLifecyclePhaseOperations(
     }
 
     suspend fun publishRotation(
+        workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         transition: DeliveryAttemptTransition,
@@ -81,7 +82,7 @@ internal class OutboundLifecyclePhaseOperations(
     ): Boolean {
         if (!resume.acceptResumeTransition(transition, smVersion)) return false
         phaseObserver.after(OutboundLifecyclePhase.ROTATION_RESUME_REGISTERED)
-        if (!drainWorker.bind(lifecycle, handle, transition.fresh)) return false
+        if (!workers.drain.bind(handle, transition.fresh)) return false
         phaseObserver.after(OutboundLifecyclePhase.ROTATION_DRAIN_BOUND)
         if (!activeSession.acceptResumeTransition(transition)) return false
         phaseObserver.after(OutboundLifecyclePhase.ROTATION_ACTIVE_SESSION_PUBLISHED)

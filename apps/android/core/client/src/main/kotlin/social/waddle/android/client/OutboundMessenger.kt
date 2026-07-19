@@ -275,11 +275,13 @@ internal class OutboundMessenger(
             }
         }
 
-        lifecycle.submitTerminal(
-            ownerBareJid = row.ownerBareJid,
-            clientStanzaId = row.clientStanzaId,
-            attempt = ownership.attempt,
-            kind = DeliveryTerminalKind.NONRETRYABLE_DELETE,
+        requireTerminalCommitted(
+            lifecycle.submitTerminal(
+                ownerBareJid = row.ownerBareJid,
+                clientStanzaId = row.clientStanzaId,
+                attempt = ownership.attempt,
+                kind = DeliveryTerminalKind.NONRETRYABLE_DELETE,
+            ),
         )
         drainOutboundQueue()
         return SendResult(
@@ -330,11 +332,13 @@ internal class OutboundMessenger(
                     when (val outcome = sendMessage(claimed, lease.client)) {
                         is WaddleSendMessageOutcome.Sent -> {
                             if (outcome.stanzaId != claimed.clientStanzaId) {
-                                lifecycle.submitTerminal(
-                                    sessionLifecycle.ownerBareJid,
-                                    claimed.clientStanzaId,
-                                    ownership.attempt,
-                                    DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                                requireTerminalCommitted(
+                                    lifecycle.submitTerminal(
+                                        sessionLifecycle.ownerBareJid,
+                                        claimed.clientStanzaId,
+                                        ownership.attempt,
+                                        DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                                    ),
                                 )
                             }
                         }
@@ -345,11 +349,13 @@ internal class OutboundMessenger(
                             return@withLock
                         }
                         else -> {
-                            lifecycle.submitTerminal(
-                                sessionLifecycle.ownerBareJid,
-                                claimed.clientStanzaId,
-                                ownership.attempt,
-                                DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                            requireTerminalCommitted(
+                                lifecycle.submitTerminal(
+                                    sessionLifecycle.ownerBareJid,
+                                    claimed.clientStanzaId,
+                                    ownership.attempt,
+                                    DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                                ),
                             )
                         }
                     }
@@ -404,11 +410,13 @@ internal class OutboundMessenger(
     ): Boolean {
         val lease = lifecycle.acquireTerminal(attempt) ?: return false
         return try {
-            lifecycle.submitTerminal(
-                attempt.ownerBareJid,
-                clientStanzaId,
-                attempt,
-                kind,
+            requireTerminalCommitted(
+                lifecycle.submitTerminal(
+                    attempt.ownerBareJid,
+                    clientStanzaId,
+                    attempt,
+                    kind,
+                ),
             )
             true
         } finally {
