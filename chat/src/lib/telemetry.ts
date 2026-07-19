@@ -297,7 +297,10 @@ export function handleWindowErrorEvent(event: { error?: unknown; message?: unkno
 }
 
 function isBenignResizeObserverError(error: unknown): boolean {
-  return error instanceof Error && BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES.has(error.message);
+  // Same normalization as reportGlobalError: browsers may surface the
+  // window-error payload as a bare string rather than an Error.
+  const message = error instanceof Error ? error.message : String(error);
+  return BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES.has(message);
 }
 
 /** Exported for tests and for {@link installGlobalErrorTelemetry}. */

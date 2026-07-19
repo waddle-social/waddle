@@ -68,6 +68,14 @@ describe("handleWindowErrorEvent", () => {
     expect(stub.errors).toHaveLength(0);
   });
 
+  test("drops benign ResizeObserver messages carried as a string error", () => {
+    handleWindowErrorEvent({
+      error: "ResizeObserver loop limit exceeded",
+    });
+
+    expect(stub.errors).toHaveLength(0);
+  });
+
   test("pushes a sanitized window-error to Faro", () => {
     handleWindowErrorEvent({
       error: new Error("stream broke for alice@example.com/desktop"),
