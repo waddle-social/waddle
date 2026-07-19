@@ -26,6 +26,8 @@ static METER_PROVIDER: std::sync::OnceLock<SdkMeterProvider> = std::sync::OnceLo
 /// The global logger provider, stored for shutdown.
 static LOGGER_PROVIDER: std::sync::OnceLock<SdkLoggerProvider> = std::sync::OnceLock::new();
 
+const METRICS_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Build the OpenTelemetry resource with service information.
 fn build_resource() -> Resource {
     let service_name =
@@ -419,6 +421,18 @@ pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Local telemetry initialized with JSON logging (no OTLP export)");
 
     Ok(())
+}
+
+/// Flush metrics recorded during graceful drain before control returns to `main`.
+///
+/// Local telemetry has no meter provider, so this is a no-op when [`init_local`]
+/// was used.
+pub async fn flush_metrics_before_exit() {
+    let Some(provider) = METER_PROVIDER.get() else {
+        return;
+    };
+
+    let _ = waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await;
 }
 
 /// Shutdown telemetry, flushing any pending spans and metrics.

@@ -6,6 +6,20 @@ use super::attributes::{
 };
 use super::test_support;
 use super::validate_metric_name;
+use std::time::Duration;
+
+#[tokio::test]
+async fn bounded_flush_exports_shutdown_tail_counter() {
+    let guard = test_support::acquire().await;
+
+    super::reliability::increment_sm_drain_timeout();
+
+    assert!(
+        super::force_flush_bounded(&guard.provider(), Duration::from_secs(1)).await,
+        "in-memory meter provider must flush within the bound"
+    );
+    assert_eq!(guard.counter_sum("xmpp.sm.drain_timeout", &[]), Some(1));
+}
 
 #[tokio::test]
 async fn counter_is_created_at_first_increment_only() {

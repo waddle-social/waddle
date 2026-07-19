@@ -76,6 +76,34 @@ pub fn meter() -> opentelemetry::metrics::Meter {
     opentelemetry::global::meter("waddle")
 }
 
+/// Force-flush a meter provider without blocking the async runtime or
+/// waiting longer than `timeout` for the SDK's synchronous flush.
+///
+/// Returns `true` only when the provider reports a successful flush.
+pub async fn force_flush_bounded(
+    provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    timeout: std::time::Duration,
+) -> bool {
+    let provider = provider.clone();
+    let flush = tokio::task::spawn_blocking(move || provider.force_flush());
+
+    match tokio::time::timeout(timeout, flush).await {
+        Ok(Ok(Ok(()))) => true,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(%error, "Failed to force-flush OpenTelemetry metrics");
+            false
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "OpenTelemetry metrics flush task failed");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Timed out force-flushing OpenTelemetry metrics");
+            false
+        }
+    }
+}
+
 /// Compile-time metric-name validation: dot.case, lowercase ascii
 /// segments that start with a letter, digits and `_` allowed within a
 /// segment, and no Prometheus-style `_total` suffix (the exporter adds

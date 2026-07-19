@@ -68,6 +68,11 @@ pub struct MetricsTestGuard {
 }
 
 impl MetricsTestGuard {
+    /// Clone the process-wide provider for testing provider lifecycle helpers.
+    pub fn provider(&self) -> SdkMeterProvider {
+        pipeline().provider.clone()
+    }
+
     /// Flush and return every batch exported since the guard was
     /// acquired (delta temporality: values are per-flush deltas).
     pub fn exported(&self) -> Vec<ResourceMetrics> {

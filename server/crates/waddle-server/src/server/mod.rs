@@ -356,6 +356,16 @@ pub async fn start_with_config(
         )
         .await;
 
+    // Issue #1388: both drains just awaited above (SM/Q6 via `http_handle`,
+    // clustering per-entity via `clustering_shutdown`) increment counters and
+    // histograms — including the tail-end-only `xmpp.sm.drain_timeout` and
+    // `waddle.clustering.drain_duration_ms` — right up to the moment they
+    // return. Those increments have no guarantee of a periodic OTLP export
+    // tick before process exit, so force-flush the meter provider here, now
+    // that every end-of-drain increment has already happened and before
+    // anything below can shorten the remaining time budget.
+    crate::telemetry::flush_metrics_before_exit().await;
+
     // Tear down the shutdown lifecycle task so we don't dangle.
     // If HTTP exited on its own (error path) before any signal
     // arrived, `shutdown_handle.await` would block on
