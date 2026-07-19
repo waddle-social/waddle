@@ -14,10 +14,15 @@ and preserves links and history.
 - **Every main push** touching `dashboards/**` ensures the **Waddle** Grafana
   folder exists and posts every dashboard to `/api/dashboards/db` (the
   `dashboardsSync` task in the `default` pipeline). Stable UIDs and
-  `overwrite: true` make the sync idempotent.
+  `overwrite: true` make the sync idempotent. The sync then prunes any
+  dashboard left in the Waddle folder whose uid no longer appears in
+  `dashboards/*.json`, so deleting (or re-uid-ing) a board here removes the
+  old one from Grafana on the next push.
 - A production rollout also posts an organization annotation tagged `deploy`
-  and `waddle` after the GitOps artifact push. The overview dashboard queries
-  the `deploy` tag and renders those events as vertical markers.
+  and `waddle` after the GitOps artifact push (`deployAnnotation` depends on
+  both push tasks, so a failed push never gets a deploy marker). The overview
+  dashboard queries the `deploy` tag and renders those events as vertical
+  markers.
 
 ## Dashboard status
 

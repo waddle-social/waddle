@@ -170,7 +170,9 @@ schema.#Project & {
 		// Record the GitOps artifact push as a Grafana organization
 		// annotation. Flux reconciliation is asynchronous, so this marks the
 		// rollout handoff rather than claiming the pods are already ready.
+		// Sequenced after both pushes so a failed push never gets a marker.
 		deployAnnotation: schema.#Task & {
+			dependsOn: [helmPush, gitopsPush]
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail
@@ -301,6 +303,30 @@ schema.#Project & {
 					      ;;
 					  esac
 					  echo "Synced ${dashboard_file} to Grafana folder Waddle."
+					done
+					# The repo is the single source of truth: any dashboard left in
+					# the Waddle folder whose uid no longer exists in
+					# dashboards/*.json was deleted or renamed in source control and
+					# is pruned.
+					local_uids="$(jq -r '.uid' dashboards/*.json)"
+					remote_uids="$(curl --fail-with-body -sS \
+					  "${grafana_url}/api/search?type=dash-db&folderUIDs=${folder_uid}&limit=1000" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					  | jq -r '.[].uid')"
+					for remote_uid in ${remote_uids}; do
+					  if ! grep -qx "${remote_uid}" <<< "${local_uids}"; then
+					    delete_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					      -X DELETE "${grafana_url}/api/dashboards/uid/${remote_uid}" \
+					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}")"
+					    case "${delete_status}" in
+					      2??) echo "Pruned dashboard ${remote_uid} (no longer in source control)." ;;
+					      *)
+					        echo "Failed to prune dashboard ${remote_uid} with HTTP ${delete_status}:" >&2
+					        cat "${folder_response}" >&2
+					        exit 1
+					        ;;
+					    esac
+					  fi
 					done
 					echo "All dashboards synced to Grafana Cloud."
 				"""#]
