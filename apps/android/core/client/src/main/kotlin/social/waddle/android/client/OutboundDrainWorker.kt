@@ -14,6 +14,7 @@ import kotlinx.coroutines.yield
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import java.util.logging.Level
 import java.util.logging.Logger
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Creates isolated outbound-drain workers; lifecycle state is held only by [Run]. */
 internal class OutboundDrainWorker(
@@ -23,12 +24,6 @@ internal class OutboundDrainWorker(
         DeliveryAttemptRef,
     ) -> Unit,
 ) {
-    fun start(
-        scope: CoroutineScope,
-        ownership: WorkerOwnership,
-        onExit: suspend (WorkerExit) -> Unit,
-    ): Run = start(scope, ownership, {}, onExit)
-
     fun start(
         scope: CoroutineScope,
         ownership: WorkerOwnership,
@@ -55,6 +50,7 @@ internal class OutboundDrainWorker(
         private val signals = Channel<DrainWakeSignal>(Channel.CONFLATED)
         private val ready = CompletableDeferred<Unit>()
         private val exit = CompletableDeferred<WorkerExit>()
+        private val unavailable = AtomicBoolean()
 
         @Volatile
         private var binding: AttemptBinding? = null
@@ -65,7 +61,7 @@ internal class OutboundDrainWorker(
         private val job: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
 
         fun bind(handle: ConnectionAttemptHandle, attempt: DeliveryAttemptRef): Boolean {
-            if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || stopRequested) return false
+            if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || unavailable.get()) return false
             binding = AttemptBinding(handle, attempt)
             return true
         }
@@ -77,12 +73,13 @@ internal class OutboundDrainWorker(
         fun boundAttempt(): DeliveryAttemptRef? = binding?.attempt
 
         fun signal(handle: ConnectionAttemptHandle, attempt: DeliveryAttemptRef) {
-            if (binding != AttemptBinding(handle, attempt) || stopRequested) return
+            if (binding != AttemptBinding(handle, attempt) || unavailable.get()) return
             signals.trySend(DrainWakeSignal(handle, attempt))
         }
 
         fun requestStop() {
             stopRequested = true
+            unavailable.set(true)
             signals.close()
         }
 
@@ -114,6 +111,8 @@ internal class OutboundDrainWorker(
                 reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "outbound predecessor drain worker stopped", failure)
             } finally {
+                unavailable.set(true)
+                signals.close()
                 val exactExit = WorkerExit(
                     lifecycle = ownership.lifecycle,
                     generation = ownership.generation,

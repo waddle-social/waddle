@@ -17,6 +17,7 @@ import social.waddle.android.client.OutboundQueue.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.logging.Level
 import java.util.logging.Logger
 
@@ -29,12 +30,6 @@ internal class DeliveryTerminalWorker(
     init {
         require(commandCapacity > 0) { "terminal command capacity must be positive" }
     }
-
-    fun start(
-        scope: CoroutineScope,
-        ownership: WorkerOwnership,
-        onExit: suspend (WorkerExit) -> Unit,
-    ): Run = start(scope, ownership, {}, onExit)
 
     fun start(
         scope: CoroutineScope,
@@ -62,6 +57,7 @@ internal class DeliveryTerminalWorker(
         private val startupDrain = CompletableDeferred<Unit>()
         private val exit = CompletableDeferred<WorkerExit>()
         private val pendingCommands = AtomicInteger()
+        private val unavailable = AtomicBoolean()
 
         @Volatile
         private var stopRequested = false
@@ -77,7 +73,7 @@ internal class DeliveryTerminalWorker(
             attempt: DeliveryAttemptRef,
             kind: DeliveryTerminalKind,
         ): TerminalCommandOutcome {
-            if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || stopRequested) {
+            if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || unavailable.get()) {
                 return TerminalCommandOutcome.WorkerUnavailable
             }
             val committed = CompletableDeferred<TerminalCommandOutcome>()
@@ -97,6 +93,7 @@ internal class DeliveryTerminalWorker(
 
         fun requestStop() {
             stopRequested = true
+            unavailable.set(true)
             commands.close()
         }
 
@@ -146,6 +143,10 @@ internal class DeliveryTerminalWorker(
                 reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "delivery terminal worker stopped", failure)
             } finally {
+                // Closing admission precedes callback fencing: a capability
+                // retained before the callback can never wait on a dead run.
+                unavailable.set(true)
+                commands.close()
                 rejectQueuedCommands()
                 val exactExit = WorkerExit(
                     lifecycle = ownership.lifecycle,

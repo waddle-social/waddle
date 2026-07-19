@@ -61,11 +61,15 @@ internal class AttemptRecord(
     val clientClosed = CompletableDeferred<Boolean>()
 }
 
-internal data class OperationCapability(
+internal class OperationCapability(
     val lifecycle: SessionLifecycleRef,
     val attempt: DeliveryAttemptRef?,
     val operationId: UUID,
-)
+) {
+    /** Registry-private mutable lease state; capabilities are never value tokens. */
+    internal var registryIdentity: Any? = null
+    internal var released: Boolean = false
+}
 
 /**
  * A coordinator creates one registry for one lifecycle only. Consequently a
@@ -78,6 +82,7 @@ internal class LifecycleOperationRegistry(
     private val lifecycle: SessionLifecycleRef,
 ) {
     private var admissionsOpen = true
+    private val identity = Any()
     private val retained = mutableMapOf<UUID, OperationCapability>()
     private var emptyWaiter: CompletableDeferred<Unit>? = null
     private var retentionChanged: CompletableDeferred<Unit>? = null
@@ -85,15 +90,22 @@ internal class LifecycleOperationRegistry(
     fun retain(capability: OperationCapability): Boolean {
         if (!admissionsOpen) return false
         if (capability.lifecycle != lifecycle) return false
+        if (capability.registryIdentity != null || retained.containsKey(capability.operationId)) return false
+        capability.registryIdentity = identity
         retained[capability.operationId] = capability
         return true
     }
 
     fun release(capability: OperationCapability): LifecycleReleaseOutcome {
         if (capability.lifecycle != lifecycle) return LifecycleReleaseOutcome.NotOwned
-        if (retained[capability.operationId] == null) return LifecycleReleaseOutcome.AlreadyReleased
-        if (retained[capability.operationId] != capability) return LifecycleReleaseOutcome.NotOwned
+        if (capability.registryIdentity !== identity) return LifecycleReleaseOutcome.NotOwned
+        if (capability.released) return LifecycleReleaseOutcome.AlreadyReleased
+        if (retained[capability.operationId] == null) {
+            return LifecycleReleaseOutcome.NotOwned
+        }
+        if (retained[capability.operationId] !== capability) return LifecycleReleaseOutcome.NotOwned
         retained.remove(capability.operationId)
+        capability.released = true
         retentionChanged?.complete(Unit)
         retentionChanged = null
         if (retained.isEmpty()) {
@@ -101,6 +113,18 @@ internal class LifecycleOperationRegistry(
             emptyWaiter = null
         }
         return LifecycleReleaseOutcome.Released
+    }
+
+    fun releaseOwned(
+        lifecycle: SessionLifecycleRef,
+        attempt: DeliveryAttemptRef?,
+        operationId: UUID,
+    ): LifecycleReleaseOutcome {
+        val capability = retained[operationId] ?: return LifecycleReleaseOutcome.NotOwned
+        if (capability.lifecycle != lifecycle || capability.attempt != attempt) {
+            return LifecycleReleaseOutcome.NotOwned
+        }
+        return release(capability)
     }
 
     fun closeAdmissions() {

@@ -19,7 +19,7 @@ class OutboundDrainWorkerTest {
     fun `requested stop emits one matching exit`() = runTest {
         val exits = mutableListOf<WorkerExit>()
         val ownership = ownership()
-        val run = OutboundDrainWorker { _, _, _ -> }.start(this, ownership) { exits += it }
+        val run = OutboundDrainWorker { _, _, _ -> }.start(this, ownership, {}, { exits += it })
 
         runCurrent()
         run.requestStop()
@@ -38,7 +38,7 @@ class OutboundDrainWorkerTest {
         val scope = CoroutineScope(coroutineContext + ownerJob)
         val ownership = ownership()
         val exits = mutableListOf<WorkerExit>()
-        val run = OutboundDrainWorker { _, _, _ -> }.start(scope, ownership) { exits += it }
+        val run = OutboundDrainWorker { _, _, _ -> }.start(scope, ownership, {}, { exits += it })
 
         ownerJob.cancel()
         runCurrent()
@@ -55,7 +55,7 @@ class OutboundDrainWorkerTest {
     fun `fatal drain dependency failure exits with exact ownership`() = runTest {
         val ownership = ownership()
         val run = OutboundDrainWorker { _, _, _ -> error("drain exploded") }
-            .start(this, ownership) { }
+            .start(this, ownership, {}, { })
         val handle = ConnectionAttemptHandle.random()
         val attempt = attempt()
         assertTrue(run.bind(handle, attempt))
@@ -81,7 +81,7 @@ class OutboundDrainWorkerTest {
         val firstOwnership = WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random())
         val secondOwnership = WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random())
         val firstExits = mutableListOf<WorkerExit>()
-        val first = worker.start(this, firstOwnership) { firstExits += it }
+        val first = worker.start(this, firstOwnership, {}, { firstExits += it })
         val firstHandle = ConnectionAttemptHandle.random()
         val attempt = attempt()
         assertTrue(first.bind(firstHandle, attempt))
@@ -92,7 +92,7 @@ class OutboundDrainWorkerTest {
         )
 
         val secondExits = mutableListOf<WorkerExit>()
-        val second = worker.start(this, secondOwnership) { secondExits += it }
+        val second = worker.start(this, secondOwnership, {}, { secondExits += it })
         val secondHandle = ConnectionAttemptHandle.random()
         assertTrue(second.bind(secondHandle, attempt))
         first.signal(firstHandle, attempt)

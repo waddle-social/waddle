@@ -124,14 +124,38 @@ internal data class WorkerRecoveryClaim(
 internal sealed interface WorkerRecoveryOutcome {
     data object Recovered : WorkerRecoveryOutcome
     data object NotFenced : WorkerRecoveryOutcome
-    data object OwnershipMismatch : WorkerRecoveryOutcome
-    data object RecoveryInProgress : WorkerRecoveryOutcome
-    data object RetainedOperationsPending : WorkerRecoveryOutcome
-    data object WorkerExitPending : WorkerRecoveryOutcome
+    data class OwnershipMismatch(val lifecycle: SessionLifecycleRef) : WorkerRecoveryOutcome
+    data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryOutcome
+    data class RetainedOperationsPending(
+        val lifecycle: SessionLifecycleRef,
+        val count: Int,
+    ) : WorkerRecoveryOutcome
+    data class WorkerExitPending(
+        val lifecycle: SessionLifecycleRef,
+        val ownership: WorkerOwnership,
+    ) : WorkerRecoveryOutcome
     data class DurableCleanupPending(
         val component: LifecyclePendingComponent,
         val pending: Int,
     ) : WorkerRecoveryOutcome
+}
+
+internal class WorkerRecoveryException(
+    val outcome: WorkerRecoveryOutcome,
+) : IllegalStateException()
+
+internal sealed interface WorkerRecoveryClaimDecision {
+    data class Granted(
+        val claim: WorkerRecoveryClaim,
+        val workers: OwnerWorkers,
+    ) : WorkerRecoveryClaimDecision
+    data object NotFenced : WorkerRecoveryClaimDecision
+    data class OwnershipMismatch(val lifecycle: SessionLifecycleRef) : WorkerRecoveryClaimDecision
+    data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryClaimDecision
+    data class AwaitingExit(
+        val lifecycle: SessionLifecycleRef,
+        val ownership: WorkerOwnership,
+    ) : WorkerRecoveryClaimDecision
 }
 
 internal class OwnerWorkers(
@@ -270,6 +294,11 @@ internal enum class LifecyclePendingComponent {
 
 internal sealed interface LifecycleShutdownOutcome {
     data object Stopped : LifecycleShutdownOutcome
+
+    data class WorkerFenced(
+        val lifecycle: SessionLifecycleRef,
+        val cause: LifecycleFenceCause,
+    ) : LifecycleShutdownOutcome
 
     data class FencedWithPending(
         val lifecycle: SessionLifecycleRef,

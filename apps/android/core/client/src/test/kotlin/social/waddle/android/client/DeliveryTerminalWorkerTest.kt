@@ -421,6 +421,7 @@ class DeliveryTerminalWorkerTest {
             WorkerKind.DELIVERY_TERMINAL,
             WorkerGeneration.random(),
         ),
+        {},
         onExit,
     )
 

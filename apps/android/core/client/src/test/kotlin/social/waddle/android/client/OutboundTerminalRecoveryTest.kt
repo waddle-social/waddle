@@ -65,7 +65,7 @@ class OutboundTerminalRecoveryTest {
                 "ordinary restart must remain fenced while terminal intents are pending",
                 runCatching { harness.startReplacementLifecycle() }.isFailure,
             )
-            assertEquals(WorkerRecoveryOutcome.WorkerExitPending, harness.recoverFencedWorkers(fencedLifecycle))
+            assertTrue(harness.recoverFencedWorkers(fencedLifecycle) is WorkerRecoveryOutcome.WorkerExitPending)
             advanceTimeBy(30_000)
             runCurrent()
             assertEquals(WorkerRecoveryOutcome.Recovered, harness.recoverFencedWorkers(fencedLifecycle))

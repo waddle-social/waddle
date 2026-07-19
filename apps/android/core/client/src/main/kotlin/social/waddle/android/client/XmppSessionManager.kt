@@ -447,6 +447,13 @@ class XmppSessionManager(
                     outcome.pending,
                 )
             }
+            is LifecycleShutdownOutcome.WorkerFenced ->
+                throw WorkerRecoveryException(
+                    WorkerRecoveryOutcome.WorkerExitPending(outcome.lifecycle, when (val cause = outcome.cause) {
+                        is LifecycleFenceCause.AwaitingRequestedWorkerExit -> cause.ownership
+                        is LifecycleFenceCause.WorkerExited -> cause.fence.exit.ownership()
+                    }),
+                )
             LifecycleShutdownOutcome.AttemptClosed,
             LifecycleShutdownOutcome.Stale,
             -> error("current owner shutdown lost lifecycle authority")
@@ -459,7 +466,12 @@ class XmppSessionManager(
         when (val recovered = messenger.recoverFencedWorkers(lifecycle)) {
             WorkerRecoveryOutcome.NotFenced -> return false
             WorkerRecoveryOutcome.Recovered -> Unit
-            else -> throw IllegalStateException("fenced worker lifecycle remains unavailable: $recovered")
+            is WorkerRecoveryOutcome.DurableCleanupPending,
+            is WorkerRecoveryOutcome.OwnershipMismatch,
+            is WorkerRecoveryOutcome.RecoveryInProgress,
+            is WorkerRecoveryOutcome.RetainedOperationsPending,
+            is WorkerRecoveryOutcome.WorkerExitPending,
+            -> throw WorkerRecoveryException(recovered)
         }
         sessionLoopJob = null
         sessionLifecycle = null
