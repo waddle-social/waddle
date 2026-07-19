@@ -522,6 +522,10 @@ mod tests {
     /// to GET instead of replaying the POST (which 307 would).
     #[tokio::test]
     async fn verify_submit_redirects_to_idp_with_303_see_other() {
+        // The happy path emits waddle.auth.success; hold the global
+        // telemetry guard so guarded export assertions elsewhere don't
+        // race this emission.
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let mut server_config = ServerConfig::test_homeserver();
         server_config.auth.providers = vec![test_oauth2_provider()];
         let (auth_state, _actor) = create_test_auth_state(&server_config).await;
