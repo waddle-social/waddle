@@ -42,11 +42,9 @@ pub fn is_ping(iq: &Iq) -> bool {
 /// exact full JID, and the IQ id must be non-empty. Payload conformance is
 /// delegated to [`is_ping`].
 pub fn is_ping_from_server_to_full_jid(iq: &Iq, recipient: &FullJid) -> bool {
-    let expected_from: Jid = recipient
-        .domain()
-        .as_str()
-        .parse()
-        .expect("a FullJid domain is always a valid domain JID");
+    let Ok(expected_from) = recipient.domain().as_str().parse::<Jid>() else {
+        return false;
+    };
     let expected_to = Jid::from(recipient.clone());
 
     is_ping(iq)
