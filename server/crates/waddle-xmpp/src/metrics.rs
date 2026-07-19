@@ -111,7 +111,9 @@ fn ensure_pod_gauges() {
             meter()
                 .i64_observable_gauge("xmpp.muc.rooms.active")
                 .with_description("Current number of active MUC rooms")
-                .with_unit("room")
+                // UCUM annotation (dropped by name normalization → the
+                // backend series is `xmpp_muc_rooms_active`; #1330/#1424).
+                .with_unit("{room}")
                 .with_callback(|observer| {
                     observer.observe(MUC_ROOMS_ACTIVE.load(Ordering::Relaxed), &[]);
                 })

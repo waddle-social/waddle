@@ -64,7 +64,8 @@ or quiet them when the fixes land.
 
 ## Legacy-name aliases (#1330 contract phase)
 
-`mimir/waddle-reliability-aliases.yaml` records every retired
+The `waddle-aliases-*` groups in `mimir/waddle-reliability.yaml`
+record every retired
 `waddle_*` text-family name from its OTel successor's translated
 series (`xmpp_*_total`, `waddle_messages_delivered_total`,
 `xmpp_connections_active`), so dashboards and the alert rules above
