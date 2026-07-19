@@ -360,9 +360,19 @@ pub(super) fn parse_countable_stanza(frame: &str) -> Option<Stanza> {
         return None;
     };
     match element.name() {
-        "message" => xmpp_parsers::message::Message::try_from(element)
-            .ok()
-            .map(Stanza::Message),
+        "message" => {
+            let stanza_ns = element.ns().to_string();
+            let thread_parent = waddle_xmpp_core::parser_utils::extract_thread_parent(&element);
+            let mut message = xmpp_parsers::message::Message::try_from(element).ok()?;
+            if let Some(parent) = thread_parent {
+                waddle_xmpp_core::parser_utils::reattach_thread_parent(
+                    &mut message,
+                    parent,
+                    &stanza_ns,
+                );
+            }
+            Some(Stanza::Message(message))
+        }
         "iq" => xmpp_parsers::iq::Iq::try_from(element)
             .ok()
             .map(|iq| Stanza::Iq(Box::new(iq))),

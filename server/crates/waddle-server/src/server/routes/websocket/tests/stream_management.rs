@@ -6,7 +6,7 @@ use super::super::{
     interpret_loop::build_interpret_deps,
     replay::drive_interpret_loop,
     state::WsConnState,
-    stream_management::is_countable_stanza,
+    stream_management::{is_countable_stanza, parse_countable_stanza},
     transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
 };
 use super::{
@@ -307,6 +307,39 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
     // Malformed XML just doesn't count — no panic, no false positive.
     assert!(!is_countable_stanza("not-xml-at-all"));
     assert!(!is_countable_stanza(""));
+}
+
+#[test]
+fn parse_countable_stanza_preserves_thread_parent_for_replay() {
+    let thread = waddle_xmpp_core::xep0201::ThreadInfo::child(
+        waddle_xmpp_core::mam::ThreadId::new("child-thread".to_owned())
+            .expect("non-empty child thread id"),
+        waddle_xmpp_core::mam::ThreadId::new("parent-thread".to_owned())
+            .expect("non-empty parent thread id"),
+    );
+    let frame = element_to_xml(
+        Element::builder("message", waddle_xmpp_core::xep0201::CLIENT_STANZA_NS)
+            .append(waddle_xmpp_core::xep0201::build_thread_element(
+                &thread,
+                waddle_xmpp_core::xep0201::CLIENT_STANZA_NS,
+            ))
+            .build(),
+    );
+
+    let stanza = parse_countable_stanza(&frame).expect("typed countable message");
+    let Stanza::Message(message) = &stanza else {
+        panic!("countable message parsed as another stanza kind");
+    };
+    assert_eq!(
+        waddle_xmpp_core::xep0201::thread_info_from_message(message),
+        Some(thread.clone())
+    );
+
+    let replay = Element::from_str(&stanza_to_xml(&stanza)).expect("serialized replay stanza");
+    assert_eq!(
+        waddle_xmpp_core::xep0201::parse_thread_info(&replay),
+        Some(thread)
+    );
 }
 
 #[tokio::test]
