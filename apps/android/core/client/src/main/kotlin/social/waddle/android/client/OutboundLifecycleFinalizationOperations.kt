@@ -4,6 +4,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
+import java.util.logging.Level
+import java.util.logging.Logger
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliveryTerminalKind
@@ -16,7 +19,74 @@ internal sealed interface OwnerFinalizationResult {
     data class Pending(
         val component: LifecyclePendingComponent,
         val count: Int,
+        val operation: DurableCleanupOperation = DurableCleanupOperation.JOURNAL_INSPECTION,
+        val attempt: DeliveryAttemptRef? = null,
     ) : OwnerFinalizationResult
+
+    data class DurableCleanupFailed(
+        val component: LifecyclePendingComponent,
+        val count: Int,
+        val operation: DurableCleanupOperation,
+        val cause: DurableCleanupFailureCause,
+        val attempt: DeliveryAttemptRef?,
+    ) : OwnerFinalizationResult
+}
+
+internal sealed interface DurableCleanupBoundary<out T> {
+    data class Completed<T>(val value: T) : DurableCleanupBoundary<T>
+
+    data class Failed(
+        val operation: DurableCleanupOperation,
+        val cause: DurableCleanupFailureCause,
+        val attempt: DeliveryAttemptRef?,
+    ) : DurableCleanupBoundary<Nothing>
+}
+
+/** Only an explicitly transient durable-store failure becomes retryable. */
+internal suspend fun <T> durableCleanupBoundary(
+    operation: DurableCleanupOperation,
+    attempt: DeliveryAttemptRef? = null,
+    block: suspend () -> T,
+): DurableCleanupBoundary<T> = try {
+    DurableCleanupBoundary.Completed(block())
+} catch (cancelled: kotlinx.coroutines.CancellationException) {
+    throw cancelled
+} catch (failure: IOException) {
+    DURABLE_CLEANUP_LOG.log(
+        Level.WARNING,
+        "durable recovery cleanup failed operation=$operation attempt=$attempt",
+        failure,
+    )
+    DurableCleanupBoundary.Failed(operation, DurableCleanupFailureCause.IO_FAILURE, attempt)
+}
+
+/** The only recoverable durability operations needed by worker recovery. */
+internal interface DurableRecoveryCleanup {
+    suspend fun inspectActiveAttempt(lifecycle: SessionLifecycleRef): DeliveryAttemptRef?
+    suspend fun fenceAttempt(attempt: DeliveryAttemptRef)
+    suspend fun retireAttempt(attempt: DeliveryAttemptRef)
+    suspend fun endActiveSessionAttempt(attempt: DeliveryAttemptRef)
+}
+
+internal class ProductionDurableRecoveryCleanup(
+    private val journal: OutboundQueue,
+    private val resume: ResumePersistence,
+    private val activeSession: ActiveSession,
+) : DurableRecoveryCleanup {
+    override suspend fun inspectActiveAttempt(lifecycle: SessionLifecycleRef): DeliveryAttemptRef? =
+        journal.activeAttempt(lifecycle.ownerBareJid)
+
+    override suspend fun fenceAttempt(attempt: DeliveryAttemptRef) {
+        journal.fenceAttempt(attempt)
+    }
+
+    override suspend fun retireAttempt(attempt: DeliveryAttemptRef) {
+        resume.retireAttempt(attempt)
+    }
+
+    override suspend fun endActiveSessionAttempt(attempt: DeliveryAttemptRef) {
+        activeSession.endAttempt(attempt)
+    }
 }
 
 /**
@@ -30,27 +100,39 @@ internal class OutboundLifecycleFinalizationOperations(
     private val drainWorker: OutboundDrainWorker,
     private val terminalWorker: DeliveryTerminalWorker,
     private val transitionTimeoutMillis: Long,
+    private val durableRecoveryCleanup: DurableRecoveryCleanup =
+        ProductionDurableRecoveryCleanup(journal, resume, activeSession),
 ) {
-    fun startWorkers(
+    suspend fun startWorkers(
         scope: CoroutineScope,
         workers: OwnerWorkers,
         onReady: suspend (WorkerOwnership) -> Unit,
         onExit: suspend (WorkerExit) -> Unit,
     ): OwnerWorkers {
-        val terminal = terminalWorker.start(
-            scope,
-            workers.terminalOwnership,
-            onReady,
-            onExit,
-        )
-        val drain = drainWorker.start(
-            scope,
-            workers.drainOwnership,
-            onReady,
-            onExit,
-        )
-        workers.install(terminal, drain)
-        return workers
+        var terminal: DeliveryTerminalWorker.Run? = null
+        var installed = false
+        try {
+            terminal = terminalWorker.start(
+                scope,
+                workers.terminalOwnership,
+                onReady,
+                onExit,
+            )
+            val drain = drainWorker.start(
+                scope,
+                workers.drainOwnership,
+                onReady,
+                onExit,
+            )
+            workers.install(terminal, drain)
+            installed = true
+            return workers
+        } finally {
+            if (!installed) {
+                terminal?.requestStop()
+                terminal?.awaitExit(transitionTimeoutMillis)
+            }
+        }
     }
 
     suspend fun awaitStartupTerminalDrain(workers: OwnerWorkers, ownerBareJid: String) {
@@ -74,12 +156,14 @@ internal class OutboundLifecycleFinalizationOperations(
         workers: OwnerWorkers?,
         active: OutboundLifecycleState.Active?,
         attempt: DeliveryAttemptRef,
-    ) {
-        if (active?.attempt == attempt) {
+    ): DrainSignalOutcome = when {
+        active == null -> DrainSignalOutcome.WorkerUnavailable
+        active.attempt != attempt -> DrainSignalOutcome.Mismatch
+        else ->
             workers?.takeIf { it.lifecycle == active.lifecycle }
                 ?.drain
                 ?.signal(active.handle, attempt)
-        }
+                ?: DrainSignalOutcome.WorkerUnavailable
     }
 
     suspend fun disconnect(claim: DisconnectClaim): Boolean {
@@ -174,24 +258,60 @@ internal class OutboundLifecycleFinalizationOperations(
         if (terminalPending > 0) {
             return OwnerFinalizationResult.Pending(LifecyclePendingComponent.TERMINAL_DRAIN, terminalPending)
         }
-        return if (withTimeoutOrNull(transitionTimeoutMillis) {
-            linkedSetOf<DeliveryAttemptRef>().apply {
-                journal.activeAttempt(lifecycle.ownerBareJid)?.let(::add)
-                activeSession.attemptRef
-                    ?.takeIf { it.ownerBareJid == lifecycle.ownerBareJid }
-                    ?.let(::add)
-            }.forEach { attempt ->
-                journal.fenceAttempt(attempt)
-                resume.retireAttempt(attempt)
-                activeSession.endAttempt(attempt)
+        val durableAttempt = when (
+            val result = durableCleanupBoundary(DurableCleanupOperation.JOURNAL_INSPECTION) {
+                durableRecoveryCleanup.inspectActiveAttempt(lifecycle)
             }
-            true
-        } == true) {
-            OwnerFinalizationResult.Finalized
-        } else {
-            OwnerFinalizationResult.Pending(LifecyclePendingComponent.ATTEMPT_FINALIZATION, 1)
+        ) {
+            is DurableCleanupBoundary.Completed -> result.value
+            is DurableCleanupBoundary.Failed -> return result.failed()
         }
+        val attempts = linkedSetOf<DeliveryAttemptRef>().apply {
+            durableAttempt?.let(::add)
+            activeSession.attemptRef
+                ?.takeIf { it.ownerBareJid == lifecycle.ownerBareJid }
+                ?.let(::add)
+        }
+        attempts.forEach { attempt ->
+            when (
+                val result = durableCleanupBoundary(
+                    operation = DurableCleanupOperation.JOURNAL_FENCE,
+                    attempt = attempt,
+                ) { durableRecoveryCleanup.fenceAttempt(attempt) }
+            ) {
+                is DurableCleanupBoundary.Completed -> Unit
+                is DurableCleanupBoundary.Failed -> return result.failed()
+            }
+            when (
+                val result = durableCleanupBoundary(
+                    operation = DurableCleanupOperation.RESUME_RETIREMENT,
+                    attempt = attempt,
+                ) { durableRecoveryCleanup.retireAttempt(attempt) }
+            ) {
+                is DurableCleanupBoundary.Completed -> Unit
+                is DurableCleanupBoundary.Failed -> return result.failed()
+            }
+            when (
+                val result = durableCleanupBoundary(
+                    operation = DurableCleanupOperation.ACTIVE_SESSION_CLEANUP,
+                    attempt = attempt,
+                ) { durableRecoveryCleanup.endActiveSessionAttempt(attempt) }
+            ) {
+                is DurableCleanupBoundary.Completed -> Unit
+                is DurableCleanupBoundary.Failed -> return result.failed()
+            }
+        }
+        return OwnerFinalizationResult.Finalized
     }
+
+    private fun DurableCleanupBoundary.Failed.failed(): OwnerFinalizationResult.DurableCleanupFailed =
+        OwnerFinalizationResult.DurableCleanupFailed(
+            component = LifecyclePendingComponent.ATTEMPT_FINALIZATION,
+            count = 1,
+            operation = operation,
+            cause = cause,
+            attempt = attempt,
+        )
 
     private suspend fun finalizeAttempt(workers: OwnerWorkers, record: AttemptRecord): Boolean =
         withTimeoutOrNull(transitionTimeoutMillis) {
@@ -245,6 +365,15 @@ internal class OutboundLifecycleFinalizationOperations(
                 LifecyclePendingComponent.ATTEMPT_FINALIZATION,
                 1,
             )
+        workers.terminal.requestStop()
+        val terminalResult = workers.terminal.awaitExit(transitionTimeoutMillis)
+        val pendingCommands = workers.terminal.pendingCommandCount()
+        if (terminalResult is WorkerAwaitOutcome.TimedOut && pendingCommands > 0) {
+            return OwnerFinalizationResult.Pending(
+                LifecyclePendingComponent.TERMINAL_DRAIN,
+                maxOf(pendingCommands, journal.terminalIntentCount(lifecycle.ownerBareJid)),
+            )
+        }
         workers.drain.requestStop()
         val drainResult = workers.drain.awaitExit(transitionTimeoutMillis)
         if (
@@ -254,18 +383,6 @@ internal class OutboundLifecycleFinalizationOperations(
             return OwnerFinalizationResult.Pending(
                 LifecyclePendingComponent.OUTBOUND_DRAIN,
                 1,
-            )
-        }
-        workers.terminal.requestStop()
-        val terminalResult = workers.terminal.awaitExit(transitionTimeoutMillis)
-        val pendingCommands = workers.terminal.pendingCommandCount()
-        if (terminalResult is WorkerAwaitOutcome.TimedOut && pendingCommands > 0) {
-            return OwnerFinalizationResult.Pending(
-                LifecyclePendingComponent.TERMINAL_DRAIN,
-                maxOf(
-                    pendingCommands,
-                    runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(1),
-                ).coerceAtLeast(1),
             )
         }
         val attemptsFinalized = finalizeAttempts(attempts)
@@ -278,15 +395,12 @@ internal class OutboundLifecycleFinalizationOperations(
         if (terminalResult is WorkerAwaitOutcome.TimedOut) {
             return OwnerFinalizationResult.Pending(
                 LifecyclePendingComponent.TERMINAL_DRAIN,
-                maxOf(
-                    pendingCommands,
-                    runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(1),
-                ).coerceAtLeast(1),
+                maxOf(pendingCommands, journal.terminalIntentCount(lifecycle.ownerBareJid)),
             )
         }
         val terminalPending = maxOf(
             pendingCommands,
-            runCatching { journal.terminalIntentCount(lifecycle.ownerBareJid) }.getOrDefault(0),
+            journal.terminalIntentCount(lifecycle.ownerBareJid),
             if (terminalResult is WorkerAwaitOutcome.Exited &&
                 terminalResult.exit.reason is WorkerExitReason.RequestedStop
             ) 0 else 1,
@@ -323,3 +437,6 @@ internal class OutboundLifecycleFinalizationOperations(
         true
     } == true
 }
+
+private val DURABLE_CLEANUP_LOG: Logger =
+    Logger.getLogger(OutboundLifecycleFinalizationOperations::class.java.name)

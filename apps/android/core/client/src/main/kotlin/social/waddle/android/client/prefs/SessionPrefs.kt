@@ -21,6 +21,8 @@ class SessionPrefs(
     private val dataStore: DataStore<Preferences>,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
+    private val deliveryJournalJson: Json = Json(json) { ignoreUnknownKeys = false }
+
     val deliveryJournal: Flow<DeliveryJournal> =
         dataStore.data.map(::decodeDeliveryJournal)
 
@@ -79,9 +81,12 @@ class SessionPrefs(
     ): T {
         var outcome: Result<T>? = null
         dataStore.edit { prefs ->
-            val mutation = transform(decodeDeliveryJournal(prefs))
+            val current = decodeDeliveryJournal(prefs)
+            val mutation = transform(current)
             require(mutation.journal.schemaVersion == DeliveryJournal.CURRENT_SCHEMA_VERSION)
-            prefs[KEY_DELIVERY_JOURNAL] = json.encodeToString(mutation.journal)
+            if (mutation.journal != current) {
+                prefs[KEY_DELIVERY_JOURNAL] = deliveryJournalJson.encodeToString(mutation.journal)
+            }
             outcome = Result.success(mutation.result)
         }
         return checkNotNull(outcome) { "delivery journal edit did not run" }.getOrThrow()
@@ -147,14 +152,14 @@ class SessionPrefs(
             prefs.clear()
             suffix?.let { prefs[KEY_RESOURCE_SUFFIX] = it }
             if (retainedJournal.owners.isNotEmpty()) {
-                prefs[KEY_DELIVERY_JOURNAL] = json.encodeToString(retainedJournal)
+                prefs[KEY_DELIVERY_JOURNAL] = deliveryJournalJson.encodeToString(retainedJournal)
             }
         }
     }
 
     private fun decodeDeliveryJournal(prefs: Preferences): DeliveryJournal {
         val stored = prefs[KEY_DELIVERY_JOURNAL] ?: return DeliveryJournal()
-        return json.decodeFromString<DeliveryJournal>(stored).also { journal ->
+        return deliveryJournalJson.decodeFromString<DeliveryJournal>(stored).also { journal ->
             require(journal.schemaVersion == DeliveryJournal.CURRENT_SCHEMA_VERSION) {
                 "unsupported delivery journal schema version: ${journal.schemaVersion}"
             }

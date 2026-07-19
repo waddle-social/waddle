@@ -40,6 +40,9 @@ internal class OutboundMessenger(
     transitionTimeoutMillis: Long = 5_000L,
     phaseObserver: OutboundLifecyclePhaseObserver =
         OutboundLifecyclePhaseObserver.NONE,
+    ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
+    private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
+        OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
     private val drainMutex = Mutex()
     private val lifecycle = OutboundLifecycleCoordinator(
@@ -50,12 +53,13 @@ internal class OutboundMessenger(
         drain = ::drainOutboundQueue,
         transitionTimeoutMillis = transitionTimeoutMillis,
         phaseObserver = phaseObserver,
+        ownerFinalizer = ownerFinalizer,
     )
 
     suspend fun start(
         scope: CoroutineScope,
         ownerBareJid: String,
-    ): SessionLifecycleRef = lifecycle.start(scope, ownerBareJid)
+    ): LifecycleStartResult = lifecycle.start(scope, ownerBareJid)
 
     suspend fun activateAttempt(
         sessionLifecycle: SessionLifecycleRef,
@@ -103,7 +107,7 @@ internal class OutboundMessenger(
 
     suspend fun beginShutdown(
         sessionLifecycle: SessionLifecycleRef,
-    ): Boolean = lifecycle.beginShutdown(sessionLifecycle)
+    ): BeginShutdownDecision = lifecycle.beginShutdown(sessionLifecycle)
 
     suspend fun closeAttempt(
         handle: ConnectionAttemptHandle,
@@ -147,6 +151,7 @@ internal class OutboundMessenger(
             OutboundAdmissionResult.LifecycleUnavailable ->
                 return SendResult(WaddleSendMessageOutcome.NotConnected)
         }
+        var primary: Throwable? = null
         try {
             val draft = queuedMessage(
                 owner = lease.lifecycle.ownerBareJid,
@@ -161,8 +166,20 @@ internal class OutboundMessenger(
                 is OutboundAdmissionLease.Terminal ->
                     error("terminal lease cannot admit outbound messages")
             }
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
         } finally {
-            lifecycle.releaseAdmission(lease)
+            requireLifecycleRelease(
+                admissionReleaseOperations.release(lifecycle, lease),
+                lease.capability,
+                when (lease) {
+                    is OutboundAdmissionLease.OfflineOutbound -> LifecycleReleaseSite.OFFLINE_OUTBOUND
+                    is OutboundAdmissionLease.LiveOutbound -> LifecycleReleaseSite.LIVE_OUTBOUND
+                    is OutboundAdmissionLease.Terminal -> LifecycleReleaseSite.TERMINAL_COMMAND
+                },
+                primary = primary,
+            )
         }
     }
 
@@ -318,6 +335,7 @@ internal class OutboundMessenger(
         val lease =
             lifecycle.acquireDrain(sessionLifecycle, handle, expectedAttempt)
                 ?: return
+        var primary: Throwable? = null
         try {
             drainMutex.withLock {
                 if (!lifecycle.matches(handle, expectedAttempt)) return@withLock
@@ -361,8 +379,16 @@ internal class OutboundMessenger(
                     }
                 }
             }
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
         } finally {
-            lifecycle.releaseAdmission(lease)
+            requireLifecycleRelease(
+                admissionReleaseOperations.release(lifecycle, lease),
+                lease.capability,
+                LifecycleReleaseSite.OUTBOUND_DRAIN,
+                primary = primary,
+            )
         }
     }
 
@@ -409,6 +435,7 @@ internal class OutboundMessenger(
         kind: DeliveryTerminalKind,
     ): Boolean {
         val lease = lifecycle.acquireTerminal(attempt) ?: return false
+        var primary: Throwable? = null
         return try {
             requireTerminalCommitted(
                 lifecycle.submitTerminal(
@@ -419,8 +446,16 @@ internal class OutboundMessenger(
                 ),
             )
             true
+        } catch (failure: Throwable) {
+            primary = failure
+            throw failure
         } finally {
-            lifecycle.releaseAdmission(lease)
+            requireLifecycleRelease(
+                admissionReleaseOperations.release(lifecycle, lease),
+                lease.capability,
+                LifecycleReleaseSite.TERMINAL_COMMAND,
+                primary = primary,
+            )
         }
     }
 

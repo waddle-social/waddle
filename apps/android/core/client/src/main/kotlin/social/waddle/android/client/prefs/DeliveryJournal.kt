@@ -23,6 +23,13 @@ data class DeliveryJournal(
         require(schemaVersion == CURRENT_SCHEMA_VERSION) {
             "unsupported delivery journal schema version: $schemaVersion"
         }
+        owners.forEach { (ownerBareJid, owner) ->
+            owner.terminalReceipt?.let { receipt ->
+                require(receipt.owner.value == ownerBareJid) {
+                    "terminal receipt owner must match its journal bucket"
+                }
+            }
+        }
     }
 
     companion object {
@@ -39,6 +46,7 @@ data class DeliveryOwnerJournal(
     val sm: SmResumeSlot = SmResumeSlot(),
     val outboundRows: List<QueuedOutboundMessage> = emptyList(),
     val terminalIntents: List<DeliveryTerminalIntent> = emptyList(),
+    val terminalReceipt: TerminalReceipt? = null,
 ) {
     init {
         require(nextSequence > 0) { "delivery sequence must remain positive" }

@@ -115,7 +115,7 @@ internal class ConnectionLoopPullHarness(
         prefs.activateSession(OWNER, session.sessionId)
         activeSession.ownBareJid = OWNER
         resume.start(ownerScope)
-        lifecycle = messenger.start(ownerScope, OWNER)
+        lifecycle = messenger.start(ownerScope, OWNER).started()
         loop.startAdmissions()
         loopJob = ownerScope.launch { loop.run(session, lifecycle) }
     }
@@ -131,7 +131,7 @@ internal class ConnectionLoopPullHarness(
     }
 
     suspend fun startReplacementLifecycle(): SessionLifecycleRef =
-        messenger.start(ownerScope, OWNER).also {
+        messenger.start(ownerScope, OWNER).started().also {
             lifecycle = it
             terminalWorkerStopped = false
         }
@@ -168,3 +168,7 @@ internal class ConnectionLoopPullHarness(
         private const val SESSION_ID = "sess-1"
     }
 }
+
+private fun LifecycleStartResult.started(): SessionLifecycleRef =
+    (this as? LifecycleStartResult.Started)?.lifecycle
+        ?: error("test lifecycle startup failed: $this")

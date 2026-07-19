@@ -3,6 +3,10 @@ package social.waddle.android.client
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
+import java.io.IOException
+import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -36,9 +40,6 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
-import java.util.concurrent.ConcurrentLinkedDeque
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicInteger
 
 fun testSessionInfo(
     sessionId: String = "sess-1",
@@ -87,20 +88,64 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
      */
     var afterCommitReturns: (suspend () -> Unit)? = null
 
+    private data class OneShotAfterCommit(
+        val matches: (before: Preferences, after: Preferences) -> Boolean,
+        val hook: suspend () -> Unit,
+    )
+
+    private var afterCommitReturnsOnce: OneShotAfterCommit? = null
+
+    private var beforeCommitReturnsOnce: (suspend () -> Unit)? = null
+
+    /** Atomically reserve [hook] for the next committed update only. */
+    suspend fun installAfterCommitReturnsOnce(hook: suspend () -> Unit) {
+        installAfterCommitReturnsOnceWhen(matches = { _, _ -> true }, hook)
+    }
+
+    /** Atomically reserve [hook] for the first committed state matching [matches]. */
+    suspend fun installAfterCommitReturnsOnceWhen(
+        matches: (before: Preferences, after: Preferences) -> Boolean,
+        hook: suspend () -> Unit,
+    ) {
+        mutex.withLock {
+            check(afterCommitReturnsOnce == null) { "one-shot after-commit hook already installed" }
+            afterCommitReturnsOnce = OneShotAfterCommit(matches, hook)
+        }
+    }
+
+    /** Holds one transformed update before it becomes durable. */
+    suspend fun installBeforeCommitReturnsOnce(hook: suspend () -> Unit) {
+        mutex.withLock {
+            check(beforeCommitReturnsOnce == null) { "one-shot before-commit hook already installed" }
+            beforeCommitReturnsOnce = hook
+        }
+    }
+
     override val data: Flow<Preferences> = state
 
-    override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences =
-        mutex.withLock {
+    override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+        val (updated, afterCommit, oneShotAfterCommit) = mutex.withLock {
             updateAttempts.incrementAndGet()
             if (failAllUpdates || failNextUpdate) {
                 failNextUpdate = false
-                error("injected preferences write failure")
+                throw IOException("injected preferences write failure")
             }
-            transform(state.value).also {
-                state.value = it
-                afterCommitReturns?.invoke()
+            val before = state.value
+            val updated = transform(before)
+            beforeCommitReturnsOnce?.let { hook ->
+                beforeCommitReturnsOnce = null
+                hook()
             }
+            state.value = updated
+            val oneShot = afterCommitReturnsOnce
+                ?.takeIf { it.matches(before, updated) }
+                ?.also { afterCommitReturnsOnce = null }
+            Triple(updated, afterCommitReturns, oneShot?.hook)
         }
+        afterCommit?.invoke()
+        oneShotAfterCommit?.invoke()
+        return updated
+    }
 }
 
 class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {

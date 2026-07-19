@@ -1,5 +1,10 @@
 package social.waddle.android.client
 
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.logging.Level
+import java.util.logging.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -16,10 +21,6 @@ import social.waddle.android.client.OutboundQueue.TerminalEffect
 import social.waddle.android.client.OutboundQueue.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryTerminalKind
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.logging.Level
-import java.util.logging.Logger
 
 /** Creates isolated terminal workers; each [Run] belongs to one lifecycle generation. */
 internal class DeliveryTerminalWorker(
@@ -226,7 +227,7 @@ internal class DeliveryTerminalWorker(
                     return operation()
                 } catch (cancellation: CancellationException) {
                     throw cancellation
-                } catch (failure: Throwable) {
+                } catch (failure: IOException) {
                     LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
                     delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
                     if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1
@@ -241,7 +242,7 @@ internal class DeliveryTerminalWorker(
                     return operation()
                 } catch (cancellation: CancellationException) {
                     throw cancellation
-                } catch (failure: Throwable) {
+                } catch (failure: IOException) {
                     LOGGER.log(Level.WARNING, "$label failed; retrying", failure)
                     delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
                     if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1

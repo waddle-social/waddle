@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import java.io.IOException
 import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.session.ActiveSession
@@ -107,7 +108,7 @@ internal class OutboundLifecyclePhaseOperations(
                 return journal.rotateAfterResumeFailure(transition, affectedStanzaIds)
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (failure: Throwable) {
+            } catch (failure: IOException) {
                 LOGGER.log(Level.WARNING, "resume transition commit failed; retrying", failure)
                 delay(RETRY_DELAYS_MILLIS[retryIndex.coerceAtMost(RETRY_DELAYS_MILLIS.lastIndex)])
                 if (retryIndex < RETRY_DELAYS_MILLIS.lastIndex) retryIndex += 1

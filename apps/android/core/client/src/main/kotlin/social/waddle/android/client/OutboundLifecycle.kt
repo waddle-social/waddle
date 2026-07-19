@@ -22,6 +22,41 @@ internal data class SessionLifecycleRef(
     }
 }
 
+/** Startup always exposes the installed lifecycle, including a recoverable failure. */
+internal sealed interface LifecycleStartResult {
+    val lifecycle: SessionLifecycleRef
+
+    data class Started(override val lifecycle: SessionLifecycleRef) : LifecycleStartResult
+
+    data class Failed(
+        override val lifecycle: SessionLifecycleRef,
+        val cause: LifecycleStartFailure,
+    ) : LifecycleStartResult
+}
+
+internal enum class LifecycleStartFailure {
+    WORKER_CONSTRUCTION_FAILED,
+    WORKER_READINESS_FAILED,
+    CANCELLED,
+}
+
+internal class LifecycleStartException(
+    val result: LifecycleStartResult.Failed,
+) : IllegalStateException("outbound worker startup failed: ${result.cause}")
+
+internal sealed interface BeginShutdownDecision {
+    data class Begun(val lifecycle: SessionLifecycleRef) : BeginShutdownDecision
+    data class AlreadyClosing(val lifecycle: SessionLifecycleRef) : BeginShutdownDecision
+    data class WorkerFenced(
+        val lifecycle: SessionLifecycleRef,
+        val cause: LifecycleFenceCause,
+    ) : BeginShutdownDecision
+    data class Stale(
+        val requested: SessionLifecycleRef,
+        val actual: SessionLifecycleRef?,
+    ) : BeginShutdownDecision
+}
+
 internal enum class WorkerKind {
     OUTBOUND_DRAIN,
     DELIVERY_TERMINAL,
@@ -64,6 +99,42 @@ internal data class WorkerExit(
     val reason: WorkerExitReason,
 )
 
+internal sealed interface WorkerExitGateDecision {
+    data object Ignore : WorkerExitGateDecision
+    data object RecordOnly : WorkerExitGateDecision
+    data class Fence(val cause: LifecycleFenceCause.WorkerExited) : WorkerExitGateDecision
+}
+
+/** Pure lifecycle transition: callback identity is validated before mutation. */
+internal fun decideWorkerExitGate(
+    state: OutboundLifecycleState,
+    exactOwner: Boolean,
+    firstExactExit: Boolean,
+    exit: WorkerExit,
+): WorkerExitGateDecision {
+    if (!exactOwner || !firstExactExit) return WorkerExitGateDecision.Ignore
+    val exited = LifecycleFenceCause.WorkerExited(WorkerFence(exit))
+    val fenced = state as? OutboundLifecycleState.Fenced
+    if (fenced != null) {
+        val cause = fenced.cause
+        if (cause is LifecycleFenceCause.WorkerExited) return WorkerExitGateDecision.Ignore
+        val awaiting = cause as LifecycleFenceCause.AwaitingRequestedWorkerExit
+        return if (
+            exit.ownership() == awaiting.ownership ||
+            exit.reason !is WorkerExitReason.RequestedStop
+        ) {
+            WorkerExitGateDecision.Fence(exited)
+        } else {
+            WorkerExitGateDecision.RecordOnly
+        }
+    }
+    return if (state is OutboundLifecycleState.Closing && exit.reason is WorkerExitReason.RequestedStop) {
+        WorkerExitGateDecision.RecordOnly
+    } else {
+        WorkerExitGateDecision.Fence(exited)
+    }
+}
+
 internal sealed interface WorkerAwaitOutcome {
     data class Exited(
         val exit: WorkerExit,
@@ -83,6 +154,12 @@ internal sealed interface TerminalCommandOutcome {
     data class Failed(
         val failure: TerminalWorkerFailure,
     ) : TerminalCommandOutcome
+}
+
+internal sealed interface DrainSignalOutcome {
+    data object Accepted : DrainSignalOutcome
+    data object Mismatch : DrainSignalOutcome
+    data object WorkerUnavailable : DrainSignalOutcome
 }
 
 internal class TerminalWorkerUnavailableException : IllegalStateException()
@@ -124,7 +201,14 @@ internal data class WorkerRecoveryClaim(
 internal sealed interface WorkerRecoveryOutcome {
     data object Recovered : WorkerRecoveryOutcome
     data object NotFenced : WorkerRecoveryOutcome
-    data class OwnershipMismatch(val lifecycle: SessionLifecycleRef) : WorkerRecoveryOutcome
+    data class OwnershipMismatch(
+        val requested: SessionLifecycleRef,
+        val actual: SessionLifecycleRef?,
+    ) : WorkerRecoveryOutcome
+    data class WorkerFenced(
+        val lifecycle: SessionLifecycleRef,
+        val cause: LifecycleFenceCause,
+    ) : WorkerRecoveryOutcome
     data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryOutcome
     data class RetainedOperationsPending(
         val lifecycle: SessionLifecycleRef,
@@ -135,14 +219,27 @@ internal sealed interface WorkerRecoveryOutcome {
         val ownership: WorkerOwnership,
     ) : WorkerRecoveryOutcome
     data class DurableCleanupPending(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
         val component: LifecyclePendingComponent,
-        val pending: Int,
+        val count: Int,
+        val operation: DurableCleanupOperation,
+        val attempt: DeliveryAttemptRef?,
+    ) : WorkerRecoveryOutcome
+    data class DurableCleanupFailed(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val component: LifecyclePendingComponent,
+        val count: Int,
+        val operation: DurableCleanupOperation,
+        val cause: DurableCleanupFailureCause,
+        val attempt: DeliveryAttemptRef?,
     ) : WorkerRecoveryOutcome
 }
 
 internal class WorkerRecoveryException(
     val outcome: WorkerRecoveryOutcome,
-) : IllegalStateException()
+) : IllegalStateException("worker recovery failed: $outcome")
 
 internal sealed interface WorkerRecoveryClaimDecision {
     data class Granted(
@@ -171,6 +268,7 @@ internal class OwnerWorkers(
 
     private var terminalReady = false
     private var drainReady = false
+    private var installed = false
     private var terminalExit: WorkerExit? = null
     private var drainExit: WorkerExit? = null
 
@@ -179,7 +277,10 @@ internal class OwnerWorkers(
         check(drain.ownership == drainOwnership)
         this.terminal = terminal
         this.drain = drain
+        installed = true
     }
+
+    fun isInstalled(): Boolean = installed
 
     fun markReady(ownership: WorkerOwnership): Boolean = when (ownership) {
         terminalOwnership -> !terminalReady.also { terminalReady = true }
@@ -292,6 +393,17 @@ internal enum class LifecyclePendingComponent {
     TERMINAL_DRAIN,
 }
 
+internal enum class DurableCleanupOperation {
+    JOURNAL_INSPECTION,
+    JOURNAL_FENCE,
+    RESUME_RETIREMENT,
+    ACTIVE_SESSION_CLEANUP,
+}
+
+internal enum class DurableCleanupFailureCause {
+    IO_FAILURE,
+}
+
 internal sealed interface LifecycleShutdownOutcome {
     data object Stopped : LifecycleShutdownOutcome
 
@@ -331,28 +443,58 @@ internal sealed interface LiveOutboundPurpose {
 
 internal sealed interface OutboundAdmissionLease {
     val lifecycle: SessionLifecycleRef
-    val token: UUID
+    val capability: LifecycleOperationRegistry.Lease
 
-    data class OfflineOutbound(
-        override val lifecycle: SessionLifecycleRef,
+    class OfflineOutbound private constructor(
         val source: social.waddle.android.client.prefs.DeliverySource,
-        val attempt: DeliveryAttemptRef?,
-        override val token: UUID,
-    ) : OutboundAdmissionLease
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
+        override val lifecycle: SessionLifecycleRef get() = capability.lifecycle
+        val attempt: DeliveryAttemptRef? get() = capability.attempt
 
-    data class LiveOutbound(
-        override val lifecycle: SessionLifecycleRef,
-        val attempt: DeliveryAttemptRef,
+        companion object {
+            internal fun issue(
+                source: social.waddle.android.client.prefs.DeliverySource,
+                capability: LifecycleOperationRegistry.Lease,
+            ): OfflineOutbound = OfflineOutbound(source, capability)
+        }
+    }
+
+    class LiveOutbound private constructor(
         val client: social.waddle.client.ffi.WaddleClientInterface,
         val purpose: LiveOutboundPurpose,
-        override val token: UUID,
-    ) : OutboundAdmissionLease
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
+        override val lifecycle: SessionLifecycleRef get() = capability.lifecycle
+        val attempt: DeliveryAttemptRef get() = requireNotNull(capability.attempt)
 
-    data class Terminal(
-        override val lifecycle: SessionLifecycleRef,
-        val attempt: DeliveryAttemptRef,
-        override val token: UUID,
-    ) : OutboundAdmissionLease
+        companion object {
+            internal fun issue(
+                client: social.waddle.client.ffi.WaddleClientInterface,
+                purpose: LiveOutboundPurpose,
+                capability: LifecycleOperationRegistry.Lease,
+            ): LiveOutbound {
+                requireNotNull(capability.attempt) { "live admission capability requires an attempt" }
+                return LiveOutbound(client, purpose, capability)
+            }
+        }
+    }
+
+    class Terminal private constructor(
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
+        override val lifecycle: SessionLifecycleRef get() = capability.lifecycle
+        val attempt: DeliveryAttemptRef get() = requireNotNull(capability.attempt)
+
+        companion object {
+            internal fun issue(
+                capability: LifecycleOperationRegistry.Lease,
+            ): Terminal {
+                requireNotNull(capability.attempt) { "terminal admission capability requires an attempt" }
+                return Terminal(capability)
+            }
+        }
+    }
 }
 
 internal sealed interface OutboundAdmissionResult {
@@ -375,6 +517,11 @@ internal class LifecycleTransitionException(
 )
 
 internal enum class OutboundLifecyclePhase {
+    TERMINAL_WORKER_READY,
+    DRAIN_WORKER_READY,
+    STARTUP_READINESS_LOST,
+    SHUTDOWN_OWNER_FINALIZED,
+    AWAITING_REQUESTED_WORKER_EXIT_INSTALLED,
     ATTEMPT_JOURNALING,
     ATTEMPT_JOURNALED,
     RESUME_REGISTERED,

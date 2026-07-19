@@ -45,15 +45,35 @@ import social.waddle.client.ffi.WaddleUploadSlot
  * remaining UI passthroughs in [ConversationVerbs] — all sharing the
  * per-attempt [ActiveSession].
  */
-class XmppSessionManager(
+class XmppSessionManager private constructor(
     private val sessionPrefs: SessionPrefs,
     clientFactory: ClientFactory,
     networkSignal: NetworkSignal,
     userPrefs: UserPrefs,
-    reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
-    private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
-    connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    reconnectPolicy: ReconnectPolicy,
+    private val dispatcher: CoroutineDispatcher,
+    connectTimeoutMillis: Long,
+    lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
 ) {
+    constructor(
+        sessionPrefs: SessionPrefs,
+        clientFactory: ClientFactory,
+        networkSignal: NetworkSignal,
+        userPrefs: UserPrefs,
+        reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
+        dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    ) : this(
+        sessionPrefs,
+        clientFactory,
+        networkSignal,
+        userPrefs,
+        reconnectPolicy,
+        dispatcher,
+        connectTimeoutMillis,
+        OutboundLifecyclePhaseObserver.NONE,
+    )
+
     private val stores = SessionStores()
 
     val timelineStore = stores.timelineStore
@@ -99,6 +119,7 @@ class XmppSessionManager(
         journal = deliveryJournal,
         resume = resume,
         dispatchEvent = router::dispatch,
+        phaseObserver = lifecyclePhaseObserver,
     )
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
@@ -139,8 +160,12 @@ class XmppSessionManager(
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
-        val lifecycle = messenger.start(scope, ownerBareJid)
-        sessionLifecycle = lifecycle
+        val startup = messenger.start(scope, ownerBareJid)
+        sessionLifecycle = startup.lifecycle
+        val lifecycle = when (startup) {
+            is LifecycleStartResult.Started -> startup.lifecycle
+            is LifecycleStartResult.Failed -> throw LifecycleStartException(startup)
+        }
         loop.startAdmissions()
         scope.launch { router.sweepChatStates() }
         sessionLoopJob = scope.launch { loop.run(session, lifecycle) }
@@ -338,7 +363,19 @@ class XmppSessionManager(
             val credentialsInvalid = disposition == SaslRetryDisposition.STOP_CREDENTIAL
             var shutdownComplete = false
             try {
-                messenger.beginShutdown(lifecycle)
+                when (val shutdown = messenger.beginShutdown(lifecycle)) {
+                    is BeginShutdownDecision.Begun,
+                    is BeginShutdownDecision.AlreadyClosing,
+                    -> Unit
+                    is BeginShutdownDecision.WorkerFenced ->
+                        throw WorkerRecoveryException(
+                            WorkerRecoveryOutcome.WorkerFenced(shutdown.lifecycle, shutdown.cause),
+                        )
+                    is BeginShutdownDecision.Stale ->
+                        throw WorkerRecoveryException(
+                            WorkerRecoveryOutcome.OwnershipMismatch(shutdown.requested, shutdown.actual),
+                        )
+                }
                 requireStopped(
                     lifecycle,
                     messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)),
@@ -394,17 +431,32 @@ class XmppSessionManager(
     }
 
     /**
-     * Always tear down the node-local socket scope, even if durable fencing
-     * fails. The failure is then rethrown so login cannot activate another
-     * owner over an unfenced journal.
+     * Recover or stop the durable owner before cancelling its node-local scope.
+     * A retryable fencing failure retains the lifecycle and scope for retry.
      */
     private suspend fun stopAndCancelCurrentSession() {
         val lifecycle = sessionLifecycle
-        var failure: Throwable? = null
+        var teardownSucceeded = false
         try {
             if (lifecycle != null) {
-                if (recoverFencedWorkers(lifecycle)) return
-                messenger.beginShutdown(lifecycle)
+                if (recoverFencedWorkers(lifecycle)) {
+                    teardownSucceeded = true
+                    return
+                }
+                when (val shutdown = messenger.beginShutdown(lifecycle)) {
+                    is BeginShutdownDecision.Begun,
+                    is BeginShutdownDecision.AlreadyClosing,
+                    -> Unit
+                    is BeginShutdownDecision.WorkerFenced -> {
+                        recoverTeardownFence(shutdown.lifecycle, shutdown.cause)
+                        teardownSucceeded = true
+                        return
+                    }
+                    is BeginShutdownDecision.Stale ->
+                        throw WorkerRecoveryException(
+                            WorkerRecoveryOutcome.OwnershipMismatch(shutdown.requested, shutdown.actual),
+                        )
+                }
                 val loopJob = sessionLoopJob
                 loopJob?.cancel()
                 val producerStopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
@@ -419,21 +471,27 @@ class XmppSessionManager(
                     )
                 }
                 sessionLoopJob = null
-                requireStopped(
-                    lifecycle,
-                    messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)),
-                )
+                when (val shutdown = messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))) {
+                    LifecycleShutdownOutcome.Stopped,
+                    is LifecycleShutdownOutcome.FencedWithPending,
+                    LifecycleShutdownOutcome.AttemptClosed,
+                    LifecycleShutdownOutcome.Stale,
+                    -> requireStopped(lifecycle, shutdown)
+                    is LifecycleShutdownOutcome.WorkerFenced -> {
+                        recoverTeardownFence(shutdown.lifecycle, shutdown.cause)
+                        teardownSucceeded = true
+                        return
+                    }
+                }
                 sessionLifecycle = null
             }
-        } catch (caught: Throwable) {
-            failure = caught
+            teardownSucceeded = true
         } finally {
-            if (failure == null) cancelSessionScope()
+            if (teardownSucceeded) cancelSessionScope()
         }
-        failure?.let { throw it }
     }
 
-    private fun requireStopped(
+    internal fun requireStopped(
         lifecycle: SessionLifecycleRef,
         outcome: LifecycleShutdownOutcome,
     ) {
@@ -448,12 +506,7 @@ class XmppSessionManager(
                 )
             }
             is LifecycleShutdownOutcome.WorkerFenced ->
-                throw WorkerRecoveryException(
-                    WorkerRecoveryOutcome.WorkerExitPending(outcome.lifecycle, when (val cause = outcome.cause) {
-                        is LifecycleFenceCause.AwaitingRequestedWorkerExit -> cause.ownership
-                        is LifecycleFenceCause.WorkerExited -> cause.fence.exit.ownership()
-                    }),
-                )
+                throw WorkerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(outcome.lifecycle, outcome.cause))
             LifecycleShutdownOutcome.AttemptClosed,
             LifecycleShutdownOutcome.Stale,
             -> error("current owner shutdown lost lifecycle authority")
@@ -466,10 +519,12 @@ class XmppSessionManager(
         when (val recovered = messenger.recoverFencedWorkers(lifecycle)) {
             WorkerRecoveryOutcome.NotFenced -> return false
             WorkerRecoveryOutcome.Recovered -> Unit
+            is WorkerRecoveryOutcome.DurableCleanupFailed,
             is WorkerRecoveryOutcome.DurableCleanupPending,
             is WorkerRecoveryOutcome.OwnershipMismatch,
             is WorkerRecoveryOutcome.RecoveryInProgress,
             is WorkerRecoveryOutcome.RetainedOperationsPending,
+            is WorkerRecoveryOutcome.WorkerFenced,
             is WorkerRecoveryOutcome.WorkerExitPending,
             -> throw WorkerRecoveryException(recovered)
         }
@@ -477,6 +532,15 @@ class XmppSessionManager(
         sessionLifecycle = null
         pendingLifecycleShutdown = null
         return true
+    }
+
+    private suspend fun recoverTeardownFence(
+        lifecycle: SessionLifecycleRef,
+        cause: LifecycleFenceCause,
+    ) {
+        if (!recoverFencedWorkers(lifecycle)) {
+            throw WorkerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(lifecycle, cause))
+        }
     }
 
     private fun clearSessionState() {
@@ -498,6 +562,27 @@ class XmppSessionManager(
     )
 
     companion object {
+        /** Internal scheduling visibility; production construction is always no-op observed. */
+        internal fun withLifecyclePhaseObserver(
+            sessionPrefs: SessionPrefs,
+            clientFactory: ClientFactory,
+            networkSignal: NetworkSignal,
+            userPrefs: UserPrefs,
+            reconnectPolicy: ReconnectPolicy,
+            dispatcher: CoroutineDispatcher,
+            lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
+            connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+        ): XmppSessionManager = XmppSessionManager(
+            sessionPrefs,
+            clientFactory,
+            networkSignal,
+            userPrefs,
+            reconnectPolicy,
+            dispatcher,
+            connectTimeoutMillis,
+            lifecyclePhaseObserver,
+        )
+
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = ConnectionLoop.CONNECT_TIMEOUT_MILLIS
         private const val SHUTDOWN_TIMEOUT_MILLIS = 5_000L

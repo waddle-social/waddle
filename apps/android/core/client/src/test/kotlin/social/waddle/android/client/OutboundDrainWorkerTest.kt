@@ -6,6 +6,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.DeliveryAttemptId
@@ -15,6 +16,22 @@ import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundDrainWorkerTest {
+    @Test
+    fun `closed run atomically denies bind and signal admission`() = runTest {
+        val ownership = ownership()
+        val run = OutboundDrainWorker { _, _, _ -> }.start(this, ownership, {}, {})
+        val handle = ConnectionAttemptHandle.random()
+        val attempt = attempt()
+
+        runCurrent()
+        assertTrue(run.bind(handle, attempt))
+        run.requestStop()
+
+        assertFalse(run.bind(handle, attempt))
+        assertEquals(DrainSignalOutcome.WorkerUnavailable, run.signal(handle, attempt))
+        assertEquals(WorkerExitReason.RequestedStop, (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit.reason)
+    }
+
     @Test
     fun `requested stop emits one matching exit`() = runTest {
         val exits = mutableListOf<WorkerExit>()

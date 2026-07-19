@@ -3,7 +3,23 @@ package social.waddle.android.client
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.session.ActiveSession
-import java.util.UUID
+
+/**
+ * The messenger owns its finally boundary while the coordinator owns the
+ * registry. Keeping this port typed makes that ownership handoff explicit.
+ */
+internal fun interface OutboundAdmissionReleaseOperations {
+    suspend fun release(
+        lifecycle: OutboundLifecycleCoordinator,
+        lease: OutboundAdmissionLease,
+    ): LifecycleReleaseOutcome
+
+    companion object {
+        val COORDINATOR = OutboundAdmissionReleaseOperations { lifecycle, lease ->
+            lifecycle.releaseAdmission(lease)
+        }
+    }
+}
 
 internal fun classifyOutboundReservation(
     state: OutboundLifecycleState,
@@ -28,16 +44,16 @@ internal fun classifyOutboundReservation(
         -> return OutboundReservationClaim.LifecycleUnavailable
     }
     return OutboundReservationClaim.Granted(
-        AdmissionReservation(lifecycle, attempt, UUID.randomUUID()),
+        AdmissionCandidate(lifecycle, attempt),
     )
 }
 
-internal fun createAdmissionReservation(
+internal fun createAdmissionCandidate(
     state: OutboundLifecycleState,
     expectedOwnerBareJid: String?,
     expectedAttempt: DeliveryAttemptRef?,
     requireActive: Boolean,
-): AdmissionReservation? {
+): AdmissionCandidate? {
     val lifecycle = state.lifecycleOrNull() ?: return null
     if (
         expectedOwnerBareJid != null &&
@@ -56,40 +72,35 @@ internal fun createAdmissionReservation(
         -> return null
     }
     if (expectedAttempt != null && attempt != expectedAttempt) return null
-    return AdmissionReservation(lifecycle, attempt, UUID.randomUUID())
+    return AdmissionCandidate(lifecycle, attempt)
 }
 
 internal suspend fun materializeOutboundAdmission(
     activeSession: ActiveSession,
-    reservation: AdmissionReservation,
+    reservation: RetainedAdmission,
     source: DeliverySource,
 ): OutboundAdmissionResult.Granted {
+    val capability = reservation.capability
     val attempt = reservation.attempt
     if (attempt == null) {
         return OutboundAdmissionResult.Granted(
-            OutboundAdmissionLease.OfflineOutbound(
-                reservation.lifecycle,
+            OutboundAdmissionLease.OfflineOutbound.issue(
                 source,
-                attempt,
-                reservation.token,
+                capability,
             ),
         )
     }
     val client = activeSession.clientAtAttempt(attempt)
     val lease = if (client == null) {
-        OutboundAdmissionLease.OfflineOutbound(
-            reservation.lifecycle,
+        OutboundAdmissionLease.OfflineOutbound.issue(
             source,
-            attempt,
-            reservation.token,
+            capability,
         )
     } else {
-        OutboundAdmissionLease.LiveOutbound(
-            reservation.lifecycle,
-            attempt,
+        OutboundAdmissionLease.LiveOutbound.issue(
             client,
             LiveOutboundPurpose.MessageSend(source),
-            reservation.token,
+            capability,
         )
     }
     return OutboundAdmissionResult.Granted(lease)

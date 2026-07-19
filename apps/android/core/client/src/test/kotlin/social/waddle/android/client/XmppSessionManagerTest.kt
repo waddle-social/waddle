@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import app.cash.turbine.test
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -24,18 +25,52 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionManagerTest {
-    private class Harness(testScope: TestScope) {
+    private class Harness(
+        testScope: TestScope,
+        phaseObserver: OutboundLifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+    ) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager(
+        val manager = XmppSessionManager.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
             userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            lifecyclePhaseObserver = phaseObserver,
         )
+    }
+
+    @Test
+    fun `B manager retains and recovers one ready startup cancellation before replacement login`() = runTest {
+        var cancelFirstReady = true
+        val harness = Harness(
+            this,
+            OutboundLifecyclePhaseObserver { phase ->
+                if (cancelFirstReady && phase == OutboundLifecyclePhase.TERMINAL_WORKER_READY) {
+                    cancelFirstReady = false
+                    throw CancellationException("cancel first startup worker")
+                }
+            },
+        )
+
+        val failed = try {
+            harness.manager.login(testSessionInfo())
+            throw AssertionError("expected typed startup failure")
+        } catch (expected: LifecycleStartException) {
+            expected
+        }
+        assertEquals(LifecycleStartFailure.CANCELLED, failed.result.cause)
+        assertNotNull(failed.result.lifecycle)
+
+        harness.manager.login(testSessionInfo(sessionId = "replacement"))
+        runCurrent()
+        assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
+        assertEquals(1, harness.factory.clients.size)
+        assertEquals("replacement", harness.prefs.sessionId.first())
+        harness.manager.logout()
     }
 
     @Test
