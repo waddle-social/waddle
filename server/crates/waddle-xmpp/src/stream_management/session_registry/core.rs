@@ -12,7 +12,7 @@ use crate::ownership::{
 };
 
 use super::persistence_codec::{
-    detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
+    detached_to_persisted, persisted_to_detached, typed_to_persisted_unacked,
 };
 use super::{DetachedSession, SmRegistryError, DEFAULT_MAX_SESSIONS};
 
@@ -26,6 +26,12 @@ pub(super) enum PendingClaimAcquisitionDisposition {
 pub(super) enum DetachClaimFenceReservation {
     Owned,
     BorrowedRejectedEnable,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct QuarantineRetry {
+    pub(super) attempts: u32,
+    pub(super) next_attempt_at: tokio::time::Instant,
 }
 
 impl DetachClaimFenceReservation {
@@ -193,6 +199,11 @@ pub struct InMemorySmSessionRegistry {
     /// durable row, preventing stale pre-tombstone queues from being
     /// republished directly from `Drop`.
     pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
+    /// Retry backoff for quarantined promotion work. Entries exist only while
+    /// the same stream id remains in `pending_promotions`; the stream-shard
+    /// lock serializes schedule changes with drain and terminal confirmation.
+    pub(super) quarantine_retries:
+        RwLock<HashMap<crate::pending_delivery::SmSessionId, QuarantineRetry>>,
     /// Claimed ISR sessions whose follow-up epoch lookup failed before the
     /// route could prove that the recorded exact fence still owns the backend
     /// row. Kept out of `sessions` until a read-only reconciliation proves
@@ -859,6 +870,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashSet::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            quarantine_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -885,6 +897,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashSet::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            quarantine_retries: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -1955,13 +1968,13 @@ impl InMemorySmSessionRegistry {
         let persisted = detached_to_persisted(session)?;
         let mut unacked_rows = Vec::with_capacity(session.unacked_stanzas.len());
         for entry in &session.unacked_stanzas {
-            unacked_rows.push(parse_xml_to_persisted_unacked(
+            unacked_rows.push(typed_to_persisted_unacked(
                 &session.stream_id,
                 entry.sequence,
-                &entry.stanza_xml,
+                &entry.stanza,
                 entry.original_receipt_at,
                 entry.purpose,
-            )?);
+            ));
         }
         storage
             .store_session_atomic(persisted, unacked_rows)

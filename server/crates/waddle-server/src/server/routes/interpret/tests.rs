@@ -5887,14 +5887,11 @@ async fn route_full_jid_dm_to_detached_resource_runs_recipient_pipeline() {
         1,
         "processed DM queued for XEP-0198 replay"
     );
-    let queued_element: Element = session.unacked_stanzas[0]
-        .stanza_xml
-        .parse()
-        .expect("queued stanza XML parses");
-    let queued =
-        xmpp_parsers::message::Message::try_from(queued_element).expect("queued message parses");
+    let Stanza::Message(queued) = &session.unacked_stanzas[0].stanza else {
+        panic!("queued stanza must remain a typed message");
+    };
     let by: jid::Jid = "bob@example.com".parse().expect("jid");
-    let recipient_stanza_id = waddle_xmpp_core::xep0359::extract_stanza_id_by(&queued, &by);
+    let recipient_stanza_id = waddle_xmpp_core::xep0359::extract_stanza_id_by(queued, &by);
     assert!(
         recipient_stanza_id.is_some(),
         "replay copy must carry the recipient-side stanza-id (XEP-0359 §3); \
@@ -6279,15 +6276,12 @@ async fn route_bare_jid_dm_to_detached_only_recipient_runs_recipient_pipeline() 
         .expect("peek ok")
         .expect("session present");
     assert_eq!(session.unacked_stanzas.len(), 1);
-    let queued_element: Element = session.unacked_stanzas[0]
-        .stanza_xml
-        .parse()
-        .expect("queued stanza XML parses");
-    let queued =
-        xmpp_parsers::message::Message::try_from(queued_element).expect("queued message parses");
+    let Stanza::Message(queued) = &session.unacked_stanzas[0].stanza else {
+        panic!("queued stanza must remain a typed message");
+    };
     let by: jid::Jid = "bob@example.com".parse().expect("jid");
     assert!(
-        waddle_xmpp_core::xep0359::extract_stanza_id_by(&queued, &by).is_some(),
+        waddle_xmpp_core::xep0359::extract_stanza_id_by(queued, &by).is_some(),
         "detached-only replay copy must be the PROCESSED (stamped) stanza"
     );
 }

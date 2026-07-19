@@ -7,7 +7,6 @@ use waddle_xmpp::pending_delivery::{PendingRowId, SmSessionId};
 use waddle_xmpp::stream_management::{DetachedSession, DetachedUnackedStanza};
 use waddle_xmpp::Stanza;
 
-use super::stanza::parse_stanza;
 use super::PromotedOutcome;
 
 pub(super) enum PendingLinks {
@@ -82,11 +81,11 @@ pub(super) fn classify(
     entry: &DetachedUnackedStanza,
     pending_links: &PendingLinks,
 ) -> PromotedOutcome {
-    let valid_barrier = match parse_stanza(&entry.stanza_xml) {
-        Some(Stanza::Iq(iq)) => {
-            waddle_xmpp::xep::xep0199::is_ping_from_server_to_full_jid(&iq, &session.jid)
+    let valid_barrier = match &entry.stanza {
+        Stanza::Iq(iq) => {
+            waddle_xmpp::xep::xep0199::is_ping_from_server_to_full_jid(iq, &session.jid)
         }
-        Some(Stanza::Message(_) | Stanza::Presence(_)) | None => false,
+        Stanza::Message(_) | Stanza::Presence(_) => false,
     };
     if !valid_barrier {
         tracing::error!(

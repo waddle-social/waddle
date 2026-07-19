@@ -152,11 +152,11 @@ pub enum SmPersistenceError {
 /// [`chrono::DateTime<chrono::Utc>`] rather than [`std::time::Instant`]
 /// — `Instant` is process-relative and cannot be persisted.
 ///
-/// `unacked_stanzas` carries the wire XML for each unacked stanza,
-/// keyed by its server-side outbound sequence. Locked Q6c requires
-/// each stanza to retain its **original receipt time** (so promoted
-/// rows stamp `<delay/>` per XEP-0203 §4.1 + XEP-0198 §5 line 364);
-/// the `original_receipt_at` field on
+/// The associated [`PersistedUnackedStanza`] rows carry typed stanzas,
+/// keyed by their server-side outbound sequence. Locked Q6c requires
+/// each stanza to retain its **original receipt time** (so promoted rows
+/// stamp `<delay/>` per XEP-0203 §4.1 + XEP-0198 §5 line 364); the
+/// `original_receipt_at` field on
 /// [`PersistedUnackedStanza`] holds that value.
 #[derive(Debug, Clone)]
 pub struct PersistedSession {
@@ -213,8 +213,7 @@ pub struct PersistedUnackedStanza {
     pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.
     pub sequence: u32,
-    /// Typed stanza payload — the original outbound stanza so SM
-    /// resumption replays bit-identically.
+    /// Typed stanza payload retained for semantically identical SM replay.
     pub stanza: Box<Stanza>,
     /// Original receipt time at the server. Carried so that the Q6
     /// promotion path can stamp the `<delay/>` per XEP-0203 §4.1 +

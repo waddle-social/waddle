@@ -14,7 +14,7 @@ use super::{
     timers::TransportTimers,
     transport_xml::{
         build_conflict_stream_error, build_handled_count_too_high_stream_error,
-        build_system_shutdown_stream_error, websocket_stream_close_xml,
+        build_system_shutdown_stream_error, stanza_to_xml, websocket_stream_close_xml,
     },
 };
 use axum::response::IntoResponse;
@@ -759,11 +759,12 @@ async fn handle_inbound_text(
                             .get_stanzas_to_resend(replay_after_h)
                             .into_iter()
                             .map(|entry| {
-                                waddle_xmpp::stream_management::stamp_replay_delay(
-                                    &entry.stanza_xml,
+                                let replay = waddle_xmpp::stream_management::stamp_replay_delay(
+                                    &entry.stanza,
                                     server_domain,
                                     entry.original_receipt_at,
-                                )
+                                );
+                                stanza_to_xml(&replay)
                             }),
                     );
                 }

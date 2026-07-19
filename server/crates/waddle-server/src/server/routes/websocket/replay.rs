@@ -1,6 +1,6 @@
 use super::*;
 use super::{
-    interpret_loop::build_interpret_deps, stream_management::is_countable_stanza,
+    interpret_loop::build_interpret_deps, stream_management::parse_countable_stanza,
     transport_xml::stanza_to_xml,
 };
 use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
@@ -103,7 +103,11 @@ async fn record_drained_xml(
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
 ) {
-    if !sm_state.enabled || !is_countable_stanza(&xml) {
+    let stanza = sm_state
+        .enabled
+        .then(|| parse_countable_stanza(&xml))
+        .flatten();
+    let Some(stanza) = stanza else {
         if let Some(row_id) = pending_row_id {
             if let Err(error) = state
                 .deps
@@ -120,7 +124,7 @@ async fn record_drained_xml(
             }
         }
         return;
-    }
+    };
     // Drain path: we're recording into the unacked queue for replay
     // on the next resume, NOT writing to a live wire. The SM cadence
     // signal is moot — there is no socket to follow up with `<r/>`.
@@ -134,7 +138,7 @@ async fn record_drained_xml(
     // reach this path: they are produced synchronously on the
     // requester's own connection, never routed via the registry.
     let _ = sm_state.record_outbound_with_receipt_at(
-        xml.clone(),
+        stanza.clone(),
         original_receipt_at,
         SmUnackedStanzaPurpose::Application,
     );
@@ -174,7 +178,12 @@ async fn record_drained_xml(
             .deps
             .protocol
             .sm_session_registry
-            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, original_receipt_at)
+            .record_outbound_for_detached_stream_at(
+                stream_id,
+                sequence,
+                stanza,
+                original_receipt_at,
+            )
             .await
         {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");

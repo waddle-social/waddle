@@ -1,4 +1,6 @@
-use super::transport_xml::{build_handled_count_too_high_stream_error, websocket_stream_close_xml};
+use super::transport_xml::{
+    build_handled_count_too_high_stream_error, stanza_to_xml, websocket_stream_close_xml,
+};
 use super::*;
 
 const SM_ENABLE_FALLIBLE_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -346,11 +348,29 @@ pub(super) use registration::{
 /// `starts_with("<message")` would also accept nonzas such as
 /// `<messages>`). Anything that does not parse is by definition not a
 /// stanza this server produced and does not count.
+#[cfg(test)]
 pub(super) fn is_countable_stanza(frame: &str) -> bool {
+    parse_countable_stanza(frame).is_some()
+}
+
+/// Parse a serialized transport frame into the typed stanza retained by
+/// stream management. Nonzas and malformed frames return `None`.
+pub(super) fn parse_countable_stanza(frame: &str) -> Option<Stanza> {
     let Ok(element) = Element::from_str(frame.trim_start()) else {
-        return false;
+        return None;
     };
-    matches!(element.name(), "iq" | "message" | "presence")
+    match element.name() {
+        "message" => xmpp_parsers::message::Message::try_from(element)
+            .ok()
+            .map(Stanza::Message),
+        "iq" => xmpp_parsers::iq::Iq::try_from(element)
+            .ok()
+            .map(|iq| Stanza::Iq(Box::new(iq))),
+        "presence" => xmpp_parsers::presence::Presence::try_from(element)
+            .ok()
+            .map(Stanza::Presence),
+        _ => None,
+    }
 }
 
 pub(super) fn sm_show_from_name(value: &str) -> Option<xmpp_parsers::presence::Show> {
@@ -1128,7 +1148,9 @@ async fn handle_sm_resume(resume: SmResume, state: &WebSocketState, ctx: SmCtx<'
         .get_stanzas_to_resend(resume.h)
         .into_iter()
         .map(|entry| {
-            stamp_replay_delay(&entry.stanza_xml, server_domain, entry.original_receipt_at)
+            let replay =
+                stamp_replay_delay(&entry.stanza, server_domain, entry.original_receipt_at);
+            stanza_to_xml(&replay)
         })
         .collect();
     info!(

@@ -1,11 +1,12 @@
 use jid::FullJid;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::ownership::{ClaimError, Entity, EntityType};
 
 use super::core::{
     DetachClaimFenceReservation, InMemorySmSessionRegistry, PendingClaimAcquisitionDisposition,
-    CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+    QuarantineRetry, CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
 };
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
 
@@ -103,7 +104,10 @@ impl Drop for PendingPromotionRetryLease<'_> {
             return;
         };
         let stream_id = session.stream_id.clone();
-        if let Err(error) = self.registry.retain_pending_promotion_for_retry(session) {
+        if let Err(error) = self
+            .registry
+            .restore_leased_pending_promotion_retry(session)
+        {
             tracing::warn!(
                 %stream_id,
                 %error,
@@ -185,12 +189,10 @@ impl InMemorySmSessionRegistry {
     /// removing MUC occupants, evicting routing entries, and discarding
     /// sidecar auth context. `cleanup_expired` only returns a count, which
     /// isn't enough for that work.
-    /// Drain every detached + claimed session from the in-memory
-    /// view, regardless of expiry status. Intended for the
-    /// graceful-shutdown path (issue #209 slice (d) phase 4 +
-    /// locked Q8 = B): the server is exiting, so it walks the full
-    /// session set and hands each one's unacked queue to the Q6
-    /// promotion path before terminating.
+    /// Drain every detached session from the in-memory view regardless of
+    /// expiry status. Parked promotion retries are deliberately excluded;
+    /// the graceful-shutdown entry pass handles its one-time due snapshot via
+    /// [`Self::drain_shutdown_entry`].
     ///
     /// **This method does NOT delete durable rows.** The caller is
     /// expected to invoke [`Self::confirm_drained`] for each
@@ -202,6 +204,30 @@ impl InMemorySmSessionRegistry {
     /// implementation deleted durable rows up-front, losing
     /// stanzas on any partial-promotion failure.)
     pub async fn drain_all_for_shutdown(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        self.drain_for_shutdown(false).await
+    }
+
+    /// First graceful-shutdown Q6 pass: drain ordinary detached sessions and
+    /// a one-time snapshot of parked promotions already due at shutdown
+    /// entry. Later passes use [`Self::drain_all_for_shutdown`], preventing a
+    /// failure retained during shutdown from being retried every 250 ms.
+    pub async fn drain_shutdown_entry(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        self.drain_for_shutdown(true).await
+    }
+
+    async fn drain_for_shutdown(
+        &self,
+        include_due_retries: bool,
+    ) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let now = tokio::time::Instant::now();
+        let retry_capacity = if include_due_retries {
+            self.pending_promotion_retries
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .len()
+        } else {
+            0
+        };
         let stream_ids: Vec<String> = {
             let sessions = self
                 .sessions
@@ -209,10 +235,18 @@ impl InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
             sessions.keys().cloned().collect()
         };
-        let mut drained = DrainedSessionBatch::new(self, stream_ids.len());
+        let mut drained = DrainedSessionBatch::new(self, stream_ids.len() + retry_capacity);
+        if include_due_retries {
+            self.drain_due_pending_promotion_retries(now, &mut drained)
+                .await?;
+        }
         for stream_id in &stream_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            let typed_stream_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+            if !self.quarantine_retry_is_due_locked(&typed_stream_id, now)? {
+                continue;
+            }
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -1043,6 +1077,7 @@ impl InMemorySmSessionRegistry {
             }
         };
         let _stream_guard = stream_lock.lock().await;
+        let typed_stream_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
         match self.persist_delete_session(stream_id).await {
             Ok(()) => {
                 // ADR-0017 Phase 3 Slice 5: the durable row is gone, so the
@@ -1056,6 +1091,17 @@ impl InMemorySmSessionRegistry {
                     .read()
                     .ok()
                     .and_then(|fences| fences.get(stream_id).cloned());
+                if let Err(error) = self.clear_quarantine_retry_locked(&typed_stream_id) {
+                    tracing::warn!(
+                        stream_id,
+                        %error,
+                        "confirm_drained: durable rows deleted but quarantine retry state could not be cleared"
+                    );
+                    // The durable row is already gone. Continue terminalizing
+                    // the pending promotion rather than asking the caller to
+                    // reinsert and re-promote completed work. Schedule
+                    // admission still requires a live pending promotion.
+                }
                 if let Some(fence) = fence {
                     if !self.try_record_terminal_claim_fence(stream_id, fence.clone()) {
                         debug!(
@@ -1110,16 +1156,164 @@ impl InMemorySmSessionRegistry {
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
 
-    /// Drain expired sessions from the in-memory view. Returns the
-    /// drained sessions for the caller to run Q6 promotion on.
+    /// Park a quarantined promotion outside the resumable session map and
+    /// schedule its next eligibility using the caller's delay policy.
     ///
-    /// **Does NOT delete durable rows.** The caller MUST invoke
-    /// [`Self::confirm_drained`] for each session AFTER its unacked
-    /// queue has been successfully promoted. If promotion fails
-    /// mid-batch, the failed sessions' durable rows survive so a
-    /// restart can retry. (Copilot review on PR #346: previous
-    /// up-front delete lost stanzas on partial-promotion failure.)
-    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+    /// The stream-shard lock makes payload publication, attempt accounting,
+    /// and deadline installation atomic with every drain path. Keeping the
+    /// payload exclusively in `pending_promotion_retries` also prevents
+    /// fresh-bind invalidation, capacity eviction, and shutdown sweeps from
+    /// bypassing the quarantine deadline.
+    pub async fn quarantine_for_retry<F>(
+        &self,
+        mut session: DetachedSession,
+        delay_for_attempt: F,
+    ) -> Result<u32, SmRegistryError>
+    where
+        F: FnOnce(u32) -> Duration,
+    {
+        let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        let stream_lock = self.stream_lock(stream_id.as_str())?;
+        let _stream_guard = stream_lock.lock().await;
+        let is_pending = self
+            .pending_promotions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .contains(stream_id.as_str());
+        if !is_pending {
+            return Err(SmRegistryError::NotFound(stream_id.to_string()));
+        }
+
+        self.reconcile_retry_payload(&mut session).await;
+
+        let attempts = self
+            .quarantine_retries
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(&stream_id)
+            .map_or(1, |retry| retry.attempts.saturating_add(1));
+        let now = tokio::time::Instant::now();
+        let next_attempt_at = now
+            .checked_add(delay_for_attempt(attempts))
+            .ok_or_else(|| {
+                SmRegistryError::Internal("Quarantine retry deadline overflow".to_string())
+            })?;
+        self.quarantine_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .insert(
+                stream_id.clone(),
+                QuarantineRetry {
+                    attempts,
+                    next_attempt_at,
+                },
+            );
+        self.sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id.as_str());
+        self.pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .insert(stream_id.to_string(), session);
+        Ok(attempts)
+    }
+
+    /// Gate a displaced promotion through the authoritative quarantine
+    /// deadline. Before the deadline, the candidate is parked and `None` is
+    /// returned. Once due, any already-parked payload wins over the handoff
+    /// candidate and is reconciled against durable storage before return.
+    ///
+    /// This avoids both deadline bypass and duplicate retry inventories when
+    /// a stale displacement handoff races the ordinary janitor retry path.
+    pub async fn take_displaced_promotion_if_quarantine_due(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<Option<DetachedSession>, SmRegistryError> {
+        let stream_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        let stream_lock = self.stream_lock(stream_id.as_str())?;
+        let _stream_guard = stream_lock.lock().await;
+        let retry = self
+            .quarantine_retries
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(&stream_id)
+            .cloned();
+        let Some(retry) = retry else {
+            return Ok(Some(session.clone()));
+        };
+        if retry.next_attempt_at > tokio::time::Instant::now() {
+            let is_pending = self
+                .pending_promotions
+                .read()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .contains(stream_id.as_str());
+            if !is_pending {
+                return Err(SmRegistryError::NotFound(stream_id.to_string()));
+            }
+            self.pending_promotion_retries
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+                .entry(stream_id.to_string())
+                .or_insert_with(|| session.clone());
+            return Ok(None);
+        }
+        let due = self
+            .pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id.as_str())
+            .unwrap_or_else(|| session.clone());
+        let mut lease = PendingPromotionRetryLease::new(self, due);
+        self.reconcile_retry_payload(lease.session_mut()).await;
+        Ok(Some(lease.finish()))
+    }
+
+    /// Clear any quarantine backoff for a pending promotion. Returns whether
+    /// an entry existed. Terminal confirmation also clears this state.
+    pub async fn clear_quarantine_retry(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<bool, SmRegistryError> {
+        let stream_lock = self.stream_lock(stream_id.as_str())?;
+        let _stream_guard = stream_lock.lock().await;
+        self.clear_quarantine_retry_locked(stream_id)
+    }
+
+    fn clear_quarantine_retry_locked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+    ) -> Result<bool, SmRegistryError> {
+        Ok(self
+            .quarantine_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .remove(stream_id)
+            .is_some())
+    }
+
+    fn quarantine_retry_is_due_locked(
+        &self,
+        stream_id: &crate::pending_delivery::SmSessionId,
+        now: tokio::time::Instant,
+    ) -> Result<bool, SmRegistryError> {
+        Ok(self
+            .quarantine_retries
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .get(stream_id)
+            .is_none_or(|retry| retry.next_attempt_at <= now))
+    }
+
+    /// Move every due parked promotion into `drained`, retaining a
+    /// cancellation lease while its payload is reconciled against durable
+    /// storage. Future quarantines stay parked. Shared by periodic expiry and
+    /// graceful shutdown so both paths honor the same eligibility boundary.
+    async fn drain_due_pending_promotion_retries(
+        &self,
+        now: tokio::time::Instant,
+        drained: &mut DrainedSessionBatch<'_>,
+    ) -> Result<(), SmRegistryError> {
         let retry_ids = self
             .pending_promotion_retries
             .read()
@@ -1127,10 +1321,13 @@ impl InMemorySmSessionRegistry {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let mut drained = DrainedSessionBatch::new(self, retry_ids.len());
         for stream_id in retry_ids {
             let stream_lock = self.stream_lock(&stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            let typed_stream_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+            if !self.quarantine_retry_is_due_locked(&typed_stream_id, now)? {
+                continue;
+            }
             let Some(session) = self
                 .pending_promotion_retries
                 .write()
@@ -1152,6 +1349,28 @@ impl InMemorySmSessionRegistry {
                 retry.discard();
             }
         }
+        Ok(())
+    }
+
+    /// Drain expired sessions from the in-memory view. Returns the
+    /// drained sessions for the caller to run Q6 promotion on.
+    ///
+    /// **Does NOT delete durable rows.** The caller MUST invoke
+    /// [`Self::confirm_drained`] for each session AFTER its unacked
+    /// queue has been successfully promoted. If promotion fails
+    /// mid-batch, the failed sessions' durable rows survive so a
+    /// restart can retry. (Copilot review on PR #346: previous
+    /// up-front delete lost stanzas on partial-promotion failure.)
+    pub async fn drain_expired(&self) -> Result<Vec<DetachedSession>, SmRegistryError> {
+        let now = tokio::time::Instant::now();
+        let retry_capacity = self
+            .pending_promotion_retries
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .len();
+        let mut drained = DrainedSessionBatch::new(self, retry_capacity);
+        self.drain_due_pending_promotion_retries(now, &mut drained)
+            .await?;
         let expired_ids: Vec<String> = {
             let sessions = self
                 .sessions
@@ -1166,6 +1385,10 @@ impl InMemorySmSessionRegistry {
         for stream_id in &expired_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
+            let typed_stream_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+            if !self.quarantine_retry_is_due_locked(&typed_stream_id, now)? {
+                continue;
+            }
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -1312,6 +1535,29 @@ impl InMemorySmSessionRegistry {
     /// The durable row and exact claim remain intact; forcing the local copy
     /// expired makes the next SM janitor sweep retry promote → confirm.
     pub fn retain_pending_promotion_for_retry(
+        &self,
+        session: DetachedSession,
+    ) -> Result<(), SmRegistryError> {
+        let stream_id = session.stream_id.clone();
+        let promotions = self
+            .pending_promotions
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if !promotions.contains(&stream_id) {
+            return Ok(());
+        }
+        self.pending_promotion_retries
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
+            .entry(stream_id)
+            .or_insert(session);
+        Ok(())
+    }
+
+    /// Restore a payload removed under a retry lease. Unlike generic
+    /// cancellation fallback, the leased payload is authoritative and must
+    /// replace any stale handoff that raced its cancellation.
+    fn restore_leased_pending_promotion_retry(
         &self,
         session: DetachedSession,
     ) -> Result<(), SmRegistryError> {

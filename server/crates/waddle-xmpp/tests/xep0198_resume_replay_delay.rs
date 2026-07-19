@@ -13,33 +13,37 @@
 use chrono::{DateTime, TimeZone, Utc};
 use jid::Jid;
 use minidom::Element;
-use std::str::FromStr;
-use waddle_xmpp::parser::{element_to_string, message_to_string};
+use waddle_xmpp::parser::element_to_string;
 use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::{stamp_replay_delay, StreamManagementState};
 use waddle_xmpp::xep::xep0203::{build_delay_element, DelayInfo};
 use waddle_xmpp::xep::NS_DELAY;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 fn fixed_receipt() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 1, 9, 15, 30).unwrap()
 }
 
-/// Serialize a typed chat `<message/>` fixture (bob → alice) with the
-/// given id, body, and any pre-attached `<delay/>` payloads.
-fn chat_message_xml(id: &str, body: &str, delays: Vec<Element>) -> String {
+/// Build a typed chat `<message/>` fixture (bob → alice) with the given
+/// id, body, and any pre-attached `<delay/>` payloads.
+fn chat_message(id: &str, body: &str, delays: Vec<Element>) -> Stanza {
     let mut message = Message::new(Some("alice@example.com".parse::<Jid>().expect("jid")));
     message.from = Some("bob@example.com/x".parse::<Jid>().expect("jid"));
     message.type_ = MessageType::Chat;
     message.id = Some(Id(id.to_string()));
     message.bodies.insert(Lang::new(), body.to_string());
     message.payloads.extend(delays);
-    message_to_string(&message).expect("serialize message fixture")
+    Stanza::Message(message)
 }
 
-fn delay_children(xml: &str) -> Vec<Element> {
-    let element = Element::from_str(xml).expect("stamped replay stays well-formed XML");
-    element
+fn stanza_to_xml(stanza: &Stanza) -> String {
+    element_to_string(&stanza.to_element()).expect("serialize stanza fixture")
+}
+
+fn delay_children(stanza: &Stanza) -> Vec<Element> {
+    stanza
+        .to_element()
         .children()
         .filter(|child| child.name() == "delay" && child.ns() == NS_DELAY)
         .cloned()
@@ -48,7 +52,7 @@ fn delay_children(xml: &str) -> Vec<Element> {
 
 #[test]
 fn replayed_message_carries_delay_with_original_receipt_stamp() {
-    let original = chat_message_xml("m1", "hi", Vec::new());
+    let original = chat_message("m1", "hi", Vec::new());
 
     let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
@@ -68,22 +72,20 @@ fn replayed_message_carries_delay_with_original_receipt_stamp() {
 fn replayed_iq_is_not_stamped() {
     // XEP-0203 §2 defines delay annotations for message and presence
     // stanzas; a replayed <iq/> must go out byte-identical.
-    let original = element_to_string(
-        &Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
-            .attr(minidom::rxml::xml_ncname!("from").to_owned(), "example.com")
-            .attr(
-                minidom::rxml::xml_ncname!("to").to_owned(),
-                "alice@example.com/r",
-            )
-            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "q1")
-            .build(),
-    )
-    .expect("serialize iq fixture");
+    let original = Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Result {
+        from: Some("example.com".parse().expect("from JID")),
+        to: Some("alice@example.com/r".parse().expect("to JID")),
+        id: "q1".to_string(),
+        payload: None,
+    }));
 
     let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
-    assert_eq!(stamped, original, "iq replays byte-identical");
+    assert_eq!(
+        stamped.to_element(),
+        original.to_element(),
+        "iq replay is unchanged"
+    );
     assert!(delay_children(&stamped).is_empty(), "iq gains no delay");
 }
 
@@ -107,7 +109,7 @@ fn replay_preserves_existing_self_stamped_delay_and_upstream_delay() {
         stamp: Utc.with_ymd_and_hms(2026, 6, 30, 7, 59, 0).unwrap(),
         reason: Some("Forwarded by upstream".to_string()),
     });
-    let original = chat_message_xml("m2", "hi", vec![self_stamp, upstream_delay]);
+    let original = chat_message("m2", "hi", vec![self_stamp, upstream_delay]);
 
     let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
 
@@ -138,15 +140,15 @@ fn replay_preserves_existing_self_stamped_delay_and_upstream_delay() {
 
 #[test]
 fn first_send_is_recorded_unstamped_and_gains_delay_only_at_replay() {
-    // The unacked queue must hold the stanza byte-for-byte as it was
-    // first written to the wire — the XEP-0203 stamp is applied only
+    // The unacked queue must hold the original typed stanza without a
+    // replay delay — the XEP-0203 stamp is applied only
     // when the stanza is replayed after <resumed/>. Stamping at record
     // time would leak a delay element onto the FIRST delivery, telling
     // the recipient a live message was delayed.
     let mut state = StreamManagementState::new();
     state.enable("stream-first-send".to_string(), true, Some(300));
 
-    let wire = chat_message_xml("live-1", "live", Vec::new());
+    let wire = chat_message("live-1", "live", Vec::new());
     let _ = state.record_outbound_with_receipt_at(
         wire.clone(),
         fixed_receipt(),
@@ -156,17 +158,45 @@ fn first_send_is_recorded_unstamped_and_gains_delay_only_at_replay() {
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 1);
     assert_eq!(
-        replay[0].stanza_xml, wire,
-        "queue preserves the first-send bytes — no delay on first delivery"
+        stanza_to_xml(&replay[0].stanza),
+        stanza_to_xml(&wire),
+        "queue preserves the original stanza — no delay on first delivery"
     );
-    assert!(delay_children(&replay[0].stanza_xml).is_empty());
+    assert!(delay_children(&replay[0].stanza).is_empty());
 
     let stamped = stamp_replay_delay(
-        &replay[0].stanza_xml,
+        &replay[0].stanza,
         "example.com",
         replay[0].original_receipt_at,
     );
     assert_eq!(delay_children(&stamped).len(), 1, "delay appears at replay");
+}
+
+#[test]
+fn replay_delay_preserves_typed_message_thread() {
+    let mut original = chat_message("threaded", "reply", Vec::new());
+    let Stanza::Message(message) = &mut original else {
+        unreachable!("chat_message always returns a message")
+    };
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "conversation-thread".to_string(),
+        parent: None,
+    });
+
+    let stamped = stamp_replay_delay(&original, "example.com", fixed_receipt());
+
+    let Stanza::Message(message) = stamped else {
+        panic!("replay delay must preserve the message stanza variant")
+    };
+    assert_eq!(
+        message.thread.as_ref().map(|thread| thread.id.as_str()),
+        Some("conversation-thread")
+    );
+    assert_eq!(
+        delay_children(&Stanza::Message(message)).len(),
+        1,
+        "the typed thread and replay delay coexist"
+    );
 }
 
 #[test]
@@ -180,15 +210,15 @@ fn resend_set_carries_each_stanzas_original_receipt_time() {
 
     let first_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
     let second_receipt = Utc.with_ymd_and_hms(2026, 7, 1, 9, 5, 0).unwrap();
-    let first_xml = chat_message_xml("a", "first", Vec::new());
-    let second_xml = chat_message_xml("b", "second", Vec::new());
+    let first = chat_message("a", "first", Vec::new());
+    let second = chat_message("b", "second", Vec::new());
     let _ = state.record_outbound_with_receipt_at(
-        first_xml.clone(),
+        first.clone(),
         first_receipt,
         SmUnackedStanzaPurpose::Application,
     );
     let _ = state.record_outbound_with_receipt_at(
-        second_xml.clone(),
+        second.clone(),
         second_receipt,
         SmUnackedStanzaPurpose::Application,
     );
@@ -196,9 +226,9 @@ fn resend_set_carries_each_stanzas_original_receipt_time() {
     let replay = state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].original_receipt_at, first_receipt);
-    assert_eq!(replay[0].stanza_xml, first_xml);
+    assert_eq!(stanza_to_xml(&replay[0].stanza), stanza_to_xml(&first));
     assert_eq!(replay[1].original_receipt_at, second_receipt);
-    assert_eq!(replay[1].stanza_xml, second_xml);
+    assert_eq!(stanza_to_xml(&replay[1].stanza), stanza_to_xml(&second));
 }
 
 #[tokio::test]

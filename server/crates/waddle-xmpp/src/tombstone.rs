@@ -138,25 +138,19 @@ fn has_stanza_id_by(el: &minidom::Element, target_id: &str, by_jid: &jid::BareJi
 
 /// Select the sequences of unacked outbound `<message/>` entries that
 /// match a XEP-0424 / XEP-0425 tombstone. Pure — takes a snapshot of
-/// `(sequence, stanza_xml)` pairs so the caller can parse OUTSIDE the
+/// `(sequence, stanza)` pairs so the caller can match OUTSIDE the
 /// registry's write locks (issue #1145) and later remove exactly the
 /// returned `(stream_id, sequence)` pairs, which is safe even if the
 /// queue changed between snapshot and removal.
 ///
-/// Parse errors and non-message frames are skipped silently — only
-/// matching messages are selected.
+/// Non-message stanzas are skipped — only matching messages are selected.
 pub fn matching_tombstone_sequences(
-    entries: &[(u32, String)],
+    entries: &[(u32, crate::Stanza)],
     target: &TombstoneTarget,
 ) -> Vec<u32> {
     entries
         .iter()
-        .filter(
-            |(_, stanza_xml)| match stanza_xml.parse::<minidom::Element>() {
-                Ok(el) => target.matches_message_element(&el),
-                Err(_) => false,
-            },
-        )
+        .filter(|(_, stanza)| target.matches_message_element(&stanza.to_element()))
         .map(|(sequence, _)| *sequence)
         .collect()
 }
@@ -185,9 +179,12 @@ mod tests {
     }
 
     fn message_from_to(from: &str, to: &str, wire_id: &str) -> minidom::Element {
-        format!("<message xmlns='jabber:client' from='{from}' to='{to}' id='{wire_id}'/>")
-            .parse()
-            .expect("valid message element")
+        let mut message = xmpp_parsers::message::Message::new(Some(
+            to.parse::<jid::Jid>().expect("valid recipient JID"),
+        ));
+        message.from = Some(from.parse::<jid::Jid>().expect("valid sender JID"));
+        message.id = Some(xmpp_parsers::message::Id(wire_id.to_string()));
+        crate::Stanza::Message(message).to_element()
     }
 
     #[test]

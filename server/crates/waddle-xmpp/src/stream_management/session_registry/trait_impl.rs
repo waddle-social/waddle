@@ -432,8 +432,10 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // under READ locks only. XML parsing of every entry used to
         // run under the sessions write lock, stalling all detach /
         // resume traffic for the duration of a full-registry scan.
-        let mut snapshots: Vec<(String, Vec<(u32, String, chrono::DateTime<chrono::Utc>)>)> =
-            Vec::new();
+        let mut snapshots: Vec<(
+            String,
+            Vec<(u32, crate::Stanza, chrono::DateTime<chrono::Utc>)>,
+        )> = Vec::new();
         {
             let sessions = self
                 .sessions
@@ -448,7 +450,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         .map(|entry| {
                             (
                                 entry.sequence,
-                                entry.stanza_xml.clone(),
+                                entry.stanza.clone(),
                                 entry.original_receipt_at,
                             )
                         })
@@ -470,7 +472,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         .map(|entry| {
                             (
                                 entry.sequence,
-                                entry.stanza_xml.clone(),
+                                entry.stanza.clone(),
                                 entry.original_receipt_at,
                             )
                         })
@@ -492,7 +494,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                         .map(|entry| {
                             (
                                 entry.sequence,
-                                entry.stanza_xml.clone(),
+                                entry.stanza.clone(),
                                 entry.original_receipt_at,
                             )
                         })
@@ -509,7 +511,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
             let eligible = entries
                 .into_iter()
                 .filter(|(_, _, received_at)| *received_at <= scrub_horizon)
-                .map(|(sequence, xml, _)| (sequence, xml))
+                .map(|(sequence, stanza, _)| (sequence, stanza))
                 .collect::<Vec<_>>();
             let sequences = matching_tombstone_sequences(&eligible, target);
             if !sequences.is_empty() {

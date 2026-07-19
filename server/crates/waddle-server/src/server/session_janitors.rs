@@ -205,23 +205,60 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         // delete a session that may require permanent barrier
                         // reconciliation.
                         if crate::sm_promotion::session_has_unclassified_barrier(&session) {
+                            match state
+                                .deps
+                                .protocol
+                                .sm_session_registry
+                                .quarantine_for_retry(
+                                    session.clone(),
+                                    crate::sm_promotion::quarantine_retry_delay,
+                                )
+                                .await
+                            {
+                                Ok(attempts) => {
+                                    warn!(
+                                        jid = %session.jid,
+                                        stream_id = %session.stream_id,
+                                        error = %error,
+                                        quarantine_attempt = attempts,
+                                        retry_after_secs = crate::sm_promotion::quarantine_retry_delay(
+                                            attempts
+                                        )
+                                        .as_secs(),
+                                        "SM janitor: blocklist load failed before resume-barrier \
+                                         classification; preserving session without consuming \
+                                         the transient retry budget and backing off quarantine"
+                                    );
+                                    promotion_guard.complete();
+                                }
+                                Err(schedule_error) => warn!(
+                                    jid = %session.jid,
+                                    stream_id = %session.stream_id,
+                                    error = %error,
+                                    %schedule_error,
+                                    "SM janitor: blocklist load failed before resume-barrier \
+                                     classification and quarantine scheduling failed; \
+                                     preserving session for retry"
+                                ),
+                            }
+                            continue;
+                        }
+                        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(
+                            session.stream_id.clone(),
+                        );
+                        if let Err(clear_error) = state
+                            .deps
+                            .protocol
+                            .sm_session_registry
+                            .clear_quarantine_retry(&session_id)
+                            .await
+                        {
                             warn!(
                                 jid = %session.jid,
                                 stream_id = %session.stream_id,
-                                error = %error,
-                                "SM janitor: blocklist load failed before resume-barrier \
-                                 classification; preserving session without consuming \
-                                 the transient retry budget"
+                                %clear_error,
+                                "SM janitor: failed to clear obsolete barrier quarantine state"
                             );
-                            if crate::sm_promotion::reinsert_failed_session_for_retry(
-                                &state.deps.protocol.sm_session_registry,
-                                session.clone(),
-                            )
-                            .await
-                            {
-                                promotion_guard.complete();
-                            }
-                            continue;
                         }
                         let attempts = match state
                             .deps
@@ -347,7 +384,6 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                         bounced = summary.bounced,
                         dropped = summary.dropped,
                         not_promotable = summary.not_promotable,
-                        unparseable = summary.unparseable,
                         scrubbed = summary.scrubbed,
                         storage_failed = summary.storage_failed,
                         quarantined = summary.quarantined,
@@ -356,24 +392,53 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                 }
                 if summary.has_quarantined() {
                     sweep_failed = true;
-                    error!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        quarantined = summary.quarantined,
-                        "SM janitor: promotion found unreconciled durable invariants; \
-                         preserving session state without consuming the transient \
-                         retry budget"
-                    );
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    match crate::sm_promotion::prune_promoted_then_quarantine_for_retry(
                         &state.deps.protocol.sm_session_registry,
                         session.clone(),
                         &summary,
                     )
                     .await
                     {
-                        promotion_guard.complete();
+                        Ok(attempts) => {
+                            error!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                quarantined = summary.quarantined,
+                                quarantine_attempt = attempts,
+                                retry_after_secs = crate::sm_promotion::quarantine_retry_delay(attempts)
+                                    .as_secs(),
+                                "SM janitor: promotion found unreconciled durable invariants; \
+                                 preserving session state without consuming the transient \
+                                 retry budget and backing off reconciliation"
+                            );
+                            promotion_guard.complete();
+                        }
+                        Err(schedule_error) => error!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            quarantined = summary.quarantined,
+                            %schedule_error,
+                            "SM janitor: promotion found unreconciled durable invariants and \
+                             quarantine scheduling failed; preserving session for retry"
+                        ),
                     }
                     continue;
+                }
+                let session_id =
+                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                if let Err(clear_error) = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .clear_quarantine_retry(&session_id)
+                    .await
+                {
+                    warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        %clear_error,
+                        "SM janitor: failed to clear quarantine retry state"
+                    );
                 }
                 if summary.has_storage_failure() {
                     sweep_failed = true;
@@ -5238,6 +5303,8 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         const QUIET_WINDOW_PASSES: u32 = 8;
         let mut empty_passes = 0u32;
         let mut total_drained = 0usize;
+        let mut shutdown_entry_pending = true;
+        let mut drain_outcomes = std::collections::HashMap::<String, bool>::new();
         loop {
             if std::time::Instant::now() >= drain_deadline {
                 waddle_xmpp::telemetry::reliability::increment_sm_drain_timeout();
@@ -5252,10 +5319,6 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     .live_session_ids()
                     .map(|ids| ids.len())
                     .unwrap_or(0);
-                if remaining > 0 {
-                    #[cfg(feature = "clustering")]
-                    crate::clustering::metrics::record_claims_abandoned_on_drain(remaining as u64);
-                }
                 warn!(
                     total_drained,
                     remaining,
@@ -5265,13 +5328,23 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 );
                 break;
             }
-            let drained = match websocket_state
-                .deps
-                .protocol
-                .sm_session_registry
-                .drain_all_for_shutdown()
-                .await
-            {
+            let drain_result = if shutdown_entry_pending {
+                shutdown_entry_pending = false;
+                websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .drain_shutdown_entry()
+                    .await
+            } else {
+                websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .drain_all_for_shutdown()
+                    .await
+            };
+            let drained = match drain_result {
                 Ok(s) => s,
                 Err(error) => {
                     warn!(error = %error, "Graceful shutdown: drain_all_for_shutdown failed");
@@ -5298,6 +5371,22 @@ pub(crate) fn spawn_graceful_shutdown_drain(
             if drained.is_empty() {
                 empty_passes += 1;
                 if empty_passes >= QUIET_WINDOW_PASSES {
+                    let remaining = websocket_state
+                        .deps
+                        .protocol
+                        .sm_session_registry
+                        .live_session_ids()
+                        .map(|ids| ids.len())
+                        .unwrap_or(0);
+                    if remaining > 0 {
+                        warn!(
+                            total_drained,
+                            remaining,
+                            "Graceful shutdown: quiet window reached with deferred SM \
+                             promotion ownership. Future quarantines keep durable rows \
+                             for restart-time reconciliation."
+                        );
+                    }
                     break;
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -5335,7 +5424,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                              promotion to preserve fail-closed XEP-0191 policy. \
                              Durable SM row will be retried on next startup."
                         );
-                        record_sm_drain_outcome(false);
+                        drain_outcomes.insert(session.stream_id.clone(), false);
                         continue;
                     }
                 };
@@ -5376,31 +5465,62 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     queued = summary.queued,
                     bounced = summary.bounced,
                     dropped = summary.dropped,
-                    unparseable = summary.unparseable,
                     scrubbed = summary.scrubbed,
                     storage_failed = summary.storage_failed,
                     quarantined = summary.quarantined,
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
                 if summary.has_quarantined() {
-                    error!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        quarantined = summary.quarantined,
-                        "Graceful shutdown: promotion found unreconciled durable invariants; \
-                         preserving durable SM rows for operator reconciliation"
-                    );
-                    record_sm_drain_outcome(false);
-                    if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                    drain_outcomes.insert(session.stream_id.clone(), false);
+                    match crate::sm_promotion::prune_promoted_then_quarantine_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         session.clone(),
                         &summary,
                     )
                     .await
                     {
-                        promotion_guard.complete();
+                        Ok(attempts) => {
+                            error!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                quarantined = summary.quarantined,
+                                quarantine_attempt = attempts,
+                                retry_after_secs = crate::sm_promotion::quarantine_retry_delay(
+                                    attempts
+                                )
+                                .as_secs(),
+                                "Graceful shutdown: promotion found unreconciled durable \
+                                 invariants; parking durable SM rows for operator reconciliation"
+                            );
+                            promotion_guard.complete();
+                        }
+                        Err(schedule_error) => error!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            quarantined = summary.quarantined,
+                            %schedule_error,
+                            "Graceful shutdown: promotion found unreconciled durable \
+                             invariants and quarantine parking failed; preserving the \
+                             promotion payload for restart-time retry"
+                        ),
                     }
                     continue;
+                }
+                let session_id =
+                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                if let Err(clear_error) = websocket_state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .clear_quarantine_retry(&session_id)
+                    .await
+                {
+                    warn!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        %clear_error,
+                        "Graceful shutdown: failed to clear resolved quarantine state"
+                    );
                 }
                 if summary.has_storage_failure() {
                     warn!(
@@ -5409,7 +5529,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                         "Graceful shutdown: promotion had storage failures; \
                          preserving durable SM row for restart-time retry"
                     );
-                    record_sm_drain_outcome(false);
+                    drain_outcomes.insert(session.stream_id.clone(), false);
                     if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         session.clone(),
@@ -5432,7 +5552,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 // deletes the durable row and releases the `ClaimStore`
                 // claim only on success (see that method's own doc
                 // comment).
-                record_sm_drain_outcome(confirmed);
+                drain_outcomes.insert(session.stream_id.clone(), confirmed);
                 if !confirmed {
                     warn!(
                         jid = %session.jid,
@@ -5451,8 +5571,6 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                     }
                     continue;
                 }
-                let session_id =
-                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
                 if let Err(error) = websocket_state
                     .deps
                     .protocol
@@ -5472,6 +5590,31 @@ pub(crate) fn spawn_graceful_shutdown_drain(
                 promotion_guard.complete();
             }
             tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if let Some(remaining) = websocket_state
+            .deps
+            .protocol
+            .sm_session_registry
+            .live_session_ids()
+        {
+            let remaining = remaining
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            for (stream_id, released) in &mut drain_outcomes {
+                if !*released && !remaining.contains(stream_id) {
+                    // The independent expiry janitor may have confirmed a
+                    // retry while shutdown was still polling. A pending
+                    // promotion disappears only after terminal confirmation,
+                    // so absence upgrades the final per-stream outcome.
+                    *released = true;
+                }
+            }
+            for stream_id in remaining {
+                drain_outcomes.entry(stream_id).or_insert(false);
+            }
+        }
+        for released in drain_outcomes.into_values() {
+            record_sm_drain_outcome(released);
         }
         info!(
             total_drained,

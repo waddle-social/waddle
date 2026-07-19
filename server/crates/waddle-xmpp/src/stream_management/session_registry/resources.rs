@@ -44,14 +44,6 @@ impl DetachedPresenceState {
 }
 
 impl InMemorySmSessionRegistry {
-    fn stanza_to_replay_xml(stanza: &Stanza) -> String {
-        let element = stanza.to_element();
-        let mut buffer = Vec::new();
-        element
-            .write_to(&mut buffer)
-            .expect("serializing typed stanza should not fail");
-        String::from_utf8(buffer).expect("serialized typed stanza is UTF-8")
-    }
     /// List detached resources for `bare_jid` that had requested the roster.
     pub async fn interested_detached_resources_for_user(
         &self,
@@ -130,7 +122,7 @@ impl InMemorySmSessionRegistry {
     async fn record_outbound_for_detached_resource(
         &self,
         jid: &FullJid,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let Some(stream_id) = self.find_session_id_matching(|session| {
@@ -144,7 +136,7 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
             |session| {
                 session.record_detached_outbound(
-                    stanza_xml,
+                    stanza,
                     original_receipt_at,
                     SmUnackedStanzaPurpose::Application,
                 );
@@ -157,7 +149,7 @@ impl InMemorySmSessionRegistry {
     async fn record_outbound_for_detached_blocklist_resource(
         &self,
         jid: &FullJid,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let Some(stream_id) = self.find_session_id_matching(|session| {
@@ -171,7 +163,7 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired() && session.blocklist_interested && session.jid == *jid,
             |session| {
                 session.record_detached_outbound(
-                    stanza_xml,
+                    stanza,
                     original_receipt_at,
                     SmUnackedStanzaPurpose::Application,
                 );
@@ -184,7 +176,7 @@ impl InMemorySmSessionRegistry {
     async fn record_outbound_for_detached_bound_resource(
         &self,
         jid: &FullJid,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let Some(stream_id) =
@@ -197,7 +189,7 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired() && session.jid == *jid,
             |session| {
                 session.record_detached_outbound(
-                    stanza_xml,
+                    stanza,
                     original_receipt_at,
                     SmUnackedStanzaPurpose::Application,
                 );
@@ -214,12 +206,8 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        self.record_outbound_for_detached_resource(
-            jid,
-            Self::stanza_to_replay_xml(stanza),
-            original_receipt_at,
-        )
-        .await
+        self.record_outbound_for_detached_resource(jid, stanza.clone(), original_receipt_at)
+            .await
     }
 
     /// Record a typed stanza for one detached XEP-0191 blocklist-interested resource.
@@ -231,7 +219,7 @@ impl InMemorySmSessionRegistry {
     ) -> Result<bool, SmRegistryError> {
         self.record_outbound_for_detached_blocklist_resource(
             jid,
-            Self::stanza_to_replay_xml(stanza),
+            stanza.clone(),
             original_receipt_at,
         )
         .await
@@ -245,12 +233,8 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        self.record_outbound_for_detached_bound_resource(
-            jid,
-            Self::stanza_to_replay_xml(stanza),
-            original_receipt_at,
-        )
-        .await
+        self.record_outbound_for_detached_bound_resource(jid, stanza.clone(), original_receipt_at)
+            .await
     }
 
     /// Record a stanza directly against a detached stream id, regardless of
@@ -258,7 +242,7 @@ impl InMemorySmSessionRegistry {
     pub async fn record_outbound_for_detached_stream(
         &self,
         stream_id: &str,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         self.update_detached_session_snapshot(
@@ -266,7 +250,7 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired(),
             |session| {
                 session.record_detached_outbound(
-                    stanza_xml,
+                    stanza,
                     original_receipt_at,
                     SmUnackedStanzaPurpose::Application,
                 );
@@ -280,7 +264,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         sequence: u32,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         self.update_detached_session_snapshot(
@@ -290,7 +274,7 @@ impl InMemorySmSessionRegistry {
                 session
                     .record_detached_outbound_at(
                         sequence,
-                        stanza_xml,
+                        stanza,
                         original_receipt_at,
                         SmUnackedStanzaPurpose::Application,
                     )
@@ -488,7 +472,7 @@ impl InMemorySmSessionRegistry {
     async fn record_outbound_for_detached_available_resource(
         &self,
         jid: &FullJid,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
         let Some(stream_id) = self.find_session_id_matching(|session| {
@@ -502,7 +486,7 @@ impl InMemorySmSessionRegistry {
             |session| !session.is_expired() && session.presence_available && session.jid == *jid,
             |session| {
                 session.record_detached_outbound(
-                    stanza_xml,
+                    stanza,
                     original_receipt_at,
                     SmUnackedStanzaPurpose::Application,
                 );
@@ -521,7 +505,7 @@ impl InMemorySmSessionRegistry {
     ) -> Result<bool, SmRegistryError> {
         self.record_outbound_for_detached_available_resource(
             jid,
-            Self::stanza_to_replay_xml(stanza),
+            stanza.clone(),
             original_receipt_at,
         )
         .await

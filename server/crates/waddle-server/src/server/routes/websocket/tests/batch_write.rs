@@ -10,7 +10,7 @@ use super::super::{
     batch_write::{write_response_batch, BatchSmPolicy, BatchWriteOutcome},
     state::WsConnState,
 };
-use super::create_test_websocket_state;
+use super::{create_test_websocket_state, test_stanza_from_xml, test_stanza_xml};
 use futures::{stream, Sink, Stream, StreamExt as _};
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -101,6 +101,10 @@ fn message_with_id(id: &str) -> String {
 
 fn countable_message(i: usize) -> String {
     message_with_id(&format!("m{i}"))
+}
+
+fn countable_stanza(i: usize) -> waddle_xmpp::Stanza {
+    test_stanza_from_xml(&countable_message(i))
 }
 
 /// XEP-0198 §4: the server may request acks at any time. A large
@@ -320,7 +324,7 @@ async fn mam_results_are_recorded_like_any_stanza_for_counter_convergence() {
     assert_eq!(conn.sm_state.queue_len(), 5);
     let replay = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 5);
-    assert_eq!(replay[0].stanza_xml, live);
+    assert_eq!(test_stanza_xml(&replay[0].stanza), live);
 }
 
 /// If the peer closes (or the socket dies) mid-batch, every countable
@@ -358,7 +362,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
     assert_eq!(conn.sm_state.queue_len(), 12);
     let replay = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(replay.len(), 12);
-    assert_eq!(replay[11].stanza_xml, countable_message(12));
+    assert_eq!(test_stanza_xml(&replay[11].stanza), countable_message(12));
     // Only 5 stanzas + 1 <r/> actually hit the wire.
     assert_eq!(sink_texts(&sink).len(), 6);
 }
@@ -764,7 +768,7 @@ async fn replay_suppressed_batch_never_send_window_pauses_even_above_high_waterm
     for i in 0..9 {
         let _ = conn
             .sm_state
-            .record_outbound(countable_message(i), SmUnackedStanzaPurpose::Application);
+            .record_outbound(countable_stanza(i), SmUnackedStanzaPurpose::Application);
     }
     assert!(
         conn.sm_state.needs_send_pause(),

@@ -53,6 +53,38 @@ mod send;
 mod stream_features;
 mod stream_management;
 
+pub(crate) fn test_message_stanza(id: &str) -> waddle_xmpp::Stanza {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+    waddle_xmpp::Stanza::Message(message)
+}
+
+pub(crate) fn test_stanza_from_xml(xml: &str) -> waddle_xmpp::Stanza {
+    let element = xml
+        .parse::<minidom::Element>()
+        .expect("valid stanza fixture");
+    match element.name() {
+        "message" => waddle_xmpp::Stanza::Message(
+            xmpp_parsers::message::Message::try_from(element).expect("typed message fixture"),
+        ),
+        "iq" => waddle_xmpp::Stanza::Iq(Box::new(
+            xmpp_parsers::iq::Iq::try_from(element).expect("typed IQ fixture"),
+        )),
+        "presence" => waddle_xmpp::Stanza::Presence(
+            xmpp_parsers::presence::Presence::try_from(element).expect("typed presence fixture"),
+        ),
+        root => panic!("unsupported stanza fixture root: {root}"),
+    }
+}
+
+pub(crate) fn test_stanza_xml(stanza: &waddle_xmpp::Stanza) -> String {
+    super::transport_xml::element_to_xml(stanza.to_element())
+}
+
+pub(crate) fn test_stanza_contains(stanza: &waddle_xmpp::Stanza, needle: &str) -> bool {
+    test_stanza_xml(stanza).contains(needle)
+}
+
 /// Seed an OIDC-provisioned local account directly into the `users`
 /// table, the way the OIDC login flow does. Needed since #1246: a
 /// message routed to a local bare JID with no registered account is

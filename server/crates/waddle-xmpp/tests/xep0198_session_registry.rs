@@ -30,10 +30,10 @@ fn live_recording_preserves_explicit_resume_barrier_purpose() {
         id: "resume-barrier".to_string(),
         payload: minidom::Element::builder("ping", waddle_xmpp::xep::xep0199::NS_PING).build(),
     };
-    let barrier_xml =
-        waddle_xmpp::parser::stanza_to_string(barrier).expect("serialize typed resume-barrier IQ");
-
-    let _ = state.record_outbound(barrier_xml, SmUnackedStanzaPurpose::ResumeBarrier);
+    let _ = state.record_outbound(
+        Stanza::Iq(Box::new(barrier)),
+        SmUnackedStanzaPurpose::ResumeBarrier,
+    );
 
     let detached = state
         .to_detached_session(DetachedSessionSnapshot {
@@ -94,6 +94,14 @@ fn chat_stanza(to: &FullJid, body: &str) -> Stanza {
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
     Stanza::Message(message)
+}
+
+fn stanza_xml(stanza: &Stanza) -> String {
+    waddle_xmpp::parser::element_to_string(&stanza.to_element()).expect("serialize stanza")
+}
+
+fn stanza_contains(stanza: &Stanza, needle: &str) -> bool {
+    stanza_xml(stanza).contains(needle)
 }
 
 struct BlockingFirstAtomicStore {
@@ -301,9 +309,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 12,
-            stanza_xml:
-                "<message xmlns='jabber:client' id='m12'><body>alice's own</body></message>"
-                    .to_string(),
+            stanza: late_drain_message("m12", "alice's own"),
             original_receipt_at: chrono::Utc::now(),
             purpose: SmUnackedStanzaPurpose::Application,
         });
@@ -326,9 +332,7 @@ async fn xep0198_restore_drops_unacked_rows_labeled_with_foreign_stream_id() {
     );
     assert_eq!(claimed.unacked_stanzas[0].sequence, 12);
     assert!(
-        claimed.unacked_stanzas[0]
-            .stanza_xml
-            .contains("alice's own"),
+        stanza_contains(&claimed.unacked_stanzas[0].stanza, "alice's own"),
         "only the session's own stanza survives hydration"
     );
 }
@@ -367,7 +371,10 @@ async fn xep0198_claimed_session_remains_writable_until_completed() {
         panic!("claim should still be resumable");
     };
     assert_eq!(completed.unacked_stanzas.len(), 1);
-    assert!(completed.unacked_stanzas[0].stanza_xml.contains("handoff"));
+    assert!(stanza_contains(
+        &completed.unacked_stanzas[0].stanza,
+        "handoff"
+    ));
     assert_eq!(registry.session_count().await, 0);
 }
 
@@ -404,7 +411,10 @@ async fn xep0198_releasing_claim_restores_session_with_handoff_records() {
         .expect("take restored session")
         .expect("session restored");
     assert_eq!(restored.unacked_stanzas.len(), 1);
-    assert!(restored.unacked_stanzas[0].stanza_xml.contains("retry"));
+    assert!(stanza_contains(
+        &restored.unacked_stanzas[0].stanza,
+        "retry"
+    ));
 }
 
 #[tokio::test]
@@ -925,8 +935,7 @@ async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
     // round-trip can re-parse the stanza into a typed Stanza.
     session.unacked_stanzas.push(DetachedUnackedStanza {
         sequence: 12,
-        stanza_xml: "<message xmlns='jabber:client' id='m12'><body>queued at T1</body></message>"
-            .to_string(),
+        stanza: late_drain_message("m12", "queued at T1"),
         original_receipt_at: t1,
         purpose: SmUnackedStanzaPurpose::Application,
     });
@@ -1005,33 +1014,31 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
     );
 }
 
-/// Build a typed `<message/>` stanza and return its on-the-wire XML.
+/// Build a typed `<message/>` stanza.
 ///
 /// AGENTS.md PR Compliance ID 14: tests must construct XMPP XML via
 /// structured builders (`xmpp_parsers` / `minidom`) rather than raw
 /// string literals — string XML is brittle to escaping bugs and
-/// drifts from the production serialization path. `message_to_string`
-/// is the same helper the production write loop uses, so this test
-/// exercises the same wire shape.
-fn late_drain_message_xml(id: &str, body: &str) -> String {
+/// drifts from the production serialization path.
+fn late_drain_message(id: &str, body: &str) -> Stanza {
     let mut message = Message::new(None);
     message.id = Some(xmpp_parsers::message::Id(id.to_string()));
     message
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
-    waddle_xmpp::parser::message_to_string(&message).expect("serialize <message/>")
+    Stanza::Message(message)
 }
 
 #[test]
 fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
     let mut session = detached_session("stream-exact-replay", "alice@example.com/laptop");
     let receipt = chrono::Utc::now();
-    let xml = late_drain_message_xml("same", "same");
+    let stanza = late_drain_message("same", "same");
 
     session
         .record_detached_outbound_at(
             12,
-            xml.clone(),
+            stanza.clone(),
             receipt,
             SmUnackedStanzaPurpose::Application,
         )
@@ -1039,7 +1046,7 @@ fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
     session
         .record_detached_outbound_at(
             12,
-            xml.clone(),
+            stanza.clone(),
             receipt,
             SmUnackedStanzaPurpose::Application,
         )
@@ -1049,7 +1056,7 @@ fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
     assert!(session
         .record_detached_outbound_at(
             12,
-            late_drain_message_xml("different", "different"),
+            late_drain_message("different", "different"),
             receipt,
             SmUnackedStanzaPurpose::Application,
         )
@@ -1057,7 +1064,7 @@ fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
     assert!(session
         .record_detached_outbound_at(
             12,
-            xml.clone(),
+            stanza.clone(),
             receipt + chrono::Duration::seconds(1),
             SmUnackedStanzaPurpose::Application,
         )
@@ -1065,7 +1072,7 @@ fn xep0198_same_sequence_identity_includes_payload_time_and_purpose() {
 
     session.unacked_stanzas[0].purpose = SmUnackedStanzaPurpose::ResumeBarrier;
     assert!(session
-        .record_detached_outbound_at(12, xml, receipt, SmUnackedStanzaPurpose::Application)
+        .record_detached_outbound_at(12, stanza, receipt, SmUnackedStanzaPurpose::Application)
         .is_err());
 }
 
@@ -1097,7 +1104,7 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
         .record_outbound_for_detached_stream_at(
             "stream-late-drain",
             42,
-            late_drain_message_xml("late", "late drain"),
+            late_drain_message("late", "late drain"),
             t1,
         )
         .await
@@ -1186,7 +1193,7 @@ async fn xep0198_record_outbound_for_unknown_stream_does_not_persist_orphan_row(
         .record_outbound_for_detached_stream_at(
             "stream-does-not-exist",
             7,
-            late_drain_message_xml("orphan", "orphan"),
+            late_drain_message("orphan", "orphan"),
             chrono::Utc::now(),
         )
         .await

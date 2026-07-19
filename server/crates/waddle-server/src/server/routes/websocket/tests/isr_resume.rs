@@ -243,7 +243,7 @@ fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         replay_gap_through: None,
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 5,
-            stanza_xml: "<message id='m5'/>".to_string(),
+            stanza: test_message_stanza("m5"),
             original_receipt_at: chrono::Utc::now(),
             purpose: SmUnackedStanzaPurpose::Application,
         }],
@@ -261,18 +261,12 @@ fn seeded_detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
     }
 }
 
-/// Same shape as [`seeded_detached_session`], but with a properly
-/// namespaced unacked stanza — required by real persistence
-/// (`PostgresFencedSmPersistence` parses each unacked stanza's XML on
-/// store, and rejects a namespace-less fragment like
-/// `seeded_detached_session`'s own `<message id='m5'/>`, which is only
-/// ever exercised against the plain in-memory `isr_fixture()` registry,
-/// never real persistence).
+/// Same shape as [`seeded_detached_session`] for a real persistence fixture.
 fn seeded_detached_session_for_persistence(stream_id: &str, jid: &FullJid) -> DetachedSession {
     DetachedSession {
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 5,
-            stanza_xml: "<message xmlns='jabber:client' id='m5'/>".to_string(),
+            stanza: test_message_stanza("m5"),
             original_receipt_at: chrono::Utc::now(),
             purpose: SmUnackedStanzaPurpose::Application,
         }],

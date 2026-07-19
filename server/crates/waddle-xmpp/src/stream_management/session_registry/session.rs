@@ -7,25 +7,23 @@ use xmpp_parsers::presence::Show;
 use super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
 use crate::stream_management::persistence::SmUnackedStanzaPurpose;
+use crate::Stanza;
 
 /// One unacknowledged stanza retained on a detached SM session.
 ///
-/// Carries the XEP-0198 outbound sequence + the serialized stanza
-/// XML as the queue did before, plus the **server-side receipt time**
+/// Carries the XEP-0198 outbound sequence + typed stanza, plus the
+/// **server-side receipt time**
 /// of the original stanza (NOT the detach time). The Q6 SM-expiry
 /// promotion path consumes `original_receipt_at` when it stamps the
 /// XEP-0203 `<delay/>` on a flushed offline replay so the recipient
 /// sees the failed delivery's true timestamp per XEP-0203 §4.1 +
 /// XEP-0198 §5 line 364.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DetachedUnackedStanza {
     /// XEP-0198 outbound sequence number assigned to this stanza.
     pub sequence: u32,
-    /// Serialized stanza XML (re-parsed on demand by the promotion
-    /// path; kept as `String` here so the queue doesn't pin the
-    /// `xmpp_parsers::Element` representation in memory across
-    /// detach windows).
-    pub stanza_xml: String,
+    /// Typed stanza retained across the detached-session window.
+    pub stanza: Stanza,
     /// Server-side receipt time of the original stanza. Used by the
     /// Q6 SM-expiry promotion path for the XEP-0203 `<delay/>` stamp.
     pub original_receipt_at: DateTime<Utc>,
@@ -70,7 +68,7 @@ pub struct DetachedSession {
     /// that is at or beyond this sequence; older `h` values still need a
     /// stanza this bounded replay queue no longer retains.
     pub replay_gap_through: Option<u32>,
-    /// Unacknowledged stanzas (sequence + xml + receipt time).
+    /// Unacknowledged stanzas (sequence + typed payload + receipt time).
     /// See [`DetachedUnackedStanza`] for field semantics.
     pub unacked_stanzas: Vec<DetachedUnackedStanza>,
     /// Maximum resumption time in seconds
@@ -151,12 +149,12 @@ impl DetachedSession {
             .count()
     }
 
-    /// Get the XML payloads that must be resent to a client reporting `h`.
-    pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<String> {
+    /// Get the typed payloads that must be resent to a client reporting `h`.
+    pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<Stanza> {
         self.unacked_stanzas
             .iter()
             .filter(|entry| sequence_gt(entry.sequence, client_h))
-            .map(|entry| entry.stanza_xml.clone())
+            .map(|entry| entry.stanza.clone())
             .collect()
     }
 
@@ -199,7 +197,7 @@ impl DetachedSession {
     /// promotion path for the XEP-0203 `<delay/>` stamp.
     pub fn record_detached_outbound(
         &mut self,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
         purpose: SmUnackedStanzaPurpose,
     ) {
@@ -211,7 +209,7 @@ impl DetachedSession {
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
             sequence: self.outbound_count,
-            stanza_xml,
+            stanza,
             original_receipt_at,
             purpose,
         });
@@ -220,7 +218,7 @@ impl DetachedSession {
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
         purpose: SmUnackedStanzaPurpose,
     ) -> Result<(), DetachedReplaySequenceConflict> {
@@ -229,7 +227,7 @@ impl DetachedSession {
             .iter()
             .find(|entry| entry.sequence == sequence)
         {
-            if existing.stanza_xml == stanza_xml
+            if existing.stanza.to_element() == stanza.to_element()
                 && existing.original_receipt_at == original_receipt_at
                 && existing.purpose == purpose
             {
@@ -246,7 +244,7 @@ impl DetachedSession {
         }
         self.unacked_stanzas.push(DetachedUnackedStanza {
             sequence,
-            stanza_xml,
+            stanza,
             original_receipt_at,
             purpose,
         });

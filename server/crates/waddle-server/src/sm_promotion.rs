@@ -49,7 +49,10 @@ use waddle_xmpp::Stanza;
 pub(crate) use barrier::session_has_unclassified_barrier;
 use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles};
-use stanza::{parse_stanza, promote_iq, promote_presence};
+#[cfg(test)]
+use stanza::parse_stanza;
+use stanza::{promote_iq, promote_presence};
+pub(crate) use types::quarantine_retry_delay;
 pub use types::{PromotedOutcome, PromotionSummary};
 
 /// Walk a session's unacked queue, promoting each stanza per the
@@ -110,10 +113,10 @@ pub async fn promote_session_unacked(
     let tombstoned_sequences: std::collections::HashSet<u32> = if recent_tombstones.is_empty() {
         std::collections::HashSet::new()
     } else {
-        let entries: Vec<(u32, String)> = session
+        let entries: Vec<(u32, Stanza)> = session
             .unacked_stanzas
             .iter()
-            .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
+            .map(|entry| (entry.sequence, entry.stanza.clone()))
             .collect();
         let receipt_by_sequence: std::collections::HashMap<u32, DateTime<Utc>> = session
             .unacked_stanzas
@@ -143,10 +146,10 @@ pub async fn promote_session_unacked(
             summary.record(entry.sequence, &outcome);
             continue;
         }
-        let stanza = parse_stanza(&entry.stanza_xml);
+        let stanza = entry.stanza.clone();
         let message_id = match &stanza {
-            Some(Stanza::Message(message)) => message.id.clone(),
-            Some(Stanza::Iq(_)) | Some(Stanza::Presence(_)) | None => None,
+            Stanza::Message(message) => message.id.clone(),
+            Stanza::Iq(_) | Stanza::Presence(_) => None,
         };
         if tombstoned_sequences.contains(&entry.sequence) {
             debug!(
@@ -159,7 +162,7 @@ pub async fn promote_session_unacked(
             continue;
         }
         let outcome = match stanza {
-            Some(Stanza::Message(message)) => {
+            Stanza::Message(message) => {
                 let ctx = PromotionContext {
                     online: &online,
                     blocklist,
@@ -172,9 +175,8 @@ pub async fn promote_session_unacked(
                 };
                 promote_one(message, entry.sequence, ctx).await
             }
-            Some(Stanza::Iq(iq)) => promote_iq(*iq, registry).await,
-            Some(Stanza::Presence(presence)) => promote_presence(presence, registry).await,
-            None => PromotedOutcome::Unparseable,
+            Stanza::Iq(iq) => promote_iq(*iq, registry).await,
+            Stanza::Presence(presence) => promote_presence(presence, registry).await,
         };
         debug!(
             stream_id = %session.stream_id,
@@ -193,7 +195,6 @@ pub async fn promote_session_unacked(
         bounced = summary.bounced,
         dropped = summary.dropped,
         not_promotable = summary.not_promotable,
-        unparseable = summary.unparseable,
         scrubbed = summary.scrubbed,
         storage_failed = summary.storage_failed,
         quarantined = summary.quarantined,
@@ -268,6 +269,10 @@ impl<'a> PromotionSessionGuard<'a> {
 
     pub(crate) fn session(&self) -> &DetachedSession {
         &self.session
+    }
+
+    fn replace(&mut self, session: DetachedSession) {
+        self.session = session;
     }
 
     pub(crate) fn complete(&mut self) {
@@ -345,6 +350,28 @@ pub async fn prune_promoted_then_reinsert_for_retry(
     mut session: DetachedSession,
     summary: &PromotionSummary,
 ) -> bool {
+    prune_promoted_for_retry(sm_registry, &mut session, summary).await;
+    reinsert_failed_session_for_retry(sm_registry, session).await
+}
+
+/// Prune completed work, then park the remaining session payload in the
+/// registry's quarantine inventory with exponential retry backoff.
+pub async fn prune_promoted_then_quarantine_for_retry(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    mut session: DetachedSession,
+    summary: &PromotionSummary,
+) -> Result<u32, waddle_xmpp::stream_management::SmRegistryError> {
+    prune_promoted_for_retry(sm_registry, &mut session, summary).await;
+    sm_registry
+        .quarantine_for_retry(session, quarantine_retry_delay)
+        .await
+}
+
+async fn prune_promoted_for_retry(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    session: &mut DetachedSession,
+    summary: &PromotionSummary,
+) {
     if !summary.promoted_sequences.is_empty() {
         match sm_registry
             .delete_unacked_sequences(&session.stream_id, &summary.promoted_sequences)
@@ -367,7 +394,6 @@ pub async fn prune_promoted_then_reinsert_for_retry(
             }
         }
     }
-    reinsert_failed_session_for_retry(sm_registry, session).await
 }
 
 /// Read the SM registry's recent-tombstone record immediately before a
@@ -486,6 +512,27 @@ pub async fn promote_displaced_sessions(
     let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
     while let Some(pending_session) = batch_guard.pop() {
         let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
+        let candidate = promotion_guard.session().clone();
+        match deps
+            .sm_registry
+            .take_displaced_promotion_if_quarantine_due(&candidate)
+            .await
+        {
+            Ok(None) => {
+                promotion_guard.complete();
+                continue;
+            }
+            Ok(Some(session)) => promotion_guard.replace(session),
+            Err(error) => {
+                tracing::warn!(
+                    stream_id = %candidate.stream_id,
+                    %error,
+                    "displaced SM session: quarantine eligibility check failed; preserving \
+                     promotion payload for janitor reconciliation"
+                );
+                continue;
+            }
+        }
         let session = promotion_guard.session().clone();
         let blocklist = match deps
             .blocking_storage
@@ -496,18 +543,45 @@ pub async fn promote_displaced_sessions(
             Err(error) => {
                 waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
                 if session_has_unclassified_barrier(&session) {
-                    tracing::warn!(
-                        jid = %session.jid,
-                        stream_id = %session.stream_id,
-                        error = %error,
-                        "displaced SM session: blocklist load failed before resume-barrier \
-                         classification; preserving durable rows without consuming the \
-                         transient retry budget"
-                    );
-                    if reinsert_failed_session_for_retry(deps.sm_registry, session.clone()).await {
-                        promotion_guard.complete();
+                    match deps
+                        .sm_registry
+                        .quarantine_for_retry(session.clone(), quarantine_retry_delay)
+                        .await
+                    {
+                        Ok(attempts) => {
+                            tracing::warn!(
+                                jid = %session.jid,
+                                stream_id = %session.stream_id,
+                                error = %error,
+                                quarantine_attempt = attempts,
+                                retry_after_secs = quarantine_retry_delay(attempts).as_secs(),
+                                "displaced SM session: blocklist load failed before \
+                                 resume-barrier classification; preserving durable rows \
+                                 without consuming the transient retry budget"
+                            );
+                            promotion_guard.complete();
+                        }
+                        Err(schedule_error) => tracing::warn!(
+                            jid = %session.jid,
+                            stream_id = %session.stream_id,
+                            error = %error,
+                            %schedule_error,
+                            "displaced SM session: blocklist load failed before \
+                             resume-barrier classification and quarantine scheduling failed; \
+                             preserving promotion payload for retry"
+                        ),
                     }
                     continue;
+                }
+                let session_id =
+                    waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                if let Err(clear_error) = deps.sm_registry.clear_quarantine_retry(&session_id).await
+                {
+                    tracing::warn!(
+                        stream_id = %session.stream_id,
+                        %clear_error,
+                        "displaced SM session: failed to clear obsolete quarantine state"
+                    );
                 }
                 if let Err(record_error) = deps
                     .sm_registry
@@ -572,19 +646,43 @@ pub async fn promote_displaced_sessions(
         )
         .await;
         if summary.has_quarantined() {
-            tracing::error!(
-                jid = %session.jid,
-                stream_id = %session.stream_id,
-                quarantined = summary.quarantined,
-                "displaced SM session: promotion found unreconciled durable invariants; \
-                 preserving durable rows without consuming the transient retry budget"
-            );
-            if prune_promoted_then_reinsert_for_retry(deps.sm_registry, session.clone(), &summary)
-                .await
+            match prune_promoted_then_quarantine_for_retry(
+                deps.sm_registry,
+                session.clone(),
+                &summary,
+            )
+            .await
             {
-                promotion_guard.complete();
+                Ok(attempts) => {
+                    tracing::error!(
+                        jid = %session.jid,
+                        stream_id = %session.stream_id,
+                        quarantined = summary.quarantined,
+                        quarantine_attempt = attempts,
+                        retry_after_secs = quarantine_retry_delay(attempts).as_secs(),
+                        "displaced SM session: promotion found unreconciled durable invariants; \
+                         preserving durable rows without consuming the transient retry budget"
+                    );
+                    promotion_guard.complete();
+                }
+                Err(schedule_error) => tracing::error!(
+                    jid = %session.jid,
+                    stream_id = %session.stream_id,
+                    quarantined = summary.quarantined,
+                    %schedule_error,
+                    "displaced SM session: promotion found unreconciled durable invariants and \
+                     quarantine scheduling failed; preserving promotion payload for retry"
+                ),
             }
             continue;
+        }
+        let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        if let Err(clear_error) = deps.sm_registry.clear_quarantine_retry(&session_id).await {
+            tracing::warn!(
+                stream_id = %session.stream_id,
+                %clear_error,
+                "displaced SM session: failed to clear resolved quarantine state"
+            );
         }
         if summary.has_storage_failure() {
             waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(u64::from(
@@ -638,7 +736,6 @@ pub async fn promote_displaced_sessions(
             bounced = summary.bounced,
             dropped = summary.dropped,
             not_promotable = summary.not_promotable,
-            unparseable = summary.unparseable,
             scrubbed = summary.scrubbed,
             quarantined = summary.quarantined,
             "displaced SM session: Q6 promotion completed"

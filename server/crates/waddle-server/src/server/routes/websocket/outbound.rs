@@ -6,7 +6,6 @@ use super::{
     replay::drive_interpret_loop,
     send::send_ws_message,
     state::WsConnState,
-    stream_management::is_countable_stanza,
     timers::TransportTimers,
     transport_xml::stanza_to_xml,
 };
@@ -36,16 +35,17 @@ where
             let pending_row_id = outbound_stanza.pending_row_id.clone();
             let pending_row_receipt_at = outbound_stanza.pending_row_original_receipt_at;
             let mut request_ack_after = false;
-            if conn.sm_state.enabled && is_countable_stanza(&xml) {
+            if conn.sm_state.enabled {
                 let record_result = match pending_row_receipt_at {
                     Some(receipt_at) => conn.sm_state.record_outbound_with_receipt_at(
-                        xml.clone(),
+                        outbound_stanza.stanza.clone(),
                         receipt_at,
                         SmUnackedStanzaPurpose::Application,
                     ),
-                    None => conn
-                        .sm_state
-                        .record_outbound(xml.clone(), SmUnackedStanzaPurpose::Application),
+                    None => conn.sm_state.record_outbound(
+                        outbound_stanza.stanza.clone(),
+                        SmUnackedStanzaPurpose::Application,
+                    ),
                 };
                 request_ack_after = record_result.request_ack;
                 // Locked Q7b SM-ack lifecycle: bind the just-assigned outbound

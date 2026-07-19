@@ -22,6 +22,44 @@ async fn add_column_if_missing(
     Ok(())
 }
 
+async fn ensure_unacked_purpose(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {
+    let application = unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application);
+    match storage.db.driver() {
+        DatabaseDriver::Sqlite => {
+            // SQLite cannot add a non-null column to a populated table unless
+            // the ADD supplies a non-null default, and it cannot subsequently
+            // promote a nullable column to NOT NULL without rebuilding the
+            // table. Do both the backfill and constraint atomically.
+            add_column_if_missing(
+                storage,
+                "sm_unacked",
+                &format!("purpose TEXT NOT NULL DEFAULT '{application}'"),
+            )
+            .await
+        }
+        DatabaseDriver::Postgres => {
+            // Stage the Postgres migration so a partially-applied nullable
+            // column is repaired too: add, backfill, then enforce. Deliberately
+            // leave no permanent default; every current writer supplies its
+            // typed purpose explicitly.
+            add_column_if_missing(storage, "sm_unacked", "purpose TEXT").await?;
+            storage
+                .execute(
+                    "UPDATE sm_unacked SET purpose = ? WHERE purpose IS NULL",
+                    crate::db_params![application.to_string()],
+                )
+                .await?;
+            storage
+                .execute(
+                    "ALTER TABLE sm_unacked ALTER COLUMN purpose SET NOT NULL",
+                    (),
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
 pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {
     // Driver-aware bigint type: Postgres INTEGER is i32 (overflows
     // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
@@ -74,6 +112,9 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
             (),
         )
         .await?;
+    // Replay purpose was added after `sm_unacked` first shipped. A bare
+    // `CREATE TABLE IF NOT EXISTS` does not alter those existing tables.
+    ensure_unacked_purpose(storage).await?;
     add_column_if_missing(
         storage,
         "sm_sessions",

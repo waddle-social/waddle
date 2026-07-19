@@ -104,7 +104,7 @@ fn detached_session_with_unacked(
             .map(
                 |(i, xml)| waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: i as u32 + 1,
-                    stanza_xml: xml,
+                    stanza: parse_stanza(&xml).expect("typed detached stanza fixture"),
                     original_receipt_at: now,
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
@@ -433,7 +433,7 @@ fn session_with_resume_barrier(
         .unacked_stanzas
         .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 1,
-            stanza_xml,
+            stanza: parse_stanza(&stanza_xml).expect("typed resume-barrier fixture"),
             original_receipt_at: Utc::now(),
             purpose: SmUnackedStanzaPurpose::ResumeBarrier,
         });
@@ -1033,10 +1033,6 @@ async fn iq_unacked_promoted_to_alt_resource_when_addressed_resource_online() {
     .await;
 
     assert_eq!(summary.redelivered, 1);
-    assert_eq!(
-        summary.unparseable, 0,
-        "IQ must not be classified Unparseable"
-    );
     assert!(
         rx.try_recv().is_ok(),
         "IQ redelivered to addressed resource"
@@ -1082,31 +1078,6 @@ async fn iq_unacked_dropped_when_no_resource_online() {
 }
 
 #[tokio::test]
-async fn skips_unparseable_stanzas() {
-    let storage: Arc<dyn PendingDeliveryStorage> =
-        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
-    let registry = ConnectionRegistry::new();
-    let user_registry = test_user_registry();
-    let session = detached_session_with_unacked(
-        "stream-1",
-        full("alice@example.com/laptop"),
-        vec!["not actually XML".to_string()],
-    );
-    let summary = promote_session_unacked(
-        &session,
-        &registry,
-        &user_registry,
-        &storage,
-        &Blocklist::empty(),
-        "example.com",
-        &[],
-    )
-    .await;
-    assert_eq!(summary.unparseable, 1);
-    assert_eq!(summary.queued, 0);
-}
-
-#[tokio::test]
 async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
     // Issue #209 PR #361: the Q6 SM-expiry promotion must stamp
     // each `pending_delivery` row's `original_receipt_at` with
@@ -1131,7 +1102,8 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
         replay_gap_through: None,
         unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
             sequence: 1,
-            stanza_xml: dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"),
+            stanza: parse_stanza(&dm_xml("bob@elsewhere/x", "alice@example.com", "missed me"))
+                .expect("typed detached message fixture"),
             original_receipt_at: receipt_time,
             purpose: SmUnackedStanzaPurpose::Application,
         }],
@@ -1690,13 +1662,16 @@ async fn displaced_barrier_blocklist_failure_preserves_retry_budget() {
     use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
     use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
 
-    struct FailingBlocking;
+    struct FailingBlocking {
+        calls: std::sync::atomic::AtomicUsize,
+    }
     #[async_trait]
     impl BlockingStorage for FailingBlocking {
         async fn list_blocked_jids(
             &self,
             _user: &BareJid,
         ) -> Result<Vec<BareJid>, BlockingStorageError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(BlockingStorageError::new(std::io::Error::other(
                 "simulated blocklist backend failure",
             )))
@@ -1722,12 +1697,15 @@ async fn displaced_barrier_blocklist_failure_preserves_retry_budget() {
         .is_empty());
     let removed = sm_registry.invalidate_sessions_for_jid(&jid).await.unwrap();
     assert_eq!(removed.len(), 1);
+    let stale_displacement_handoff = removed[0].clone();
 
     let pending: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
     let registry = ConnectionRegistry::new();
     let user_registry = test_user_registry();
-    let blocking = FailingBlocking;
+    let blocking = FailingBlocking {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
     promote_displaced_sessions(
         removed,
         DisplacedPromotionDeps {
@@ -1741,19 +1719,38 @@ async fn displaced_barrier_blocklist_failure_preserves_retry_budget() {
     )
     .await;
 
+    promote_displaced_sessions(
+        vec![stale_displacement_handoff],
+        DisplacedPromotionDeps {
+            sm_registry: &sm_registry,
+            connection_registry: &registry,
+            user_registry: &user_registry,
+            pending_storage: &pending,
+            blocking_storage: &blocking,
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert_eq!(
+        blocking.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a racing fresh-bind or capacity handoff must not bypass quarantine backoff"
+    );
+
     assert!(sm_storage
         .get_session(&SmSessionId::new("stream-blocklist-retry"))
         .await
         .unwrap()
         .is_some());
-    let drained = sm_registry.drain_expired().await.unwrap();
-    assert_eq!(
-        drained.len(),
-        1,
-        "blocklist-load failure must leave the session drainable for retry"
+    assert!(
+        sm_registry.drain_expired().await.unwrap().is_empty(),
+        "the pre-classification quarantine must not be reprocessed before its deadline"
     );
-    assert_eq!(drained[0].stream_id, "stream-blocklist-retry");
-    assert_eq!(drained[0].unacked_stanzas.len(), 1);
+    assert!(sm_registry
+        .live_session_ids()
+        .unwrap()
+        .iter()
+        .any(|stream_id| stream_id == "stream-blocklist-retry"));
     assert_eq!(
         sm_registry
             .record_promotion_failure("stream-blocklist-retry")

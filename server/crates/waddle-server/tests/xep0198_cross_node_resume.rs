@@ -142,6 +142,14 @@ async fn node_registry_with_claim_store(
 }
 
 fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
+    fn message(body: &str) -> waddle_xmpp::Stanza {
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+        waddle_xmpp::Stanza::Message(message)
+    }
+
     DetachedSession {
         stream_id: stream_id.to_string(),
         user_id: jid.to_bare().to_string(),
@@ -153,14 +161,13 @@ fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 6,
-                stanza_xml: "<message xmlns='jabber:client'><body>six</body></message>".to_string(),
+                stanza: message("six"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
-                stanza_xml: "<message xmlns='jabber:client'><body>seven</body></message>"
-                    .to_string(),
+                stanza: message("seven"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -985,7 +992,11 @@ async fn handoff_fanout_survives_a_cross_node_steal_unchanged() {
                 completed
                     .unacked_stanzas
                     .iter()
-                    .any(|entry| entry.stanza_xml.contains("during-cross-node-handoff")),
+                    .any(|entry| matches!(
+                        &entry.stanza,
+                        waddle_xmpp::Stanza::Presence(presence)
+                            if presence.statuses.values().any(|status| status == "during-cross-node-handoff")
+                    )),
                 "completed claim must include fanout recorded during the post-steal handoff"
             );
         }

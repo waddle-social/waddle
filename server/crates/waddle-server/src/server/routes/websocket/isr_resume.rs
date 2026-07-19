@@ -58,7 +58,7 @@
 //! leaking which SM-IDs exist.
 
 use super::stream_management::SmCtx;
-use super::transport_xml::element_to_xml;
+use super::transport_xml::{element_to_xml, stanza_to_xml};
 use super::*;
 use waddle_xmpp::isr::{
     inst_resume_failed_element, inst_resumed_element, IsrConsumeOutcome, ISR_PINNED_MECHANISM,
@@ -512,7 +512,9 @@ pub(super) async fn handle_isr_resume_authenticate(
         .get_stanzas_to_resend(resume.h)
         .into_iter()
         .map(|entry| {
-            stamp_replay_delay(&entry.stanza_xml, server_domain, entry.original_receipt_at)
+            let replay =
+                stamp_replay_delay(&entry.stanza, server_domain, entry.original_receipt_at);
+            stanza_to_xml(&replay)
         })
         .collect();
 

@@ -13,6 +13,7 @@ use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_sm_registry, message_frame_xml_with_id,
     register_test_native_user, scram_client_final_from_challenge, snapshot_room,
+    test_message_stanza, test_stanza_contains, test_stanza_from_xml,
 };
 use crate::auth::Session;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -262,7 +263,7 @@ async fn sm_features_advertise_sm_namespace() {
 fn is_countable_stanza_matches_element_name_not_prefix() {
     // Real stanzas that must count toward SM handled/sent counters.
     assert!(is_countable_stanza(
-        "<iq xmlns='jabber:client' type='get' id='1'/>"
+        "<iq xmlns='jabber:client' type='result' id='1'/>"
     ));
     assert!(is_countable_stanza("<message xmlns='jabber:client'/>"));
     assert!(is_countable_stanza("<presence xmlns='jabber:client'/>"));
@@ -273,12 +274,14 @@ fn is_countable_stanza_matches_element_name_not_prefix() {
         "<jc:presence xmlns:jc='jabber:client'/>"
     ));
     assert!(is_countable_stanza(
-        "<jc:iq xmlns:jc='jabber:client' id='1'/>"
+        "<jc:iq xmlns:jc='jabber:client' type='result' id='1'/>"
     ));
     // Leading whitespace is tolerated (matches the pre-existing
     // trim behaviour — frames are always serialized with a
     // namespace by minidom, so callers never produce bare `<iq/>`).
-    assert!(is_countable_stanza("  <iq xmlns='jabber:client' id='1'/>"));
+    assert!(is_countable_stanza(
+        "  <iq xmlns='jabber:client' type='result' id='1'/>"
+    ));
 
     // SM control nonzas and stream-level frames must NOT count.
     assert!(!is_countable_stanza("<r xmlns='urn:xmpp:sm:3'/>"));
@@ -525,7 +528,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
         detached
             .record_detached_outbound_at(
                 sequence,
-                message_frame_xml_with_id(format!("m{sequence}")),
+                test_stanza_from_xml(&message_frame_xml_with_id(format!("m{sequence}"))),
                 chrono::Utc::now(),
                 SmUnackedStanzaPurpose::Application,
             )
@@ -1196,14 +1199,12 @@ async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
     // Two outbound stanzas recorded → send-count is 2.
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1264,14 +1265,12 @@ async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -1312,14 +1311,12 @@ async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
 
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1363,19 +1360,19 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: u32::MAX,
-                stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                stanza: test_message_stanza("pre-wrap"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
-                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                stanza: test_message_stanza("post-wrap-1"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 2,
-                stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                stanza: test_message_stanza("post-wrap-2"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -1431,14 +1428,12 @@ async fn sm_live_ack_at_half_window_distance_is_ignored_not_acknowledged() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
     // Full valid ack first: last_acked == outbound_count == 2.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='2'/>",
@@ -1486,14 +1481,12 @@ async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let _stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
     // Partial ack: last_acked = 1, one stanza still unacked.
     let responses = handle_xmpp_frame(
         "<a xmlns='urn:xmpp:sm:3' h='1'/>",
@@ -1668,13 +1661,13 @@ async fn sm_resume_restores_session_and_replays_unacked() {
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 9,
-                stanza_xml: "<message id='m9'/>".to_string(),
+                stanza: test_message_stanza("m9"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 10,
-                stanza_xml: "<message id='m10'/>".to_string(),
+                stanza: test_message_stanza("m10"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -1754,7 +1747,7 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
-                stanza_xml: "<message id='m1'/>".to_string(),
+                stanza: test_message_stanza("m1"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             }],
@@ -1960,7 +1953,7 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
         detached
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("detached-dm-1")),
+            .any(|entry| test_stanza_contains(&entry.stanza, "detached-dm-1")),
         "full-JID direct message should be recorded for detached replay: {detached:?}"
     );
 }
@@ -2031,7 +2024,7 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
         detached
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("detached-bare-dm-1")),
+            .any(|entry| test_stanza_contains(&entry.stanza, "detached-bare-dm-1")),
         "bare-JID direct message should be recorded for detached replay: {detached:?}"
     );
     // RFC 6121 §8.5.2.1.1: bare-JID delivery routes the original
@@ -2114,9 +2107,9 @@ async fn message_carbons_record_for_detached_enabled_resources() {
         sent_detached
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("<sent")
-                && entry.stanza_xml.contains("urn:xmpp:carbons:2")
-                && entry.stanza_xml.contains("detached-sent-carbon-source")),
+            .any(|entry| test_stanza_contains(&entry.stanza, "<sent")
+                && test_stanza_contains(&entry.stanza, "urn:xmpp:carbons:2")
+                && test_stanza_contains(&entry.stanza, "detached-sent-carbon-source")),
         "sent carbon should be recorded for detached opted-in resource: {sent_detached:?}"
     );
 
@@ -2209,11 +2202,11 @@ async fn message_carbons_record_for_detached_enabled_resources() {
         .expect("take received detached")
         .expect("received detached session remains");
     assert!(
-        received_detached.unacked_stanzas.iter().any(|entry| entry
-            .stanza_xml
-            .contains("<received")
-            && entry.stanza_xml.contains("urn:xmpp:carbons:2")
-            && entry.stanza_xml.contains("detached-received-carbon-source")),
+        received_detached.unacked_stanzas.iter().any(|entry| {
+            test_stanza_contains(&entry.stanza, "<received")
+                && test_stanza_contains(&entry.stanza, "urn:xmpp:carbons:2")
+                && test_stanza_contains(&entry.stanza, "detached-received-carbon-source")
+        }),
         "received carbon should be recorded for detached opted-in resource: {received_detached:?}"
     );
 }
@@ -3130,13 +3123,13 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
         unacked_stanzas: vec![
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 1,
-                stanza_xml: "<message id='m1'/>".to_string(),
+                stanza: test_message_stanza("m1"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 2,
-                stanza_xml: "<message id='m2'/>".to_string(),
+                stanza: test_message_stanza("m2"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -3265,7 +3258,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         detached
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("<presence")),
+            .any(|entry| matches!(&entry.stanza, Stanza::Presence(_))),
         "cleanup must record queued-but-unwritten outbound stanzas before detaching"
     );
     assert!(snapshot_room(state.as_ref(), &room_jid)
@@ -3617,13 +3610,13 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
                     sequence: 1,
-                    stanza_xml: queued_message_xml,
+                    stanza: test_stanza_from_xml(&queued_message_xml),
                     original_receipt_at: original_receipt,
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
                 DetachedUnackedStanza {
                     sequence: 2,
-                    stanza_xml: queued_iq_xml,
+                    stanza: test_stanza_from_xml(&queued_iq_xml),
                     original_receipt_at: original_receipt,
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
@@ -4258,19 +4251,19 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
             unacked_stanzas: vec![
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: u32::MAX,
-                    stanza_xml: "<message xmlns='jabber:client' id='pre-wrap'/>".to_string(),
+                    stanza: test_message_stanza("pre-wrap"),
                     original_receipt_at: chrono::Utc::now(),
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: 1,
-                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-1'/>".to_string(),
+                    stanza: test_message_stanza("post-wrap-1"),
                     original_receipt_at: chrono::Utc::now(),
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
                 waddle_xmpp::stream_management::DetachedUnackedStanza {
                     sequence: 2,
-                    stanza_xml: "<message xmlns='jabber:client' id='post-wrap-2'/>".to_string(),
+                    stanza: test_message_stanza("post-wrap-2"),
                     original_receipt_at: chrono::Utc::now(),
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
@@ -4645,14 +4638,12 @@ async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = enable_sm_for_live_ack_tests(state.as_ref(), &mut conn, &jid).await;
 
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o1'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
-    let _ = conn.sm_state.record_outbound(
-        "<message xmlns='jabber:client' id='o2'/>".to_string(),
-        APPLICATION_PURPOSE,
-    );
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o1"), APPLICATION_PURPOSE);
+    let _ = conn
+        .sm_state
+        .record_outbound(test_message_stanza("o2"), APPLICATION_PURPOSE);
     let recipient: BareJid = "alice@example.com".parse().expect("bare jid");
     seed_claimed_pending_row(state.as_ref(), &recipient, &stream_id, 1).await;
 
@@ -4723,7 +4714,7 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
             replay_gap_through: None,
             unacked_stanzas: vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
                 sequence: 4,
-                stanza_xml: "<message xmlns='jabber:client' id='m4'/>".to_string(),
+                stanza: test_message_stanza("m4"),
                 original_receipt_at: chrono::Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             }],

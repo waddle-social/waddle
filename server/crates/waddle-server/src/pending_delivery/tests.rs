@@ -553,6 +553,81 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
 // ── DatabasePendingDeliveryStorage integration tests ────────────────
 
 #[tokio::test]
+async fn db_storage_upgrades_legacy_session_index_to_fifo_composite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("pending-delivery-session-index.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+
+    // Seed the old schema and its single-column index. Close this handle
+    // before startup so SQLite does not retain a competing schema lock.
+    {
+        let db = crate::db::Database::from_config(
+            "pending-delivery-legacy-session-index",
+            &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .expect("open legacy pending-delivery database");
+        let conn = db.guard().await.expect("legacy database guard");
+        conn.execute(
+            "CREATE TABLE pending_delivery (\
+                 row_id TEXT PRIMARY KEY, \
+                 recipient_jid TEXT NOT NULL, \
+                 original_receipt_at INTEGER NOT NULL, \
+                 payload_kind TEXT NOT NULL, \
+                 archive_stanza_by TEXT, \
+                 archive_stanza_id TEXT, \
+                 transient_xml TEXT, \
+                 flushed_in_session TEXT\
+             )",
+            (),
+        )
+        .await
+        .expect("create legacy pending_delivery table");
+        conn.execute(
+            "CREATE INDEX idx_pending_delivery_session \
+             ON pending_delivery (flushed_in_session)",
+            (),
+        )
+        .await
+        .expect("create legacy session index");
+    }
+
+    let storage = DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+        .await
+        .expect("upgrade legacy pending-delivery schema");
+    drop(storage);
+    // Reopen once more to exercise the `IF NOT EXISTS` path before inspecting
+    // the ordered index columns.
+    drop(
+        DatabasePendingDeliveryStorage::open(Some(&url), QuotaPolicy::Unlimited)
+            .await
+            .expect("repeat pending-delivery index migration"),
+    );
+
+    let db = crate::db::Database::from_config(
+        "pending-delivery-session-index-inspection",
+        &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url),
+    )
+    .await
+    .expect("open migrated pending-delivery database");
+    let conn = db.guard().await.expect("migrated database guard");
+    let mut rows = conn
+        .query("PRAGMA index_info(idx_pending_delivery_session_row_id)", ())
+        .await
+        .expect("inspect composite session index");
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.expect("read index column") {
+        columns.push(row.get::<String>(2).expect("index column name"));
+    }
+    assert_eq!(columns, ["flushed_in_session", "row_id"]);
+}
+
+#[tokio::test]
 async fn db_storage_lists_all_exact_session_claims_across_recipients() {
     let storage = DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
         .await
@@ -2145,16 +2220,11 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
     // converting state → DetachedSession (i.e. transport drops).
     let mut sm_state = StreamManagementState::new();
     sm_state.enable("sm-stream-receipt-e2e".to_string(), true, Some(300));
-    let xml = match &pushed.stanza {
-        waddle_xmpp::Stanza::Message(m) => {
-            let element: xmpp_parsers::minidom::Element = m.clone().into();
-            let mut buf = Vec::new();
-            element.write_to(&mut buf).unwrap();
-            String::from_utf8(buf).unwrap()
-        }
-        _ => panic!("expected Message"),
-    };
-    let _ = sm_state.record_outbound_with_receipt_at(xml, t1, SmUnackedStanzaPurpose::Application);
+    let _ = sm_state.record_outbound_with_receipt_at(
+        pushed.stanza.clone(),
+        t1,
+        SmUnackedStanzaPurpose::Application,
+    );
 
     // Convert to detached session (simulates transport drop).
     let detached = sm_state

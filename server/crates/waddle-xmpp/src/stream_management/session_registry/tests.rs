@@ -32,13 +32,40 @@ fn groupchat_target(stanza_id: &str, room: &str) -> crate::tombstone::TombstoneT
     }
 }
 
-fn message_stanza_xml_with_id(id: String) -> String {
+fn message_stanza_with_id(id: impl Into<String>) -> Stanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    message.id = Some(xmpp_parsers::message::Id(id));
-    let element = Stanza::Message(message).to_element();
+    message.id = Some(xmpp_parsers::message::Id(id.into()));
+    Stanza::Message(message)
+}
+
+fn stanza_from_xml(xml: impl AsRef<str>) -> Stanza {
+    let element = xml
+        .as_ref()
+        .parse::<minidom::Element>()
+        .expect("valid stanza element");
+    match element.name() {
+        "message" => Stanza::Message(
+            xmpp_parsers::message::Message::try_from(element).expect("typed message stanza"),
+        ),
+        "iq" => Stanza::Iq(Box::new(
+            xmpp_parsers::iq::Iq::try_from(element).expect("typed IQ stanza"),
+        )),
+        "presence" => Stanza::Presence(
+            xmpp_parsers::presence::Presence::try_from(element).expect("typed presence stanza"),
+        ),
+        root => panic!("unsupported stanza root: {root}"),
+    }
+}
+
+fn stanza_xml(stanza: &Stanza) -> String {
+    let element = stanza.to_element();
     let mut buffer = Vec::new();
     element.write_to(&mut buffer).expect("serialize message");
     String::from_utf8(buffer).expect("message stanza xml is utf-8")
+}
+
+fn stanza_contains(stanza: &Stanza, needle: &str) -> bool {
+    stanza_xml(stanza).contains(needle)
 }
 
 fn make_test_session(stream_id: &str) -> DetachedSession {
@@ -57,19 +84,19 @@ fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 13,
-                stanza_xml: "<msg1/>".to_string(),
+                stanza: message_stanza_with_id("msg1"),
                 original_receipt_at: Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 14,
-                stanza_xml: "<msg2/>".to_string(),
+                stanza: message_stanza_with_id("msg2"),
                 original_receipt_at: Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 15,
-                stanza_xml: "<msg3/>".to_string(),
+                stanza: message_stanza_with_id("msg3"),
                 original_receipt_at: Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -95,7 +122,7 @@ fn make_test_session_with_unacked(stream_id: &str, unacked: Vec<(u32, String)>) 
         .into_iter()
         .map(|(sequence, stanza_xml)| DetachedUnackedStanza {
             sequence,
-            stanza_xml,
+            stanza: stanza_from_xml(stanza_xml),
             original_receipt_at: now,
             purpose: SmUnackedStanzaPurpose::Application,
         })
@@ -2322,7 +2349,7 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
         session
             .record_detached_outbound_at(
                 sequence,
-                message_stanza_xml_with_id(format!("m{sequence}")),
+                message_stanza_with_id(format!("m{sequence}")),
                 Utc::now(),
                 SmUnackedStanzaPurpose::Application,
             )
@@ -2401,8 +2428,11 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
                     "<message xmlns='jabber:client' from='alice@example.com/web' to='user@example.com/resource' id='other' type='chat'><body>safe</body></message>"
                         .to_string(),
                 ),
-                (3, "<presence/>".to_string()),
-                (4, "<iq type='result' id='not-a-message'/>".to_string()),
+                (3, "<presence xmlns='jabber:client'/>".to_string()),
+                (
+                    4,
+                    "<iq xmlns='jabber:client' type='result' id='not-a-message'/>".to_string(),
+                ),
             ],
         );
     registry.store_session(session).await.unwrap();
@@ -2427,28 +2457,28 @@ async fn xep_0198_scrub_for_tombstone_removes_matching_1on1_message() {
         !again
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("id='target'")),
+            .any(|entry| stanza_contains(&entry.stanza, "id='target'")),
         "scrubbed message must not appear in queue"
     );
     assert!(
         again
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("id='other'")),
+            .any(|entry| stanza_contains(&entry.stanza, "id='other'")),
         "non-matching message must remain"
     );
     assert!(
         again
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("<presence")),
+            .any(|entry| matches!(&entry.stanza, Stanza::Presence(_))),
         "presence frame must remain (not a message)"
     );
     assert!(
         again
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("<iq")),
+            .any(|entry| matches!(&entry.stanza, Stanza::Iq(_))),
         "iq frame must remain (not a message)"
     );
 }
@@ -2499,11 +2529,9 @@ async fn xep_0198_detached_replay_preserves_xep_0201_thread_metadata() {
     let replay = stored
         .unacked_stanzas
         .last()
-        .map(|entry| &entry.stanza_xml)
+        .map(|entry| entry.stanza.to_element())
         .expect("recorded replay stanza");
-    let element = replay
-        .parse::<minidom::Element>()
-        .expect("valid stanza xml");
+    let element = replay;
 
     assert!(element.children().any(|child| {
         child.name() == "thread"
@@ -2601,7 +2629,7 @@ async fn xep_0198_scrub_for_tombstone_does_not_cross_conversations() {
         again
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("conv-B")),
+            .any(|entry| stanza_contains(&entry.stanza, "conv-B")),
         "conversation B's message must survive — different scope"
     );
 }
@@ -2773,7 +2801,7 @@ async fn test_claimed_session_remains_writable_for_handoff_fanout() {
                 completed
                     .unacked_stanzas
                     .iter()
-                    .any(|entry| entry.stanza_xml.contains("during-claim")),
+                    .any(|entry| stanza_contains(&entry.stanza, "during-claim")),
                 "completed claim must include fanout recorded during handoff"
             );
         }
@@ -2845,7 +2873,7 @@ async fn blocklist_interested_detached_resources_include_claimed_sessions_and_re
             completed
                 .unacked_stanzas
                 .iter()
-                .any(|entry| entry.stanza_xml.contains("block-push-test")),
+                .any(|entry| stanza_contains(&entry.stanza, "block-push-test")),
             "completed claim must include blocklist push recorded during handoff"
         ),
         SmClaimCompletion::Expired(_) => panic!("claim should still be resumable"),
@@ -2880,7 +2908,7 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
             .record_outbound_for_detached_stream_at(
                 "stream-handoff-gap",
                 sequence,
-                message_stanza_xml_with_id(format!("m{sequence}")),
+                message_stanza_with_id(format!("m{sequence}")),
                 Utc::now(),
             )
             .await
@@ -3077,18 +3105,11 @@ fn test_remaining_time() {
 
 use super::super::persistence::SmPersistenceStorage as _;
 
-fn realistic_message_stanza(body: &str) -> String {
-    // Build a valid XMPP message via the typed builder so the
-    // persistence path can parse it back to a typed Stanza on
-    // store_session. The fmt-pinned indentation is what the
-    // serializer emits when rebuilt via Element::from(message).
+fn realistic_message_stanza(body: &str) -> Stanza {
     let mut m = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     m.bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
-    let element: xmpp_parsers::minidom::Element = m.into();
-    let mut buf = Vec::new();
-    element.write_to(&mut buf).expect("serialize message");
-    String::from_utf8(buf).expect("utf8")
+    Stanza::Message(m)
 }
 
 fn realistic_test_session(stream_id: &str) -> DetachedSession {
@@ -3107,13 +3128,13 @@ fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSess
         unacked_stanzas: vec![
             DetachedUnackedStanza {
                 sequence: 6,
-                stanza_xml: realistic_message_stanza("first"),
+                stanza: realistic_message_stanza("first"),
                 original_receipt_at: Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
-                stanza_xml: realistic_message_stanza("second"),
+                stanza: realistic_message_stanza("second"),
                 original_receipt_at: Utc::now(),
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -3726,17 +3747,14 @@ async fn store_session_returns_capacity_evicted_session_and_preserves_rows() {
     assert!(storage.list_unacked(&oldest_id).await.unwrap().is_empty());
 }
 
-fn realistic_dm_stanza_xml(from: &str, to: &str, id: &str, body: &str) -> String {
+fn realistic_dm_stanza(from: &str, to: &str, id: &str, body: &str) -> Stanza {
     let mut m = xmpp_parsers::message::Message::new(Some(to.parse::<jid::Jid>().expect("jid")));
     m.from = Some(from.parse::<jid::Jid>().expect("jid"));
     m.id = Some(xmpp_parsers::message::Id(id.to_string()));
     m.type_ = xmpp_parsers::message::MessageType::Chat;
     m.bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
-    let element: xmpp_parsers::minidom::Element = m.into();
-    let mut buf = Vec::new();
-    element.write_to(&mut buf).expect("serialize message");
-    String::from_utf8(buf).expect("utf8")
+    Stanza::Message(m)
 }
 
 #[tokio::test]
@@ -3753,21 +3771,21 @@ async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
         vec![
             (
                 6,
-                realistic_dm_stanza_xml(
+                stanza_xml(&realistic_dm_stanza(
                     "alice@example.com/web",
                     "user@example.com/resource",
                     "retracted-id",
                     "secret",
-                ),
+                )),
             ),
             (
                 7,
-                realistic_dm_stanza_xml(
+                stanza_xml(&realistic_dm_stanza(
                     "alice@example.com/web",
                     "user@example.com/resource",
                     "kept-id",
                     "safe",
-                ),
+                )),
             ),
         ],
     );
@@ -3807,13 +3825,13 @@ async fn scrub_for_tombstone_deletes_durable_rows_so_restart_cannot_replay() {
         !hydrated
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("secret")),
+            .any(|entry| stanza_contains(&entry.stanza, "secret")),
         "retracted stanza must not be replayable after restart"
     );
     assert!(hydrated
         .unacked_stanzas
         .iter()
-        .any(|entry| entry.stanza_xml.contains("safe")));
+        .any(|entry| stanza_contains(&entry.stanza, "safe")));
 }
 
 #[tokio::test]
@@ -3934,7 +3952,10 @@ async fn restore_hydrates_expired_sessions_for_promotion_and_preserves_rows() {
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].stream_id, "stream-expired");
     assert_eq!(drained[0].unacked_stanzas.len(), 1);
-    assert!(drained[0].unacked_stanzas[0].stanza_xml.contains("missed"));
+    assert!(stanza_contains(
+        &drained[0].unacked_stanzas[0].stanza,
+        "missed"
+    ));
 
     // Only confirm_drained erases the durable rows.
     registry.confirm_drained("stream-expired").await;
@@ -4298,7 +4319,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
     old_session.unacked_stanzas = vec![
         DetachedUnackedStanza {
             sequence: 6,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "alice@example.com/web",
                 "retract-during-displacement",
@@ -4309,7 +4330,7 @@ async fn cancelled_displacement_reconciles_the_pending_promotion_before_reinsert
         },
         DetachedUnackedStanza {
             sequence: 7,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "alice@example.com/web",
                 "keep-during-displacement",
@@ -4808,7 +4829,7 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
                 |_| true,
                 |session| {
                     session.record_detached_outbound(
-                        message_stanza_xml_with_id("race-append".to_string()),
+                        message_stanza_with_id("race-append"),
                         Utc::now(),
                         SmUnackedStanzaPurpose::Application,
                     );
@@ -4868,7 +4889,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
             sequence: 6,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "user@example.com/resource",
                 "retract-me",
@@ -4879,7 +4900,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
         },
         DetachedUnackedStanza {
             sequence: 7,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "user@example.com/resource",
                 "keep-me",
@@ -4924,13 +4945,13 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
         !hydrated
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("secret")),
+            .any(|entry| stanza_contains(&entry.stanza, "secret")),
         "retracted stanza must not survive the restart"
     );
     assert!(hydrated
         .unacked_stanzas
         .iter()
-        .any(|entry| entry.stanza_xml.contains("safe")));
+        .any(|entry| stanza_contains(&entry.stanza, "safe")));
 }
 
 #[tokio::test]
@@ -5077,6 +5098,380 @@ async fn reinsert_for_retry_makes_session_drainable_but_never_resumable() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quarantine_retry_blocks_other_handoffs_until_exact_deadline() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(realistic_test_session("stream-quarantine-deadline"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-quarantine-deadline");
+    let attempt = registry
+        .quarantine_for_retry(session.clone(), |_| Duration::from_secs(300))
+        .await
+        .unwrap();
+    assert_eq!(attempt, 1);
+    assert!(registry.drain_expired().await.unwrap().is_empty());
+    assert!(registry.drain_all_for_shutdown().await.unwrap().is_empty());
+    assert!(registry.drain_shutdown_entry().await.unwrap().is_empty());
+    assert!(registry
+        .invalidate_sessions_for_jid(&session.jid)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(registry
+        .take_displaced_promotion_if_quarantine_due(&session)
+        .await
+        .unwrap()
+        .is_none());
+
+    tokio::time::advance(Duration::from_secs(299)).await;
+    assert!(registry.drain_expired().await.unwrap().is_empty());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let due = registry
+        .take_displaced_promotion_if_quarantine_due(&session)
+        .await
+        .unwrap()
+        .expect("displaced promotion becomes eligible at the exact deadline");
+    assert_eq!(due.stream_id, stream_id.as_str());
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_admission_cannot_displace_a_parked_quarantine_before_deadline() {
+    let registry = InMemorySmSessionRegistry::with_capacity(1);
+    registry
+        .store_session(realistic_test_session("stream-quarantine-capacity"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    registry
+        .quarantine_for_retry(session, |_| Duration::from_secs(300))
+        .await
+        .unwrap();
+
+    let admission = registry
+        .store_session(realistic_test_session("stream-capacity-new"))
+        .await;
+    assert!(admission.unwrap().is_empty());
+    let overflow = registry
+        .store_session(realistic_test_session("stream-capacity-newer"))
+        .await;
+    assert!(matches!(overflow, Err(SmRegistryError::Internal(_))));
+    assert!(registry.drain_expired().await.unwrap().is_empty());
+    let shutdown = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(shutdown.len(), 1);
+    assert_eq!(shutdown[0].stream_id, "stream-capacity-new");
+    assert!(registry.confirm_drained("stream-capacity-new").await);
+
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let due = registry.drain_expired().await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].stream_id, "stream-quarantine-capacity");
+}
+
+#[tokio::test(start_paused = true)]
+async fn quarantine_retry_schedule_leaves_pending_reconciliation_untouched_until_due() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(realistic_test_session("stream-quarantine-reconciliation"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-quarantine-reconciliation");
+    registry
+        .quarantine_for_retry(session, |_| Duration::from_secs(300))
+        .await
+        .unwrap();
+
+    assert!(registry.drain_expired().await.unwrap().is_empty());
+    assert!(registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .contains_key(stream_id.as_str()));
+
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let due = registry.drain_shutdown_entry().await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].stream_id, stream_id.as_str());
+    registry
+        .retain_pending_promotion_for_retry(due[0].clone())
+        .unwrap();
+    assert!(
+        registry.drain_all_for_shutdown().await.unwrap().is_empty(),
+        "later shutdown passes must not hot-loop a retry retained by the entry attempt"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quarantine_retry_schedule_increments_attempts_and_clear_resets_them() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(realistic_test_session("stream-quarantine-clear"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-quarantine-clear");
+    assert_eq!(
+        registry
+            .quarantine_for_retry(session.clone(), |_| Duration::from_secs(10))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        registry
+            .quarantine_for_retry(session.clone(), |_| Duration::from_secs(20))
+            .await
+            .unwrap(),
+        2
+    );
+
+    assert!(registry.clear_quarantine_retry(&stream_id).await.unwrap());
+    assert!(!registry.clear_quarantine_retry(&stream_id).await.unwrap());
+    assert_eq!(
+        registry
+            .quarantine_for_retry(session, |_| Duration::from_secs(30))
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_same_stream_quarantine_schedules_get_distinct_attempts() {
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new());
+    registry
+        .store_session(realistic_test_session("stream-quarantine-concurrent"))
+        .await
+        .unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+
+    let session = drained.into_iter().next().unwrap();
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let first = {
+        let registry = std::sync::Arc::clone(&registry);
+        let session = session.clone();
+        let start = std::sync::Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            registry
+                .quarantine_for_retry(session, |_| Duration::from_secs(10))
+                .await
+        })
+    };
+    let second = {
+        let registry = std::sync::Arc::clone(&registry);
+        let session = session.clone();
+        let start = std::sync::Arc::clone(&start);
+        tokio::spawn(async move {
+            start.wait().await;
+            registry
+                .quarantine_for_retry(session, |_| Duration::from_secs(20))
+                .await
+        })
+    };
+
+    start.wait().await;
+    let mut attempts = vec![
+        first.await.unwrap().unwrap(),
+        second.await.unwrap().unwrap(),
+    ];
+    attempts.sort_unstable();
+    assert_eq!(attempts, vec![1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirm_drained_clears_quarantine_retry_lifecycle_state() {
+    let registry = InMemorySmSessionRegistry::new();
+    registry
+        .store_session(realistic_test_session("stream-quarantine-confirm"))
+        .await
+        .unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    let session = drained.into_iter().next().unwrap();
+
+    let stream_id = crate::pending_delivery::SmSessionId::new("stream-quarantine-confirm");
+    assert_eq!(
+        registry
+            .quarantine_for_retry(session.clone(), |_| Duration::from_secs(300))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(registry.confirm_drained(stream_id.as_str()).await);
+
+    assert!(!registry.clear_quarantine_retry(&stream_id).await.unwrap());
+    assert!(matches!(
+        registry
+            .quarantine_for_retry(session, |_| Duration::from_secs(300))
+            .await,
+        Err(SmRegistryError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_displacement_gate_wait_preserves_authoritative_parked_payload() {
+    let registry = std::sync::Arc::new(InMemorySmSessionRegistry::new());
+    registry
+        .store_session(realistic_test_session("stream-quarantine-gate-cancel"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let stale_handoff = session.clone();
+    let mut authoritative = session;
+    authoritative.unacked_stanzas.remove(0);
+    registry
+        .quarantine_for_retry(authoritative.clone(), |_| Duration::from_secs(300))
+        .await
+        .unwrap();
+
+    let stream_lock = registry
+        .lock_session_operation("stream-quarantine-gate-cancel")
+        .await
+        .unwrap();
+    let task_registry = std::sync::Arc::clone(&registry);
+    let task_candidate = stale_handoff.clone();
+    let task = tokio::spawn(async move {
+        task_registry
+            .take_displaced_promotion_if_quarantine_due(&task_candidate)
+            .await
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+
+    // Simulate the server-side PromotionSessionGuard's cancellation fallback.
+    registry
+        .retain_pending_promotion_for_retry(stale_handoff)
+        .unwrap();
+    let parked = registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .get("stream-quarantine-gate-cancel")
+        .cloned()
+        .expect("authoritative quarantine payload remains parked");
+    assert_eq!(
+        parked
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        authoritative
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>()
+    );
+    drop(stream_lock);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_quarantine_due_reconciliation_restores_authoritative_lease_payload() {
+    let storage = std::sync::Arc::new(GatedGetSessionPersistence::new(
+        "stream-quarantine-reconcile-cancel",
+    ));
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::clone(&storage)
+            as std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>),
+    );
+    registry
+        .store_session(realistic_test_session("stream-quarantine-reconcile-cancel"))
+        .await
+        .unwrap();
+    let session = registry
+        .drain_all_for_shutdown()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let stale_handoff = session.clone();
+    let mut authoritative = session;
+    authoritative.unacked_stanzas.remove(0);
+    registry
+        .quarantine_for_retry(authoritative.clone(), |_| Duration::from_secs(1))
+        .await
+        .unwrap();
+    storage
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    let task_registry = std::sync::Arc::clone(&registry);
+    let task_candidate = stale_handoff.clone();
+    let task = tokio::spawn(async move {
+        task_registry
+            .take_displaced_promotion_if_quarantine_due(&task_candidate)
+            .await
+    });
+    storage.reached.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+
+    // Whichever cancellation guard runs last, the leased payload must win.
+    registry
+        .retain_pending_promotion_for_retry(stale_handoff)
+        .unwrap();
+    let parked = registry
+        .pending_promotion_retries
+        .read()
+        .unwrap()
+        .get("stream-quarantine-reconcile-cancel")
+        .cloned()
+        .expect("cancelled reconciliation restores the leased payload");
+    assert_eq!(
+        parked
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        authoritative
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -5298,7 +5693,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     session.unacked_stanzas = vec![
         DetachedUnackedStanza {
             sequence: 6,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "user@example.com/resource",
                 "retract-me",
@@ -5309,7 +5704,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
         },
         DetachedUnackedStanza {
             sequence: 7,
-            stanza_xml: realistic_dm_stanza_xml(
+            stanza: realistic_dm_stanza(
                 "alice@example.com/web",
                 "user@example.com/resource",
                 "keep-me",
@@ -5361,7 +5756,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
         !retried[0]
             .unacked_stanzas
             .iter()
-            .any(|entry| entry.stanza_xml.contains("secret")),
+            .any(|entry| stanza_contains(&entry.stanza, "secret")),
         "retracted content must not be promotable after the retry re-insert"
     );
 }
@@ -5384,7 +5779,7 @@ async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
     );
     session.unacked_stanzas = vec![DetachedUnackedStanza {
         sequence: 3,
-        stanza_xml: realistic_dm_stanza_xml(
+        stanza: realistic_dm_stanza(
             "alice@example.com/web",
             "user@example.com/resource",
             "keep-me",

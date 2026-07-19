@@ -220,8 +220,14 @@ pub(super) async fn initialize(
         .await?;
     storage
         .execute(
-            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_session \
-         ON pending_delivery (flushed_in_session)",
+            // Use a new name rather than changing the definition of the
+            // legacy single-column `idx_pending_delivery_session` in place:
+            // `IF NOT EXISTS` matches by name, so reusing it would silently
+            // leave upgraded databases without the row-id ordering key.
+            // Existing databases may retain the redundant legacy index;
+            // fresh databases create only this composite access path.
+            "CREATE INDEX IF NOT EXISTS idx_pending_delivery_session_row_id \
+         ON pending_delivery (flushed_in_session, row_id)",
             (),
         )
         .await?;

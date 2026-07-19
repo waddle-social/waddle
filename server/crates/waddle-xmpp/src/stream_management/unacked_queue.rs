@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use super::persistence::SmUnackedStanzaPurpose;
+use crate::Stanza;
 use chrono::{DateTime, Utc};
 
 /// An unacknowledged stanza waiting for client acknowledgment.
@@ -15,8 +16,8 @@ use chrono::{DateTime, Utc};
 pub struct UnackedStanza {
     /// The sequence number of this stanza (outbound count when sent)
     pub sequence: u32,
-    /// The XML content of the stanza
-    pub stanza_xml: String,
+    /// Typed stanza retained until a transport or storage boundary serializes it.
+    pub stanza: Stanza,
     /// When the stanza was sent (monotonic — used for age telemetry).
     pub sent_at: Instant,
     /// Server-side receipt time of the original stanza. For server-
@@ -44,7 +45,7 @@ pub enum UnackedPushResult {
     /// Queue was at capacity; the oldest stanza was evicted to make
     /// room. The evicted entry is returned so the caller can log its
     /// sequence number and mark the replay window as truncated.
-    Evicted(UnackedStanza),
+    Evicted(Box<UnackedStanza>),
 }
 
 impl UnackedStanza {
@@ -52,20 +53,20 @@ impl UnackedStanza {
     /// with `Utc::now()`. Use [`Self::with_receipt_at`] when the
     /// caller already knows the original receipt time (e.g. when
     /// replaying a `pending_delivery` row).
-    pub fn new(sequence: u32, stanza_xml: String, purpose: SmUnackedStanzaPurpose) -> Self {
-        Self::with_receipt_at(sequence, stanza_xml, Utc::now(), purpose)
+    pub fn new(sequence: u32, stanza: Stanza, purpose: SmUnackedStanzaPurpose) -> Self {
+        Self::with_receipt_at(sequence, stanza, Utc::now(), purpose)
     }
 
     /// Create a new unacked stanza with an explicit receipt time.
     pub fn with_receipt_at(
         sequence: u32,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
         purpose: SmUnackedStanzaPurpose,
     ) -> Self {
         Self {
             sequence,
-            stanza_xml,
+            stanza,
             sent_at: Instant::now(),
             original_receipt_at,
             purpose,
@@ -111,10 +112,10 @@ impl UnackedQueue {
     pub fn push(
         &mut self,
         sequence: u32,
-        stanza_xml: String,
+        stanza: Stanza,
         purpose: SmUnackedStanzaPurpose,
     ) -> UnackedPushResult {
-        self.push_with_receipt_at(sequence, stanza_xml, Utc::now(), purpose)
+        self.push_with_receipt_at(sequence, stanza, Utc::now(), purpose)
     }
 
     /// Push a stanza with an explicit `original_receipt_at`. Used by
@@ -124,7 +125,7 @@ impl UnackedQueue {
     pub fn push_with_receipt_at(
         &mut self,
         sequence: u32,
-        stanza_xml: String,
+        stanza: Stanza,
         original_receipt_at: DateTime<Utc>,
         purpose: SmUnackedStanzaPurpose,
     ) -> UnackedPushResult {
@@ -136,13 +137,13 @@ impl UnackedQueue {
 
         self.stanzas.push_back(UnackedStanza::with_receipt_at(
             sequence,
-            stanza_xml,
+            stanza,
             original_receipt_at,
             purpose,
         ));
 
         match evicted {
-            Some(stanza) => UnackedPushResult::Evicted(stanza),
+            Some(stanza) => UnackedPushResult::Evicted(Box::new(stanza)),
             None => UnackedPushResult::Accepted,
         }
     }
@@ -170,7 +171,7 @@ impl UnackedQueue {
             .iter()
             .filter(|s| sequence_gt(s.sequence, h))
             .map(|s| super::ReplayStanza {
-                stanza_xml: s.stanza_xml.clone(),
+                stanza: s.stanza.clone(),
                 original_receipt_at: s.original_receipt_at,
                 purpose: s.purpose,
             })
@@ -186,7 +187,7 @@ impl UnackedQueue {
             .iter()
             .map(|s| super::session_registry::DetachedUnackedStanza {
                 sequence: s.sequence,
-                stanza_xml: s.stanza_xml.clone(),
+                stanza: s.stanza.clone(),
                 original_receipt_at: s.original_receipt_at,
                 purpose: s.purpose,
             })
@@ -201,7 +202,7 @@ impl UnackedQueue {
             if self.stanzas.len() < self.max_size {
                 self.stanzas.push_back(UnackedStanza::with_receipt_at(
                     entry.sequence,
-                    entry.stanza_xml.clone(),
+                    entry.stanza.clone(),
                     entry.original_receipt_at,
                     entry.purpose,
                 ));
@@ -259,12 +260,22 @@ pub(super) fn sequence_gt(a: u32, b: u32) -> bool {
 mod tests {
     use super::*;
 
-    fn push_accepted(queue: &mut UnackedQueue, sequence: u32, xml: &str) {
-        match queue.push(
-            sequence,
-            xml.to_string(),
-            SmUnackedStanzaPurpose::Application,
-        ) {
+    fn message(id: impl ToString) -> Stanza {
+        let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+        message.id = Some(xmpp_parsers::message::Id(id.to_string()));
+        Stanza::Message(message)
+    }
+
+    fn stanza_has_id(stanza: &Stanza, expected: &str) -> bool {
+        matches!(
+            stanza,
+            Stanza::Message(message)
+                if message.id.as_ref().is_some_and(|id| id.0 == expected)
+        )
+    }
+
+    fn push_accepted(queue: &mut UnackedQueue, sequence: u32, id: &str) {
+        match queue.push(sequence, message(id), SmUnackedStanzaPurpose::Application) {
             UnackedPushResult::Accepted => {}
             UnackedPushResult::Evicted(stanza) => {
                 panic!("unexpected eviction of stanza sequence={}", stanza.sequence)
@@ -277,9 +288,9 @@ mod tests {
         let mut queue = UnackedQueue::new(10);
         assert!(queue.is_empty());
 
-        push_accepted(&mut queue, 1, "<msg1/>");
-        push_accepted(&mut queue, 2, "<msg2/>");
-        push_accepted(&mut queue, 3, "<msg3/>");
+        push_accepted(&mut queue, 1, "msg1");
+        push_accepted(&mut queue, 2, "msg2");
+        push_accepted(&mut queue, 3, "msg3");
 
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(1));
@@ -290,10 +301,10 @@ mod tests {
     fn test_unacked_queue_acknowledge() {
         let mut queue = UnackedQueue::new(10);
 
-        push_accepted(&mut queue, 1, "<msg1/>");
-        push_accepted(&mut queue, 2, "<msg2/>");
-        push_accepted(&mut queue, 3, "<msg3/>");
-        push_accepted(&mut queue, 4, "<msg4/>");
+        push_accepted(&mut queue, 1, "msg1");
+        push_accepted(&mut queue, 2, "msg2");
+        push_accepted(&mut queue, 3, "msg3");
+        push_accepted(&mut queue, 4, "msg4");
 
         // Acknowledge up to 2
         queue.acknowledge(2);
@@ -309,16 +320,16 @@ mod tests {
     fn test_unacked_queue_get_unacked_after() {
         let mut queue = UnackedQueue::new(10);
 
-        push_accepted(&mut queue, 1, "<msg1/>");
-        push_accepted(&mut queue, 2, "<msg2/>");
-        push_accepted(&mut queue, 3, "<msg3/>");
-        push_accepted(&mut queue, 4, "<msg4/>");
+        push_accepted(&mut queue, 1, "msg1");
+        push_accepted(&mut queue, 2, "msg2");
+        push_accepted(&mut queue, 3, "msg3");
+        push_accepted(&mut queue, 4, "msg4");
 
         // Get stanzas after h=2 (should be 3 and 4)
         let unacked = queue.get_unacked_after(2);
         assert_eq!(unacked.len(), 2);
-        assert_eq!(unacked[0].stanza_xml, "<msg3/>");
-        assert_eq!(unacked[1].stanza_xml, "<msg4/>");
+        assert!(stanza_has_id(&unacked[0].stanza, "msg3"));
+        assert!(stanza_has_id(&unacked[1].stanza, "msg4"));
 
         // Get stanzas after h=0 (all of them)
         let unacked = queue.get_unacked_after(0);
@@ -329,25 +340,21 @@ mod tests {
     fn test_unacked_queue_max_size_returns_evicted_stanza() {
         let mut queue = UnackedQueue::new(3);
 
-        push_accepted(&mut queue, 1, "<msg1/>");
-        push_accepted(&mut queue, 2, "<msg2/>");
-        push_accepted(&mut queue, 3, "<msg3/>");
+        push_accepted(&mut queue, 1, "msg1");
+        push_accepted(&mut queue, 2, "msg2");
+        push_accepted(&mut queue, 3, "msg3");
         assert_eq!(queue.len(), 3);
 
         // Adding a 4th should remove the oldest and surface the evicted
         // stanza so `StreamManagementState::record_outbound` can warn
         // about it instead of dropping silently.
-        let result = queue.push(
-            4,
-            "<msg4/>".to_string(),
-            SmUnackedStanzaPurpose::Application,
-        );
+        let result = queue.push(4, message("msg4"), SmUnackedStanzaPurpose::Application);
         let evicted = match result {
             UnackedPushResult::Evicted(stanza) => stanza,
             UnackedPushResult::Accepted => panic!("queue at capacity must evict"),
         };
         assert_eq!(evicted.sequence, 1);
-        assert_eq!(evicted.stanza_xml, "<msg1/>");
+        assert!(stanza_has_id(&evicted.stanza, "msg1"));
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.oldest_sequence(), Some(2));
     }
@@ -360,19 +367,19 @@ mod tests {
         let stanzas = vec![
             DetachedUnackedStanza {
                 sequence: 5,
-                stanza_xml: "<msg5/>".to_string(),
+                stanza: message("msg5"),
                 original_receipt_at: now,
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 6,
-                stanza_xml: "<msg6/>".to_string(),
+                stanza: message("msg6"),
                 original_receipt_at: now,
                 purpose: SmUnackedStanzaPurpose::Application,
             },
             DetachedUnackedStanza {
                 sequence: 7,
-                stanza_xml: "<msg7/>".to_string(),
+                stanza: message("msg7"),
                 original_receipt_at: now,
                 purpose: SmUnackedStanzaPurpose::Application,
             },
@@ -389,20 +396,20 @@ mod tests {
         let mut queue = UnackedQueue::new(10);
         let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
         message.id = Some(xmpp_parsers::message::Id("application".to_string()));
-        let message_xml = crate::parser::message_to_string(&message).expect("serialize message");
+        let message = Stanza::Message(message);
         let barrier = xmpp_parsers::iq::Iq::Get {
             from: None,
             to: None,
             id: "resume-barrier".to_string(),
             payload: minidom::Element::builder("ping", crate::xep::xep0199::NS_PING).build(),
         };
-        let barrier_xml = crate::parser::stanza_to_string(barrier).expect("serialize ping IQ");
+        let barrier = Stanza::Iq(Box::new(barrier));
         assert!(matches!(
-            queue.push_with_receipt_at(1, message_xml, now, SmUnackedStanzaPurpose::Application,),
+            queue.push_with_receipt_at(1, message, now, SmUnackedStanzaPurpose::Application,),
             UnackedPushResult::Accepted
         ));
         assert!(matches!(
-            queue.push_with_receipt_at(2, barrier_xml, now, SmUnackedStanzaPurpose::ResumeBarrier,),
+            queue.push_with_receipt_at(2, barrier, now, SmUnackedStanzaPurpose::ResumeBarrier,),
             UnackedPushResult::Accepted
         ));
 

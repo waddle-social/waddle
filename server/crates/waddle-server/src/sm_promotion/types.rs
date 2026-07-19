@@ -1,4 +1,26 @@
 use jid::FullJid;
+use std::time::Duration;
+
+const QUARANTINE_RETRY_BASE: Duration = Duration::from_secs(5 * 60);
+const QUARANTINE_RETRY_MAX: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Delay before retrying a session whose replay invariants are quarantined.
+///
+/// This budget is deliberately independent from the transient promotion
+/// attempt counter: quarantine is never dead-lettered, while exponential
+/// backoff prevents a permanent invariant violation (or a prolonged pending
+/// store outage) from re-running the global reconciliation query every SM
+/// janitor sweep.
+pub(crate) fn quarantine_retry_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(31);
+    let multiplier = 1_u64 << exponent;
+    Duration::from_secs(
+        QUARANTINE_RETRY_BASE
+            .as_secs()
+            .saturating_mul(multiplier)
+            .min(QUARANTINE_RETRY_MAX.as_secs()),
+    )
+}
 
 /// Outcome of promoting a single unacked stanza per the Q6 chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,9 +40,6 @@ pub enum PromotedOutcome {
     /// Valid stanza that intentionally bypassed Q6 sinks because it
     /// has no XEP-0160 offline-delivery semantics.
     NotPromotable,
-    /// Skipped — stanza could not be parsed back to a typed value
-    /// (corrupt unacked queue entry). Logged for operator visibility.
-    Unparseable,
     /// Dropped because a recently applied XEP-0424/0425 tombstone
     /// matches this stanza (round-2 review R2): the retraction raced
     /// the drain, so the promotion-time re-check scrubs the in-flight
@@ -48,7 +67,6 @@ pub struct PromotionSummary {
     pub bounced: u32,
     pub dropped: u32,
     pub not_promotable: u32,
-    pub unparseable: u32,
     /// Number of stanzas dropped by the promotion-time recent-
     /// tombstone re-check (round-2 review R2). Counted separately
     /// from `dropped` so retraction-race scrubs stay visible in the
@@ -81,7 +99,6 @@ impl PromotionSummary {
             PromotedOutcome::Bounced => self.bounced += 1,
             PromotedOutcome::Dropped => self.dropped += 1,
             PromotedOutcome::NotPromotable => self.not_promotable += 1,
-            PromotedOutcome::Unparseable => self.unparseable += 1,
             PromotedOutcome::Scrubbed => self.scrubbed += 1,
             PromotedOutcome::StorageFailure => self.storage_failed += 1,
             PromotedOutcome::Quarantined => self.quarantined += 1,
@@ -114,5 +131,18 @@ impl PromotionSummary {
     /// of the current attempt count.
     pub(crate) fn should_dead_letter(&self, attempts: u32, max_attempts: u32) -> bool {
         !self.has_quarantined() && self.has_storage_failure() && attempts >= max_attempts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{quarantine_retry_delay, QUARANTINE_RETRY_BASE, QUARANTINE_RETRY_MAX};
+
+    #[test]
+    fn quarantine_retry_uses_bounded_exponential_backoff() {
+        assert_eq!(quarantine_retry_delay(1), QUARANTINE_RETRY_BASE);
+        assert_eq!(quarantine_retry_delay(2), QUARANTINE_RETRY_BASE * 2);
+        assert_eq!(quarantine_retry_delay(3), QUARANTINE_RETRY_BASE * 4);
+        assert_eq!(quarantine_retry_delay(u32::MAX), QUARANTINE_RETRY_MAX);
     }
 }

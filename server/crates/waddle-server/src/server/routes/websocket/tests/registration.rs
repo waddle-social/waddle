@@ -9,7 +9,7 @@ use super::super::{
     stream_management::SmRegistrationFinalization,
     transport_xml::element_to_xml,
 };
-use super::{create_test_session, create_test_websocket_state};
+use super::{create_test_session, create_test_websocket_state, test_message_stanza};
 use jid::{BareJid, FullJid};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -159,13 +159,13 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
             unacked_stanzas: vec![
                 DetachedUnackedStanza {
                     sequence: 9,
-                    stanza_xml: "<message id='m9'/>".to_string(),
+                    stanza: test_message_stanza("m9"),
                     original_receipt_at: chrono::Utc::now(),
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
                 DetachedUnackedStanza {
                     sequence: 10,
-                    stanza_xml: "<message id='m10'/>".to_string(),
+                    stanza: test_message_stanza("m10"),
                     original_receipt_at: chrono::Utc::now(),
                     purpose: SmUnackedStanzaPurpose::Application,
                 },
@@ -237,7 +237,11 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     assert!(conn.pending_resume_h.is_none());
     let replay = conn.sm_state.get_stanzas_to_resend(9);
     assert_eq!(replay.len(), 1);
-    assert_eq!(replay[0].stanza_xml, "<message id='m10'/>");
+    assert!(matches!(
+        &replay[0].stanza,
+        Stanza::Message(message)
+            if message.id.as_ref().is_some_and(|id| id.0 == "m10")
+    ));
     assert!(state
         .deps
         .protocol

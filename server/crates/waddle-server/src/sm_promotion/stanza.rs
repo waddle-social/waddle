@@ -3,12 +3,9 @@ use waddle_xmpp::Stanza;
 
 use super::PromotedOutcome;
 
-/// Parse a wire-XML stanza back to its typed [`Stanza`] variant.
-/// Returns `None` for unparseable XML or unknown root elements.
-/// Handles `<message/>`, `<iq/>`, and `<presence/>` — the three
-/// stanza kinds the SM unacked queue can hold (Copilot review on
-/// PR #346: previous code only parsed `<message/>` and silently
-/// dropped IQ/presence as Unparseable).
+/// Parse a test fixture into the same typed [`Stanza`] variants retained by
+/// the SM queue. Runtime promotion receives typed stanzas directly.
+#[cfg(test)]
 pub(super) fn parse_stanza(xml: &str) -> Option<Stanza> {
     let element: xmpp_parsers::minidom::Element = xml.parse().ok()?;
     match element.name() {

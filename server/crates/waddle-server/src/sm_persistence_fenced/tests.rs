@@ -320,6 +320,85 @@ async fn store_session_atomic_also_applies_divergence_a() {
 }
 
 #[tokio::test]
+async fn legacy_unacked_rows_gain_non_null_application_purpose() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = format!("legacy-purpose-{}", uuid::Uuid::new_v4());
+    let legacy_xml = serialize_stanza(fixture_unacked(&stream_id, 1).stanza.as_ref())
+        .expect("serialize typed legacy stanza");
+
+    // Recreate the pre-purpose state inside the fixture's shared-table lock,
+    // then invoke the fenced schema initializer directly. The migration
+    // restores the column before the test releases that lock.
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute("ALTER TABLE sm_unacked DROP COLUMN purpose", ())
+        .await
+        .expect("remove purpose to simulate legacy table");
+    conn.execute("ALTER TABLE sm_unacked ADD COLUMN purpose TEXT", ())
+        .await
+        .expect("simulate a partially-applied nullable purpose migration");
+    conn.execute(
+        "INSERT INTO sm_unacked \
+         (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+         VALUES (?, ?, ?, ?)",
+        crate::db_params![
+            stream_id.clone(),
+            1i64,
+            legacy_xml,
+            stale_caller_supplied_time().timestamp_millis(),
+        ],
+    )
+    .await
+    .expect("insert pre-purpose unacked row");
+    drop(conn);
+
+    f.fenced
+        .ensure_schema()
+        .await
+        .expect("migrate fenced sm_unacked purpose");
+    f.fenced
+        .ensure_schema()
+        .await
+        .expect("repeat fenced purpose migration idempotently");
+
+    let conn = f.claims_db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT purpose FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+            crate::db_params![stream_id, 1i64],
+        )
+        .await
+        .expect("query migrated legacy row");
+    let row = rows
+        .next()
+        .await
+        .expect("read migrated row")
+        .expect("migrated row exists");
+    let purpose: String = row.get(0).expect("purpose text");
+    assert_eq!(
+        purpose,
+        unacked_purpose_wire_str(SmUnackedStanzaPurpose::Application)
+    );
+
+    let mut columns = conn
+        .query(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'sm_unacked' \
+               AND column_name = 'purpose'",
+            (),
+        )
+        .await
+        .expect("inspect purpose nullability");
+    let column = columns
+        .next()
+        .await
+        .expect("read purpose metadata")
+        .expect("purpose column metadata");
+    let is_nullable: String = column.get(0).expect("is_nullable");
+    assert_eq!(is_nullable, "NO");
+}
+
+#[tokio::test]
 async fn list_expired_sessions_ignores_caller_now_and_uses_postgres_now() {
     let Some(f) = fixture().await else { return };
     // detached_at is always Postgres now() (divergence a); a zero-length

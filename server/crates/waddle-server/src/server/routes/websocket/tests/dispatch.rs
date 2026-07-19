@@ -4,7 +4,7 @@ use super::super::{
     stanza_to_xml,
     state::WsConnState,
 };
-use super::create_test_websocket_state;
+use super::{create_test_websocket_state, test_stanza_xml};
 use tokio::sync::mpsc;
 use waddle_xmpp::{
     protocol::{Blocklist, InboundEvent, OutboundEvent},
@@ -177,8 +177,9 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
     let queue = conn.sm_state.get_stanzas_to_resend(0);
     assert_eq!(queue.len(), 1, "DirectFrame recorded once");
     assert_eq!(
-        queue[0].stanza_xml, expected_xml,
-        "DirectFrame is recorded byte-for-byte (no recipient pipeline rewrite)"
+        test_stanza_xml(&queue[0].stanza),
+        expected_xml,
+        "DirectFrame is recorded without a recipient pipeline rewrite"
     );
 }
 
@@ -241,7 +242,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
     );
     let combined: String = queue
         .iter()
-        .map(|entry| entry.stanza_xml.as_str())
+        .map(|entry| test_stanza_xml(&entry.stanza))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(

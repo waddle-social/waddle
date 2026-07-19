@@ -42,43 +42,21 @@ pub(super) fn detached_to_persisted(
     })
 }
 
-/// Parse a wire-XML fragment back to a typed persisted unacked stanza.
-pub(super) fn parse_xml_to_persisted_unacked(
+/// Convert an in-memory typed stanza to the typed persistence contract.
+pub(super) fn typed_to_persisted_unacked(
     stream_id: &str,
     sequence: u32,
-    stanza_xml: &str,
+    stanza: &crate::Stanza,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     purpose: super::super::persistence::SmUnackedStanzaPurpose,
-) -> Result<super::super::persistence::PersistedUnackedStanza, SmRegistryError> {
-    let element: minidom::Element = stanza_xml.parse().map_err(|e: minidom::Error| {
-        SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
-    })?;
-    let stanza = match element.name() {
-        "message" => crate::Stanza::Message(
-            xmpp_parsers::message::Message::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        ),
-        "iq" => crate::Stanza::Iq(Box::new(
-            xmpp_parsers::iq::Iq::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        )),
-        "presence" => crate::Stanza::Presence(
-            xmpp_parsers::presence::Presence::try_from(element)
-                .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
-        ),
-        other => {
-            return Err(SmRegistryError::Internal(format!(
-                "unknown unacked stanza element '{other}'"
-            )));
-        }
-    };
-    Ok(super::super::persistence::PersistedUnackedStanza {
+) -> super::super::persistence::PersistedUnackedStanza {
+    super::super::persistence::PersistedUnackedStanza {
         stream_id: crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
         sequence,
-        stanza: Box::new(stanza),
+        stanza: Box::new(stanza.clone()),
         original_receipt_at,
         purpose,
-    })
+    }
 }
 
 /// Convert a [`super::persistence::PersistedSession`] + its unacked
@@ -120,26 +98,13 @@ pub(super) fn persisted_to_detached(
             }
             matches
         })
-        .map(|row| {
-            let element: minidom::Element = match &*row.stanza {
-                crate::Stanza::Message(m) => m.clone().into(),
-                crate::Stanza::Iq(iq) => (**iq).clone().into(),
-                crate::Stanza::Presence(p) => p.clone().into(),
-            };
-            let mut buf = Vec::new();
-            element
-                .write_to(&mut buf)
-                .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
-            let xml = String::from_utf8(buf)
-                .map_err(|e| SmRegistryError::Internal(format!("serialize unacked stanza: {e}")))?;
-            Ok(DetachedUnackedStanza {
-                sequence: row.sequence,
-                stanza_xml: xml,
-                original_receipt_at: row.original_receipt_at,
-                purpose: row.purpose,
-            })
+        .map(|row| DetachedUnackedStanza {
+            sequence: row.sequence,
+            stanza: (*row.stanza).clone(),
+            original_receipt_at: row.original_receipt_at,
+            purpose: row.purpose,
         })
-        .collect::<Result<_, SmRegistryError>>()?;
+        .collect();
 
     Ok(DetachedSession {
         stream_id: persisted.stream_id.as_str().to_string(),

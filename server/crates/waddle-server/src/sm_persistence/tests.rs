@@ -210,6 +210,108 @@ async fn unacked_purpose_round_trips() {
 }
 
 #[tokio::test]
+async fn sqlite_upgrade_backfills_legacy_unacked_purpose_as_non_null_application() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("sm-persistence-legacy-purpose.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let url = format!("sqlite://{path}");
+    let legacy_xml = serialize_stanza(fixture_unacked("legacy-purpose", 1).stanza.as_ref())
+        .expect("serialize typed legacy stanza");
+
+    // Simulate the exact pre-purpose table shape and leave a durable row in
+    // it. Keep the raw handle scoped so the startup migration never competes
+    // with an open SQLite schema lock.
+    {
+        let db = Database::from_config(
+            "sm-persistence-legacy-purpose-seed",
+            &DatabaseConfig::new(DatabaseDriver::Sqlite, url.clone()),
+        )
+        .await
+        .expect("open legacy SQLite database");
+        let conn = db.guard().await.expect("legacy database guard");
+        conn.execute(
+            "CREATE TABLE sm_unacked (\
+                 stream_id TEXT NOT NULL, \
+                 sequence INTEGER NOT NULL, \
+                 stanza_xml TEXT NOT NULL, \
+                 original_receipt_at_ms INTEGER NOT NULL, \
+                 PRIMARY KEY (stream_id, sequence)\
+             )",
+            (),
+        )
+        .await
+        .expect("create pre-purpose sm_unacked table");
+        conn.execute(
+            "INSERT INTO sm_unacked \
+             (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                "legacy-purpose".to_string(),
+                1i64,
+                legacy_xml.clone(),
+                fixed_time().timestamp_millis(),
+            ],
+        )
+        .await
+        .expect("insert legacy unacked row");
+    }
+
+    let storage = DatabaseSmPersistence::open(Some(&url))
+        .await
+        .expect("upgrade legacy SQLite SM persistence");
+    let rows = storage
+        .list_unacked(&SmSessionId::new("legacy-purpose"))
+        .await
+        .expect("decode migrated unacked row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::Application);
+
+    let mut table_info = storage
+        .query("PRAGMA table_info(sm_unacked)", ())
+        .await
+        .expect("inspect migrated sm_unacked columns");
+    let mut purpose_not_null = None;
+    while let Some(row) = table_info.next().await.expect("read table_info row") {
+        let name: String = row.get(1).expect("column name");
+        if name == "purpose" {
+            purpose_not_null = Some(row.get::<i64>(3).expect("purpose NOT NULL flag"));
+        }
+    }
+    assert_eq!(purpose_not_null, Some(1), "purpose must be NOT NULL");
+    storage
+        .execute(
+            "INSERT INTO sm_unacked \
+             (stream_id, sequence, stanza_xml, original_receipt_at_ms, purpose) \
+             VALUES (?, ?, ?, ?, NULL)",
+            crate::db_params![
+                "legacy-purpose".to_string(),
+                2i64,
+                legacy_xml,
+                fixed_time().timestamp_millis(),
+            ],
+        )
+        .await
+        .expect_err("migrated purpose constraint must reject NULL");
+    drop(storage);
+
+    // A second startup must treat the migration as a no-op and preserve the
+    // backfilled value.
+    let reopened = DatabaseSmPersistence::open(Some(&url))
+        .await
+        .expect("reopen migrated SQLite SM persistence");
+    let rows = reopened
+        .list_unacked(&SmSessionId::new("legacy-purpose"))
+        .await
+        .expect("list row after idempotent reopen");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].purpose, SmUnackedStanzaPurpose::Application);
+}
+
+#[tokio::test]
 async fn ack_through_drops_only_acked_sequences() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     for seq in 1..=4 {

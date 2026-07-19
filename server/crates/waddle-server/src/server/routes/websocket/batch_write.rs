@@ -14,11 +14,12 @@
 
 use super::send::send_ws_message;
 use super::state::WsConnState;
-use super::stream_management::{apply_sm_ack, is_countable_stanza};
+use super::stream_management::{apply_sm_ack, parse_countable_stanza};
 use super::*;
 use futures::FutureExt as _;
 use waddle_xmpp::stream_management::persistence::SmUnackedStanzaPurpose;
 use waddle_xmpp::stream_management::SmRequest;
+use waddle_xmpp::Stanza;
 
 /// How the writer records countable frames into XEP-0198 bookkeeping.
 ///
@@ -153,9 +154,9 @@ where
         }
     }
     while let Some(frame) = frames.next() {
-        let request_ack = if should_record(conn, &frame, policy) {
+        let request_ack = if let Some(stanza) = stanza_to_record(conn, &frame, policy) {
             conn.sm_state
-                .record_outbound(frame.clone(), SmUnackedStanzaPurpose::Application)
+                .record_outbound(stanza, SmUnackedStanzaPurpose::Application)
                 .request_ack
         } else {
             false
@@ -352,8 +353,10 @@ where
     }
 }
 
-fn should_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> bool {
-    conn.sm_state.enabled && matches!(policy, BatchSmPolicy::Record) && is_countable_stanza(frame)
+fn stanza_to_record(conn: &WsConnState, frame: &str, policy: BatchSmPolicy) -> Option<Stanza> {
+    (conn.sm_state.enabled && matches!(policy, BatchSmPolicy::Record))
+        .then(|| parse_countable_stanza(frame))
+        .flatten()
 }
 
 /// The transport died mid-batch (or a send-window pause timed out): record
@@ -380,10 +383,10 @@ pub(super) fn record_remaining_for_replay(
     policy: BatchSmPolicy,
 ) {
     for frame in frames {
-        if should_record(conn, &frame, policy) {
+        if let Some(stanza) = stanza_to_record(conn, &frame, policy) {
             let _ = conn
                 .sm_state
-                .record_outbound(frame, SmUnackedStanzaPurpose::Application);
+                .record_outbound(stanza, SmUnackedStanzaPurpose::Application);
         }
     }
 }
