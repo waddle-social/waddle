@@ -26,7 +26,7 @@ import java.util.UUID
  */
 internal class OutboundLifecycleCoordinator(
     private val activeSession: ActiveSession,
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val resume: ResumePersistence,
     dispatchEvent: (XmppEvent) -> Unit,
     drain: suspend (

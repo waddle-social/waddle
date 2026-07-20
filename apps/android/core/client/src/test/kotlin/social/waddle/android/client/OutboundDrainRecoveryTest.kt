@@ -25,7 +25,7 @@ class OutboundDrainRecoveryTest {
     fun `K fatal drain exit retains exact outbound lease until recovery can proceed`() = runTest {
         val prefs = SessionPrefs(FailingPreferencesDataStore())
         prefs.activateSession(OWNER, "drain-fatal")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
         val ownerJob = Job()

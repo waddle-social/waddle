@@ -4,8 +4,8 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryCallbackRef
@@ -47,7 +47,7 @@ internal fun terminalWorkerClaimed(result: LiveAdmissionResult): QueuedOutboundM
 
 internal suspend fun seedNativeOwnedTerminalRows(
     prefs: SessionPrefs,
-    queue: OutboundQueue,
+    queue: DeliveryJournalStore,
     attempt: DeliveryAttemptRef,
     count: Int,
 ): List<QueuedOutboundMessage> {

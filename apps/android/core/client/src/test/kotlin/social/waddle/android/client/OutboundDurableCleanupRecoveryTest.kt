@@ -179,7 +179,7 @@ class OutboundDurableCleanupRecoveryTest {
     ) {
         private val dataStore = FailingPreferencesDataStore()
         private val prefs = SessionPrefs(dataStore)
-        private val queue = OutboundQueue(prefs)
+        private val queue = DeliveryJournalStore(prefs)
         private val resume = ResumePersistence(prefs, queue)
         private val activeSession = ActiveSession().also { it.ownBareJid = OWNER }
         val ownerJob = Job()

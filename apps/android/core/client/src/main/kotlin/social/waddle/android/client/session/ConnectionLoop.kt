@@ -30,7 +30,7 @@ import social.waddle.android.client.ConnectionAttemptHandle
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.OutboundMessenger
-import social.waddle.android.client.OutboundQueue
+import social.waddle.android.client.DeliveryJournalStore
 import social.waddle.android.client.ReconnectPolicy
 import social.waddle.android.client.ResumeHandoffOutcome
 import social.waddle.android.client.SaslRetryDisposition
@@ -77,7 +77,7 @@ internal class ConnectionAttemptClientFactory(
     fun create(
         session: WaddleSessionInfo,
         resource: String,
-        prepared: OutboundQueue.AttemptBootstrap,
+        prepared: DeliveryJournalStore.AttemptBootstrap,
     ): WaddleClientInterface = clientFactory.create(
         WaddleConfig(
             serverUrl = session.xmppWebsocketUrl,

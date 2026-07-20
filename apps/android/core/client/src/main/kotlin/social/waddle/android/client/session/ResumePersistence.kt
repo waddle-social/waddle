@@ -7,7 +7,7 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import social.waddle.android.client.OutboundQueue
+import social.waddle.android.client.DeliveryJournalStore
 import social.waddle.android.client.ResumeCursorTracker
 import social.waddle.android.client.nowRfc3339
 import social.waddle.android.client.persistQuietly
@@ -32,7 +32,7 @@ import java.util.logging.Logger
  */
 internal class ResumePersistence(
     private val sessionPrefs: SessionPrefs,
-    private val deliveryJournal: OutboundQueue,
+    private val deliveryJournal: DeliveryJournalStore,
 ) {
     /** In-memory newest-seen cursors ranking the bounded DM catch-up. */
     val cursorTracker = ResumeCursorTracker()

@@ -1,6 +1,6 @@
 package social.waddle.android.client
 
-import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
+import social.waddle.android.client.DeliveryJournalStore.ResumeTransitionResult
 import social.waddle.android.client.prefs.CommittedResumeTransition
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
@@ -96,7 +96,7 @@ private fun DeliveryOwnerJournal.commitUnseenResumeFailure(
         return OwnerCommitResult.Rejected(ResumeTransitionResult.StaleAttempt)
     }
     val retainedReceipts = gcTransitionReceipts(command.nowMillis).resumeTransitionReceipts
-    if (retainedReceipts.size >= OutboundQueue.MAX_TRANSITION_RECEIPTS_PER_OWNER) {
+    if (retainedReceipts.size >= DeliveryJournalStore.MAX_TRANSITION_RECEIPTS_PER_OWNER) {
         return OwnerCommitResult.Rejected(ResumeTransitionResult.ReceiptCapacityExhausted)
     }
 
@@ -176,7 +176,7 @@ internal fun DeliveryOwnerJournal.gcTransitionReceipts(
             receipt.terminalAtMillis == null ->
                 receipt.copy(terminalAtMillis = nowMillis)
             nowMillis - receipt.terminalAtMillis >=
-                OutboundQueue.TRANSITION_RECEIPT_RETENTION_MILLIS -> null
+                DeliveryJournalStore.TRANSITION_RECEIPT_RETENTION_MILLIS -> null
             else -> receipt
         }
     }

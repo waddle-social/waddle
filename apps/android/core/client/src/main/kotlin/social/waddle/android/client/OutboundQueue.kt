@@ -28,7 +28,7 @@ import social.waddle.android.client.prefs.SmResumeSnapshot
  * one owner bucket, preserves foreign buckets, and compares the immutable row
  * identity plus the complete UUID attempt/native-generation ownership proof.
  */
-class OutboundQueue(
+class DeliveryJournalStore(
     private val sessionPrefs: SessionPrefs,
     private val capacityPerOwner: Int = DEFAULT_CAPACITY,
 ) {
@@ -630,5 +630,5 @@ class OutboundQueue(
 }
 
 internal class TerminalReceiptAttemptBlockedException(
-    val result: OutboundQueue.BeginAttemptResult,
+    val result: DeliveryJournalStore.BeginAttemptResult,
 ) : IllegalStateException("terminal receipt blocks the next delivery attempt")

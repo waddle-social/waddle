@@ -15,7 +15,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.QueuedOutboundContent
@@ -33,7 +33,7 @@ class WorkerRecoveryClaimLinearizationTest {
     fun `N concurrent recovery claims are linearized and cancellation permits an exact retry`() = runTest(timeout = 5.seconds) {
         val prefs = SessionPrefs(FailingPreferencesDataStore())
         prefs.activateSession(OWNER, "claim-linearization")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
         val ownerJob = Job()
@@ -140,7 +140,7 @@ class WorkerRecoveryClaimLinearizationTest {
     }
 
     private suspend fun stageTerminalRow(
-        queue: OutboundQueue,
+        queue: DeliveryJournalStore,
         attempt: social.waddle.android.client.prefs.DeliveryAttemptRef,
     ) {
         assertTrue(

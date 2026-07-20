@@ -14,7 +14,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryCallbackRef
@@ -47,7 +47,7 @@ class OutboundTerminalRecoveryTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(OWNER, "receipt-cleanup")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val receipt = pendingReceipt("recovery-receipt")
         prefs.updateDeliveryJournal { journal ->
             DeliveryJournalMutation(
@@ -123,7 +123,7 @@ class OutboundTerminalRecoveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         prefs.activateSession(OWNER, "terminal-fatal")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
         val ownerJob = Job()
@@ -312,7 +312,7 @@ class OutboundTerminalRecoveryTest {
     }
 
     private suspend fun stageTerminalRow(
-        queue: OutboundQueue,
+        queue: DeliveryJournalStore,
         attempt: social.waddle.android.client.prefs.DeliveryAttemptRef,
         clientStanzaId: String,
     ) {

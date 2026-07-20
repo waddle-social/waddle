@@ -52,7 +52,7 @@ class TerminalReceiptReplayPersistenceTest {
         val events = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 events::add,
                 ProcessEpoch(uuid("claim-later-epoch")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -86,7 +86,7 @@ class TerminalReceiptReplayPersistenceTest {
             val crash = IllegalStateException("process crashed after prefix $prefix")
             val first = terminalRun(
                 DeliveryTerminalWorker(
-                    OutboundQueue(prefs),
+                    DeliveryJournalStore(prefs),
                     dispatchEvent = { event ->
                         if (firstEvents.size == prefix) throw crash
                         firstEvents += event
@@ -109,7 +109,7 @@ class TerminalReceiptReplayPersistenceTest {
             val replacementEpoch = ProcessEpoch(uuid("replay-replacement-$prefix"))
             val replacement = terminalRun(
                 DeliveryTerminalWorker(
-                    OutboundQueue(prefs),
+                    DeliveryJournalStore(prefs),
                     replayed::add,
                     replacementEpoch,
                     evidence = WorkerExitExceptionEvidence(),
@@ -157,7 +157,7 @@ class TerminalReceiptReplayPersistenceTest {
         val firstEvents = mutableListOf<XmppEvent>()
         val first = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 dispatchEvent = { event ->
                     firstEvents += event
                     store.afterCommitReturns = {
@@ -183,7 +183,7 @@ class TerminalReceiptReplayPersistenceTest {
         val restartedEvents = mutableListOf<XmppEvent>()
         val restarted = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 restartedEvents::add,
                 ProcessEpoch(uuid("ack-postcommit-restart")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -209,7 +209,7 @@ class TerminalReceiptReplayPersistenceTest {
             val events = mutableListOf<XmppEvent>()
             val run = terminalRun(
                 DeliveryTerminalWorker(
-                    OutboundQueue(prefs),
+                    DeliveryJournalStore(prefs),
                     events::add,
                     evidence = WorkerExitExceptionEvidence(),
                 ),

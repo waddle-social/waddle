@@ -18,8 +18,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryCallbackRef
@@ -86,7 +86,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = { effects += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("worker-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -118,7 +118,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     effects += it
                     store.failNextUpdate = true
@@ -163,7 +163,7 @@ class DeliveryTerminalReceiptApplicationTest {
         }
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, epoch, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(DeliveryJournalStore(prefs), { effects += it }, epoch, evidence = WorkerExitExceptionEvidence()),
             this,
         )
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
@@ -225,7 +225,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val store = FailingPreferencesDataStore().also { it.failAllUpdates = true }
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(SessionPrefs(store)),
+                DeliveryJournalStore(SessionPrefs(store)),
                 dispatchEvent = {},
                 evidence = WorkerExitExceptionEvidence(),
             ),
@@ -274,7 +274,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 { effects += it },
                 ProcessEpoch(terminalWorkerUuid("new-epoch")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -305,7 +305,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = { effects += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("claim-uncertain-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -339,7 +339,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val firstEvents = mutableListOf<XmppEvent>()
         val first = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     firstEvents += it
                     store.afterCommitReturns = {
@@ -369,7 +369,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val replayed = mutableListOf<XmppEvent>()
         val second = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = { replayed += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("prefix-second-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -401,7 +401,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val events = mutableListOf<XmppEvent>()
         val first = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     events += it
                     store.afterCommitReturns = {
@@ -450,7 +450,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val cancellation = kotlinx.coroutines.CancellationException("acknowledge returned cancelled")
         val first = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     firstEvents += it
                     store.afterCommitReturns = {
@@ -472,7 +472,7 @@ class DeliveryTerminalReceiptApplicationTest {
         val restartedEvents = mutableListOf<XmppEvent>()
         val second = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = { restartedEvents += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("ack-cancel-second-process")),
                 evidence = WorkerExitExceptionEvidence(),

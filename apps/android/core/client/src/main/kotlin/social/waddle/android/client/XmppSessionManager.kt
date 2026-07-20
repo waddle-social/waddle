@@ -120,7 +120,7 @@ class XmppSessionManager private constructor(
 
     private val lifecycleMutex = Mutex()
 
-    private val deliveryJournal = OutboundQueue(sessionPrefs)
+    private val deliveryJournal = DeliveryJournalStore(sessionPrefs)
 
     private val resume = ResumePersistence(sessionPrefs, deliveryJournal)
 

@@ -20,7 +20,7 @@ class DeliveryTerminalReceiptCorruptionTest {
         store.updateData { mutablePreferencesOf(key to "{not-json") }
         val events = mutableListOf<XmppEvent>()
         val run = DeliveryTerminalWorker(
-            OutboundQueue(SessionPrefs(store)),
+            DeliveryJournalStore(SessionPrefs(store)),
             events::add,
             evidence = WorkerExitExceptionEvidence(),
         ).start(

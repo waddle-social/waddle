@@ -16,7 +16,7 @@ internal fun DeliveryJournal.beginDeliveryAttempt(
     ownerBareJid: String,
     replacement: DeliveryAttemptRef,
     nowMillis: Long,
-): DeliveryJournalMutation<OutboundQueue.BeginAttemptResult> {
+): DeliveryJournalMutation<DeliveryJournalStore.BeginAttemptResult> {
     check(activeOwnerBareJid == ownerBareJid) {
         "cannot begin a delivery attempt for an inactive owner"
     }
@@ -56,8 +56,8 @@ internal fun DeliveryJournal.beginDeliveryAttempt(
     ).gcTransitionReceipts(nowMillis)
     return DeliveryJournalMutation(
         journal = withOwner(ownerBareJid, nextOwner),
-        result = OutboundQueue.BeginAttemptResult.Started(
-            OutboundQueue.AttemptBootstrap(
+        result = DeliveryJournalStore.BeginAttemptResult.Started(
+            DeliveryJournalStore.AttemptBootstrap(
                 attempt = replacement,
                 resumeSnapshot = snapshot,
                 smVersion = consumedSm.version,
@@ -68,7 +68,7 @@ internal fun DeliveryJournal.beginDeliveryAttempt(
 
 private sealed interface TerminalReceiptAttemptGate {
     data class Ready(val owner: DeliveryOwnerJournal) : TerminalReceiptAttemptGate
-    data class Blocked(val result: OutboundQueue.BeginAttemptResult) : TerminalReceiptAttemptGate
+    data class Blocked(val result: DeliveryJournalStore.BeginAttemptResult) : TerminalReceiptAttemptGate
 }
 
 /**
@@ -80,7 +80,7 @@ private fun DeliveryOwnerJournal.advancePastTerminalReceipt(): TerminalReceiptAt
     val ref = TerminalReceiptRef(receipt.owner, receipt.attempt, receipt.id)
     return when (val state = receipt.state) {
         is TerminalReceiptState.Pending -> TerminalReceiptAttemptGate.Blocked(
-            OutboundQueue.BeginAttemptResult.PendingReceipt(ref, state.claim),
+            DeliveryJournalStore.BeginAttemptResult.PendingReceipt(ref, state.claim),
         )
         is TerminalReceiptState.Acknowledged,
         TerminalReceiptState.PreAcknowledged,
@@ -95,7 +95,7 @@ private fun DeliveryOwnerJournal.advancePastTerminalReceipt(): TerminalReceiptAt
             TerminalReceiptAttemptGate.Ready(copy(terminalReceipt = null))
         } else {
             TerminalReceiptAttemptGate.Blocked(
-                OutboundQueue.BeginAttemptResult.TombstoneNotPostFence(ref, state),
+                DeliveryJournalStore.BeginAttemptResult.TombstoneNotPostFence(ref, state),
             )
         }
     }

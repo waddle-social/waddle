@@ -180,7 +180,7 @@ class OutboundLifecycleCoordinatorTest {
         assertEquals(WaddleSendMessageOutcome.NotConnected, offline.outcome)
 
         val activation = fixture.messenger.activateAttempt(lifecycle)
-        fixture.messenger.drainOutboundQueue()
+        fixture.messenger.drainDeliveryJournal()
 
         val client = FakeWaddleClient()
         assertTrue(fixture.messenger.attachTransport(activation.handle, client))
@@ -281,4 +281,3 @@ class OutboundLifecycleCoordinatorTest {
     }
 
 }
-

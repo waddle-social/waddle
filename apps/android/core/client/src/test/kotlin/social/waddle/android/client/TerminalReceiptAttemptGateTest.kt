@@ -36,7 +36,7 @@ class TerminalReceiptAttemptGateTest {
 
         val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement"), 1)
 
-        assertTrue(result.result is OutboundQueue.BeginAttemptResult.PendingReceipt)
+        assertTrue(result.result is DeliveryJournalStore.BeginAttemptResult.PendingReceipt)
         assertEquals(journal, result.journal)
     }
 
@@ -59,7 +59,7 @@ class TerminalReceiptAttemptGateTest {
                 1,
             )
 
-            assertTrue(result.result is OutboundQueue.BeginAttemptResult.Started)
+            assertTrue(result.result is DeliveryJournalStore.BeginAttemptResult.Started)
             assertEquals(null, result.journal.owners.getValue(OWNER).terminalReceipt)
         }
     }
@@ -93,7 +93,7 @@ class TerminalReceiptAttemptGateTest {
 
                 val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement-${stateIndex}-${projectionIndex}"), 1)
 
-                assertTrue(result.result is OutboundQueue.BeginAttemptResult.TombstoneNotPostFence)
+                assertTrue(result.result is DeliveryJournalStore.BeginAttemptResult.TombstoneNotPostFence)
                 assertEquals(journal, result.journal)
             }
         }

@@ -18,8 +18,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryCallbackRef
@@ -60,7 +60,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(DeliveryJournalStore(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
             this,
         )
 
@@ -100,7 +100,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(DeliveryJournalStore(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
             this,
         )
 
@@ -147,7 +147,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
         try {
             val run = terminalRun(
                 DeliveryTerminalWorker(
-                    journal = OutboundQueue(prefs),
+                    journal = DeliveryJournalStore(prefs),
                     dispatchEvent = {
                         store.failAllUpdates = true
                         throw primary
@@ -221,7 +221,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             try {
                 val run = terminalRun(
                     DeliveryTerminalWorker(
-                        journal = OutboundQueue(prefs),
+                        journal = DeliveryJournalStore(prefs),
                         dispatchEvent = {
                             store.failAllUpdatesWith = storageFailure
                             throw primary
@@ -272,7 +272,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
         val events = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                journal = OutboundQueue(prefs),
+                journal = DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     events += it
                     store.failNextUpdate = true

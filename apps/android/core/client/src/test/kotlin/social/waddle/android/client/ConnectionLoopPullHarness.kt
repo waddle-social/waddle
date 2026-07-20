@@ -7,7 +7,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.QueuedOutboundContent
@@ -31,7 +31,7 @@ internal class ConnectionLoopPullHarness(
 ) {
     val factory = FakeClientFactory()
     val prefs = SessionPrefs(dataStore)
-    val queue = OutboundQueue(prefs)
+    val queue = DeliveryJournalStore(prefs)
     val activeSession = ActiveSession()
     val stores = SessionStores()
     val deliveryEvents = CopyOnWriteArrayList<XmppEvent>()

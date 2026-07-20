@@ -21,7 +21,7 @@ import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGener
 
 /** Applies one durable terminal receipt and owns its exact claim cleanup. */
 internal class TerminalReceiptProcessor(
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val dispatchEvent: (XmppEvent) -> Unit,
     private val processEpoch: ProcessEpoch,
     private val ownership: WorkerOwnership,

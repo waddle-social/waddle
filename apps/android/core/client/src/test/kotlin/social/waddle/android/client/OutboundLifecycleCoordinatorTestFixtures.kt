@@ -48,7 +48,7 @@ internal suspend fun TestScope.coordinatorFixture(
 ): CoordinatorFixture {
     val prefs = SessionPrefs(dataStore)
     prefs.activateSession(COORDINATOR_OWNER, COORDINATOR_SESSION_ID)
-    val queue = OutboundQueue(prefs)
+    val queue = DeliveryJournalStore(prefs)
     val resume = ResumePersistence(prefs, queue)
     resume.start(backgroundScope)
     val activeSession = ActiveSession().also {
@@ -78,7 +78,7 @@ internal suspend fun TestScope.coordinatorFixture(
 internal data class CoordinatorFixture(
     val messenger: OutboundMessenger,
     val scope: CoroutineScope,
-    val queue: OutboundQueue,
+    val queue: DeliveryJournalStore,
     val activeSession: ActiveSession,
 ) {
     suspend fun start(): SessionLifecycleRef =

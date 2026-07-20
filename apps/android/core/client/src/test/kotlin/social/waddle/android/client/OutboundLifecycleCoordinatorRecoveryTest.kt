@@ -448,7 +448,7 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         prefs.activateSession(COORDINATOR_OWNER, COORDINATOR_SESSION_ID)
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
         val activeSession = ActiveSession().also { it.ownBareJid = COORDINATOR_OWNER }
@@ -482,7 +482,7 @@ class OutboundLifecycleCoordinatorRecoveryTest {
                     source = DeliverySource.Composer,
                 ),
                 activation.bootstrap.attempt,
-            ) is OutboundQueue.LiveAdmissionResult.Claimed,
+            ) is DeliveryJournalStore.LiveAdmissionResult.Claimed,
         )
         dataStore.afterCommitReturns = {
             requestedDependencyEntered.complete(Unit)

@@ -10,9 +10,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
-import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.ResumeTransitionResult
 import social.waddle.android.client.prefs.CommittedResumeTransition
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
@@ -33,7 +33,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import java.util.UUID
 
-class OutboundQueueTest {
+class DeliveryJournalStoreTest {
     @Test
     fun `absolute lane head blocks later ready work until terminal apply`() = runTest {
         val (prefs, queue) = activeQueue()
@@ -50,11 +50,11 @@ class OutboundQueueTest {
                 first.clientStanzaId,
                 attempt,
                 DeliveryTerminalKind.ACK,
-            ) is OutboundQueue.TerminalRecordResult.Recorded,
+            ) is DeliveryJournalStore.TerminalRecordResult.Recorded,
         )
         assertNull(queue.readyHead(OWNER_A))
 
-        assertTrue(queue.applyNextTerminal(OWNER_A) is OutboundQueue.TerminalEffect.Acknowledged)
+        assertTrue(queue.applyNextTerminal(OWNER_A) is DeliveryJournalStore.TerminalEffect.Acknowledged)
         assertEquals(second.identity, queue.readyHead(OWNER_A)?.identity)
         assertEquals(OWNER_A, prefs.ownerBareJid.first())
     }
@@ -89,7 +89,7 @@ class OutboundQueueTest {
                 claimedFirst.clientStanzaId,
                 attempt,
                 DeliveryTerminalKind.ACK,
-            ) is OutboundQueue.TerminalRecordResult.Recorded,
+            ) is DeliveryJournalStore.TerminalRecordResult.Recorded,
         )
         val behindTerminal = queue.enqueueAndClaimAbsoluteHead(
             draft(OWNER_A, "m-4"),
@@ -100,7 +100,7 @@ class OutboundQueueTest {
 
         assertTrue(
             queue.applyNextTerminal(OWNER_A) is
-                OutboundQueue.TerminalEffect.Acknowledged,
+                DeliveryJournalStore.TerminalEffect.Acknowledged,
         )
         assertEquals(
             behindReady.row.identity,
@@ -111,7 +111,7 @@ class OutboundQueueTest {
     @Test
     fun `owner buckets and capacity are isolated`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val queue = OutboundQueue(prefs, capacityPerOwner = 2)
+        val queue = DeliveryJournalStore(prefs, capacityPerOwner = 2)
         prefs.activateSession(OWNER_A, "sess-a")
         val attemptA = queue.beginAttempt(OWNER_A).attempt
         val rowA1 = admitted(
@@ -141,7 +141,7 @@ class OutboundQueueTest {
             ),
         )
         assertEquals(
-            OutboundQueue.TerminalRecordResult.Stale,
+            DeliveryJournalStore.TerminalRecordResult.Stale,
             queue.recordTerminal(OWNER_A, "a-1", attemptA, DeliveryTerminalKind.ACK),
         )
 
@@ -406,7 +406,7 @@ class OutboundQueueTest {
                     owners = journal.owners + (
                         OWNER_A to owner.copy(
                             resumeTransitionReceipts = List(
-                                OutboundQueue.MAX_TRANSITION_RECEIPTS_PER_OWNER,
+                                DeliveryJournalStore.MAX_TRANSITION_RECEIPTS_PER_OWNER,
                                 ::receipt,
                             ),
                         )
@@ -432,7 +432,7 @@ class OutboundQueueTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(OWNER_A, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(OWNER_A).attempt
         val before = prefs.deliveryJournal.first()
 
@@ -445,10 +445,10 @@ class OutboundQueueTest {
         assertEquals(before, prefs.deliveryJournal.first())
     }
 
-    private suspend fun activeQueue(): Pair<SessionPrefs, OutboundQueue> {
+    private suspend fun activeQueue(): Pair<SessionPrefs, DeliveryJournalStore> {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(OWNER_A, "sess-a")
-        return prefs to OutboundQueue(prefs)
+        return prefs to DeliveryJournalStore(prefs)
     }
 
     private fun draft(

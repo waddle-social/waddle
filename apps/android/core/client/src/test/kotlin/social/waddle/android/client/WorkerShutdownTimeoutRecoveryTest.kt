@@ -164,7 +164,7 @@ class WorkerShutdownTimeoutRecoveryTest {
         private val ownerScope = CoroutineScope(testScope.coroutineContext + ownerJob)
         private val dataStore = FailingPreferencesDataStore()
         private val prefs = SessionPrefs(dataStore)
-        private val queue = OutboundQueue(prefs)
+        private val queue = DeliveryJournalStore(prefs)
         private val resume = ResumePersistence(prefs, queue)
         val coordinator: OutboundLifecycleCoordinator
         private var initialized = false
@@ -206,7 +206,7 @@ class WorkerShutdownTimeoutRecoveryTest {
                         source = DeliverySource.Composer,
                     ),
                     started.attempt,
-                ) is OutboundQueue.LiveAdmissionResult.Claimed,
+                ) is DeliveryJournalStore.LiveAdmissionResult.Claimed,
             )
             dataStore.afterCommitReturns = {
                 terminalDependencyEntered.complete(Unit)

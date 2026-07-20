@@ -81,7 +81,7 @@ internal interface DurableRecoveryCleanup {
 }
 
 internal class ProductionDurableRecoveryCleanup(
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val resume: ResumePersistence,
     private val activeSession: ActiveSession,
 ) : DurableRecoveryCleanup {
@@ -107,7 +107,7 @@ internal class ProductionDurableRecoveryCleanup(
  */
 internal class OutboundLifecycleFinalizationOperations(
     private val activeSession: ActiveSession,
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val resume: ResumePersistence,
     private val drainWorker: OutboundDrainWorker,
     private val terminalWorker: DeliveryTerminalWorker,

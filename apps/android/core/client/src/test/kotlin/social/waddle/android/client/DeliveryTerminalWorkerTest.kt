@@ -16,8 +16,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryCallbackRef
@@ -48,7 +48,7 @@ class DeliveryTerminalWorkerTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs, capacityPerOwner = TERMINAL_WORKER_SIGNAL_COUNT)
+        val queue = DeliveryJournalStore(prefs, capacityPerOwner = TERMINAL_WORKER_SIGNAL_COUNT)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val rows = seedNativeOwnedTerminalRows(prefs, queue, attempt, TERMINAL_WORKER_SIGNAL_COUNT)
         val effects = mutableListOf<XmppEvent>()
@@ -94,7 +94,7 @@ class DeliveryTerminalWorkerTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(
             queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt),
@@ -143,7 +143,7 @@ class DeliveryTerminalWorkerTest {
     fun `startup drain applies durable terminal intent before admissions`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(
             queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt),
@@ -170,7 +170,7 @@ class DeliveryTerminalWorkerTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(
             queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt),
@@ -202,7 +202,7 @@ class DeliveryTerminalWorkerTest {
     fun `two startup appliers emit one exact terminal effect`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(
             queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt),
@@ -237,7 +237,7 @@ class DeliveryTerminalWorkerTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(
             queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt),
@@ -273,7 +273,7 @@ class DeliveryTerminalWorkerTest {
     fun `fatal terminal dependency failure exits with exact ownership`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         queue.recordTerminal(TERMINAL_WORKER_OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
@@ -301,7 +301,7 @@ class DeliveryTerminalWorkerTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         val effects = mutableListOf<XmppEvent>()
@@ -337,7 +337,7 @@ class DeliveryTerminalWorkerTest {
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
         val exits = mutableListOf<WorkerExit>()
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), {}, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(DeliveryJournalStore(prefs), {}, evidence = WorkerExitExceptionEvidence()),
             this,
         ) { exits += it }
 
@@ -356,7 +356,7 @@ class DeliveryTerminalWorkerTest {
     fun `sequential terminal runs isolate old submission and exit`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         val effects = mutableListOf<XmppEvent>()

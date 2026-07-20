@@ -117,7 +117,7 @@ class TerminalReceiptCleanupRecoveryMatrixTest {
         val events = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     events += it
                     store.failAllUpdatesWith = IOException("cleanup exhaustion")

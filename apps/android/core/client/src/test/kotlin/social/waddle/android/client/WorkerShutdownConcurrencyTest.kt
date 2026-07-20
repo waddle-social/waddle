@@ -160,7 +160,7 @@ class WorkerShutdownConcurrencyTest {
         private val ownerScope = CoroutineScope(testScope.coroutineContext + ownerJob)
         private val dataStore = FailingPreferencesDataStore()
         private val prefs = SessionPrefs(dataStore)
-        private val queue = OutboundQueue(prefs)
+        private val queue = DeliveryJournalStore(prefs)
         private val resume = ResumePersistence(prefs, queue)
         private var initialized = false
         val coordinator = OutboundLifecycleCoordinator(

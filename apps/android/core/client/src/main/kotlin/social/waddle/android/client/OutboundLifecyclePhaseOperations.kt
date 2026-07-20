@@ -3,7 +3,7 @@ package social.waddle.android.client
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import java.io.IOException
-import social.waddle.android.client.OutboundQueue.ResumeTransitionResult
+import social.waddle.android.client.DeliveryJournalStore.ResumeTransitionResult
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
@@ -25,13 +25,13 @@ internal sealed interface RotationJournalOutcome {
  */
 internal class OutboundLifecyclePhaseOperations(
     private val activeSession: ActiveSession,
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val phaseObserver: OutboundLifecyclePhaseObserver,
     private val resume: ResumePersistence,
 ) {
     suspend fun journalActivation(
         lifecycle: SessionLifecycleRef,
-    ): OutboundQueue.AttemptBootstrap {
+    ): DeliveryJournalStore.AttemptBootstrap {
         phaseObserver.after(OutboundLifecyclePhase.ATTEMPT_JOURNALING)
         val bootstrap = journal.beginAttempt(lifecycle.ownerBareJid)
         phaseObserver.after(OutboundLifecyclePhase.ATTEMPT_JOURNALED)
@@ -42,7 +42,7 @@ internal class OutboundLifecyclePhaseOperations(
         workers: OwnerWorkers,
         lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
-        bootstrap: OutboundQueue.AttemptBootstrap,
+        bootstrap: DeliveryJournalStore.AttemptBootstrap,
     ): ActiveSession.Attempt {
         resume.registerAttempt(bootstrap.attempt, bootstrap.smVersion)
         phaseObserver.after(OutboundLifecyclePhase.RESUME_REGISTERED)

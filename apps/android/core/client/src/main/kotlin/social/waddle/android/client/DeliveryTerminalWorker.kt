@@ -19,8 +19,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
 import social.waddle.android.client.prefs.DeliveryJournalDecodeException
 import kotlinx.coroutines.yield
-import social.waddle.android.client.OutboundQueue.TerminalEffect
-import social.waddle.android.client.OutboundQueue.TerminalRecordResult
+import social.waddle.android.client.DeliveryJournalStore.TerminalEffect
+import social.waddle.android.client.DeliveryJournalStore.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.LifecycleGeneration
@@ -34,7 +34,7 @@ import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGener
 
 /** Creates isolated terminal workers; each [Run] belongs to one lifecycle generation. */
 internal class DeliveryTerminalWorker(
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val dispatchEvent: (XmppEvent) -> Unit,
     private val processEpoch: ProcessEpoch = DeliveryProcessEpoch.current,
     private val commandCapacity: Int = COMMAND_CAPACITY,
@@ -57,7 +57,7 @@ internal class DeliveryTerminalWorker(
     }
 
     internal class Run internal constructor(
-        private val journal: OutboundQueue,
+        private val journal: DeliveryJournalStore,
         private val dispatchEvent: (XmppEvent) -> Unit,
         private val processEpoch: ProcessEpoch,
         commandCapacity: Int,

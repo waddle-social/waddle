@@ -13,7 +13,7 @@ internal sealed interface OutboundLifecycleState {
 }
 
 internal sealed interface AttemptCloseOutcome { data object Closed : AttemptCloseOutcome; data object AlreadyClosed : AttemptCloseOutcome; data object OwnedBySessionShutdown : AttemptCloseOutcome; data class FencedWithPending(val component: LifecyclePendingComponent, val pending: Int) : AttemptCloseOutcome; data object Stale : AttemptCloseOutcome }
-internal data class AttemptActivation(val lifecycle: SessionLifecycleRef, val handle: ConnectionAttemptHandle, val bootstrap: OutboundQueue.AttemptBootstrap, val bridge: XmppEventBridge)
+internal data class AttemptActivation(val lifecycle: SessionLifecycleRef, val handle: ConnectionAttemptHandle, val bootstrap: DeliveryJournalStore.AttemptBootstrap, val bridge: XmppEventBridge)
 internal sealed interface ResumeHandoffOutcome { data object Committed : ResumeHandoffOutcome; data object Rejected : ResumeHandoffOutcome }
 internal enum class LifecyclePendingComponent { ACTIVATION_COMPENSATION, ATTEMPT_FINALIZATION, ATTEMPT_LEASES, NATIVE_PRODUCER, NATIVE_DISCONNECT, NATIVE_CLIENT_CLOSE, OUTBOUND_DRAIN, TERMINAL_DRAIN }
 internal enum class DurableCleanupOperation { JOURNAL_INSPECTION, JOURNAL_FENCE, RESUME_RETIREMENT, ACTIVE_SESSION_CLEANUP }

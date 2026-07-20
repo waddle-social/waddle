@@ -4,8 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import social.waddle.android.client.OutboundQueue.EnqueueResult
-import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
+import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliverySource
@@ -34,7 +34,7 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 internal class OutboundMessenger(
     private val activeSession: ActiveSession,
     private val stores: SessionStores,
-    private val journal: OutboundQueue,
+    private val journal: DeliveryJournalStore,
     private val resume: ResumePersistence,
     private val dispatchEvent: (XmppEvent) -> Unit,
     transitionTimeoutMillis: Long = 5_000L,
@@ -53,7 +53,7 @@ internal class OutboundMessenger(
         journal = journal,
         resume = resume,
         dispatchEvent = dispatchEvent,
-        drain = outboundDrain ?: ::drainOutboundQueue,
+        drain = outboundDrain ?: ::drainDeliveryJournal,
         transitionTimeoutMillis = transitionTimeoutMillis,
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
@@ -311,7 +311,7 @@ internal class OutboundMessenger(
                 kind = DeliveryTerminalKind.NONRETRYABLE_DELETE,
             ),
         )
-        drainOutboundQueue()
+        drainDeliveryJournal()
         return SendResult(
             if (outcome is WaddleSendMessageOutcome.Sent) {
                 WaddleSendMessageOutcome.Error
@@ -333,12 +333,12 @@ internal class OutboundMessenger(
      * Replay owner Ready rows after the startup terminal barrier. Rows already
      * native-owned or terminal are never selected.
      */
-    suspend fun drainOutboundQueue() {
+    suspend fun drainDeliveryJournal() {
         val active = lifecycle.active() ?: return
-        drainOutboundQueue(active.lifecycle, active.handle, active.attempt)
+        drainDeliveryJournal(active.lifecycle, active.handle, active.attempt)
     }
 
-    private suspend fun drainOutboundQueue(
+    private suspend fun drainDeliveryJournal(
         sessionLifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         expectedAttempt: DeliveryAttemptRef,
@@ -421,7 +421,7 @@ internal class OutboundMessenger(
                 if (!reconcileTerminalEvent(event.attempt, event.clientStanzaId, DeliveryTerminalKind.ACK)) {
                     return false
                 }
-                drainOutboundQueue()
+                drainDeliveryJournal()
                 false
             }
             is XmppEvent.NativeDeliveryFailed -> {
@@ -434,7 +434,7 @@ internal class OutboundMessenger(
                 ) {
                     return false
                 }
-                drainOutboundQueue()
+                drainDeliveryJournal()
                 false
             }
             else -> true

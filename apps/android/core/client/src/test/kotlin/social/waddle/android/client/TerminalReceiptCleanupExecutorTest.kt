@@ -38,7 +38,7 @@ class TerminalReceiptCleanupExecutorTest {
             var attemptsBeforeFirstCleanup: Int? = null
             val run = terminalRun(
                 DeliveryTerminalWorker(
-                    OutboundQueue(prefs),
+                    DeliveryJournalStore(prefs),
                     dispatchEvent = {
                         events += it
                         attemptsBeforeFirstCleanup = store.updateAttempts.get()
@@ -78,7 +78,7 @@ class TerminalReceiptCleanupExecutorTest {
         val events = mutableListOf<XmppEvent>()
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     events += it
                     store.failAllUpdatesWith = IOException("cleanup exhausted")
@@ -109,7 +109,7 @@ class TerminalReceiptCleanupExecutorTest {
         seed(prefs, "schedule")
         val run = terminalRun(
             DeliveryTerminalWorker(
-                OutboundQueue(prefs),
+                DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     store.failAllUpdatesWith = IOException("schedule failure")
                     throw IllegalStateException("primary")

@@ -43,7 +43,7 @@ internal class SessionCatchup(
         // coroutine would kill the process ("never throw" contract).
         persistQuietly {
             rejoinPersistedRooms(client, session)
-            messenger.drainOutboundQueue()
+            messenger.drainDeliveryJournal()
             if (freshStream) {
                 catchUpConversations()
                 hydrateNotifySettings(client)
