@@ -3,7 +3,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -11,7 +14,10 @@
         "type": "dashboard"
       },
       {
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": false,
         "iconColor": "rgba(255, 145, 0, 1)",
@@ -19,7 +25,9 @@
         "target": {
           "limit": 100,
           "matchAny": false,
-          "tags": ["deploy"],
+          "tags": [
+            "deploy"
+          ],
           "type": "tags"
         }
       }
@@ -32,7 +40,10 @@
     {
       "type": "timeseries",
       "title": "Connected users by pod",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (instance) (waddle_connected_users)",
@@ -40,14 +51,26 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
     },
     {
       "type": "timeseries",
       "title": "Message rate by kind",
       "description": "Ships dark until #1320 wires the kind label on the delivered-message metric.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (kind) (rate(waddle_messages_delivered_total[5m]))",
@@ -55,13 +78,25 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" } },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
     },
     {
       "type": "timeseries",
       "title": "Room count",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum(xmpp_muc_rooms_active)",
@@ -69,13 +104,25 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      }
     },
     {
       "type": "timeseries",
       "title": "Server error-log rate",
-      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
       "targets": [
         {
           "expr": "sum(count_over_time({service_name=\"waddle-server\"} | detected_level=\"error\" [5m]))",
@@ -83,13 +130,25 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      }
     },
     {
       "type": "timeseries",
       "title": "WebSocket resets",
-      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "datasource": {
+        "type": "loki",
+        "uid": "${DS_LOKI}"
+      },
       "targets": [
         {
           "expr": "sum(count_over_time({service_name=\"waddle-server\"} |= \"WebSocket error\" [5m]))",
@@ -97,28 +156,55 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["waddle", "overview"],
+  "tags": [
+    "waddle",
+    "overview"
+  ],
   "templating": {
     "list": [
       {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
-        "query": "prometheus"
+        "query": "prometheus",
+        "regex": "/-prom$/",
+        "current": {
+          "selected": true,
+          "text": "grafanacloud-waddlesocial-prom",
+          "value": "grafanacloud-prom"
+        }
       },
       {
         "name": "DS_LOKI",
         "type": "datasource",
-        "query": "loki"
+        "query": "loki",
+        "regex": "/-logs$/",
+        "current": {
+          "selected": true,
+          "text": "grafanacloud-waddlesocial-logs",
+          "value": "grafanacloud-logs"
+        }
       }
     ]
   },
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "title": "Waddle overview",
   "uid": "waddle-overview",
   "version": 1
