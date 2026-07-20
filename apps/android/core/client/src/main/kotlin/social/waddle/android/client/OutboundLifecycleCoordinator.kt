@@ -59,6 +59,50 @@ internal class OutboundLifecycleCoordinator(
         durableRecoveryCleanup ?: ProductionDurableRecoveryCleanup(journal, resume, activeSession),
     )
     private val ownerFinalizer = ownerFinalizer ?: finalizationOperations::finalizeOwner
+    private val recoveryOrchestrator = WorkerRecoveryOrchestrator(
+        state = object : WorkerRecoveryStateOwner {
+            override suspend fun claim(lifecycle: SessionLifecycleRef): WorkerRecoveryClaimDecision =
+                claimRecovery(lifecycle)
+
+            override suspend fun currentLifecycle(): SessionLifecycleRef? =
+                gate.withLock { state.lifecycleOrNull() }
+
+            override suspend fun decideSiblingStop(
+                claim: WorkerRecoveryClaim,
+                workers: OwnerWorkers,
+            ): RecoverySiblingStopDecision = gate.withLock {
+                if (!ownsRecoveryClaimLocked(claim, workers)) {
+                    RecoverySiblingStopDecision.RecoveryClaimLost
+                } else {
+                    decideRecoverySiblingStop(
+                        failed = claim.fence.exit.ownership(),
+                        terminal = workers.terminalOwnership,
+                        terminalExit = workers.exitFor(workers.terminalOwnership),
+                        drain = workers.drainOwnership,
+                        drainExit = workers.exitFor(workers.drainOwnership),
+                    )
+                }
+            }
+
+            override suspend fun ownsClaim(claim: WorkerRecoveryClaim, workers: OwnerWorkers): Boolean =
+                this@OutboundLifecycleCoordinator.ownsRecoveryClaim(claim, workers)
+
+            override suspend fun awaitLeases(): Boolean = awaitLeaseDrain()
+
+            override suspend fun pendingLeaseCount(): Int = pendingLeaseCount()
+
+            override suspend fun complete(
+                claim: WorkerRecoveryClaim,
+                workers: OwnerWorkers,
+            ): WorkerRecoveryOutcome = completeRecovery(claim, workers)
+
+            override suspend fun clearClaim(claim: WorkerRecoveryClaim) {
+                clearRecoveryClaim(claim)
+            }
+        },
+        recoverDurableState = finalizationOperations::recoverDurableState,
+        timeoutMillis = transitionTimeoutMillis,
+    )
     /** Replaced on every start; old completions cannot affect a new owner. */
     private var retainedOperations: LifecycleOperationRegistry? = null
     private var ownerWorkers: OwnerWorkers? = null
@@ -800,8 +844,11 @@ internal class OutboundLifecycleCoordinator(
         }
     }
 
-    suspend fun recoverFencedWorkers(lifecycle: SessionLifecycleRef): WorkerRecoveryOutcome {
-        val decision = gate.withLock {
+    suspend fun recoverFencedWorkers(lifecycle: SessionLifecycleRef): WorkerRecoveryOutcome =
+        recoveryOrchestrator.recover(lifecycle)
+
+    private suspend fun claimRecovery(lifecycle: SessionLifecycleRef): WorkerRecoveryClaimDecision =
+        gate.withLock {
             val fenced = state as? OutboundLifecycleState.Fenced
                 ?: return@withLock WorkerRecoveryClaimDecision.NotFenced
             if (fenced.lifecycle != lifecycle) {
@@ -825,115 +872,22 @@ internal class OutboundLifecycleCoordinator(
             }
             WorkerRecoveryClaimDecision.Granted(claim, workers)
         }
-        val granted = when (decision) {
-            WorkerRecoveryClaimDecision.NotFenced -> return WorkerRecoveryOutcome.NotFenced
-            is WorkerRecoveryClaimDecision.OwnershipMismatch ->
-                return WorkerRecoveryOutcome.OwnershipMismatch(decision.lifecycle, state.lifecycleOrNull())
-            is WorkerRecoveryClaimDecision.RecoveryInProgress ->
-                return WorkerRecoveryOutcome.RecoveryInProgress(decision.claim)
-            is WorkerRecoveryClaimDecision.AwaitingExit ->
-                return WorkerRecoveryOutcome.WorkerExitPending(decision.lifecycle, decision.ownership)
-            is WorkerRecoveryClaimDecision.Granted -> decision
-        }
-        val claim = granted.claim
-        val workers = granted.workers
 
-        try {
-            val siblingDecision = gate.withLock {
-                if (!ownsRecoveryClaimLocked(claim, workers)) {
-                    RecoverySiblingStopDecision.RecoveryClaimLost
-                } else {
-                    decideRecoverySiblingStop(
-                        failed = claim.fence.exit.ownership(),
-                        terminal = workers.terminalOwnership,
-                        terminalExit = workers.exitFor(workers.terminalOwnership),
-                        drain = workers.drainOwnership,
-                        drainExit = workers.exitFor(workers.drainOwnership),
-                    )
-                }
-            }
-            when (siblingDecision) {
-                is RecoverySiblingStopDecision.Stop -> when (siblingDecision.sibling.kind) {
-                    WorkerKind.DELIVERY_TERMINAL -> workers.terminal.requestStop()
-                    WorkerKind.OUTBOUND_DRAIN -> workers.drain.requestStop()
-                }
-                RecoverySiblingStopDecision.AlreadyExited -> Unit
-                RecoverySiblingStopDecision.RecoveryClaimLost,
-                RecoverySiblingStopDecision.UnknownFailedWorker,
-                is RecoverySiblingStopDecision.RecordedExitMismatch,
-                -> return WorkerRecoveryOutcome.OwnershipMismatch(lifecycle, state.lifecycleOrNull())
-            }
-            val exits = listOf(
-                workers.terminalOwnership to workers.terminal.awaitExit(transitionTimeoutMillis),
-                workers.drainOwnership to workers.drain.awaitExit(transitionTimeoutMillis),
-            )
-            val timedOut = exits.firstOrNull { (_, outcome) -> outcome is WorkerAwaitOutcome.TimedOut }
-            if (timedOut != null) {
-                return WorkerRecoveryOutcome.WorkerExitPending(lifecycle, timedOut.first)
-            }
-            try {
-                when (val receiptCleanup = workers.terminal.recoverUnresolvedReceiptCleanup()) {
-                    TerminalReceiptRecoveryCleanupResult.NoPendingLease,
-                    TerminalReceiptRecoveryCleanupResult.Released,
-                    -> Unit
-                    is TerminalReceiptRecoveryCleanupResult.Unresolved -> {
-                        return WorkerRecoveryOutcome.TerminalReceiptCleanupFailed(
-                            lifecycle = lifecycle,
-                            claim = claim,
-                            cleanup = receiptCleanup.evidence,
-                        )
-                    }
-                }
-            } catch (failure: TerminalReceiptCleanupException) {
-                return WorkerRecoveryOutcome.TerminalReceiptCleanupFailed(
-                    lifecycle = lifecycle,
-                    claim = claim,
-                    cleanup = failure.evidence,
-                )
-            }
-            if (!awaitLeaseDrain()) {
-                return WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, pendingLeaseCount())
-            }
-            if (!ownsRecoveryClaim(claim, workers)) return WorkerRecoveryOutcome.OwnershipMismatch(lifecycle, state.lifecycleOrNull())
-            val cleanup = finalizationOperations.recoverDurableState(workers, lifecycle)
-            when (cleanup) {
-                OwnerFinalizationResult.Finalized -> Unit
-                is OwnerFinalizationResult.Pending -> {
-                    return WorkerRecoveryOutcome.DurableCleanupPending(
-                        lifecycle = lifecycle,
-                        claim = claim,
-                        component = cleanup.component,
-                        count = cleanup.count,
-                        operation = cleanup.operation,
-                        attempt = cleanup.attempt,
-                    )
-                }
-                is OwnerFinalizationResult.DurableCleanupFailed -> {
-                    return WorkerRecoveryOutcome.DurableCleanupFailed(
-                        lifecycle = lifecycle,
-                        claim = claim,
-                        component = cleanup.component,
-                        count = cleanup.count,
-                        operation = cleanup.operation,
-                        cause = cleanup.cause,
-                        attempt = cleanup.attempt,
-                    )
-                }
-            }
-            return gate.withLock {
-                if (!ownsRecoveryClaimLocked(claim, workers)) return@withLock WorkerRecoveryOutcome.OwnershipMismatch(lifecycle, state.lifecycleOrNull())
-                currentAttempt = null
-                lastClosedAttempt = null
-                pendingShutdown = null
-                ownerWorkers = null
-                recoveryClaim = null
-                state = OutboundLifecycleState.Stopped
-                discardWorkerEvidence(workers)
-                WorkerRecoveryOutcome.Recovered
-            }
-        } finally {
-            clearRecoveryClaim(claim)
+    private suspend fun completeRecovery(
+        claim: WorkerRecoveryClaim,
+        workers: OwnerWorkers,
+    ): WorkerRecoveryOutcome = gate.withLock {
+        if (!ownsRecoveryClaimLocked(claim, workers)) {
+            return@withLock WorkerRecoveryOutcome.OwnershipMismatch(claim.lifecycle, state.lifecycleOrNull())
         }
+        currentAttempt = null
+        lastClosedAttempt = null
+        pendingShutdown = null
+        ownerWorkers = null
+        recoveryClaim = null
+        state = OutboundLifecycleState.Stopped
+        discardWorkerEvidence(workers)
+        WorkerRecoveryOutcome.Recovered
     }
 
     private suspend fun ownsRecoveryClaim(claim: WorkerRecoveryClaim, workers: OwnerWorkers): Boolean =
