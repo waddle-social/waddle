@@ -422,12 +422,15 @@ internal class DeliveryTerminalWorker(
             attempts: Int = 1,
         ): TerminalReceiptCleanupEvidence = TerminalReceiptCleanupEvidence(lease, attempts, reason)
 
-        private fun cleanupCategory(failure: Throwable): TerminalReceiptCleanupFailureCategory = when (failure) {
-            is IOException -> TerminalReceiptCleanupFailureCategory.IO_FAILURE
-            is CancellationException -> TerminalReceiptCleanupFailureCategory.CANCELLATION
-            is SerializationException -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
-            is Error -> TerminalReceiptCleanupFailureCategory.ERROR_FAILURE
-            is IllegalStateException -> TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE
+        private fun cleanupCategory(failure: Throwable): TerminalReceiptCleanupFailureCategory = when {
+            failure is DeliveryJournalDecodeException &&
+                generateSequence<Throwable>(failure) { it.cause }.any { it is SerializationException } ->
+                TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
+            failure is IOException -> TerminalReceiptCleanupFailureCategory.IO_FAILURE
+            failure is CancellationException -> TerminalReceiptCleanupFailureCategory.CANCELLATION
+            failure is SerializationException -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
+            failure is Error -> TerminalReceiptCleanupFailureCategory.ERROR_FAILURE
+            failure is IllegalStateException -> TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE
             else -> TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE
         }
 

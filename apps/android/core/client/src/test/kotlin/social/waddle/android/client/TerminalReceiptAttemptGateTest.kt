@@ -9,7 +9,10 @@ import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
+import social.waddle.android.client.prefs.DeliveryTerminalIntentId
 import social.waddle.android.client.prefs.NativeConnectionGeneration
+import social.waddle.android.client.prefs.NativeOutboundPhase
+import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.TerminalClaimId
 import social.waddle.android.client.prefs.TerminalReceipt
@@ -61,6 +64,41 @@ class TerminalReceiptAttemptGateTest {
         }
     }
 
+    @Test
+    fun `acknowledged and preacknowledged tombstones retain native and terminal projections`() {
+        val states = listOf(
+            TerminalReceiptState.Acknowledged(
+                TerminalReceiptClaimState.Claimed(
+                    TerminalClaimId(id("ack-claim")),
+                    TerminalReceiptClaimant.BootstrapProcess,
+                    ProcessEpoch(id("ack-epoch")),
+                ),
+            ),
+            TerminalReceiptState.PreAcknowledged,
+        )
+        val projections = listOf(
+            OutboundOwnership.NativeOwned(attempt("native-projection"), NativeOutboundPhase.FRESH),
+            OutboundOwnership.Terminal(DeliveryTerminalIntentId(id("terminal-projection"))),
+        )
+
+        states.forEachIndexed { stateIndex, state ->
+            projections.forEachIndexed { projectionIndex, projection ->
+                val previous = attempt("previous-${stateIndex}-${projectionIndex}")
+                val owner = DeliveryOwnerJournal(
+                    activeAttempt = null,
+                    terminalReceipt = receipt(previous, state),
+                    outboundRows = listOf(row(previous, projection)),
+                )
+                val journal = DeliveryJournal(activeOwnerBareJid = OWNER, owners = mapOf(OWNER to owner))
+
+                val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement-${stateIndex}-${projectionIndex}"), 1)
+
+                assertTrue(result.result is OutboundQueue.BeginAttemptResult.TombstoneNotPostFence)
+                assertEquals(journal, result.journal)
+            }
+        }
+    }
+
     private fun journal(attempt: DeliveryAttemptRef, receipt: TerminalReceipt): DeliveryJournal = DeliveryJournal(
         activeOwnerBareJid = OWNER,
         owners = mapOf(OWNER to DeliveryOwnerJournal(activeAttempt = null, terminalReceipt = receipt)),
@@ -89,6 +127,19 @@ class TerminalReceiptAttemptGateTest {
             social.waddle.android.client.prefs.DeliveryCallbackRef(row.identity, attempt), row,
         )
     }
+
+    private fun row(
+        attempt: DeliveryAttemptRef,
+        ownership: OutboundOwnership,
+    ) = social.waddle.android.client.prefs.QueuedOutboundDraft.create(
+        ownerBareJid = OWNER,
+        clientStanzaId = "residual-${attempt.attemptId.value}",
+        enqueuedAtMillis = 1,
+        payload = social.waddle.android.client.prefs.QueuedOutboundPayload(
+            social.waddle.android.client.prefs.QueuedOutboundTarget.Chat("peer@waddle.test"),
+            social.waddle.android.client.prefs.QueuedOutboundContent("body"),
+        ),
+    ).persisted(1, ownership)
 
     private fun attempt(seed: String): DeliveryAttemptRef = DeliveryAttemptRef(
         OWNER,

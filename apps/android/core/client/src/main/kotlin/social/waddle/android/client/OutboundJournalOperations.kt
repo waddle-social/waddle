@@ -87,7 +87,10 @@ private fun DeliveryOwnerJournal.advancePastTerminalReceipt(): TerminalReceiptAt
         -> if (
             activeAttempt == null &&
             terminalIntents.isEmpty() &&
-            outboundRows.none { it.ownership is OutboundOwnership.Terminal }
+            outboundRows.none {
+                it.ownership is OutboundOwnership.Terminal ||
+                    it.ownership is OutboundOwnership.NativeOwned
+            }
         ) {
             TerminalReceiptAttemptGate.Ready(copy(terminalReceipt = null))
         } else {
