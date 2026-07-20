@@ -84,7 +84,9 @@
       {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
-        "query": "prometheus"
+        "query": "prometheus",
+        "regex": "/-prom$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-prom", "value": "grafanacloud-prom" }
       }
     ]
   },

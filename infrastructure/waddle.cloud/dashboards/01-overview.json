@@ -109,12 +109,16 @@
       {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
-        "query": "prometheus"
+        "query": "prometheus",
+        "regex": "/-prom$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-prom", "value": "grafanacloud-prom" }
       },
       {
         "name": "DS_LOKI",
         "type": "datasource",
-        "query": "loki"
+        "query": "loki",
+        "regex": "/-logs$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-logs", "value": "grafanacloud-logs" }
       }
     ]
   },

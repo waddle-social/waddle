@@ -44,6 +44,18 @@ for dashboard_file in "${dashboard_files[@]}"; do
     failed=1
   fi
 
+  # Datasource variables must pin a current value and constrain matches
+  # with a regex: an unpinned datasource variable makes Grafana pick the
+  # first type-matching datasource alphabetically, which on Grafana
+  # Cloud is a decoy tenant (grafanacloud-usage for prometheus,
+  # alert-state-history for loki) and renders every panel "No data".
+  if ! jq -e '[.templating.list[]? | select(.type == "datasource")
+      | ((.regex // "" | length) > 0) and ((.current.value // "" | length) > 0)]
+      | all' "${dashboard_file}" >/dev/null; then
+    echo "ERROR: ${dashboard_file}: every datasource template variable must set a regex filter and a current.value default." >&2
+    failed=1
+  fi
+
   if ! jq -e '.panels | type == "array"' "${dashboard_file}" >/dev/null; then
     echo "ERROR: ${dashboard_file}: .panels must be an array." >&2
     failed=1
