@@ -20,7 +20,7 @@ internal sealed interface RotationJournalOutcome {
 
 /**
  * Stateless durable phase operations. Lifecycle state publication remains in
- * [OutboundLifecycleCoordinator], while this class owns only ordered calls to
+ * [OutboundLifecycleStateStore], while this class owns only ordered calls to
  * the journal, resume persistence, drain worker, and active-session projection.
  */
 internal class OutboundLifecyclePhaseOperations(

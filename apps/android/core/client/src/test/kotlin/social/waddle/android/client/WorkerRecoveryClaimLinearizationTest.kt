@@ -40,7 +40,7 @@ class WorkerRecoveryClaimLinearizationTest {
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val drainEntered = CompletableDeferred<Unit>()
         val releaseDrain = CompletableDeferred<Unit>()
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = ActiveSession().also { it.ownBareJid = OWNER },
             journal = queue,
             resume = resume,

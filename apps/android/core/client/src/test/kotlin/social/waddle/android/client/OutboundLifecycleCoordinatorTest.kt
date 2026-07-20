@@ -35,7 +35,7 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class OutboundLifecycleCoordinatorTest {
+class OutboundLifecycleStateStoreTest {
     @Test
     fun `blocked live send fences shutdown and refuses restart`() = runTest {
         val fixture = coordinatorFixture(transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS)

@@ -163,7 +163,7 @@ class WorkerShutdownConcurrencyTest {
         private val queue = DeliveryJournalStore(prefs)
         private val resume = ResumePersistence(prefs, queue)
         private var initialized = false
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = ActiveSession().also { it.ownBareJid = OWNER },
             journal = queue,
             resume = resume,

@@ -132,7 +132,7 @@ internal class ActiveSession {
     /**
      * Capture the generation-specific client while holding the mirror lock,
      * then release it before any FFI call. Lifecycle admission is owned by
-     * OutboundLifecycleCoordinator; this class never keeps its mutex across
+     * OutboundLifecycleStateStore; this class never keeps its mutex across
      * foreign code.
      */
     suspend fun clientAtAttempt(

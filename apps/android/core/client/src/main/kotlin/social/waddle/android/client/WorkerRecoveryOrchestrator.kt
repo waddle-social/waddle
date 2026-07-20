@@ -1,28 +1,13 @@
 package social.waddle.android.client
 
-/** State transitions kept behind the coordinator's lifecycle mutex. */
-internal interface WorkerRecoveryStateOwner {
-    suspend fun claim(lifecycle: SessionLifecycleRef): WorkerRecoveryClaimDecision
-    suspend fun currentLifecycle(): SessionLifecycleRef?
-    suspend fun decideSiblingStop(
-        claim: WorkerRecoveryClaim,
-        workers: OwnerWorkers,
-    ): RecoverySiblingStopDecision
-    suspend fun ownsClaim(claim: WorkerRecoveryClaim, workers: OwnerWorkers): Boolean
-    suspend fun awaitLeases(): Boolean
-    suspend fun pendingLeaseCount(): Int
-    suspend fun complete(claim: WorkerRecoveryClaim, workers: OwnerWorkers): WorkerRecoveryOutcome
-    suspend fun clearClaim(claim: WorkerRecoveryClaim)
-}
-
 /** Executes one fenced-worker recovery after the coordinator admits its claim. */
 internal class WorkerRecoveryOrchestrator(
-    private val state: WorkerRecoveryStateOwner,
+    private val state: OutboundLifecycleStateStore,
     private val recoverDurableState: suspend (OwnerWorkers, SessionLifecycleRef) -> OwnerFinalizationResult,
     private val timeoutMillis: Long,
 ) {
     suspend fun recover(lifecycle: SessionLifecycleRef): WorkerRecoveryOutcome {
-        val granted = when (val decision = state.claim(lifecycle)) {
+        val granted = when (val decision = state.claimRecovery(lifecycle)) {
             WorkerRecoveryClaimDecision.NotFenced -> return WorkerRecoveryOutcome.NotFenced
             is WorkerRecoveryClaimDecision.OwnershipMismatch -> return WorkerRecoveryOutcome.OwnershipMismatch(
                 decision.lifecycle,
@@ -64,14 +49,14 @@ internal class WorkerRecoveryOrchestrator(
             if (receiptCleanup is TerminalReceiptRecoveryCleanupResult.Unresolved) {
                 return WorkerRecoveryOutcome.TerminalReceiptCleanupFailed(lifecycle, claim, receiptCleanup.evidence)
             }
-            if (!state.awaitLeases()) {
+            if (!state.awaitLeaseDrain()) {
                 return WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, claim, state.pendingLeaseCount())
             }
-            if (!state.ownsClaim(claim, workers)) {
+            if (!state.ownsRecoveryClaim(claim, workers)) {
                 return WorkerRecoveryOutcome.OwnershipMismatch(lifecycle, state.currentLifecycle())
             }
             return when (val cleanup = recoverDurableState(workers, lifecycle)) {
-                OwnerFinalizationResult.Finalized -> state.complete(claim, workers)
+                OwnerFinalizationResult.Finalized -> state.completeRecovery(claim, workers)
                 is OwnerFinalizationResult.Pending -> WorkerRecoveryOutcome.DurableCleanupPending(
                     lifecycle, claim, cleanup.component, cleanup.count, cleanup.operation, cleanup.attempt,
                 )
@@ -80,7 +65,7 @@ internal class WorkerRecoveryOrchestrator(
                 )
             }
         } finally {
-            state.clearClaim(claim)
+            state.clearRecoveryClaim(claim)
         }
     }
 }

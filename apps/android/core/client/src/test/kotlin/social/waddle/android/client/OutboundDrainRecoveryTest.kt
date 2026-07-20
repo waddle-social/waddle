@@ -34,7 +34,7 @@ class OutboundDrainRecoveryTest {
         val failDrain = CompletableDeferred<Unit>()
         val replacementDrain = CompletableDeferred<Unit>()
         var fatalDrain = true
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = ActiveSession().also { it.ownBareJid = OWNER },
             journal = queue,
             resume = resume,

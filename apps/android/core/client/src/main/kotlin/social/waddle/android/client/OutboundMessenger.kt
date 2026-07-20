@@ -48,7 +48,7 @@ internal class OutboundMessenger(
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
     private val drainMutex = Mutex()
-    private val lifecycle = OutboundLifecycleCoordinator(
+    private val lifecycle = OutboundLifecycleStateStore(
         activeSession = activeSession,
         journal = journal,
         resume = resume,

@@ -186,14 +186,14 @@ class OutboundDurableCleanupRecoveryTest {
         private val ownerScope = CoroutineScope(testScope.coroutineContext + ownerJob)
         private val drainEntered = CompletableDeferred<Unit>()
         private val failDrain = CompletableDeferred<Unit>()
-        val coordinator: OutboundLifecycleCoordinator
+        val coordinator: OutboundLifecycleStateStore
         lateinit var fence: WorkerFence
             private set
 
         init {
             val production = ProductionDurableRecoveryCleanup(queue, resume, activeSession)
             script.delegate = production
-            coordinator = OutboundLifecycleCoordinator(
+            coordinator = OutboundLifecycleStateStore(
                 activeSession = activeSession,
                 journal = queue,
                 resume = resume,

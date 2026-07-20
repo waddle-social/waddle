@@ -10,7 +10,7 @@ import social.waddle.android.client.session.ActiveSession
  */
 internal fun interface OutboundAdmissionReleaseOperations {
     suspend fun release(
-        lifecycle: OutboundLifecycleCoordinator,
+        lifecycle: OutboundLifecycleStateStore,
         lease: OutboundAdmissionLease,
     ): LifecycleReleaseOutcome
 

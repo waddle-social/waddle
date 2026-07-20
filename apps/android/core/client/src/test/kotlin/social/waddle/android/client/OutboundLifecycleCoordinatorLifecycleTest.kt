@@ -35,7 +35,7 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class OutboundLifecycleCoordinatorLifecycleTest {
+class OutboundLifecycleStateStoreLifecycleTest {
     @Test
     fun `concurrent disconnect callers share one generation operation`() = runTest {
         val fixture = coordinatorFixture()
@@ -194,4 +194,3 @@ class OutboundLifecycleCoordinatorLifecycleTest {
     }
 
 }
-

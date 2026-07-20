@@ -38,7 +38,7 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class OutboundLifecycleCoordinatorRecoveryTest {
+class OutboundLifecycleStateStoreRecoveryTest {
     @Test
     fun `B cancellation before both workers are ready returns reachable lifecycle and replacement coordinator starts`() = runTest {
         val ownerJob = Job()
@@ -452,7 +452,7 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
         val activeSession = ActiveSession().also { it.ownBareJid = COORDINATOR_OWNER }
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = activeSession,
             journal = queue,
             resume = resume,

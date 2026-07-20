@@ -66,7 +66,7 @@ internal class AttemptRecord(
  * late completion from a retired lifecycle cannot remove work retained by a
  * replacement owner, even when both owners have the same bare JID.
  *
- * All methods are called under OutboundLifecycleCoordinator's short gate.
+ * All methods are called under OutboundLifecycleStateStore's short gate.
  */
 internal class LifecycleOperationRegistry(
     private val lifecycle: SessionLifecycleRef,

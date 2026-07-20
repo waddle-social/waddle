@@ -64,7 +64,7 @@ class OutboundTerminalRecoveryTest {
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val events = mutableListOf<XmppEvent>()
         var failDispatch = true
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = ActiveSession().also { it.ownBareJid = OWNER },
             journal = queue,
             resume = resume,
@@ -133,7 +133,7 @@ class OutboundTerminalRecoveryTest {
         val releaseDrain = CompletableDeferred<Unit>()
         var fatalDispatch = true
         val delivered = mutableListOf<XmppEvent>()
-        val coordinator = OutboundLifecycleCoordinator(
+        val coordinator = OutboundLifecycleStateStore(
             activeSession = activeSession,
             journal = queue,
             resume = resume,

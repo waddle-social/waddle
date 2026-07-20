@@ -166,11 +166,11 @@ class WorkerShutdownTimeoutRecoveryTest {
         private val prefs = SessionPrefs(dataStore)
         private val queue = DeliveryJournalStore(prefs)
         private val resume = ResumePersistence(prefs, queue)
-        val coordinator: OutboundLifecycleCoordinator
+        val coordinator: OutboundLifecycleStateStore
         private var initialized = false
 
         init {
-            coordinator = OutboundLifecycleCoordinator(
+            coordinator = OutboundLifecycleStateStore(
                 activeSession = ActiveSession().also { it.ownBareJid = OWNER },
                 journal = queue,
                 resume = resume,
