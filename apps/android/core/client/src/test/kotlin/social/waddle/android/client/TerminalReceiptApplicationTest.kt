@@ -95,6 +95,39 @@ class TerminalReceiptApplicationTest {
     }
 
     @Test
+    fun `released receipt fences every differing durable worker lease field without mutation`() {
+        val claimant = TerminalReceiptClaimant.Worker(
+            LifecycleGeneration(uuid("released-lifecycle")),
+            TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
+            WorkerGeneration(uuid("released-worker")),
+        )
+        val initial = journal()
+        val claimed = initial.claimTerminalReceipt(request(initial, "released-claim", "released-epoch", claimant))
+            as TerminalReceiptClaimResult.Claimed
+        val released = claimed.journal.releaseTerminalReceipt(claimed.lease)
+            as TerminalReceiptReleaseResult.Released
+        val exactWorker = claimed.lease.claim.claimant as TerminalReceiptClaimant.Worker
+        val wrongLeases = listOf(
+            claimed.lease.copy(claim = claimed.lease.claim.copy(id = TerminalClaimId(uuid("released-other-claim")))),
+            claimed.lease.copy(claim = claimed.lease.claim.copy(claimant = TerminalReceiptClaimant.BootstrapProcess)),
+            claimed.lease.copy(claim = claimed.lease.claim.copy(
+                claimant = exactWorker.copy(lifecycleGeneration = LifecycleGeneration(uuid("released-other-lifecycle"))),
+            )),
+            claimed.lease.copy(claim = claimed.lease.claim.copy(
+                claimant = exactWorker.copy(workerGeneration = WorkerGeneration(uuid("released-other-worker"))),
+            )),
+            claimed.lease.copy(claim = claimed.lease.claim.copy(processEpoch = ProcessEpoch(uuid("released-other-epoch")))),
+        )
+
+        wrongLeases.forEach { wrong ->
+            val result = released.journal.releaseTerminalReceipt(wrong)
+            assertTrue(result is TerminalReceiptReleaseResult.LeaseMismatch)
+            assertEquals(released.journal, result.journal)
+        }
+        assertTrue(released.journal.releaseTerminalReceipt(claimed.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+    }
+
+    @Test
     fun `claim owner fence and post claim owner change follow their exact boundaries`() {
         val initial = journal()
         val fenced = initial.copy(activeOwnerBareJid = "other@waddle.test")
