@@ -56,6 +56,26 @@ class XmppSessionManager private constructor(
     lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
     workerExitEvidence: WorkerExitEvidence,
 ) {
+    constructor(
+        sessionPrefs: SessionPrefs,
+        clientFactory: ClientFactory,
+        networkSignal: NetworkSignal,
+        userPrefs: UserPrefs,
+        reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
+        dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    ) : this(
+        sessionPrefs,
+        clientFactory,
+        networkSignal,
+        userPrefs,
+        reconnectPolicy,
+        dispatcher,
+        connectTimeoutMillis,
+        OutboundLifecyclePhaseObserver.NONE,
+        WorkerExitExceptionEvidence(),
+    )
+
     internal constructor(
         sessionPrefs: SessionPrefs,
         clientFactory: ClientFactory,
@@ -588,6 +608,28 @@ class XmppSessionManager private constructor(
             connectTimeoutMillis,
             lifecyclePhaseObserver,
             workerExitEvidence,
+        )
+
+        /** Session composition owns one evidence registry for all of its workers. */
+        internal fun withOwnedWorkerExitEvidence(
+            sessionPrefs: SessionPrefs,
+            clientFactory: ClientFactory,
+            networkSignal: NetworkSignal,
+            userPrefs: UserPrefs,
+            reconnectPolicy: ReconnectPolicy,
+            dispatcher: CoroutineDispatcher,
+            lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
+            connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+        ): XmppSessionManager = withLifecyclePhaseObserver(
+            sessionPrefs = sessionPrefs,
+            clientFactory = clientFactory,
+            networkSignal = networkSignal,
+            userPrefs = userPrefs,
+            reconnectPolicy = reconnectPolicy,
+            dispatcher = dispatcher,
+            lifecyclePhaseObserver = lifecyclePhaseObserver,
+            connectTimeoutMillis = connectTimeoutMillis,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         /** Web parity: 15s budget from connect to `SessionReady`. */
