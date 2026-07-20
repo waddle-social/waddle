@@ -28,6 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 internal class ConnectionLoopPullHarness(
     testScope: TestScope,
     val dataStore: FailingPreferencesDataStore = FailingPreferencesDataStore(),
+    connectTimeoutMillis: Long = ConnectionLoop.CONNECT_TIMEOUT_MILLIS,
 ) {
     val factory = FakeClientFactory()
     val prefs = SessionPrefs(dataStore)
@@ -74,6 +75,7 @@ internal class ConnectionLoopPullHarness(
             onReady = { _, _, _, _ -> },
             onAuthenticationStopped = { _, _ -> },
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
+            connectTimeoutMillis = connectTimeoutMillis,
         ),
     )
 

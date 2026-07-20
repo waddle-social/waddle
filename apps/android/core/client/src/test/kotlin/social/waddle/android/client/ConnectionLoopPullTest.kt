@@ -1,15 +1,21 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.ConnectionLoopPullHarness.Companion.OWNER
@@ -21,13 +27,168 @@ import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
+import social.waddle.android.client.session.ConnectionAttemptRunner
+import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.session.ConnectionLoop
+import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSessionReadyKind
+import java.lang.reflect.Modifier
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionLoopPullTest {
+    @Test
+    fun `connect and readiness timeout windows have independent exact boundaries`() = runTest {
+        val connectGate = CompletableDeferred<Unit>()
+        val connectTimeout = ConnectionLoopPullHarness(this, connectTimeoutMillis = 100)
+        connectTimeout.factory.configureClient = { client ->
+            client.beforeConnectReturns = { connectGate.await() }
+        }
+        try {
+            connectTimeout.start()
+            runCurrent()
+            val first = connectTimeout.factory.clients.single()
+            advanceTimeBy(99)
+            runCurrent()
+            assertEquals(0, first.disconnectCalls)
+            assertEquals(1, connectTimeout.factory.clients.size)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(1, first.disconnectCalls)
+            advanceTimeBy(1_000)
+            runCurrent()
+            assertEquals(2, connectTimeout.factory.clients.size)
+        } finally {
+            connectGate.complete(Unit)
+            connectTimeout.shutdown()
+        }
+
+        val readinessTimeout = ConnectionLoopPullHarness(this, connectTimeoutMillis = 100)
+        readinessTimeout.factory.configureClient = { client ->
+            client.beforeConnectReturns = { delay(75) }
+        }
+        try {
+            readinessTimeout.start()
+            runCurrent()
+            val first = readinessTimeout.factory.clients.single()
+            advanceTimeBy(75)
+            runCurrent()
+            assertEquals(0, first.disconnectCalls)
+            assertEquals(1, first.nextEventCalls.get())
+            advanceTimeBy(99)
+            runCurrent()
+            assertEquals(0, first.disconnectCalls)
+            assertEquals(1, readinessTimeout.factory.clients.size)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(1, first.disconnectCalls)
+            advanceTimeBy(1_000)
+            runCurrent()
+            assertEquals(2, readinessTimeout.factory.clients.size)
+        } finally {
+            readinessTimeout.shutdown()
+        }
+    }
+
+    @Test
+    fun `injected cancellation rethrows its exact instance and closes only that attempt`() = runTest {
+        val connectCancellation = SentinelCancellationException(CancellationPhase.CONNECT)
+        val connecting = ConnectionLoopPullHarness(this)
+        connecting.factory.configureClient = { client ->
+            client.beforeConnectReturns = { throw connectCancellation }
+        }
+        var connectCompletion: Throwable? = null
+        try {
+            connecting.start()
+            connecting.loopJob.invokeOnCompletion { connectCompletion = it }
+            runCurrent()
+            val client = connecting.factory.clients.single()
+            assertSame(connectCancellation, connectCompletion)
+            assertEquals(1, client.disconnectCalls)
+            assertEquals(1, connecting.factory.clients.size)
+        } finally {
+            connecting.shutdown()
+        }
+
+        val readinessCancellation = SentinelCancellationException(CancellationPhase.READINESS)
+        val awaitingReadiness = ConnectionLoopPullHarness(this)
+        awaitingReadiness.factory.configureClient = { client ->
+            client.beforeNextEventReturns = { call ->
+                if (call == 1) throw readinessCancellation
+            }
+        }
+        var readinessCompletion: Throwable? = null
+        try {
+            awaitingReadiness.start()
+            awaitingReadiness.loopJob.invokeOnCompletion { readinessCompletion = it }
+            runCurrent()
+            val client = awaitingReadiness.factory.clients.single()
+            assertSame(readinessCancellation, readinessCompletion)
+            assertEquals(1, client.disconnectCalls)
+            assertEquals(1, awaitingReadiness.factory.clients.size)
+        } finally {
+            awaitingReadiness.shutdown()
+        }
+
+        val eventCancellation = SentinelCancellationException(CancellationPhase.EVENT_CONSUMPTION)
+        val consumingEvents = ConnectionLoopPullHarness(this)
+        consumingEvents.factory.configureClient = { client ->
+            client.beforeNextEventReturns = { call ->
+                if (call == 2) throw eventCancellation
+            }
+        }
+        var eventCompletion: Throwable? = null
+        try {
+            consumingEvents.start()
+            consumingEvents.loopJob.invokeOnCompletion { eventCompletion = it }
+            runCurrent()
+            consumingEvents.factory.emitReady()
+            runCurrent()
+            val client = consumingEvents.factory.clients.single()
+            assertSame(eventCancellation, eventCompletion)
+            assertEquals(1, client.disconnectCalls)
+            assertEquals(1, consumingEvents.factory.clients.size)
+        } finally {
+            consumingEvents.shutdown()
+        }
+    }
+
+    @Test
+    fun `runner retains immutable collaborators and loop owns retry state`() {
+        val runnerFields = ConnectionAttemptRunner::class.java.declaredFields
+            .filterNot { Modifier.isStatic(it.modifiers) }
+        assertEquals(
+            setOf("attemptClientFactory", "resume", "router", "messenger", "connectTimeoutMillis"),
+            runnerFields.map { it.name }.toSet(),
+        )
+        assertTrue(runnerFields.all { Modifier.isFinal(it.modifiers) })
+        val forbiddenTypes: Set<Class<*>> = setOf(
+            WaddleClientInterface::class.java,
+            ConnectionAttemptHandle::class.java,
+            Job::class.java,
+            Channel::class.java,
+            Mutex::class.java,
+            ActiveSession::class.java,
+            SessionLifecycleRef::class.java,
+            Function0::class.java,
+            Function1::class.java,
+            Function2::class.java,
+            Function3::class.java,
+            Function4::class.java,
+        )
+        assertTrue(
+            runnerFields.none { field ->
+                forbiddenTypes.any { forbidden -> forbidden.isAssignableFrom(field.type) }
+            },
+        )
+        val loopFields = ConnectionLoop::class.java.declaredFields.map { it.name }.toSet()
+        assertTrue("attemptRunner" in loopFields)
+        assertTrue("retryRequests" in loopFields)
+        assertTrue("admissionsOpen" in loopFields)
+    }
+
     @Test
     fun `native pull is serialized with no prefetch`() = runTest {
         val harness = ConnectionLoopPullHarness(this)
@@ -648,6 +809,17 @@ class ConnectionLoopPullTest {
         val predecessorId: String,
         val target: DeliveryOutcomeRef,
     )
+
+    private enum class CancellationPhase {
+        CONNECT,
+        READINESS,
+        EVENT_CONSUMPTION,
+    }
+
+    /** A non-copyable cancellation sentinel for completion-cause identity checks. */
+    private class SentinelCancellationException(
+        phase: CancellationPhase,
+    ) : CancellationException(phase.name)
 
     private companion object {
         const val RESUME_STANZA_ID = "resume-stanza-1"

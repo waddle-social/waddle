@@ -169,9 +169,12 @@ class FakeClientFactory : ClientFactory {
     @Volatile
     private var client: FakeWaddleClient? = null
 
+    var configureClient: (FakeWaddleClient) -> Unit = { }
+
     override fun create(config: WaddleConfig): WaddleClientInterface {
         configs += config
         return FakeWaddleClient().also {
+            configureClient(it)
             client = it
             clients += it
         }
@@ -280,6 +283,9 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var connectCalls = 0
 
+    /** Runs after connect is recorded but before the call returns. */
+    var beforeConnectReturns: (suspend () -> Unit)? = null
+
     @Volatile
     var disconnectCalls = 0
 
@@ -326,8 +332,12 @@ class FakeWaddleClient : WaddleClientInterface {
     /** High-water mark used to reject accidental native prefetch. */
     val maxInFlightNextEvents = AtomicInteger()
 
+    /** Runs for a selected pull after its call count is recorded. */
+    var beforeNextEventReturns: (suspend (Int) -> Unit)? = null
+
     override suspend fun connect() {
         connectCalls += 1
+        beforeConnectReturns?.invoke()
     }
 
     override suspend fun disconnect() {
@@ -336,7 +346,8 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun nextEvent(): WaddleClientEvent {
-        nextEventCalls.incrementAndGet()
+        val call = nextEventCalls.incrementAndGet()
+        beforeNextEventReturns?.invoke(call)
         val inFlight = inFlightNextEvents.incrementAndGet()
         maxInFlightNextEvents.updateAndGet { previous -> maxOf(previous, inFlight) }
         return try {
