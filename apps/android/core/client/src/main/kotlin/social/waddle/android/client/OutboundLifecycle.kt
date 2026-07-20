@@ -239,6 +239,16 @@ internal sealed interface WorkerRecoveryOutcome {
         val cause: DurableCleanupFailureCause,
         val attempt: DeliveryAttemptRef?,
     ) : WorkerRecoveryOutcome
+    /**
+     * The terminal worker still owns this exact receipt lease. Recovery must
+     * retry release under the existing recovery claim before replacement can
+     * start; callbacks are never redispatched here.
+     */
+    data class TerminalReceiptCleanupFailed(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val cleanup: TerminalReceiptCleanupEvidence,
+    ) : WorkerRecoveryOutcome
 }
 
 internal class WorkerRecoveryException(

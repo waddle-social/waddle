@@ -521,6 +521,7 @@ class XmppSessionManager private constructor(
             WorkerRecoveryOutcome.Recovered -> Unit
             is WorkerRecoveryOutcome.DurableCleanupFailed,
             is WorkerRecoveryOutcome.DurableCleanupPending,
+            is WorkerRecoveryOutcome.TerminalReceiptCleanupFailed,
             is WorkerRecoveryOutcome.OwnershipMismatch,
             is WorkerRecoveryOutcome.RecoveryInProgress,
             is WorkerRecoveryOutcome.RetainedOperationsPending,

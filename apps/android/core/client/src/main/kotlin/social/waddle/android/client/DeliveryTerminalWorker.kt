@@ -70,6 +70,10 @@ internal class DeliveryTerminalWorker(
         private val pendingCommands = AtomicInteger()
         private val unavailable = AtomicBoolean()
 
+        /** Written before this run exits and consumed only by its fenced recovery claim. */
+        @Volatile
+        private var unresolvedReceiptCleanup: TerminalReceiptCleanupException? = null
+
         @Volatile
         private var stopRequested = false
 
@@ -138,17 +142,25 @@ internal class DeliveryTerminalWorker(
                 activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
                 if (activeSignal != null) pendingCommands.decrementAndGet()
                 activeSignal = null
-                reason = if (stopRequested) {
-                    WorkerExitReason.RequestedStop
-                } else {
-                    WorkerExitReason.OwnerScopeCancelled
+                reason = when (val receiptFailure = terminalReceiptFailure(cancellation)) {
+                    is TerminalReceiptFailureExtraction.Found ->
+                        WorkerExitReason.UnexpectedFailure(
+                            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure),
+                        )
+                    TerminalReceiptFailureExtraction.None -> if (stopRequested) {
+                        WorkerExitReason.RequestedStop
+                    } else {
+                        WorkerExitReason.OwnerScopeCancelled
+                    }
                 }
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
                 startupDrain.completeExceptionally(failure)
-                val cause = (failure as? TerminalReceiptApplicationException)?.failure
-                    ?.let(WorkerFailureKind::TERMINAL_RECEIPT_APPLICATION)
-                    ?: WorkerFailureKind.DEPENDENCY_FAILURE
+                val cause = when (val receiptFailure = terminalReceiptFailure(failure)) {
+                    is TerminalReceiptFailureExtraction.Found ->
+                        WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure)
+                    TerminalReceiptFailureExtraction.None -> WorkerFailureKind.DEPENDENCY_FAILURE
+                }
                 activeSignal?.committed?.complete(
                     TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)),
                 )
@@ -292,35 +304,116 @@ internal class DeliveryTerminalWorker(
                     is TerminalReceiptAcknowledgeResult.Corrupt -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeCorrupt(acknowledgement))
                 }
             } catch (cancellation: CancellationException) {
-                releaseReceiptClaim(claimed.lease)?.let { releaseFailure ->
-                    cancellation.addSuppressed(TerminalReceiptApplicationException(releaseFailure))
+                when (val cleanup = releaseReceiptClaim(claimed.lease)) {
+                    TerminalReceiptCleanupResult.Released -> Unit
+                    is TerminalReceiptCleanupResult.Unresolved -> {
+                        unresolvedReceiptCleanup = cleanup.failure
+                        cancellation.addSuppressed(cleanup.failure)
+                    }
                 }
                 throw cancellation
             } catch (failure: Throwable) {
-                releaseReceiptClaim(claimed.lease)?.let { releaseFailure ->
-                    failure.addSuppressed(TerminalReceiptApplicationException(releaseFailure))
+                when (val cleanup = releaseReceiptClaim(claimed.lease)) {
+                    TerminalReceiptCleanupResult.Released -> Unit
+                    is TerminalReceiptCleanupResult.Unresolved -> {
+                        unresolvedReceiptCleanup = cleanup.failure
+                        failure.addSuppressed(cleanup.failure)
+                    }
                 }
                 throw failure
             }
         }
 
+        /**
+         * Fenced recovery never replays callbacks. It retries only the exact
+         * durable release that prevented this run from completing.
+         */
+        suspend fun recoverUnresolvedReceiptCleanup(): TerminalReceiptRecoveryCleanupResult {
+            val pending = unresolvedReceiptCleanup ?: return TerminalReceiptRecoveryCleanupResult.NoPendingLease
+            return when (val recovered = releaseReceiptClaim(pending.evidence.lease)) {
+                TerminalReceiptCleanupResult.Released -> {
+                    unresolvedReceiptCleanup = null
+                    TerminalReceiptRecoveryCleanupResult.Released
+                }
+                is TerminalReceiptCleanupResult.Unresolved ->
+                    TerminalReceiptRecoveryCleanupResult.Unresolved(recovered.failure)
+            }
+        }
+
         private suspend fun releaseReceiptClaim(
             lease: TerminalReceiptLease,
-        ): TerminalReceiptApplicationFailure? = withContext(NonCancellable) {
+        ): TerminalReceiptCleanupResult = try {
+            withContext(NonCancellable) {
                 try {
                     when (val release = journal.releaseTerminalReceipt(lease)) {
                         is TerminalReceiptReleaseResult.Released,
                         is TerminalReceiptReleaseResult.AlreadyAcknowledged,
-                        -> null
-                        is TerminalReceiptReleaseResult.LeaseMismatch -> TerminalReceiptApplicationFailure.ReleaseLeaseMismatch(release)
-                        is TerminalReceiptReleaseResult.ReceiptMissing -> TerminalReceiptApplicationFailure.ReleaseMissing(release)
-                        is TerminalReceiptReleaseResult.ReceiptReplaced -> TerminalReceiptApplicationFailure.ReleaseReplaced(release)
-                        is TerminalReceiptReleaseResult.Corrupt -> TerminalReceiptApplicationFailure.ReleaseCorrupt(release)
+                        -> TerminalReceiptCleanupResult.Released
+                        is TerminalReceiptReleaseResult.LeaseMismatch -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
+                            lease,
+                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
+                        ))
+                        is TerminalReceiptReleaseResult.ReceiptMissing -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
+                            lease,
+                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
+                        ))
+                        is TerminalReceiptReleaseResult.ReceiptReplaced -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
+                            lease,
+                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
+                        ))
+                        is TerminalReceiptReleaseResult.Corrupt -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
+                            lease,
+                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
+                        ))
                     }
-                } catch (failure: IOException) {
+                } catch (failure: Throwable) {
                     LOGGER.log(Level.WARNING, "terminal receipt release failed", failure)
-                    TerminalReceiptApplicationFailure.ReleaseIo(lease)
+                    TerminalReceiptCleanupResult.Unresolved(
+                        unresolvedCleanup(lease, cleanupCategory(failure), failure),
+                    )
                 }
+            }
+        } catch (failure: Throwable) {
+            TerminalReceiptCleanupResult.Unresolved(
+                unresolvedCleanup(lease, cleanupCategory(failure), failure),
+            )
+        }
+
+        private fun unresolvedCleanup(
+            lease: TerminalReceiptLease,
+            category: TerminalReceiptCleanupFailureCategory,
+            cause: Throwable? = null,
+        ): TerminalReceiptCleanupException = TerminalReceiptCleanupException(
+            TerminalReceiptCleanupEvidence(
+                lease = lease,
+                operation = TerminalReceiptOperation.RELEASE,
+                attempts = 1,
+                category = category,
+            ),
+            cause,
+        )
+
+        private fun cleanupCategory(failure: Throwable): TerminalReceiptCleanupFailureCategory = when (failure) {
+            is IOException -> TerminalReceiptCleanupFailureCategory.IO_FAILURE
+            is CancellationException -> TerminalReceiptCleanupFailureCategory.CANCELLATION
+            is Error -> TerminalReceiptCleanupFailureCategory.ERROR_FAILURE
+            is IllegalStateException -> TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE
+            else -> TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE
+        }
+
+        private fun terminalReceiptFailure(failure: Throwable): TerminalReceiptFailureExtraction {
+            val application = failure as? TerminalReceiptApplicationException
+            if (application != null) return TerminalReceiptFailureExtraction.Found(application.failure)
+            val cleanup = failure.suppressed
+                .filterIsInstance<TerminalReceiptCleanupException>()
+                .lastOrNull()
+            return if (cleanup == null) {
+                TerminalReceiptFailureExtraction.None
+            } else {
+                TerminalReceiptFailureExtraction.Found(
+                    TerminalReceiptApplicationFailure.CleanupUnresolved(cleanup.evidence),
+                )
+            }
         }
 
         private fun applyEffect(effect: TerminalEffect) {
@@ -429,6 +522,19 @@ internal class TerminalReceiptApplicationException(
     val failure: TerminalReceiptApplicationFailure,
     cause: Throwable? = null,
 ) : IllegalStateException("terminal receipt application failed: ${failure::class.simpleName}", cause)
+
+/**
+ * Cleanup failure is an exception rather than a protocol value so a primary
+ * callback, acknowledgement, cancellation, runtime failure, or Error keeps
+ * its exact identity and receives this failure through suppression.
+ */
+internal class TerminalReceiptCleanupException(
+    val evidence: TerminalReceiptCleanupEvidence,
+    cause: Throwable? = null,
+) : IllegalStateException(
+    "terminal receipt cleanup failed: ${evidence.operation} ${evidence.category}",
+    cause,
+)
 
 private fun WorkerOwnership.toTerminalReceiptClaimant(): TerminalReceiptClaimant.Worker =
     TerminalReceiptClaimant.Worker(

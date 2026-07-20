@@ -63,6 +63,56 @@ internal enum class TerminalReceiptOperation {
     DISPATCH,
 }
 
+/**
+ * Typed identity for cleanup that could not durably release an exact receipt
+ * lease. The exception which carries this evidence retains the original
+ * storage/runtime cause through normal Throwable causality; protocol values
+ * never carry a Throwable.
+ */
+internal data class TerminalReceiptCleanupEvidence(
+    val lease: TerminalReceiptLease,
+    val operation: TerminalReceiptOperation,
+    val attempts: Int,
+    val category: TerminalReceiptCleanupFailureCategory,
+) {
+    init {
+        require(operation == TerminalReceiptOperation.RELEASE) {
+            "terminal receipt cleanup can only release an exact lease"
+        }
+        require(attempts > 0) { "terminal receipt cleanup attempts must be positive" }
+    }
+}
+
+internal enum class TerminalReceiptCleanupFailureCategory {
+    IO_FAILURE,
+    CANCELLATION,
+    INVARIANT_FAILURE,
+    RUNTIME_FAILURE,
+    ERROR_FAILURE,
+}
+
+internal sealed interface TerminalReceiptCleanupResult {
+    data object Released : TerminalReceiptCleanupResult
+    data class Unresolved(
+        val failure: TerminalReceiptCleanupException,
+    ) : TerminalReceiptCleanupResult
+}
+
+internal sealed interface TerminalReceiptRecoveryCleanupResult {
+    data object NoPendingLease : TerminalReceiptRecoveryCleanupResult
+    data object Released : TerminalReceiptRecoveryCleanupResult
+    data class Unresolved(
+        val failure: TerminalReceiptCleanupException,
+    ) : TerminalReceiptRecoveryCleanupResult
+}
+
+internal sealed interface TerminalReceiptFailureExtraction {
+    data object None : TerminalReceiptFailureExtraction
+    data class Found(
+        val failure: TerminalReceiptApplicationFailure,
+    ) : TerminalReceiptFailureExtraction
+}
+
 /** Typed poison evidence carried from receipt validation into the worker fence. */
 internal sealed interface TerminalReceiptApplicationFailure {
     data class PersistenceExhausted(
@@ -86,8 +136,9 @@ internal sealed interface TerminalReceiptApplicationFailure {
     data class ReleaseMissing(val result: TerminalReceiptReleaseResult.ReceiptMissing) : TerminalReceiptApplicationFailure
     data class ReleaseReplaced(val result: TerminalReceiptReleaseResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
     data class ReleaseCorrupt(val result: TerminalReceiptReleaseResult.Corrupt) : TerminalReceiptApplicationFailure
-    data class ReleaseIo(val lease: TerminalReceiptLease) : TerminalReceiptApplicationFailure
-    data class DispatchFailed(val lease: TerminalReceiptLease) : TerminalReceiptApplicationFailure
+    data class CleanupUnresolved(
+        val evidence: TerminalReceiptCleanupEvidence,
+    ) : TerminalReceiptApplicationFailure
 }
 
 internal enum class TerminalReceiptPersistenceOperation {

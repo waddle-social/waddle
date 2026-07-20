@@ -164,7 +164,7 @@ class TerminalReceiptSerializationTest {
             "duplicate-effects",
             TerminalReceiptState.Pending(
                 TerminalReceiptClaimState.Unclaimed,
-                listOf(effect("terminal-row-a"), effect("terminal-row-b")),
+                listOf(effect("terminal-row-a", 1), effect("terminal-row-b", 2)),
             ),
         )
         assertDecodeInvalid(
@@ -227,24 +227,24 @@ class TerminalReceiptSerializationTest {
         state = state,
     )
 
-    private fun effect(id: String = "terminal-row"): TerminalReceiptEffect {
-        val row = row(id)
+    private fun effect(id: String = "terminal-row", sequence: Long = 1): TerminalReceiptEffect {
+        val row = row(id, sequence)
         return TerminalReceiptEffect.Acknowledged(
             callback = DeliveryCallbackRef(row.identity, attempt()),
             row = row,
         )
     }
 
-    private fun row(id: String = "terminal-row"): QueuedOutboundMessage = QueuedOutboundDraft.create(
+    private fun row(id: String = "terminal-row", sequence: Long = 1): QueuedOutboundMessage = QueuedOutboundDraft.create(
         ownerBareJid = OWNER,
         clientStanzaId = id,
-        enqueuedAtMillis = 1,
+        enqueuedAtMillis = sequence,
         payload = QueuedOutboundPayload(
             target = QueuedOutboundTarget.Chat("peer@waddle.test"),
             content = QueuedOutboundContent("body"),
         ),
         incarnation = DeliveryIncarnation(uuid("incarnation-$id")),
-    ).persisted(1, OutboundOwnership.Ready)
+    ).persisted(sequence, OutboundOwnership.Ready)
 
     private fun attempt(seed: String = "receipt-attempt"): DeliveryAttemptRef = DeliveryAttemptRef(
         ownerBareJid = OWNER,

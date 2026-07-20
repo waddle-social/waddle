@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -14,18 +15,104 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.OutboundQueue.LiveAdmissionResult
+import social.waddle.android.client.prefs.DeliveryAttemptId
+import social.waddle.android.client.prefs.DeliveryAttemptRef
+import social.waddle.android.client.prefs.DeliveryCallbackRef
+import social.waddle.android.client.prefs.DeliveryJournalMutation
+import social.waddle.android.client.prefs.DeliveryOwnerBareJid
+import social.waddle.android.client.prefs.DeliveryOwnerJournal
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
+import social.waddle.android.client.prefs.NativeConnectionGeneration
+import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.TerminalReceipt
+import social.waddle.android.client.prefs.TerminalReceiptClaimState
+import social.waddle.android.client.prefs.TerminalReceiptEffect
+import social.waddle.android.client.prefs.TerminalReceiptId
+import social.waddle.android.client.prefs.TerminalReceiptState
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundTerminalRecoveryTest {
+    @Test
+    fun `receipt release failure stays fenced until recovery releases the exact lease`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
+        prefs.activateSession(OWNER, "receipt-cleanup")
+        val queue = OutboundQueue(prefs)
+        val receipt = pendingReceipt("recovery-receipt")
+        prefs.updateDeliveryJournal { journal ->
+            DeliveryJournalMutation(
+                journal.copy(
+                    activeOwnerBareJid = OWNER,
+                    owners = journal.owners + (OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                ),
+                Unit,
+            )
+        }
+        val resume = ResumePersistence(prefs, queue)
+        resume.start(backgroundScope)
+        val ownerJob = Job()
+        val ownerScope = CoroutineScope(coroutineContext + ownerJob)
+        val events = mutableListOf<XmppEvent>()
+        var failDispatch = true
+        val coordinator = OutboundLifecycleCoordinator(
+            activeSession = ActiveSession().also { it.ownBareJid = OWNER },
+            journal = queue,
+            resume = resume,
+            dispatchEvent = { event ->
+                events += event
+                if (failDispatch) {
+                    store.failNextUpdate = true
+                    error("dispatch failed after the receipt claim")
+                }
+            },
+            drain = { _, _, _ -> },
+            transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+        )
+
+        val failed = coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Failed
+        val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(failed.lifecycle))
+            as LifecycleShutdownOutcome.WorkerFenced
+        val exit = (fenced.cause as LifecycleFenceCause.WorkerExited).fence.exit
+        val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
+            as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+        val cleanup = workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved
+        assertEquals(TerminalReceiptOperation.RELEASE, cleanup.evidence.operation)
+        assertEquals(TerminalReceiptCleanupFailureCategory.IO_FAILURE, cleanup.evidence.category)
+        assertEquals(1, events.size)
+
+        store.failAllUpdates = true
+        val pending = coordinator.recoverFencedWorkers(failed.lifecycle)
+            as WorkerRecoveryOutcome.TerminalReceiptCleanupFailed
+        assertEquals(cleanup.evidence, pending.cleanup)
+        assertEquals(1, events.size)
+        store.failAllUpdates = false
+        assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(failed.lifecycle))
+        assertEquals(1, events.size)
+        assertTrue(
+            (prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as
+                TerminalReceiptState.Pending).claim is TerminalReceiptClaimState.Unclaimed,
+        )
+
+        failDispatch = false
+        val replacement = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
+        assertEquals(2, events.size)
+        assertEquals(
+            LifecycleShutdownOutcome.Stopped,
+            coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(replacement)),
+        )
+        ownerJob.cancelAndJoin()
+    }
+
     @Test
     fun `J fatal terminal exit rejects late command releases lease and recovers replacement`() = runTest {
         val dataStore = FailingPreferencesDataStore()
@@ -239,6 +326,36 @@ class OutboundTerminalRecoveryTest {
             ) is LiveAdmissionResult.Claimed,
         )
     }
+
+    private fun pendingReceipt(seed: String): TerminalReceipt {
+        val attempt = DeliveryAttemptRef(
+            ownerBareJid = OWNER,
+            attemptId = DeliveryAttemptId(uuid("$seed-attempt")),
+            nativeGeneration = NativeConnectionGeneration(1u),
+        )
+        val row = QueuedOutboundDraft.create(
+            ownerBareJid = OWNER,
+            clientStanzaId = "$seed-row",
+            enqueuedAtMillis = 1,
+            payload = QueuedOutboundPayload(
+                target = QueuedOutboundTarget.Chat(PEER),
+                content = QueuedOutboundContent(seed),
+            ),
+        ).persisted(1, OutboundOwnership.Ready)
+        return TerminalReceipt(
+            owner = DeliveryOwnerBareJid(OWNER),
+            attempt = attempt,
+            id = TerminalReceiptId(uuid("$seed-id")),
+            originProcessEpoch = ProcessEpoch(uuid("$seed-origin")),
+            preparedAtMillis = 1,
+            state = TerminalReceiptState.Pending(
+                TerminalReceiptClaimState.Unclaimed,
+                listOf(TerminalReceiptEffect.Acknowledged(DeliveryCallbackRef(row.identity, attempt), row)),
+            ),
+        )
+    }
+
+    private fun uuid(seed: String): String = UUID.nameUUIDFromBytes(seed.toByteArray()).toString()
 
     private companion object {
         const val PEER = "alice@waddle.test"

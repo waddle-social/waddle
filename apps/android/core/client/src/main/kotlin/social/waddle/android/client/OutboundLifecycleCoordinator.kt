@@ -862,6 +862,18 @@ internal class OutboundLifecycleCoordinator(
             if (timedOut != null) {
                 return WorkerRecoveryOutcome.WorkerExitPending(lifecycle, timedOut.first)
             }
+            when (val receiptCleanup = workers.terminal.recoverUnresolvedReceiptCleanup()) {
+                TerminalReceiptRecoveryCleanupResult.NoPendingLease,
+                TerminalReceiptRecoveryCleanupResult.Released,
+                -> Unit
+                is TerminalReceiptRecoveryCleanupResult.Unresolved -> {
+                    return WorkerRecoveryOutcome.TerminalReceiptCleanupFailed(
+                        lifecycle = lifecycle,
+                        claim = claim,
+                        cleanup = receiptCleanup.failure.evidence,
+                    )
+                }
+            }
             if (!awaitLeaseDrain()) {
                 return WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, pendingLeaseCount())
             }

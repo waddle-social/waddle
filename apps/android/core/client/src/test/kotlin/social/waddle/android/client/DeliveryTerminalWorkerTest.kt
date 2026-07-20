@@ -472,17 +472,19 @@ class DeliveryTerminalWorkerTest {
             )
 
             val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+            val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
+                as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
             assertEquals(
-                WorkerFailureKind.DEPENDENCY_FAILURE,
-                (exit.reason as WorkerExitReason.UnexpectedFailure).kind,
+                TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+                (workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved)
+                    .evidence.category,
             )
             assertEquals(primary, handler.observed)
             assertEquals(1, primary.suppressed.size)
-            assertEquals(
-                true,
-                (primary.suppressed.single() as TerminalReceiptApplicationException).failure is
-                    TerminalReceiptApplicationFailure.ReleaseIo,
-            )
+            val cleanup = primary.suppressed.single() as TerminalReceiptCleanupException
+            assertEquals(TerminalReceiptOperation.RELEASE, cleanup.evidence.operation)
+            assertEquals(TerminalReceiptCleanupFailureCategory.IO_FAILURE, cleanup.evidence.category)
+            assertTrue(cleanup.cause is java.io.IOException)
             val pending = prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state
                 as TerminalReceiptState.Pending
             assertTrue(pending.claim is TerminalReceiptClaimState.Claimed)
