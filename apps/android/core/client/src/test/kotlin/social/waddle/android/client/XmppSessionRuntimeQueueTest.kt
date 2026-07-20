@@ -17,7 +17,7 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerQueueTest {
+class XmppSessionRuntimeQueueTest {
     @Test
     fun `pending drain wake is fenced before replacement and next owner gets a fresh worker`() =
         runTest {
@@ -200,7 +200,7 @@ class XmppSessionManagerQueueTest {
     private fun TestScope.manager(
         prefs: SessionPrefs,
         factory: FakeClientFactory,
-    ): XmppSessionManager = XmppSessionManager.withLifecyclePhaseObserver(
+    ): XmppSessionRuntime = XmppSessionRuntime.withLifecyclePhaseObserver(
         sessionPrefs = prefs,
         clientFactory = factory,
         networkSignal = FakeNetworkSignal(),

@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.ConnectionState
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.store.NotifySettingsEntry
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
@@ -41,20 +41,20 @@ data class HomeUiState(
 
 /** Spaces→channels topology with unread badges and the connection banner. */
 class HomeViewModel(
-    private val sessionManager: XmppSessionManager,
+    private val sessionRuntime: XmppSessionRuntime,
     private val nick: String,
 ) : ViewModel() {
     /** Failed-banner action: restart the parked loop with a fresh budget. */
     fun retryConnection() {
-        sessionManager.requestReconnect()
+        sessionRuntime.requestReconnect()
     }
 
     val uiState: StateFlow<HomeUiState> = combine(
-        sessionManager.roomStore.topology,
-        sessionManager.unreadStore.counts,
-        sessionManager.dmStore.peers,
-        sessionManager.connectionState,
-        sessionManager.notifySettingsStore.entries,
+        sessionRuntime.roomStore.topology,
+        sessionRuntime.unreadStore.counts,
+        sessionRuntime.dmStore.peers,
+        sessionRuntime.connectionState,
+        sessionRuntime.notifySettingsStore.entries,
     ) { topology, counts, dmPeers, connection, notifyEntries ->
         HomeUiState(
             sections = sectionsOf(topology, counts, notifyEntries),
@@ -68,7 +68,7 @@ class HomeViewModel(
      * immediately, the timeline backfills via MAM regardless.
      */
     fun openChannel(roomJid: String) {
-        viewModelScope.launch { sessionManager.joinRoom(roomJid, nick) }
+        viewModelScope.launch { sessionRuntime.joinRoom(roomJid, nick) }
     }
 
     private fun sectionsOf(
@@ -115,7 +115,7 @@ class HomeViewModel(
 
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             HomeViewModel(
-                sessionManager = graph.sessionManager,
+                sessionRuntime = graph.sessionRuntime,
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
             )
         }

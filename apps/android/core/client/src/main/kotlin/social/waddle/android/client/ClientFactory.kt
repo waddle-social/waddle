@@ -5,7 +5,7 @@ import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 
 /**
- * Seam over `WaddleClient` construction so `XmppSessionManager` is
+ * Seam over `WaddleClient` construction so `XmppSessionRuntime` is
  * testable on the JVM without loading the native library. The FFI client
  * is one-shot per connection: every reconnect attempt builds a fresh
  * config, bridge, and client.

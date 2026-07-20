@@ -19,7 +19,7 @@ import social.waddle.android.client.ConnectivityNetworkSignal
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.RustClientFactory
 import social.waddle.android.client.WaddleAppState
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
@@ -70,7 +70,7 @@ class AppGraph(
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))
 
-    val sessionManager: XmppSessionManager = XmppSessionManager(
+    val sessionRuntime: XmppSessionRuntime = XmppSessionRuntime(
         sessionPrefs = sessionPrefs,
         clientFactory = clientFactory,
         networkSignal = this.networkSignal,
@@ -86,8 +86,8 @@ class AppGraph(
         sessionPrefs = sessionPrefs,
         authApi = authApi,
         signIn = ::signIn,
-        signOutLocally = { sessionManager.logout() },
-        managerAppState = sessionManager.appState,
+        signOutLocally = { sessionRuntime.logout() },
+        managerAppState = sessionRuntime.appState,
         networkSignal = this.networkSignal,
         scope = applicationScope,
     )
@@ -104,16 +104,16 @@ class AppGraph(
     val attachmentUploader: AttachmentUploader = AttachmentUploader(
         contentResolver = appContext.contentResolver,
         httpClient = okHttpClient,
-        sessionManager = sessionManager,
+        sessionRuntime = sessionRuntime,
     )
 
     val messageNotifier: MessageNotifier = MessageNotifier(
         context = appContext,
-        events = sessionManager.events,
+        events = sessionRuntime.events,
         userPrefs = userPrefs,
         currentSession = currentSession,
         notifyModeFor = { conversationJid, isGroupchat ->
-            sessionManager.notifySettingsStore.modeFor(
+            sessionRuntime.notifySettingsStore.modeFor(
                 conversationJid,
                 // No public/private room discriminator yet (web parity):
                 // every MUC resolves as a private group (§3 default: always).
@@ -133,7 +133,7 @@ class AppGraph(
     /** Persist + start the XMPP session for a validated REST session. */
     suspend fun signIn(session: WaddleSessionInfo) {
         _currentSession.value = session
-        sessionManager.login(session)
+        sessionRuntime.login(session)
     }
 
     /**
@@ -144,7 +144,7 @@ class AppGraph(
      */
     fun startSignedOutCleanup() {
         applicationScope.launch {
-            sessionManager.appState.collect { state ->
+            sessionRuntime.appState.collect { state ->
                 if (state == WaddleAppState.SignedOut) {
                     messageNotifier.clearAll()
                 }
@@ -157,7 +157,7 @@ class AppGraph(
         val sessionId = sessionPrefs.sessionId.first()
         messageNotifier.clearAll()
         _currentSession.value = null
-        sessionManager.logout()
+        sessionRuntime.logout()
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
         // sign-out.

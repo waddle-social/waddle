@@ -58,7 +58,7 @@ class ReplyReceiver : BroadcastReceiver() {
         isGroupchat: Boolean,
         text: String,
     ) {
-        val result = graph.sessionManager.sendDirectReply(
+        val result = graph.sessionRuntime.sendDirectReply(
             expectedOwnerBareJid = ownerBareJid,
             conversationJid = conversationJid,
             isGroupchat = isGroupchat,

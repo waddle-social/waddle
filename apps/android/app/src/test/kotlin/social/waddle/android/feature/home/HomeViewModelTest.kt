@@ -19,7 +19,7 @@ import social.waddle.android.client.FakeNetworkSignal
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
@@ -31,7 +31,7 @@ import social.waddle.client.ffi.WaddleTopology
 class HomeViewModelTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager(
+        val manager = XmppSessionRuntime(
             sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
@@ -39,7 +39,7 @@ class HomeViewModelTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
         )
-        val viewModel = HomeViewModel(sessionManager = manager, nick = "icepuma")
+        val viewModel = HomeViewModel(sessionRuntime = manager, nick = "icepuma")
     }
 
     @Before

@@ -72,7 +72,7 @@ internal class ConnectionLoopPullHarness(
         router = router,
         messenger = messenger,
         configuration = ConnectionLoopConfiguration(
-            onReady = { _, _, _, _ -> },
+            onReady = { _, _, _, _, _ -> },
             onAuthenticationStopped = { _, _ -> },
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             connectTimeoutMillis = connectTimeoutMillis,

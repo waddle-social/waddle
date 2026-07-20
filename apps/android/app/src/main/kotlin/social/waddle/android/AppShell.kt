@@ -109,15 +109,15 @@ private fun ReadyShell(
         LaunchedEffect(pendingJid) {
             val jid = pendingJid ?: return@LaunchedEffect
             val key = conversationNavKeyFor(
-                topology = graph.sessionManager.roomStore.topology.value,
-                joinedRooms = graph.sessionManager.roomStore.joinedRooms.value,
+                topology = graph.sessionRuntime.roomStore.topology.value,
+                joinedRooms = graph.sessionRuntime.roomStore.joinedRooms.value,
                 conversationJid = jid,
             )
             if (backStack.lastOrNull() != key) {
                 backStack.add(key)
             }
             if (key is WaddleNavKey.Channel) {
-                graph.sessionManager.joinRoom(
+                graph.sessionRuntime.joinRoom(
                     roomJid = key.roomJid,
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                 )

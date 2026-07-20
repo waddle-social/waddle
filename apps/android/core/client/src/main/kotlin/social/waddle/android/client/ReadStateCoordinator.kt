@@ -5,7 +5,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
-import social.waddle.android.client.XmppSessionManager.DisplayedTarget
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.SessionStores

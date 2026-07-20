@@ -42,7 +42,7 @@ class MessageSearchSheetTest {
         harness = TestAppGraph()
         harness.signInAndConnect()
         viewModel = DmViewModel(
-            sessionManager = harness.graph.sessionManager,
+            sessionRuntime = harness.graph.sessionRuntime,
             peerJid = PEER_JID,
         )
         composeRule.setContent {
@@ -108,7 +108,7 @@ class MessageSearchSheetTest {
             },
         )
         assertTrue(
-            harness.graph.sessionManager.timelineStore.timeline(PEER_JID).value.isEmpty(),
+            harness.graph.sessionRuntime.timelineStore.timeline(PEER_JID).value.isEmpty(),
         )
     }
 

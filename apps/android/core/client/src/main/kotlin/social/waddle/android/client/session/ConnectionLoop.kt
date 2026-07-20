@@ -115,9 +115,9 @@ internal class ConnectionLoop(
             if (!admissionsOpen) return
             _state.value = ConnectionState.Connecting
             val outcome = try {
-                attemptRunner.run(session, lifecycle) { scope, client, readySession, freshStream ->
+                attemptRunner.run(session, lifecycle) { scope, client, readySession, freshStream, readyLifecycle ->
                     _state.value = ConnectionState.Ready
-                    configuration.onReady(scope, client, readySession, freshStream)
+                    configuration.onReady(scope, client, readySession, freshStream, readyLifecycle)
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation

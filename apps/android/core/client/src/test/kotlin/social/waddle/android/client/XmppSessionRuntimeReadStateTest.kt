@@ -21,13 +21,13 @@ import social.waddle.client.ffi.WaddleMdsDisplayedEntry
  * session manager.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerReadStateTest {
+class XmppSessionRuntimeReadStateTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         val userPrefs = UserPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager.withLifecyclePhaseObserver(
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,

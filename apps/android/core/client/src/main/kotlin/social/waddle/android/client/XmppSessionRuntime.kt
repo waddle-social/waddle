@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -10,7 +11,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -45,7 +45,7 @@ import social.waddle.client.ffi.WaddleUploadSlot
  * remaining UI passthroughs in [ConversationVerbs] — all sharing the
  * per-attempt [ActiveSession].
  */
-class XmppSessionManager private constructor(
+class XmppSessionRuntime private constructor(
     private val sessionPrefs: SessionPrefs,
     clientFactory: ClientFactory,
     networkSignal: NetworkSignal,
@@ -55,6 +55,7 @@ class XmppSessionManager private constructor(
     connectTimeoutMillis: Long,
     lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
     workerExitEvidence: WorkerExitEvidence,
+    workerStartHooks: WorkerStartHooks,
 ) {
     constructor(
         sessionPrefs: SessionPrefs,
@@ -74,6 +75,7 @@ class XmppSessionManager private constructor(
         connectTimeoutMillis,
         OutboundLifecyclePhaseObserver.NONE,
         WorkerExitExceptionEvidence(),
+        WorkerStartHooks.None,
     )
 
     internal constructor(
@@ -95,6 +97,7 @@ class XmppSessionManager private constructor(
         connectTimeoutMillis,
         OutboundLifecyclePhaseObserver.NONE,
         workerExitEvidence,
+        WorkerStartHooks.None,
     )
 
     private val stores = SessionStores()
@@ -112,9 +115,14 @@ class XmppSessionManager private constructor(
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
 
-    private var sessionScope: CoroutineScope? = null
-    private var sessionLoopJob: Job? = null
-    private var sessionLifecycle: SessionLifecycleRef? = null
+    private val runtimeRootJob = SupervisorJob()
+    private val runtimeRootScope = CoroutineScope(runtimeRootJob + dispatcher)
+    private var nextGeneration = 0L
+    @Volatile
+    private var activeRuntime: ActiveRuntimeSession? = null
+
+    @Volatile
+    private var lifecycleState: RuntimeLifecycleState = RuntimeLifecycleState.Open
     private var pendingLifecycleShutdown:
         LifecycleShutdownOutcome.FencedWithPending? = null
 
@@ -144,6 +152,7 @@ class XmppSessionManager private constructor(
         dispatchEvent = router::dispatch,
         phaseObserver = lifecyclePhaseObserver,
         workerExitEvidence = workerExitEvidence,
+        workerStartHooks = workerStartHooks,
     )
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
@@ -171,6 +180,8 @@ class XmppSessionManager private constructor(
 
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
+        check(lifecycleState == RuntimeLifecycleState.Open) { "XmppSessionRuntime is closed" }
+        val generation = reserveRuntimeGeneration()
         loop.stopAdmissions()
         stopAndCancelCurrentSession()
         clearSessionState()
@@ -180,19 +191,29 @@ class XmppSessionManager private constructor(
         timelineStore.setOwnBareJid(session.jid)
         persistQuietly { seedStoresFromPrefs() }
 
-        val scope = CoroutineScope(SupervisorJob() + dispatcher)
-        sessionScope = scope
+        val childJob = SupervisorJob(runtimeRootJob)
+        val childScope = CoroutineScope(childJob + dispatcher)
         _appState.value = WaddleAppState.Ready
-        resume.start(scope)
-        val startup = messenger.start(scope, ownerBareJid)
-        sessionLifecycle = startup.lifecycle
-        val lifecycle = when (startup) {
-            is LifecycleStartResult.Started -> startup.lifecycle
-            is LifecycleStartResult.Failed -> throw LifecycleStartException(startup)
+        val lifecycle = try {
+            resume.start(childScope)
+            when (val startup = messenger.start(childScope, ownerBareJid)) {
+                is LifecycleStartResult.Started -> startup.lifecycle
+                is LifecycleStartResult.Failed -> throw LifecycleStartException(startup)
+            }
+        } catch (failure: Throwable) {
+            cancelAndJoinChild(childJob)
+            activeSession.ownBareJid = null
+            clearSessionState()
+            sessionPrefs.clear()
+            loop.resetToIdle()
+            _appState.value = WaddleAppState.SignedOut
+            throw failure
         }
         loop.startAdmissions()
-        scope.launch { router.sweepChatStates() }
-        sessionLoopJob = scope.launch { loop.run(session, lifecycle) }
+        val loopJob = childScope.launch(start = CoroutineStart.LAZY) { loop.run(session, lifecycle) }
+        activeRuntime = ActiveRuntimeSession(generation, childScope, childJob, loopJob, lifecycle)
+        loopJob.start()
+        childScope.launch { router.sweepChatStates() }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
@@ -204,6 +225,24 @@ class XmppSessionManager private constructor(
         sessionPrefs.clear()
         loop.resetToIdle()
         _appState.value = WaddleAppState.SignedOut
+    }
+
+    /** Terminal, bounded shutdown. A closed runtime cannot be logged in again. */
+    suspend fun close() = lifecycleMutex.withLock {
+        if (lifecycleState == RuntimeLifecycleState.Closed) return@withLock
+        lifecycleState = RuntimeLifecycleState.Closing
+        loop.stopAdmissions()
+        stopAndCancelCurrentSession()
+        activeSession.ownBareJid = null
+        clearSessionState()
+        sessionPrefs.clear()
+        loop.resetToIdle()
+        _appState.value = WaddleAppState.SignedOut
+        withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
+            runtimeRootJob.cancel()
+            runtimeRootJob.join()
+        } ?: error("runtime root scope did not quiesce within the shutdown bound")
+        lifecycleState = RuntimeLifecycleState.Closed
     }
 
     // UI passthroughs (M1): the app module never touches the FFI client
@@ -372,9 +411,15 @@ class XmppSessionManager private constructor(
         client: WaddleClientInterface,
         session: WaddleSessionInfo,
         freshStream: Boolean,
+        lifecycle: SessionLifecycleRef,
     ) {
-        attemptScope.launch { catchup.refreshTopology(client) }
-        attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
+        val generation = activeRuntimeFor(lifecycle)?.generation ?: return
+        attemptScope.launch {
+            if (!isActiveGeneration(generation, lifecycle)) return@launch
+            catchup.refreshTopology(client)
+            if (!isActiveGeneration(generation, lifecycle)) return@launch
+            catchup.onSessionReady(client, session, freshStream)
+        }
     }
 
     private suspend fun onAuthenticationStopped(
@@ -382,7 +427,7 @@ class XmppSessionManager private constructor(
         disposition: SaslRetryDisposition,
     ) {
         lifecycleMutex.withLock {
-            if (sessionLifecycle != lifecycle) return@withLock
+            val active = activeRuntimeFor(lifecycle) ?: return@withLock
             loop.stopAdmissions()
             val credentialsInvalid = disposition == SaslRetryDisposition.STOP_CREDENTIAL
             var shutdownComplete = false
@@ -405,22 +450,29 @@ class XmppSessionManager private constructor(
                     messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)),
                 )
                 shutdownComplete = true
-                if (credentialsInvalid) {
-                    sessionPrefs.clear()
-                }
             } finally {
-                sessionLoopJob = null
                 if (shutdownComplete) {
                     if (credentialsInvalid) {
                         _appState.value = WaddleAppState.SignedOut
                         activeSession.ownBareJid = null
                         clearSessionState()
                     }
-                    // Do not join: this callback runs inside the session scope.
-                    val scope = sessionScope
-                    sessionScope = null
-                    sessionLifecycle = null
-                    scope?.cancel()
+                    // This callback is itself in the child scope. Let the
+                    // runtime root initiate cancellation after it returns;
+                    // an external transition joins this quiescing record.
+                    val quiescing = active.copy(quiescing = true)
+                    activeRuntime = quiescing
+                    runtimeRootScope.launch {
+                        cancelAndJoinChild(quiescing.childJob)
+                        if (credentialsInvalid) {
+                            lifecycleMutex.withLock {
+                                if (activeRuntime == quiescing) {
+                                    sessionPrefs.clear()
+                                    activeRuntime = null
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -428,8 +480,9 @@ class XmppSessionManager private constructor(
 
     /** Persist DM-list recency (UI hook and router callback). */
     private fun persistDmSeen(peer: String, timestamp: String) {
-        val scope = sessionScope ?: return
-        scope.launch {
+        val active = activeRuntime ?: return
+        active.childScope.launch {
+            if (!isActiveGeneration(active.generation, active.lifecycle)) return@launch
             persistQuietly { sessionPrefs.setLastSeen(peer, timestamp) }
         }
     }
@@ -439,18 +492,22 @@ class XmppSessionManager private constructor(
         resume.seedFromPrefs()
     }
 
-    private suspend fun cancelSessionScope() {
-        val scope = sessionScope ?: return
-        sessionScope = null
+    private suspend fun cancelRuntimeChild(active: ActiveRuntimeSession) = cancelAndJoinChild(active.childJob)
+
+    /** Reserve before any transition so overflow cannot disturb a live runtime. */
+    private fun reserveRuntimeGeneration(): RuntimeGeneration {
+        check(nextGeneration != Long.MAX_VALUE) { "runtime generation exhausted" }
+        return RuntimeGeneration(++nextGeneration)
+    }
+
+    private suspend fun cancelAndJoinChild(childJob: Job) {
         val stopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
-            scope.coroutineContext.job.let { job ->
-                job.cancel()
-                job.join()
-            }
+            childJob.cancel()
+            childJob.join()
             true
         } == true
         check(stopped) {
-            "session scope did not quiesce within the shutdown bound"
+            "runtime child scope did not quiesce within the shutdown bound"
         }
     }
 
@@ -459,10 +516,16 @@ class XmppSessionManager private constructor(
      * A retryable fencing failure retains the lifecycle and scope for retry.
      */
     private suspend fun stopAndCancelCurrentSession() {
-        val lifecycle = sessionLifecycle
+        val active = activeRuntime
+        val lifecycle = active?.lifecycle
         var teardownSucceeded = false
         try {
             if (lifecycle != null) {
+                if (active.quiescing) {
+                    teardownSucceeded = true
+                    activeRuntime = null
+                    return
+                }
                 if (recoverFencedWorkers(lifecycle)) {
                     teardownSucceeded = true
                     return
@@ -481,20 +544,7 @@ class XmppSessionManager private constructor(
                             WorkerRecoveryOutcome.OwnershipMismatch(shutdown.requested, shutdown.actual),
                         )
                 }
-                val loopJob = sessionLoopJob
-                loopJob?.cancel()
-                val producerStopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
-                    loopJob?.join()
-                    true
-                } == true
-                if (!producerStopped) {
-                    throw LifecycleTransitionException(
-                        lifecycle,
-                        LifecyclePendingComponent.NATIVE_PRODUCER,
-                        1,
-                    )
-                }
-                sessionLoopJob = null
+                stopLoop(active, lifecycle)
                 when (val shutdown = messenger.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))) {
                     LifecycleShutdownOutcome.Stopped,
                     is LifecycleShutdownOutcome.FencedWithPending,
@@ -507,11 +557,22 @@ class XmppSessionManager private constructor(
                         return
                     }
                 }
-                sessionLifecycle = null
+                activeRuntime = null
             }
             teardownSucceeded = true
         } finally {
-            if (teardownSucceeded) cancelSessionScope()
+            if (teardownSucceeded && active != null) cancelRuntimeChild(active)
+        }
+    }
+
+    private suspend fun stopLoop(active: ActiveRuntimeSession, lifecycle: SessionLifecycleRef) {
+        active.loopJob.cancel()
+        val stopped = withTimeoutOrNull(SHUTDOWN_TIMEOUT_MILLIS) {
+            active.loopJob.join()
+            true
+        } == true
+        if (!stopped) {
+            throw LifecycleTransitionException(lifecycle, LifecyclePendingComponent.NATIVE_PRODUCER, 1)
         }
     }
 
@@ -530,7 +591,9 @@ class XmppSessionManager private constructor(
                 )
             }
             is LifecycleShutdownOutcome.WorkerFenced ->
-                throw messenger.workerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(outcome.lifecycle, outcome.cause))
+                throw messenger.workerRecoveryException(
+                    WorkerRecoveryOutcome.WorkerFenced(outcome.lifecycle, outcome.cause),
+                )
             LifecycleShutdownOutcome.AttemptClosed,
             LifecycleShutdownOutcome.Stale,
             -> error("current owner shutdown lost lifecycle authority")
@@ -553,8 +616,7 @@ class XmppSessionManager private constructor(
             is WorkerRecoveryOutcome.WorkerExitPending,
             -> throw messenger.workerRecoveryException(recovered)
         }
-        sessionLoopJob = null
-        sessionLifecycle = null
+        activeRuntime = null
         pendingLifecycleShutdown = null
         return true
     }
@@ -574,17 +636,26 @@ class XmppSessionManager private constructor(
         resume.clear()
     }
 
-    /**
-     * A displayed dispatch target: [markerId] is what the XEP-0333
-     * marker carries (author-assigned in 1:1, room stanza id in MUCs);
-     * the stanza-id pair feeds only the XEP-0490 MDS publish.
-     */
-    data class DisplayedTarget(
-        val markerId: String,
-        val stanzaId: String?,
-        val stanzaIdBy: String?,
-        val markerRequested: Boolean,
+    private fun activeRuntimeFor(lifecycle: SessionLifecycleRef): ActiveRuntimeSession? =
+        activeRuntime?.takeIf { it.lifecycle == lifecycle }
+
+    private fun isActiveGeneration(
+        generation: RuntimeGeneration,
+        lifecycle: SessionLifecycleRef,
+    ): Boolean =
+        lifecycleState == RuntimeLifecycleState.Open &&
+            activeRuntime?.let { it.generation == generation && it.lifecycle == lifecycle && !it.quiescing } == true
+
+    private data class ActiveRuntimeSession(
+        val generation: RuntimeGeneration,
+        val childScope: CoroutineScope,
+        val childJob: Job,
+        val loopJob: Job,
+        val lifecycle: SessionLifecycleRef,
+        val quiescing: Boolean = false,
     )
+
+    private enum class RuntimeLifecycleState { Open, Closing, Closed }
 
     companion object {
         /** Internal scheduling visibility; production construction is always no-op observed. */
@@ -598,7 +669,8 @@ class XmppSessionManager private constructor(
             lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
             connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
             workerExitEvidence: WorkerExitEvidence,
-        ): XmppSessionManager = XmppSessionManager(
+            workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
+        ): XmppSessionRuntime = XmppSessionRuntime(
             sessionPrefs,
             clientFactory,
             networkSignal,
@@ -608,28 +680,7 @@ class XmppSessionManager private constructor(
             connectTimeoutMillis,
             lifecyclePhaseObserver,
             workerExitEvidence,
-        )
-
-        /** Session composition owns one evidence registry for all of its workers. */
-        internal fun withOwnedWorkerExitEvidence(
-            sessionPrefs: SessionPrefs,
-            clientFactory: ClientFactory,
-            networkSignal: NetworkSignal,
-            userPrefs: UserPrefs,
-            reconnectPolicy: ReconnectPolicy,
-            dispatcher: CoroutineDispatcher,
-            lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
-            connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
-        ): XmppSessionManager = withLifecyclePhaseObserver(
-            sessionPrefs = sessionPrefs,
-            clientFactory = clientFactory,
-            networkSignal = networkSignal,
-            userPrefs = userPrefs,
-            reconnectPolicy = reconnectPolicy,
-            dispatcher = dispatcher,
-            lifecyclePhaseObserver = lifecyclePhaseObserver,
-            connectTimeoutMillis = connectTimeoutMillis,
-            workerExitEvidence = WorkerExitExceptionEvidence(),
+            workerStartHooks,
         )
 
         /** Web parity: 15s budget from connect to `SessionReady`. */

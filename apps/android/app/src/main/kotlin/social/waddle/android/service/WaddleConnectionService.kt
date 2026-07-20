@@ -34,10 +34,10 @@ class WaddleConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val graph = (application as WaddleApplication).graph
-        promoteToForeground(graph.sessionManager.connectionState.value)
+        promoteToForeground(graph.sessionRuntime.connectionState.value)
         if (stateJob == null) {
             stateJob = scope.launch {
-                graph.sessionManager.connectionState.collect(::promoteToForeground)
+                graph.sessionRuntime.connectionState.collect(::promoteToForeground)
             }
         }
         return START_STICKY

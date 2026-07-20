@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.mentionCandidatesOf
 import social.waddle.android.feature.channel.ChannelIo
 import social.waddle.android.feature.dm.DmIo
@@ -17,7 +17,7 @@ import social.waddle.android.viewModelFactoryOf
  * (plus its root) and every composer send targets it.
  */
 class ThreadViewModel(
-    sessionManager: XmppSessionManager,
+    sessionRuntime: XmppSessionRuntime,
     conversationJid: String,
     isGroupchat: Boolean,
     threadId: String,
@@ -27,18 +27,18 @@ class ThreadViewModel(
 ) : ConversationViewModel(
     conversationJid = conversationJid,
     isGroupchat = isGroupchat,
-    timeline = sessionManager.timelineStore.timeline(conversationJid),
-    events = sessionManager.events,
-    unreadStore = sessionManager.unreadStore,
+    timeline = sessionRuntime.timelineStore.timeline(conversationJid),
+    events = sessionRuntime.events,
+    unreadStore = sessionRuntime.unreadStore,
     io = if (isGroupchat) {
-        ChannelIo(sessionManager, conversationJid, nick)
+        ChannelIo(sessionRuntime, conversationJid, nick)
     } else {
-        DmIo(sessionManager, conversationJid)
+        DmIo(sessionRuntime, conversationJid)
     },
-    typingNames = sessionManager.chatStateStore.composingNames(conversationJid),
-    pinnedIds = sessionManager.pinStore.pinnedIds(conversationJid),
+    typingNames = sessionRuntime.chatStateStore.composingNames(conversationJid),
+    pinnedIds = sessionRuntime.pinStore.pinnedIds(conversationJid),
     mentionCandidates = if (isGroupchat) {
-        sessionManager.presenceStore.occupants
+        sessionRuntime.presenceStore.occupants
             .map { rooms -> mentionCandidatesOf(rooms[conversationJid].orEmpty()) }
     } else {
         flowOf(emptyList())
@@ -59,7 +59,7 @@ class ThreadViewModel(
                 ?.substringBefore('/')
                 ?.takeIf(String::isNotBlank)
             ThreadViewModel(
-                sessionManager = graph.sessionManager,
+                sessionRuntime = graph.sessionRuntime,
                 conversationJid = conversationJid,
                 isGroupchat = isGroupchat,
                 threadId = threadId,

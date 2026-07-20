@@ -168,6 +168,7 @@ internal class ConnectionAttemptRunner(
                         attempt.client,
                         attempt.session,
                         readiness.kind == SessionReadyKind.FRESH,
+                        attempt.lifecycle,
                     )
                 }
             }

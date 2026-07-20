@@ -41,7 +41,7 @@ class ConversationScreenTest {
         harness = TestAppGraph()
         harness.signInAndConnect()
         viewModel = DmViewModel(
-            sessionManager = harness.graph.sessionManager,
+            sessionRuntime = harness.graph.sessionRuntime,
             peerJid = PEER_JID,
         )
         composeRule.setContent {

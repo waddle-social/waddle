@@ -18,13 +18,13 @@ import social.waddle.android.client.FakeNetworkSignal
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DmListViewModelTest {
-    private fun manager(testScope: TestScope): XmppSessionManager = XmppSessionManager(
+    private fun manager(testScope: TestScope): XmppSessionRuntime = XmppSessionRuntime(
         sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
         clientFactory = FakeClientFactory(),
         networkSignal = FakeNetworkSignal(),

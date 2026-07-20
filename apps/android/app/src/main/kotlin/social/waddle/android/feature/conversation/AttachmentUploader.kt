@@ -8,7 +8,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.SlotUploader
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.prefs.SharedFileRef
 
 /** Outcome of one attachment upload attempt. */
@@ -30,7 +30,7 @@ sealed interface UploadResult {
 class AttachmentUploader(
     private val contentResolver: ContentResolver,
     httpClient: OkHttpClient,
-    private val sessionManager: XmppSessionManager,
+    private val sessionRuntime: XmppSessionRuntime,
 ) {
     private val slotUploader = SlotUploader(httpClient)
 
@@ -40,7 +40,7 @@ class AttachmentUploader(
         val contentType = withContext(Dispatchers.IO) {
             runCatching { contentResolver.getType(uri) }.getOrNull()
         } ?: DEFAULT_CONTENT_TYPE
-        val slot = sessionManager.requestUploadSlot(
+        val slot = sessionRuntime.requestUploadSlot(
             filename = meta.name,
             sizeBytes = meta.sizeBytes.toULong(),
             contentType = contentType,

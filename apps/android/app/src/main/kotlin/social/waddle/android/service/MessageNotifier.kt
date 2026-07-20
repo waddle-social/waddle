@@ -22,8 +22,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.MainActivity
 import social.waddle.android.R
+import social.waddle.android.client.DisplayedTarget
 import social.waddle.android.client.XmppEvent
-import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.UserPrefs
@@ -79,7 +79,7 @@ class MessageNotifier(
      * process-death read dispatch intact instead of wiping the extras.
      */
     private val displayedTargets =
-        HashMap<NotificationConversationKey, XmppSessionManager.DisplayedTarget>()
+        HashMap<NotificationConversationKey, DisplayedTarget>()
 
     fun start(scope: CoroutineScope) {
         scope.launch {
@@ -352,7 +352,7 @@ class MessageNotifier(
     private fun markReadAction(
         key: NotificationConversationKey,
         isGroupchat: Boolean,
-        displayedTarget: XmppSessionManager.DisplayedTarget?,
+        displayedTarget: DisplayedTarget?,
     ): NotificationCompat.Action {
         val intent = Intent(context, MarkReadReceiver::class.java)
             .setAction(MarkReadReceiver.ACTION_MARK_READ)

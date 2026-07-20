@@ -28,7 +28,7 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerWorkerRecoveryTest {
+class XmppSessionRuntimeWorkerRecoveryTest {
     @Test
     fun `E1 manager recovery preserves terminal dependency runtime evidence`() = runTest {
         assertTerminalFailureEvidence(IllegalStateException("terminal dependency runtime"))
@@ -53,7 +53,7 @@ class XmppSessionManagerWorkerRecoveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager.withOwnedWorkerExitEvidence(
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
@@ -61,6 +61,7 @@ class XmppSessionManagerWorkerRecoveryTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScheduler),
             lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         manager.login(testSessionInfo())
         runCurrent()
@@ -115,8 +116,8 @@ class XmppSessionManagerWorkerRecoveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         val factory = FakeClientFactory()
-        lateinit var manager: XmppSessionManager
-        manager = XmppSessionManager.withOwnedWorkerExitEvidence(
+        lateinit var manager: XmppSessionRuntime
+        manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
@@ -125,7 +126,11 @@ class XmppSessionManagerWorkerRecoveryTest {
             dispatcher = StandardTestDispatcher(testScheduler),
             lifecyclePhaseObserver = OutboundLifecyclePhaseObserver { phase ->
                 if (phase == OutboundLifecyclePhase.SHUTDOWN_OWNER_FINALIZED) {
-                    dataStore.installAfterCommitReturnsOnceWhen(::updatesScopeWitnessLastSeen) {
+                    // This hook runs after A has passed the runtime-generation
+                    // fence but before its DataStore mutation becomes durable.
+                    // Replacement B must cancel/join A's owned child before B
+                    // can activate, so this write cannot land in B's runtime.
+                    dataStore.installBeforeCommitReturnsOnce {
                         oldScopeWriteEntered.complete(Unit)
                         try {
                             awaitCancellation()
@@ -141,6 +146,7 @@ class XmppSessionManagerWorkerRecoveryTest {
                     releaseShutdownFinalized.await()
                 }
             },
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         manager.login(testSessionInfo())
@@ -209,7 +215,7 @@ class XmppSessionManagerWorkerRecoveryTest {
         withTimeoutOrNull(5_000) { deferred.await() }
             ?: error("timed out waiting for $name")
 
-    private suspend fun TestScope.assertLoggedOutTwice(manager: XmppSessionManager, prefs: SessionPrefs) {
+    private suspend fun TestScope.assertLoggedOutTwice(manager: XmppSessionRuntime, prefs: SessionPrefs) {
         manager.logout()
         runCurrent()
         assertEquals(ConnectionState.Idle, manager.connectionState.value)
@@ -267,7 +273,7 @@ class XmppSessionManagerWorkerRecoveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager.withOwnedWorkerExitEvidence(
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
@@ -275,6 +281,7 @@ class XmppSessionManagerWorkerRecoveryTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScheduler),
             lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         manager.login(testSessionInfo())
         runCurrent()

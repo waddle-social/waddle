@@ -1,14 +1,21 @@
 package social.waddle.android.client
 
 import app.cash.turbine.test
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
@@ -25,15 +32,17 @@ import social.waddle.client.ffi.WaddleSaslCondition
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerTest {
+class XmppSessionRuntimeTest {
     private class Harness(
         testScope: TestScope,
         phaseObserver: OutboundLifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+        workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
+        sessionPrefs: SessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
     ) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
-        val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager.withOwnedWorkerExitEvidence(
+        val prefs = sessionPrefs
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
@@ -41,6 +50,8 @@ class XmppSessionManagerTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
             lifecyclePhaseObserver = phaseObserver,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
+            workerStartHooks = workerStartHooks,
         )
     }
 
@@ -89,6 +100,88 @@ class XmppSessionManagerTest {
         assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
         assertEquals(1, harness.factory.clients.size)
         assertEquals("replacement", harness.prefs.sessionId.first())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `bootstrap failure joins its owned child before replacement starts`() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var failFirstStart = true
+        val harness = Harness(
+            this,
+            workerStartHooks = object : WorkerStartHooks {
+                override suspend fun beforeTerminal() = Unit
+
+                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
+                    if (!failFirstStart) return
+                    failFirstStart = false
+                    entered.complete(Unit)
+                    withContext(NonCancellable) { release.await() }
+                    error("bootstrap failure")
+                }
+
+                override suspend fun afterInstall(workers: OwnerWorkers) = Unit
+            },
+        )
+
+        val first = async { runCatching { harness.manager.login(testSessionInfo()) }.exceptionOrNull() }
+        entered.await()
+        val replacement = async { harness.manager.login(testSessionInfo(sessionId = "replacement")) }
+        runCurrent()
+        assertTrue(!replacement.isCompleted)
+        release.complete(Unit)
+        assertTrue(first.await() is IllegalStateException)
+        replacement.await()
+        assertTrue(coroutineContext.job.isActive)
+        assertEquals("replacement", harness.prefs.sessionId.first())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `auth stop retains quiescing child until replacement joins it`() = runTest {
+        val dataStore = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(dataStore)
+        val persistStarted = CompletableDeferred<Unit>()
+        val finalizerEntered = CompletableDeferred<Unit>()
+        val releaseFinalizer = CompletableDeferred<Unit>()
+        lateinit var harness: Harness
+        harness = Harness(
+            this,
+            sessionPrefs = prefs,
+            phaseObserver = OutboundLifecyclePhaseObserver { phase ->
+                if (phase == OutboundLifecyclePhase.SHUTDOWN_OWNER_FINALIZED) {
+                    dataStore.installBeforeCommitReturnsOnce {
+                        persistStarted.complete(Unit)
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            withContext(NonCancellable) {
+                                finalizerEntered.complete(Unit)
+                                releaseFinalizer.await()
+                            }
+                        }
+                    }
+                    harness.manager.recordDmSeen("old@waddle.test")
+                    yield()
+                    persistStarted.await()
+                }
+            },
+        )
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED))
+        runCurrent()
+        finalizerEntered.await()
+
+        val replacement = async { harness.manager.login(testSessionInfo(sessionId = "replacement")) }
+        runCurrent()
+        assertTrue(!replacement.isCompleted)
+        releaseFinalizer.complete(Unit)
+        runCurrent()
+        replacement.await()
+        assertEquals("replacement", prefs.sessionId.first())
+        assertTrue(coroutineContext.job.isActive)
         harness.manager.logout()
     }
 
@@ -439,7 +532,7 @@ class XmppSessionManagerTest {
         runCurrent()
         assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
 
-        advanceTimeBy(XmppSessionManager.CONNECT_TIMEOUT_MILLIS)
+        advanceTimeBy(XmppSessionRuntime.CONNECT_TIMEOUT_MILLIS)
         runCurrent()
 
         assertEquals(
@@ -638,6 +731,21 @@ class XmppSessionManagerTest {
         assertEquals(null, harness.prefs.sessionId.first())
         assertTrue(harness.manager.timelineStore.timeline("alice@waddle.test").value.isEmpty())
         assertEquals(1, harness.factory.clients.single().disconnectCalls)
+    }
+
+    @Test
+    fun `close is idempotent terminal and does not cancel the caller scope`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        harness.manager.close()
+        harness.manager.close()
+
+        assertTrue(coroutineContext.job.isActive)
+        assertEquals(ConnectionState.Idle, harness.manager.connectionState.value)
+        assertEquals(WaddleAppState.SignedOut, harness.manager.appState.value)
+        assertTrue(runCatching { harness.manager.login(testSessionInfo()) }.exceptionOrNull() is IllegalStateException)
     }
 
     private suspend fun allOutboundRowsAreNativeOwned(harness: Harness): Boolean =

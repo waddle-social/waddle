@@ -2,6 +2,7 @@ package social.waddle.android.client.session
 
 import kotlinx.coroutines.CoroutineScope
 import social.waddle.android.client.SaslRetryDisposition
+import social.waddle.android.client.SessionLifecycleRef
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleSaslCondition
@@ -24,4 +25,5 @@ internal typealias SessionReadyListener = (
     client: WaddleClientInterface,
     session: WaddleSessionInfo,
     freshStream: Boolean,
+    lifecycle: SessionLifecycleRef,
 ) -> Unit

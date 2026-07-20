@@ -6,7 +6,7 @@ import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
@@ -18,19 +18,19 @@ import social.waddle.client.ffi.WaddleNotifyMode
 
 /** 1:1 DM conversation: DM MAM paging and chat sends (no join step). */
 class DmViewModel(
-    sessionManager: XmppSessionManager,
+    sessionRuntime: XmppSessionRuntime,
     peerJid: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
 ) : ConversationViewModel(
     conversationJid = peerJid,
     isGroupchat = false,
-    timeline = sessionManager.timelineStore.timeline(peerJid),
-    events = sessionManager.events,
-    unreadStore = sessionManager.unreadStore,
-    io = DmIo(sessionManager, peerJid),
-    typingNames = sessionManager.chatStateStore.composingNames(peerJid),
-    notifyMode = sessionManager.notifySettingsStore.modeFlow(peerJid, ConversationKind.DIRECT_CHAT),
+    timeline = sessionRuntime.timelineStore.timeline(peerJid),
+    events = sessionRuntime.events,
+    unreadStore = sessionRuntime.unreadStore,
+    io = DmIo(sessionRuntime, peerJid),
+    typingNames = sessionRuntime.chatStateStore.composingNames(peerJid),
+    notifyMode = sessionRuntime.notifySettingsStore.modeFlow(peerJid, ConversationKind.DIRECT_CHAT),
     uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
@@ -42,7 +42,7 @@ class DmViewModel(
                     ?.substringBefore('/')
                     ?.takeIf(String::isNotBlank)
                 DmViewModel(
-                    sessionManager = graph.sessionManager,
+                    sessionRuntime = graph.sessionRuntime,
                     peerJid = peerJid,
                     uploader = graph.attachmentUploader,
                     onConversationRead = { conversationJid ->
@@ -56,32 +56,32 @@ class DmViewModel(
 }
 
 internal class DmIo(
-    private val sessionManager: XmppSessionManager,
+    private val sessionRuntime: XmppSessionRuntime,
     private val peerJid: String,
 ) : ConversationIo {
     override suspend fun fetchHistory(maxMessages: UInt, beforeId: String?): WaddleMamPage? =
-        sessionManager.fetchDmHistory(peerJid, maxMessages, beforeId)
+        sessionRuntime.fetchDmHistory(peerJid, maxMessages, beforeId)
 
     override suspend fun send(body: String, extras: MessageSendExtras?): SendResult =
-        sessionManager.sendChatMessage(peerJid, body, extras)
+        sessionRuntime.sendChatMessage(peerJid, body, extras)
 
     override fun recordConversationSeen() {
-        sessionManager.recordDmSeen(peerJid)
+        sessionRuntime.recordDmSeen(peerJid)
     }
 
     override suspend fun sendChatState(state: WaddleChatState) {
-        sessionManager.sendChatState(peerJid, isGroupchat = false, state = state)
+        sessionRuntime.sendChatState(peerJid, isGroupchat = false, state = state)
     }
 
     override suspend fun markDisplayed() {
-        sessionManager.markConversationDisplayed(peerJid, isGroupchat = false)
+        sessionRuntime.markConversationDisplayed(peerJid, isGroupchat = false)
     }
 
     override suspend fun toggleReaction(targetId: String, emoji: String): VerbResult =
-        sessionManager.toggleReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emoji = emoji)
+        sessionRuntime.toggleReaction(peerJid, isGroupchat = false, targetStanzaId = targetId, emoji = emoji)
 
     override suspend fun sendCorrection(targetId: String, newBody: String, threadId: String?): VerbResult =
-        sessionManager.sendCorrection(
+        sessionRuntime.sendCorrection(
             peerJid,
             isGroupchat = false,
             targetId = targetId,
@@ -90,8 +90,8 @@ internal class DmIo(
         )
 
     override suspend fun sendRetraction(targetId: String): VerbResult =
-        sessionManager.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)
+        sessionRuntime.sendRetraction(peerJid, isGroupchat = false, targetStanzaId = targetId)
 
     override suspend fun setNotificationMode(mode: WaddleNotifyMode): NotifySettingsResult =
-        sessionManager.setDmNotificationMode(peerJid, mode)
+        sessionRuntime.setDmNotificationMode(peerJid, mode)
 }

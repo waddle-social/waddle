@@ -14,15 +14,15 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.DeliveryJournalStore
 import social.waddle.android.client.FailingPreferencesDataStore
 import social.waddle.android.client.FakeClientFactory
 import social.waddle.android.client.FakeNetworkSignal
 import social.waddle.android.client.InMemoryPreferencesDataStore
-import social.waddle.android.client.OutboundQueue
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
 import social.waddle.android.client.XmppEvent
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryJournalMutation
@@ -181,7 +181,7 @@ class DirectReplyDeliveryTest {
     @Test
     fun `identical stanza ids remain independent across owners`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val rowA = seedClaimed(prefs, queue, OWNER_A, "reply-a")
         val rowB = seedClaimed(prefs, queue, OWNER_B, "reply-b")
 
@@ -195,7 +195,7 @@ class DirectReplyDeliveryTest {
     @Test
     fun `native terminal effects require exact owner identity digest and attempt`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val queue = OutboundQueue(prefs)
+        val queue = DeliveryJournalStore(prefs)
         val rowA = seedClaimed(prefs, queue, OWNER_A, "reply-a")
         val rowB = seedClaimed(prefs, queue, OWNER_B, "reply-b")
 
@@ -206,12 +206,12 @@ class DirectReplyDeliveryTest {
     }
 
     private suspend fun assertForeignOwnerTerminalIsRejected(
-        queue: OutboundQueue,
+        queue: DeliveryJournalStore,
         rowA: SeededRow,
         rowB: SeededRow,
     ) {
         assertEquals(
-            OutboundQueue.TerminalRecordResult.Stale,
+            DeliveryJournalStore.TerminalRecordResult.Stale,
             queue.recordTerminal(
                 OWNER_A,
                 SHARED_STANZA_ID,
@@ -225,14 +225,14 @@ class DirectReplyDeliveryTest {
             rowB.attempt,
             DeliveryTerminalKind.NATIVE_FAILURE,
         )
-        val failed = queue.applyNextTerminal(OWNER_B) as OutboundQueue.TerminalEffect.Failed
+        val failed = queue.applyNextTerminal(OWNER_B) as DeliveryJournalStore.TerminalEffect.Failed
         assertEquals(rowB.row.identity, failed.callback.row)
         assertEquals(rowB.attempt, failed.callback.attempt)
         assertEquals(rowA.row, queue.rows(OWNER_A).single())
     }
 
     private suspend fun assertExactAttemptIsRequired(
-        queue: OutboundQueue,
+        queue: DeliveryJournalStore,
         rowA: SeededRow,
         rowB: SeededRow,
     ) {
@@ -240,7 +240,7 @@ class DirectReplyDeliveryTest {
             attemptId = DeliveryAttemptId(WRONG_ATTEMPT_ID),
         )
         assertEquals(
-            OutboundQueue.TerminalRecordResult.Stale,
+            DeliveryJournalStore.TerminalRecordResult.Stale,
             queue.recordTerminal(
                 OWNER_A,
                 SHARED_STANZA_ID,
@@ -255,7 +255,7 @@ class DirectReplyDeliveryTest {
             DeliveryTerminalKind.ACK,
         )
         val acknowledged =
-            queue.applyNextTerminal(OWNER_A) as OutboundQueue.TerminalEffect.Acknowledged
+            queue.applyNextTerminal(OWNER_A) as DeliveryJournalStore.TerminalEffect.Acknowledged
         assertEquals(rowA.row.identity, acknowledged.callback.row)
         assertEquals(rowA.attempt, acknowledged.callback.attempt)
         assertTrue(queue.rows(OWNER_A).isEmpty())
@@ -264,7 +264,7 @@ class DirectReplyDeliveryTest {
 
     private suspend fun assertStaleIntentCannotDeleteReplacement() {
         val reusePrefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val reuseQueue = OutboundQueue(reusePrefs)
+        val reuseQueue = DeliveryJournalStore(reusePrefs)
         val old = seedClaimed(reusePrefs, reuseQueue, OWNER_A, "old payload")
         reuseQueue.recordTerminal(
             OWNER_A,
@@ -336,7 +336,7 @@ class DirectReplyDeliveryTest {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager(
+        val manager = XmppSessionRuntime(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
@@ -353,7 +353,7 @@ class DirectReplyDeliveryTest {
 
     private suspend fun seedClaimed(
         prefs: SessionPrefs,
-        queue: OutboundQueue,
+        queue: DeliveryJournalStore,
         owner: String,
         body: String,
     ): SeededRow {
@@ -363,7 +363,7 @@ class DirectReplyDeliveryTest {
             queue.enqueueAndClaimAbsoluteHead(
                 directReplyDraft(owner, body),
                 attempt,
-            ) as OutboundQueue.LiveAdmissionResult.Claimed
+            ) as DeliveryJournalStore.LiveAdmissionResult.Claimed
         ).row
         return SeededRow(attempt, row)
     }

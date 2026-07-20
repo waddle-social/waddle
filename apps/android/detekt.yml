@@ -1,7 +1,7 @@
 # Deviations from the detekt default rule set. Every entry needs a
 # justification; suppressing findings in code (`@Suppress`) is not
 # allowed. Per-file excludes marked "decomposition PR" are removed by the
-# follow-up refactor that splits XmppSessionManager/ConversationViewModel.
+# follow-up refactor that splits XmppSessionRuntime/ConversationViewModel.
 
 naming:
   FunctionNaming:

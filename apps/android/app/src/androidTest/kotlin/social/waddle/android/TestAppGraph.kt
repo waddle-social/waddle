@@ -87,7 +87,7 @@ class TestAppGraph {
 
     /** Flip the shell to SignedOut without touching the network. */
     fun signOut() {
-        runBlocking { graph.sessionManager.logout() }
+        runBlocking { graph.sessionRuntime.logout() }
     }
 
     /** Sign in only: appState flips to Ready, no live connection yet. */
@@ -101,7 +101,7 @@ class TestAppGraph {
         awaitCondition("a connection attempt") { clientFactory.clients.isNotEmpty() }
         clientFactory.emitReady()
         awaitCondition("the ready connection") {
-            graph.sessionManager.connectionState.value == ConnectionState.Ready
+            graph.sessionRuntime.connectionState.value == ConnectionState.Ready
         }
     }
 
@@ -120,7 +120,7 @@ class TestAppGraph {
 
     /** Stop the graph's collectors and connection loop after a test. */
     fun shutdown() {
-        runBlocking { graph.sessionManager.logout() }
+        runBlocking { graph.sessionRuntime.logout() }
         graph.applicationScope.cancel()
     }
 

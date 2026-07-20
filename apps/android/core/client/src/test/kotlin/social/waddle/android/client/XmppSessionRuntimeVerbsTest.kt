@@ -27,10 +27,10 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 
 /** Messaging action verbs (react/edit/retract/pin) through the manager. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerVerbsTest {
+class XmppSessionRuntimeVerbsTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager.withLifecyclePhaseObserver(
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),

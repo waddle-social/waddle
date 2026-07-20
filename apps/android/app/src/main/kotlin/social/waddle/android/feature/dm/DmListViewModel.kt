@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import social.waddle.android.AppGraph
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleNotifyMode
@@ -22,11 +22,11 @@ data class DmListItem(
 )
 
 /** Recent DM peers (most recently active first) with unread badges. */
-class DmListViewModel(sessionManager: XmppSessionManager) : ViewModel() {
+class DmListViewModel(sessionRuntime: XmppSessionRuntime) : ViewModel() {
     val peers: StateFlow<List<DmListItem>> = combine(
-        sessionManager.dmStore.peers,
-        sessionManager.unreadStore.counts,
-        sessionManager.notifySettingsStore.entries,
+        sessionRuntime.dmStore.peers,
+        sessionRuntime.unreadStore.counts,
+        sessionRuntime.notifySettingsStore.entries,
     ) { peers, counts, notifyEntries ->
         peers.map { peerJid ->
             DmListItem(
@@ -42,6 +42,6 @@ class DmListViewModel(sessionManager: XmppSessionManager) : ViewModel() {
 
     companion object {
         fun factory(graph: AppGraph): ViewModelProvider.Factory =
-            viewModelFactoryOf { DmListViewModel(graph.sessionManager) }
+            viewModelFactoryOf { DmListViewModel(graph.sessionRuntime) }
     }
 }

@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
 import social.waddle.android.viewModelFactoryOf
@@ -28,7 +28,7 @@ import social.waddle.client.ffi.WaddleMamPage
  * older search resolving late can never clobber a newer query's state.
  */
 class MessageSearchViewModel(
-    private val sessionManager: XmppSessionManager,
+    private val sessionRuntime: XmppSessionRuntime,
     private val target: MessageSearchTarget,
 ) : ViewModel() {
     private val _query = MutableStateFlow("")
@@ -111,9 +111,9 @@ class MessageSearchViewModel(
     }
 
     private suspend fun searchArchive(query: String): WaddleMamPage? = if (target.isGroupchat) {
-        sessionManager.searchRoomHistory(target.conversationJid, query, MAX_RESULTS)
+        sessionRuntime.searchRoomHistory(target.conversationJid, query, MAX_RESULTS)
     } else {
-        sessionManager.searchDmHistory(target.conversationJid, query, MAX_RESULTS)
+        sessionRuntime.searchDmHistory(target.conversationJid, query, MAX_RESULTS)
     }
 
     /** Displayable projection; retracted and bodyless matches drop out. */
@@ -146,6 +146,6 @@ class MessageSearchViewModel(
         const val MAX_RESULTS = 20u
 
         fun factory(graph: AppGraph, target: MessageSearchTarget): ViewModelProvider.Factory =
-            viewModelFactoryOf { MessageSearchViewModel(graph.sessionManager, target) }
+            viewModelFactoryOf { MessageSearchViewModel(graph.sessionRuntime, target) }
     }
 }

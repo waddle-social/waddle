@@ -39,7 +39,7 @@ class NotifySettingsSheetTest {
         harness = TestAppGraph()
         harness.signInAndConnect()
         viewModel = DmViewModel(
-            sessionManager = harness.graph.sessionManager,
+            sessionRuntime = harness.graph.sessionRuntime,
             peerJid = PEER_JID,
         )
         composeRule.setContent {
@@ -83,7 +83,7 @@ class NotifySettingsSheetTest {
         }
         // ...and the store reconciled from the Ok outcome.
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            harness.graph.sessionManager.notifySettingsStore
+            harness.graph.sessionRuntime.notifySettingsStore
                 .modeFor(PEER_JID, ConversationKind.DIRECT_CHAT) == WaddleNotifyMode.NEVER
         }
 

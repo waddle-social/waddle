@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.launch
 import social.waddle.android.WaddleApplication
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.DisplayedTarget
 
 /**
  * Notification "Mark as read": dispatches the displayed marker + MDS
@@ -23,7 +23,7 @@ class MarkReadReceiver : BroadcastReceiver() {
         // death the in-memory timeline is empty and a lookup-based
         // dispatch would silently no-op.
         val explicitTarget = intent.getStringExtra(EXTRA_MARKER_ID)?.let { markerId ->
-            XmppSessionManager.DisplayedTarget(
+            DisplayedTarget(
                 markerId = markerId,
                 stanzaId = intent.getStringExtra(EXTRA_STANZA_ID),
                 stanzaIdBy = intent.getStringExtra(EXTRA_STANZA_ID_BY),
@@ -38,7 +38,7 @@ class MarkReadReceiver : BroadcastReceiver() {
                 // PendingIntents can outlive logout/login. The manager holds
                 // its lifecycle lock across this owner check and XMPP call.
                 val accepted = runCatching {
-                    graph.sessionManager.markConversationDisplayedForOwner(
+                    graph.sessionRuntime.markConversationDisplayedForOwner(
                         expectedOwnerBareJid = ownerBareJid,
                         conversationJid = conversationJid,
                         isGroupchat = isGroupchat,
@@ -46,7 +46,7 @@ class MarkReadReceiver : BroadcastReceiver() {
                     )
                 }.getOrDefault(false)
                 if (!accepted) return@launch
-                runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
+                runCatching { graph.sessionRuntime.unreadStore.clear(conversationJid) }
                 runCatching {
                     graph.messageNotifier.clearConversationNotification(
                         ownerBareJid,

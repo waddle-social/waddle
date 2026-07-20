@@ -23,7 +23,7 @@ import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
 import social.waddle.android.client.SearchCall
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.XmppSessionRuntime
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testArchivedMessage
@@ -40,7 +40,7 @@ import social.waddle.client.ffi.WaddleMamPage
 class MessageSearchViewModelTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager(
+        val manager = XmppSessionRuntime(
             sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),

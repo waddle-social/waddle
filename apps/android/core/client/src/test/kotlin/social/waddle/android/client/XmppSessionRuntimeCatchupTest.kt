@@ -26,12 +26,12 @@ import social.waddle.client.ffi.WaddleSessionReadyKind
  * the newest MAM page per joined room plus the most recent DMs.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class XmppSessionManagerCatchupTest {
+class XmppSessionRuntimeCatchupTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager.withLifecyclePhaseObserver(
+        val manager = XmppSessionRuntime.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
@@ -102,8 +102,8 @@ class XmppSessionManagerCatchupTest {
         val client = harness.factory.clients.single()
         assertEquals(
             setOf(
-                Triple("general@muc.waddle.test", XmppSessionManager.CATCHUP_PAGE_SIZE, null as String?),
-                Triple("dev@muc.waddle.test", XmppSessionManager.CATCHUP_PAGE_SIZE, null as String?),
+                Triple("general@muc.waddle.test", XmppSessionRuntime.CATCHUP_PAGE_SIZE, null as String?),
+                Triple("dev@muc.waddle.test", XmppSessionRuntime.CATCHUP_PAGE_SIZE, null as String?),
             ),
             client.fetchHistoryCalls.toSet(),
         )
@@ -130,7 +130,7 @@ class XmppSessionManagerCatchupTest {
 
         val fetched = harness.factory.clients.single().fetchHistoryCalls.map { it.first }
         assertEquals(
-            "newest ${XmppSessionManager.CATCHUP_DM_LIMIT} DMs only, oldest left out",
+            "newest ${XmppSessionRuntime.CATCHUP_DM_LIMIT} DMs only, oldest left out",
             listOf("b@waddle.test", "c@waddle.test", "d@waddle.test"),
             fetched,
         )
@@ -198,7 +198,7 @@ class XmppSessionManagerCatchupTest {
         assertEquals(2, harness.factory.clients.size)
         assertEquals(
             "fresh stream refetches the joined room",
-            listOf(Triple("general@muc.waddle.test", XmppSessionManager.CATCHUP_PAGE_SIZE, null as String?)),
+            listOf(Triple("general@muc.waddle.test", XmppSessionRuntime.CATCHUP_PAGE_SIZE, null as String?)),
             harness.factory.clients.last().fetchHistoryCalls,
         )
 

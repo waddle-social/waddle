@@ -49,7 +49,7 @@ class MentionComposerTest {
             ),
         )
         viewModel = ChannelViewModel(
-            sessionManager = harness.graph.sessionManager,
+            sessionRuntime = harness.graph.sessionRuntime,
             roomJid = ROOM_JID,
             nick = "icepuma",
         )

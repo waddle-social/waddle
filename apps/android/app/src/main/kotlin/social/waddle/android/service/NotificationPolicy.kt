@@ -2,7 +2,7 @@ package social.waddle.android.service
 
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
-import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.DisplayedTarget
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.prefs.UserPrefs
@@ -36,7 +36,7 @@ class NotificationPolicy(
         val sender: String,
         val isGroupchat: Boolean,
         val body: String,
-        val displayedTarget: XmppSessionManager.DisplayedTarget?,
+        val displayedTarget: DisplayedTarget?,
         /** XEP-0372: broadcast or self-mention — post at high priority. */
         val isMention: Boolean = false,
     )
@@ -103,7 +103,7 @@ class NotificationPolicy(
         message: WaddleMessage,
         isGroupchat: Boolean,
         conversationJid: String,
-    ): XmppSessionManager.DisplayedTarget? {
+    ): DisplayedTarget? {
         // Authority-scanned like the session manager's own resolution:
         // the FIRST stanza-id is sender-controlled and must not become
         // a marker target or a published MDS pair.
@@ -123,7 +123,7 @@ class NotificationPolicy(
         } else {
             message.originId ?: message.id
         } ?: return null
-        return XmppSessionManager.DisplayedTarget(
+        return DisplayedTarget(
             markerId = markerId,
             stanzaId = mdsPair?.id,
             stanzaIdBy = mdsPair?.by,
