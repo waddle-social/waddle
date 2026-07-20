@@ -130,18 +130,19 @@ class TerminalReceiptLeasePersistenceTest {
             val acknowledged = claimedFixture("success-ack-$name", claimant)
             val acknowledgement = acknowledged.prefs.acknowledgeTerminalReceipt(acknowledged.lease)
             assertTrue("$name acknowledgement must succeed", acknowledgement is TerminalReceiptAcknowledgeResult.Acknowledged)
-            assertTrue(
-                "$name acknowledgement must persist terminal state",
-                acknowledgement.journal.owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged,
-            )
+            val acknowledgedState = requireNotNull(
+                acknowledged.prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt,
+            ).state as TerminalReceiptState.Acknowledged
+            assertEquals("$name acknowledgement must persist its exact claim", acknowledged.lease.claim, acknowledgedState.claim)
 
             val released = claimedFixture("success-release-$name", claimant)
             val release = released.prefs.releaseTerminalReceipt(released.lease)
             assertTrue("$name release must succeed", release is TerminalReceiptReleaseResult.Released)
-            assertTrue(
-                "$name release must persist terminal state",
-                release.journal.owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Pending,
-            )
+            val releasedState = requireNotNull(
+                released.prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt,
+            ).state as TerminalReceiptState.Pending
+            assertEquals("$name release must clear its durable claim", TerminalReceiptClaimState.Unclaimed, releasedState.claim)
+            assertEquals("$name release must record its exact released claim", released.lease.claim, releasedState.releasedClaim)
         }
     }
 
