@@ -5,6 +5,7 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -36,6 +37,7 @@ import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.TerminalReceipt
+import social.waddle.android.client.prefs.TerminalClaimId
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptId
@@ -165,6 +167,51 @@ class DeliveryTerminalReceiptApplicationTest {
             (exit.reason as WorkerExitReason.UnexpectedFailure).kind is
                 WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION,
         )
+    }
+
+    @Test
+    fun `persisted same epoch claims serialize one winner and a busy loser before a new epoch reclaims`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
+        val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "persisted-race")
+        prefs.updateDeliveryJournal { journal ->
+            DeliveryJournalMutation(
+                journal.copy(
+                    activeOwnerBareJid = TERMINAL_WORKER_OWNER,
+                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                ),
+                Unit,
+            )
+        }
+        val ref = TerminalReceiptRef(receipt.owner, receipt.attempt, receipt.id)
+        val epoch = ProcessEpoch(terminalWorkerUuid("persisted-race-epoch"))
+        fun request(id: String, process: ProcessEpoch) = TerminalReceiptClaimRequest(
+            ref,
+            TerminalReceiptClaimState.Claimed(
+                TerminalClaimId(terminalWorkerUuid(id)),
+                social.waddle.android.client.prefs.TerminalReceiptClaimant.BootstrapProcess,
+                process,
+            ),
+        )
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        store.installBeforeCommitReturnsOnce {
+            entered.complete(Unit)
+            release.await()
+        }
+        val winner = async { prefs.claimTerminalReceipt(request("persisted-race-winner", epoch)) }
+        entered.await()
+        val loser = async { prefs.claimTerminalReceipt(request("persisted-race-loser", epoch)) }
+        runCurrent()
+        assertFalse("second claim must wait behind the first DataStore commit", loser.isCompleted)
+        release.complete(Unit)
+        val claimed = winner.await() as TerminalReceiptClaimResult.Claimed
+        val busy = loser.await() as TerminalReceiptClaimResult.Busy
+        assertEquals(claimed.lease, busy.current)
+        assertEquals(claimed.lease.claim, ((prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as TerminalReceiptState.Pending).claim))
+        val reclaimed = prefs.claimTerminalReceipt(request("persisted-race-reclaim", ProcessEpoch(terminalWorkerUuid("persisted-race-new-epoch"))))
+            as TerminalReceiptClaimResult.Claimed
+        assertEquals(ProcessEpoch(terminalWorkerUuid("persisted-race-new-epoch")), reclaimed.lease.claim.processEpoch)
     }
 
     @Test
