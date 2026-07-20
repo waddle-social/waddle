@@ -92,6 +92,60 @@ class TerminalReceiptLeasePersistenceTest {
     }
 
     @Test
+    fun `persisted active owner handoff denies a valid different owner lease without rewriting bytes`() = runTest {
+        listOf("acknowledge", "release").forEach { operation ->
+            val fixture = claimedFixture("handoff-other-$operation", workerClaimant("handoff-other-$operation"))
+            fixture.prefs.updateDeliveryJournal { journal ->
+                DeliveryJournalMutation(journal.copy(activeOwnerBareJid = OTHER_OWNER), Unit)
+            }
+            val wrongOwnerLease = fixture.lease.copy(ref = fixture.lease.ref.copy(
+                owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(OTHER_OWNER),
+                attempt = fixture.lease.ref.attempt.copy(ownerBareJid = OTHER_OWNER),
+            ))
+            val before = fixture.snapshot()
+
+            when (operation) {
+                "acknowledge" -> {
+                    val result = fixture.prefs.acknowledgeTerminalReceipt(wrongOwnerLease)
+                    assertTrue(result is TerminalReceiptAcknowledgeResult.ReceiptMissing)
+                    fixture.assertUnchanged(before, result.journal)
+                }
+                "release" -> {
+                    val result = fixture.prefs.releaseTerminalReceipt(wrongOwnerLease)
+                    assertTrue(result is TerminalReceiptReleaseResult.ReceiptMissing)
+                    fixture.assertUnchanged(before, result.journal)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `persisted exact claimant leases acknowledge and release for every claimant subtype`() = runTest {
+        val claimants = listOf(
+            "worker" to workerClaimant("success-worker"),
+            "finalizer" to finalizerClaimant("success-finalizer"),
+            "bootstrap" to TerminalReceiptClaimant.BootstrapProcess,
+        )
+        claimants.forEach { (name, claimant) ->
+            val acknowledged = claimedFixture("success-ack-$name", claimant)
+            val acknowledgement = acknowledged.prefs.acknowledgeTerminalReceipt(acknowledged.lease)
+            assertTrue("$name acknowledgement must succeed", acknowledgement is TerminalReceiptAcknowledgeResult.Acknowledged)
+            assertTrue(
+                "$name acknowledgement must persist terminal state",
+                acknowledgement.journal.owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+            )
+
+            val released = claimedFixture("success-release-$name", claimant)
+            val release = released.prefs.releaseTerminalReceipt(released.lease)
+            assertTrue("$name release must succeed", release is TerminalReceiptReleaseResult.Released)
+            assertTrue(
+                "$name release must persist terminal state",
+                release.journal.owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Pending,
+            )
+        }
+    }
+
+    @Test
     fun `persisted exact terminal no ops preserve raw bytes for acknowledged and released receipts`() = runTest {
         val acknowledged = acknowledgedFixture("exact-acknowledged", workerClaimant("exact-acknowledged"))
         val acknowledgedBefore = acknowledged.snapshot()
@@ -197,6 +251,12 @@ class TerminalReceiptLeasePersistenceTest {
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
             lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
                 workerGeneration = ReceiptWorkerGeneration(uuid("wrong-worker-generation")),
+            )))
+        },
+        LeaseMismatchCase("finalizer lifecycle generation", finalizerClaimant("finalizer-lifecycle"), LeaseDenial.LEASE_MISMATCH) { lease ->
+            val claimant = lease.claim.claimant as TerminalReceiptClaimant.Finalizer
+            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
+                lifecycleGeneration = LifecycleGeneration(uuid("wrong-finalizer-lifecycle")),
             )))
         },
         LeaseMismatchCase("finalizer generation", finalizerClaimant("finalizer-generation"), LeaseDenial.LEASE_MISMATCH) { lease ->
