@@ -1,7 +1,5 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": { "list": [] },
   "description": "Waddle server long-lived in-memory maps, sampled every 15 s by `state_inventory_metrics::spawn_state_inventory_publisher` and exported through the standard OTel meter provider into Grafana Cloud Mimir via the in-cluster grafana-alloy collector. Each panel charts a logical group of maps against `process_resident_memory_bytes` so an RSS climb correlates directly to whichever .len() is growing. Hand-buildable on purpose so it survives Grafana upgrades and is reviewable in PRs.",
   "editable": true,
   "graphTooltip": 1,
@@ -9,188 +7,78 @@
     {
       "type": "timeseries",
       "title": "Process RSS",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
           "expr": "waddle_process_resident_memory_bytes_By",
           "legendFormat": "{{service_instance_id}}"
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      }
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 }
     },
     {
       "type": "timeseries",
       "title": "Auth state maps (.len())",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "waddle_state_auth_pending_auth_entry",
-          "legendFormat": "pending_auth"
-        },
-        {
-          "expr": "waddle_state_auth_device_auth_entry",
-          "legendFormat": "device_auth"
-        },
-        {
-          "expr": "waddle_state_auth_xmpp_auth_codes_entry",
-          "legendFormat": "xmpp_auth_codes"
-        },
-        {
-          "expr": "waddle_state_auth_dynamic_oidc_clients_entry",
-          "legendFormat": "dynamic_oidc_clients"
-        },
-        {
-          "expr": "waddle_state_auth_dynamic_oidc_client_locks_entry",
-          "legendFormat": "dynamic_oidc_client_locks"
-        }
+        { "expr": "waddle_state_auth_pending_auth_entry", "legendFormat": "pending_auth" },
+        { "expr": "waddle_state_auth_device_auth_entry", "legendFormat": "device_auth" },
+        { "expr": "waddle_state_auth_xmpp_auth_codes_entry", "legendFormat": "xmpp_auth_codes" },
+        { "expr": "waddle_state_auth_dynamic_oidc_clients_entry", "legendFormat": "dynamic_oidc_clients" },
+        { "expr": "waddle_state_auth_dynamic_oidc_client_locks_entry", "legendFormat": "dynamic_oidc_client_locks" }
       ],
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
     },
     {
       "type": "timeseries",
       "title": "Profile + dispatch in-flight",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "waddle_state_profile_avatar_source_locks_entry",
-          "legendFormat": "avatar_source_locks"
-        },
-        {
-          "expr": "waddle_state_profile_publish_tracker_in_flight_entry",
-          "legendFormat": "profile_publish"
-        },
-        {
-          "expr": "waddle_state_profile_provider_dispatch_in_flight_entry",
-          "legendFormat": "provider_dispatch"
-        }
+        { "expr": "waddle_state_profile_avatar_source_locks_entry", "legendFormat": "avatar_source_locks" },
+        { "expr": "waddle_state_profile_publish_tracker_in_flight_entry", "legendFormat": "profile_publish" },
+        { "expr": "waddle_state_profile_provider_dispatch_in_flight_entry", "legendFormat": "provider_dispatch" }
       ],
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
     },
     {
       "type": "timeseries",
       "title": "Sessions + caps",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "waddle_state_sessions_sm_live_sessions_entry",
-          "legendFormat": "sm_live"
-        },
-        {
-          "expr": "waddle_state_sessions_resumable_sessions_entry",
-          "legendFormat": "resumable"
-        },
-        {
-          "expr": "waddle_state_caps_caps_cache_entry",
-          "legendFormat": "caps_cache"
-        },
-        {
-          "expr": "waddle_state_caps_pending_resolutions_entry",
-          "legendFormat": "caps_pending"
-        }
+        { "expr": "waddle_state_sessions_sm_live_sessions_entry", "legendFormat": "sm_live" },
+        { "expr": "waddle_state_sessions_resumable_sessions_entry", "legendFormat": "resumable" },
+        { "expr": "waddle_state_caps_caps_cache_entry", "legendFormat": "caps_cache" },
+        { "expr": "waddle_state_caps_pending_resolutions_entry", "legendFormat": "caps_pending" }
       ],
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      }
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
     },
     {
       "type": "timeseries",
       "title": "Connections + presence",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "waddle_state_connections_full_jid_connections_entry",
-          "legendFormat": "connections"
-        },
-        {
-          "expr": "waddle_state_connections_pending_subscription_stanzas_entry",
-          "legendFormat": "pending_subs"
-        },
-        {
-          "expr": "waddle_state_connections_presence_states_entry",
-          "legendFormat": "presence_states"
-        },
-        {
-          "expr": "waddle_state_connections_last_activity_entry",
-          "legendFormat": "last_activity"
-        }
+        { "expr": "waddle_state_connections_full_jid_connections_entry", "legendFormat": "connections" },
+        { "expr": "waddle_state_connections_pending_subscription_stanzas_entry", "legendFormat": "pending_subs" },
+        { "expr": "waddle_state_connections_presence_states_entry", "legendFormat": "presence_states" },
+        { "expr": "waddle_state_connections_last_activity_entry", "legendFormat": "last_activity" }
       ],
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      }
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
     },
     {
       "type": "timeseries",
       "title": "MUC rooms (total vs dormant — reclaimable headroom)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        {
-          "expr": "waddle_state_rooms_total_entry",
-          "legendFormat": "total"
-        },
-        {
-          "expr": "waddle_state_rooms_dormant_entry",
-          "legendFormat": "dormant (will be evicted)"
-        }
+        { "expr": "waddle_state_rooms_total_entry", "legendFormat": "total" },
+        { "expr": "waddle_state_rooms_dormant_entry", "legendFormat": "dormant (will be evicted)" }
       ],
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      }
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": [
-    "waddle",
-    "memory",
-    "leak-hunt"
-  ],
+  "tags": ["waddle", "memory", "leak-hunt"],
   "templating": {
     "list": [
       {
@@ -198,18 +86,11 @@
         "type": "datasource",
         "query": "prometheus",
         "regex": "/-prom$/",
-        "current": {
-          "selected": true,
-          "text": "grafanacloud-waddlesocial-prom",
-          "value": "grafanacloud-prom"
-        }
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-prom", "value": "grafanacloud-prom" }
       }
     ]
   },
-  "time": {
-    "from": "now-6h",
-    "to": "now"
-  },
+  "time": { "from": "now-6h", "to": "now" },
   "title": "Waddle server — long-lived state inventory",
   "uid": "waddle-state-inventory",
   "version": 2
