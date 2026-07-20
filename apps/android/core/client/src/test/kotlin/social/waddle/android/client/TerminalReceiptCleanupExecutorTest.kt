@@ -35,12 +35,13 @@ class TerminalReceiptCleanupExecutorTest {
             seed(prefs, "retry-$index")
             val primary = IllegalStateException("primary-$index")
             val events = mutableListOf<XmppEvent>()
-            val attemptsBeforeWorker = store.updateAttempts.get()
+            var attemptsBeforeFirstCleanup: Int? = null
             val run = terminalRun(
                 DeliveryTerminalWorker(
                     OutboundQueue(prefs),
                     dispatchEvent = {
                         events += it
+                        attemptsBeforeFirstCleanup = store.updateAttempts.get()
                         store.failAllUpdatesWith = storageFailure
                         throw primary
                     },
@@ -52,7 +53,7 @@ class TerminalReceiptCleanupExecutorTest {
 
             runCurrent()
             val attemptsAfterFirstCleanup = store.updateAttempts.get()
-            assertTrue(attemptsAfterFirstCleanup > attemptsBeforeWorker)
+            assertEquals(requireNotNull(attemptsBeforeFirstCleanup) + 1, attemptsAfterFirstCleanup)
             advanceTimeBy(249)
             runCurrent()
             assertEquals(attemptsAfterFirstCleanup, store.updateAttempts.get())
@@ -135,6 +136,7 @@ class TerminalReceiptCleanupExecutorTest {
         val cleanup = ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as
             WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure as TerminalReceiptApplicationFailure.CleanupUnresolved
         assertEquals(6, cleanup.evidence.attempts)
+        advanceTimeBy(60_000)
         runCurrent()
         assertEquals(attempts, store.updateAttempts.get())
     }
