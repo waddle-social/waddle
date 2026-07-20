@@ -37,6 +37,13 @@ for dashboard_file in "${dashboard_files[@]}"; do
     failed=1
   fi
 
+  # The README's dashboard contract: every board carries a tags array
+  # containing "waddle" (the skeleton exemption below also reads tags).
+  if ! jq -e '.tags | type == "array" and index("waddle") != null' "${dashboard_file}" >/dev/null; then
+    echo "ERROR: ${dashboard_file}: .tags must be an array containing \"waddle\"." >&2
+    failed=1
+  fi
+
   if ! jq -e '.panels | type == "array"' "${dashboard_file}" >/dev/null; then
     echo "ERROR: ${dashboard_file}: .panels must be an array." >&2
     failed=1
