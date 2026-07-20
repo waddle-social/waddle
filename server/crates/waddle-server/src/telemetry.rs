@@ -433,11 +433,14 @@ pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ///
 /// The single home for the idiom: every failure site marks its span
 /// through this helper, keeping the "what counts as an error span"
-/// decision in one place.
-pub(crate) fn mark_span_error(description: impl std::fmt::Display) {
+/// decision in one place. The description is deliberately
+/// `&'static str`: span status is exported trace metadata, so it must
+/// be a short, stable phrase — full error text (which can embed raw
+/// row values or DSN-adjacent detail) belongs only on the adjacent
+/// log line.
+pub(crate) fn mark_span_error(description: &'static str) {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
-    tracing::Span::current()
-        .set_status(opentelemetry::trace::Status::error(description.to_string()));
+    tracing::Span::current().set_status(opentelemetry::trace::Status::error(description));
 }
 
 /// Outcome of [`flush_metrics_before_exit`], threaded explicitly from

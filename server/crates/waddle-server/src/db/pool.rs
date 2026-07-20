@@ -52,7 +52,7 @@ impl DatabasePool {
         let global_healthy = match self.global_actor.ask(DbHealthCheck).await {
             Ok(healthy) => healthy,
             Err(e) => {
-                crate::telemetry::mark_span_error(&e);
+                crate::telemetry::mark_span_error("global database health check failed");
                 tracing::warn!(error = %e, "Global DB health check failed");
                 false
             }

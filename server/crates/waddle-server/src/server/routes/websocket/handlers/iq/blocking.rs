@@ -21,7 +21,7 @@ pub(super) async fn handle_blocking_iq(
     let db = match global_database(state).await {
         Ok(db) => db,
         Err(error) => {
-            mark_span_error(&error);
+            mark_span_error("failed to access database for blocking IQ");
             warn!(error = %error, "Failed to access database for blocking IQ");
             return vec![build_iq_error_xml_typed(
                 iq.id(),
@@ -63,7 +63,7 @@ pub(super) async fn handle_blocking_iq(
                     )]
                 }
                 Err(error) => {
-                    mark_span_error(&error);
+                    mark_span_error("failed to load blocklist");
                     warn!(jid = %user_bare, error = %error, "Failed to load blocklist");
                     vec![build_iq_error_xml_typed(
                         iq.id(),
@@ -76,7 +76,7 @@ pub(super) async fn handle_blocking_iq(
         }
         waddle_xmpp::xep::xep0191::BlockingRequest::Block(jids) => {
             if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
-                mark_span_error(&error);
+                mark_span_error("failed to add blocks");
                 warn!(jid = %user_bare, error = %error, "Failed to add blocks");
                 return vec![build_iq_error_xml_typed(
                     iq.id(),
@@ -99,7 +99,7 @@ pub(super) async fn handle_blocking_iq(
                 let current = match storage.list_blocked_jid_entries(&user_bare).await {
                     Ok(current) => current,
                     Err(error) => {
-                        mark_span_error(&error);
+                        mark_span_error("failed to load blocklist before unblock-all");
                         warn!(jid = %user_bare, error = %error, "Failed to load blocklist before unblock-all");
                         return vec![build_iq_error_xml_typed(
                             iq.id(),
@@ -110,7 +110,7 @@ pub(super) async fn handle_blocking_iq(
                     }
                 };
                 if let Err(error) = storage.remove_all_blocks(&user_bare).await {
-                    mark_span_error(&error);
+                    mark_span_error("failed to remove all blocks");
                     warn!(jid = %user_bare, error = %error, "Failed to remove all blocks");
                     return vec![build_iq_error_xml_typed(
                         iq.id(),
@@ -122,7 +122,7 @@ pub(super) async fn handle_blocking_iq(
                 current
             } else {
                 if let Err(error) = storage.remove_blocks(&user_bare, &jids).await {
-                    mark_span_error(&error);
+                    mark_span_error("failed to remove blocks");
                     warn!(jid = %user_bare, error = %error, "Failed to remove blocks");
                     return vec![build_iq_error_xml_typed(
                         iq.id(),
@@ -139,7 +139,6 @@ pub(super) async fn handle_blocking_iq(
                 match storage.list_blocked_jid_entries(&user_bare).await {
                     Ok(entries) => Some(waddle_xmpp::protocol::Blocklist::new(entries)),
                     Err(error) => {
-                        mark_span_error(&error);
                         warn!(jid = %user_bare, error = %error, "Failed to load blocklist after unblock for presence side effects");
                         None
                     }
@@ -186,7 +185,6 @@ pub(super) async fn handle_blocking_iq(
                 sm.set_blocklist(waddle_xmpp::protocol::Blocklist::new(jids));
             }
             Err(error) => {
-                mark_span_error(&error);
                 warn!(
                     jid = %user_bare,
                     %error,
@@ -231,6 +229,11 @@ async fn mirror_remote_blocklist_interest(
 ) {
 }
 
+// Best-effort like `send_blocking_pushes` below: by the time this runs the
+// Block/Unblock storage mutation has already succeeded and the client gets an
+// IQ result, so failures here degrade presence fanout with a warn but never
+// mark the dispatch span — `status=error` stays reserved for operations whose
+// outcome actually failed (#1428).
 async fn send_blocking_presence_side_effects(
     state: &WebSocketState,
     user_bare: &BareJid,
@@ -249,7 +252,6 @@ async fn send_blocking_presence_side_effects(
     let storage = match roster_storage_for_state(state).await {
         Ok(storage) => storage,
         Err(error) => {
-            mark_span_error(&error);
             warn!(jid = %user_bare, error = %error, "Failed to access roster storage for XEP-0191 presence side effects");
             return;
         }
@@ -257,7 +259,6 @@ async fn send_blocking_presence_side_effects(
     let subscribers = match storage.get_presence_subscribers(user_bare).await {
         Ok(subscribers) => subscribers,
         Err(error) => {
-            mark_span_error(&error);
             warn!(jid = %user_bare, error = %error, "Failed to load presence subscribers for XEP-0191 presence side effects");
             return;
         }

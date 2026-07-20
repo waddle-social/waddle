@@ -306,7 +306,7 @@ impl Database {
         match conn.query("SELECT 1", ()).await {
             Ok(_) => Ok(true),
             Err(e) => {
-                crate::telemetry::mark_span_error(&e);
+                crate::telemetry::mark_span_error("database health check failed");
                 tracing::warn!(error = %e, "Database health check failed");
                 Ok(false)
             }

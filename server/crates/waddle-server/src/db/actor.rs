@@ -9,8 +9,8 @@ use sqlx::query;
 use super::{Database, DatabaseError};
 
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
-    if let Err(error) = &result {
-        crate::telemetry::mark_span_error(error);
+    if result.is_err() {
+        crate::telemetry::mark_span_error("database actor operation failed");
     }
     result
 }
