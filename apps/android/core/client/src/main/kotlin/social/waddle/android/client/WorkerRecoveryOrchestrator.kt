@@ -65,7 +65,7 @@ internal class WorkerRecoveryOrchestrator(
                 return WorkerRecoveryOutcome.TerminalReceiptCleanupFailed(lifecycle, claim, receiptCleanup.evidence)
             }
             if (!state.awaitLeases()) {
-                return WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, state.pendingLeaseCount())
+                return WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, claim, state.pendingLeaseCount())
             }
             if (!state.ownsClaim(claim, workers)) {
                 return WorkerRecoveryOutcome.OwnershipMismatch(lifecycle, state.currentLifecycle())

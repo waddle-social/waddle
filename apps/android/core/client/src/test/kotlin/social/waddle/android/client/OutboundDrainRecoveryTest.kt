@@ -83,10 +83,10 @@ class OutboundDrainRecoveryTest {
 
         advanceTimeBy(TEST_TIMEOUT_MILLIS + 1)
         runCurrent()
-        assertEquals(
-            WorkerRecoveryOutcome.RetainedOperationsPending(lifecycle, 1),
-            recovery.await(),
-        )
+        val retained = recovery.await() as WorkerRecoveryOutcome.RetainedOperationsPending
+        assertEquals(lifecycle, retained.lifecycle)
+        assertEquals(1, retained.count)
+        assertEquals(cause.fence, retained.claim.fence)
         requireLifecycleRelease(
             coordinator.releaseAdmission(held),
             held.capability,

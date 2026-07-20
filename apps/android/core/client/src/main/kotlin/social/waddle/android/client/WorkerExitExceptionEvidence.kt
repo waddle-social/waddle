@@ -40,7 +40,7 @@ internal object WorkerExitExceptionEvidence : WorkerExitEvidence {
         WorkerRecoveryOutcome.Recovered,
         WorkerRecoveryOutcome.NotFenced,
         is WorkerRecoveryOutcome.OwnershipMismatch,
-        is WorkerRecoveryOutcome.RetainedOperationsPending,
         -> null
+        is WorkerRecoveryOutcome.RetainedOperationsPending -> outcome.claim.fence.exit.ownership()
     }
 }

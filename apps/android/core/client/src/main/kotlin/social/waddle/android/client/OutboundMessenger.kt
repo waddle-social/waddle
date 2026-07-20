@@ -43,6 +43,7 @@ internal class OutboundMessenger(
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
     private val workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+    outboundDrain: (suspend (SessionLifecycleRef, ConnectionAttemptHandle, DeliveryAttemptRef) -> Unit)? = null,
     private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
@@ -52,7 +53,7 @@ internal class OutboundMessenger(
         journal = journal,
         resume = resume,
         dispatchEvent = dispatchEvent,
-        drain = ::drainOutboundQueue,
+        drain = outboundDrain ?: ::drainOutboundQueue,
         transitionTimeoutMillis = transitionTimeoutMillis,
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
@@ -132,6 +133,9 @@ internal class OutboundMessenger(
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) {
         lifecycle.awaitStartupTerminalDrain(ownerBareJid)
     }
+
+    internal fun signalDrain(attempt: DeliveryAttemptRef): DrainSignalOutcome =
+        lifecycle.signalDrain(attempt)
 
     /**
      * One manager-level send. [expectedOwnerBareJid] is required by

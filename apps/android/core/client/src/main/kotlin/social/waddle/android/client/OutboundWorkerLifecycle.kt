@@ -41,7 +41,7 @@ internal sealed interface WorkerRecoveryOutcome {
     data class OwnershipMismatch(val requested: SessionLifecycleRef, val actual: SessionLifecycleRef?) : WorkerRecoveryOutcome
     data class WorkerFenced(val lifecycle: SessionLifecycleRef, val cause: LifecycleFenceCause) : WorkerRecoveryOutcome
     data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryOutcome
-    data class RetainedOperationsPending(val lifecycle: SessionLifecycleRef, val count: Int) : WorkerRecoveryOutcome
+    data class RetainedOperationsPending(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val count: Int) : WorkerRecoveryOutcome
     data class WorkerExitPending(val lifecycle: SessionLifecycleRef, val ownership: WorkerOwnership) : WorkerRecoveryOutcome
     data class DurableCleanupPending(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val component: LifecyclePendingComponent, val count: Int, val operation: DurableCleanupOperation, val attempt: DeliveryAttemptRef?) : WorkerRecoveryOutcome
     data class DurableCleanupFailed(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val component: LifecyclePendingComponent, val count: Int, val operation: DurableCleanupOperation, val cause: DurableCleanupFailureCause, val attempt: DeliveryAttemptRef?) : WorkerRecoveryOutcome

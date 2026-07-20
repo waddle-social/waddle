@@ -92,7 +92,7 @@ internal class OutboundLifecycleCoordinator(
 
             override suspend fun awaitLeases(): Boolean = awaitLeaseDrain()
 
-            override suspend fun pendingLeaseCount(): Int = pendingLeaseCount()
+            override suspend fun pendingLeaseCount(): Int = this@OutboundLifecycleCoordinator.pendingLeaseCount()
 
             override suspend fun complete(
                 claim: WorkerRecoveryClaim,
