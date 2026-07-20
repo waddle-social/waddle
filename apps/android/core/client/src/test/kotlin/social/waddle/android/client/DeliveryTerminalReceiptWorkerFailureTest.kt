@@ -1,10 +1,12 @@
 package social.waddle.android.client
 
+import java.io.IOException
 import java.util.UUID
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -40,6 +42,7 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
+import kotlinx.serialization.SerializationException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DeliveryTerminalReceiptWorkerFailureTest {
@@ -180,5 +183,114 @@ class DeliveryTerminalReceiptWorkerFailureTest {
         }
     }
 
-}
+    @Test
+    fun `release cleanup exhausts every persistence category with the primary preserved`() = runTest {
+        val cases = listOf(
+            IOException("cleanup io") to TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+            SerializationException("cleanup codec") to TerminalReceiptCleanupFailureCategory.CODEC_FAILURE,
+            IllegalArgumentException("cleanup runtime") to TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE,
+            CancellationException("cleanup cancellation") to TerminalReceiptCleanupFailureCategory.CANCELLATION,
+            AssertionError("cleanup error") to TerminalReceiptCleanupFailureCategory.ERROR_FAILURE,
+        )
 
+        cases.forEachIndexed { index, (storageFailure, category) ->
+            val store = FailingPreferencesDataStore()
+            val prefs = SessionPrefs(store)
+            val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "cleanup-$index")
+            prefs.updateDeliveryJournal { journal ->
+                DeliveryJournalMutation(
+                    journal.copy(
+                        activeOwnerBareJid = TERMINAL_WORKER_OWNER,
+                        owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    ),
+                    Unit,
+                )
+            }
+            val primary = IllegalStateException("dispatch primary $index")
+            var observed: Throwable? = null
+            val logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
+            val handler = object : Handler() {
+                override fun publish(record: LogRecord) {
+                    if (record.thrown === primary) observed = record.thrown
+                }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            logger.addHandler(handler)
+            try {
+                val run = terminalRun(
+                    DeliveryTerminalWorker(
+                        journal = OutboundQueue(prefs),
+                        dispatchEvent = {
+                            store.failAllUpdatesWith = storageFailure
+                            throw primary
+                        },
+                        processEpoch = ProcessEpoch(terminalWorkerUuid("cleanup-process-$index")),
+                    ),
+                    this,
+                )
+                advanceTimeBy(8_750)
+                runCurrent()
+
+                val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+                val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
+                    as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+                val evidence = (workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved).evidence
+                assertEquals(6, evidence.attempts)
+                assertEquals(category, (evidence.reason as TerminalReceiptCleanupReason.Persistence).category)
+                assertTrue(observed === primary)
+                assertEquals(1, primary.suppressed.size)
+                val cleanup = primary.suppressed.single() as TerminalReceiptCleanupException
+                assertEquals(evidence, cleanup.evidence)
+                assertTrue(cleanup.cause === storageFailure)
+                val pending = prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state
+                    as TerminalReceiptState.Pending
+                assertTrue(pending.claim is TerminalReceiptClaimState.Claimed)
+            } finally {
+                logger.removeHandler(handler)
+            }
+        }
+    }
+
+    @Test
+    fun `release cleanup retry success preserves the dispatch failure without redispatch`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
+        val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "cleanup-retry")
+        prefs.updateDeliveryJournal { journal ->
+            DeliveryJournalMutation(
+                journal.copy(
+                    activeOwnerBareJid = TERMINAL_WORKER_OWNER,
+                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                ),
+                Unit,
+            )
+        }
+        val primary = IllegalStateException("dispatch primary")
+        val events = mutableListOf<XmppEvent>()
+        val run = terminalRun(
+            DeliveryTerminalWorker(
+                journal = OutboundQueue(prefs),
+                dispatchEvent = {
+                    events += it
+                    store.failNextUpdate = true
+                    throw primary
+                },
+                processEpoch = ProcessEpoch(terminalWorkerUuid("cleanup-retry-process")),
+            ),
+            this,
+        )
+
+        advanceTimeBy(250)
+        runCurrent()
+        val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+        assertEquals(WorkerFailureKind.DEPENDENCY_FAILURE, (exit.reason as WorkerExitReason.UnexpectedFailure).kind)
+        assertTrue(primary.suppressed.isEmpty())
+        assertEquals(1, events.size)
+        assertTrue(
+            (prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as
+                TerminalReceiptState.Pending).claim is TerminalReceiptClaimState.Unclaimed,
+        )
+    }
+
+}

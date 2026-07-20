@@ -5,6 +5,7 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -360,6 +361,60 @@ class DeliveryTerminalReceiptApplicationTest {
         assertEquals(2, replayed.filterIsInstance<XmppEvent.DeliveryAcked>().size)
         assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(second)
+    }
+
+    @Test
+    fun `post commit release cancellation preserves the original cancellation and exact retry is idempotent`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
+        val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "release-cancel", effectCount = 2)
+        prefs.updateDeliveryJournal { journal ->
+            DeliveryJournalMutation(
+                journal.copy(
+                    activeOwnerBareJid = TERMINAL_WORKER_OWNER,
+                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                ),
+                Unit,
+            )
+        }
+        val cancellation = CancellationException("release committed then cancelled")
+        val events = mutableListOf<XmppEvent>()
+        val first = terminalRun(
+            DeliveryTerminalWorker(
+                journal = OutboundQueue(prefs),
+                dispatchEvent = {
+                    events += it
+                    store.afterCommitReturns = {
+                        store.afterCommitReturns = null
+                        throw cancellation
+                    }
+                    throw cancellation
+                },
+                processEpoch = ProcessEpoch(terminalWorkerUuid("release-cancel-process")),
+            ),
+            this,
+        )
+
+        advanceTimeBy(250)
+        runCurrent()
+        val exit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+        assertEquals(WorkerExitReason.OwnerScopeCancelled, exit.reason)
+        assertTrue(
+            WorkerExitExceptionEvidence.lookup(
+                WorkerRecoveryOutcome.WorkerExitPending(first.ownership.lifecycle, first.ownership),
+            ) === cancellation,
+        )
+        assertEquals(1, events.size)
+        val pending = prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state
+            as TerminalReceiptState.Pending
+        assertEquals(TerminalReceiptClaimState.Unclaimed, pending.claim)
+        val durableReceipt = prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt!!
+        val lease = TerminalReceiptLease(
+            TerminalReceiptRef(durableReceipt.owner, durableReceipt.attempt, durableReceipt.id),
+            requireNotNull(pending.releasedClaim),
+        )
+        assertTrue(prefs.releaseTerminalReceipt(lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+        WorkerExitExceptionEvidence.discard(first.ownership)
     }
 
     @Test

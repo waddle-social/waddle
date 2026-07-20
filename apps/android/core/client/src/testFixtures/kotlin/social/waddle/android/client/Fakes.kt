@@ -82,6 +82,10 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
     @Volatile
     var failAllUpdates: Boolean = false
 
+    /** Exact failure reused by each update while set; used for cleanup classification tests. */
+    @Volatile
+    var failAllUpdatesWith: Throwable? = null
+
     /**
      * Runs after the transformed value is committed. Tests use a deferred
      * pair to observe durable commit and hold the writer without sleeps.
@@ -126,6 +130,7 @@ class FailingPreferencesDataStore : DataStore<Preferences> {
     override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
         val (updated, afterCommit, oneShotAfterCommit) = mutex.withLock {
             updateAttempts.incrementAndGet()
+            failAllUpdatesWith?.let { throw it }
             if (failAllUpdates || failNextUpdate) {
                 failNextUpdate = false
                 throw IOException("injected preferences write failure")
