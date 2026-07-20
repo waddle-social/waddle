@@ -41,6 +41,7 @@ internal class OutboundMessenger(
     phaseObserver: OutboundLifecyclePhaseObserver =
         OutboundLifecyclePhaseObserver.NONE,
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
+    workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
     private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
@@ -54,6 +55,7 @@ internal class OutboundMessenger(
         transitionTimeoutMillis = transitionTimeoutMillis,
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
+        workerStartHooks = workerStartHooks,
     )
 
     suspend fun start(

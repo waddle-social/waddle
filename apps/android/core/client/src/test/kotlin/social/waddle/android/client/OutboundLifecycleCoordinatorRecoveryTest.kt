@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -83,6 +84,44 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         assertNotEquals(failed.lifecycle, replacement)
         fixture.stop(replacement)
     }
+
+    @Test
+    fun `B startup seams compensate ordinary failure cancellation and error`() = runTest {
+        listOf(false, true).forEach { afterTerminal ->
+            val exception = IllegalStateException("startup exception $afterTerminal")
+            val failed = coordinatorFixture(
+                workerStartHooks = failingStartHooks(afterTerminal, exception),
+            ).messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+            assertEquals(
+                LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED,
+                failed.cause,
+            )
+
+            val cancellation = CancellationException("startup cancellation $afterTerminal")
+            val cancelled = coordinatorFixture(
+                workerStartHooks = failingStartHooks(afterTerminal, cancellation),
+            ).messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+            assertEquals(LifecycleStartFailure.CANCELLED, cancelled.cause)
+
+            val error = AssertionError("startup error $afterTerminal")
+            val thrown = runCatching {
+                coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, error))
+                    .messenger.start(backgroundScope, COORDINATOR_OWNER)
+            }.exceptionOrNull()
+            assertTrue(thrown === error)
+        }
+    }
+
+    private fun failingStartHooks(afterTerminal: Boolean, failure: Throwable): WorkerStartHooks =
+        object : WorkerStartHooks {
+            override suspend fun beforeTerminal() {
+                if (!afterTerminal) throw failure
+            }
+
+            override suspend fun afterTerminal() {
+                if (afterTerminal) throw failure
+            }
+        }
 
     @Test
     fun `F2 owner scope cancellation while shutdown is outside gate preserves worker fence`() = runTest {

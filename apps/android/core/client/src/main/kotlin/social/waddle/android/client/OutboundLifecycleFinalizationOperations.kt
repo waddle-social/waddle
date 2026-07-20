@@ -32,6 +32,16 @@ internal sealed interface OwnerFinalizationResult {
     ) : OwnerFinalizationResult
 }
 
+internal interface WorkerStartHooks {
+    suspend fun beforeTerminal()
+    suspend fun afterTerminal()
+
+    data object None : WorkerStartHooks {
+        override suspend fun beforeTerminal() = Unit
+        override suspend fun afterTerminal() = Unit
+    }
+}
+
 internal sealed interface DurableCleanupBoundary<out T> {
     data class Completed<T>(val value: T) : DurableCleanupBoundary<T>
 
@@ -102,6 +112,7 @@ internal class OutboundLifecycleFinalizationOperations(
     private val transitionTimeoutMillis: Long,
     private val durableRecoveryCleanup: DurableRecoveryCleanup =
         ProductionDurableRecoveryCleanup(journal, resume, activeSession),
+    private val workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
 ) {
     suspend fun startWorkers(
         scope: CoroutineScope,
@@ -112,12 +123,14 @@ internal class OutboundLifecycleFinalizationOperations(
         var terminal: DeliveryTerminalWorker.Run? = null
         var installed = false
         try {
+            workerStartHooks.beforeTerminal()
             terminal = terminalWorker.start(
                 scope,
                 workers.terminalOwnership,
                 onReady,
                 onExit,
             )
+            workerStartHooks.afterTerminal()
             val drain = drainWorker.start(
                 scope,
                 workers.drainOwnership,
@@ -129,8 +142,10 @@ internal class OutboundLifecycleFinalizationOperations(
             return workers
         } finally {
             if (!installed) {
-                terminal?.requestStop()
-                terminal?.awaitExit(transitionTimeoutMillis)
+                withContext(NonCancellable) {
+                    terminal?.requestStop()
+                    terminal?.awaitExit(transitionTimeoutMillis)
+                }
             }
         }
     }

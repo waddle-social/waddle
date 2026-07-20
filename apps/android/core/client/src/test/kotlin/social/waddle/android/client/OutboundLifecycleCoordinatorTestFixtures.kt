@@ -41,6 +41,7 @@ internal suspend fun TestScope.coordinatorFixture(
     phaseObserver: OutboundLifecyclePhaseObserver =
         OutboundLifecyclePhaseObserver.NONE,
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
+    workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
     admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ): CoordinatorFixture {
@@ -61,6 +62,7 @@ internal suspend fun TestScope.coordinatorFixture(
         transitionTimeoutMillis = transitionTimeoutMillis,
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
+        workerStartHooks = workerStartHooks,
         admissionReleaseOperations = admissionReleaseOperations,
     )
     return CoordinatorFixture(

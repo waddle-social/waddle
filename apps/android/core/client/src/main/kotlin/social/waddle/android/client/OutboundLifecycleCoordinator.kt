@@ -39,6 +39,7 @@ internal class OutboundLifecycleCoordinator(
         OutboundLifecyclePhaseObserver.NONE,
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     durableRecoveryCleanup: DurableRecoveryCleanup? = null,
+    workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
 ) {
     private val gate = Mutex()
     private val drainWorker = OutboundDrainWorker(drain)
@@ -57,6 +58,7 @@ internal class OutboundLifecycleCoordinator(
         terminalWorker,
         transitionTimeoutMillis,
         durableRecoveryCleanup ?: ProductionDurableRecoveryCleanup(journal, resume, activeSession),
+        workerStartHooks,
     )
     private val ownerFinalizer = ownerFinalizer ?: finalizationOperations::finalizeOwner
     private val recoveryOrchestrator = WorkerRecoveryOrchestrator(
