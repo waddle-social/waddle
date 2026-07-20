@@ -225,7 +225,7 @@ schema.#Project & {
 					set -euo pipefail
 					./scripts/validate-dashboards.sh
 				"""#]
-			inputs: ["dashboards/**", "env.cue"]
+			inputs: ["dashboards/**", "scripts/validate-dashboards.sh", "env.cue"]
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push
 		// only). Sync is authoritative within the `waddle` namespace;
@@ -329,6 +329,9 @@ schema.#Project & {
 					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
 					  | jq -r --arg folder_uid "${folder_uid}" \
 					      '.[] | select(.folderUid == $folder_uid) | .uid')"
+					# validate-dashboards.sh enforces this charset for every
+					# repo-owned uid, so this skip can only fire for dashboards
+					# created outside this pipeline.
 					for remote_uid in ${remote_uids}; do
 					  if [[ ! "${remote_uid}" =~ ^[A-Za-z0-9_-]+$ ]]; then
 					    echo "Skipping prune of dashboard with unexpected uid ${remote_uid@Q} (not URL-safe)." >&2
