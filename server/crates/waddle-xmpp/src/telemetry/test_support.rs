@@ -37,9 +37,21 @@ use tracing_subscriber::prelude::*;
 /// span exporter.
 ///
 /// Keep the returned guard alive across the operation under test. Async tests
-/// must use Tokio's current-thread flavor because tracing's default subscriber
-/// guard is thread-local.
+/// must use Tokio's current-thread flavor (`#[tokio::test]`'s default; pin it
+/// with `flavor = "current_thread"`) because tracing's default subscriber
+/// guard is thread-local — a multi-thread runtime is rejected here rather
+/// than silently exporting nothing from worker threads.
 pub fn acquire_spans() -> SpanTestGuard {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        assert_eq!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread,
+            "acquire_spans() requires Tokio's current-thread runtime: the \
+             subscriber installed by tracing::subscriber::set_default is \
+             thread-local, so spans recorded on worker threads would bypass \
+             the in-memory exporter. Use #[tokio::test(flavor = \"current_thread\")].",
+        );
+    }
     let exporter = InMemorySpanExporterBuilder::new().build();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())

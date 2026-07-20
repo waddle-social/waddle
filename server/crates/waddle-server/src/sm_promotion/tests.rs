@@ -855,7 +855,7 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn storage_failure_exports_error_promotion_span() {
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
@@ -889,7 +889,7 @@ async fn storage_failure_exports_error_promotion_span() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn successful_promotion_exports_unset_promotion_span() {
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let storage: Arc<dyn PendingDeliveryStorage> =

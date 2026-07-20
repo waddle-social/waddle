@@ -79,22 +79,37 @@ pub fn meter() -> opentelemetry::metrics::Meter {
 /// Force-flush a meter provider without blocking the async runtime or
 /// waiting longer than `timeout` for the SDK's synchronous flush.
 ///
-/// Returns `true` only when the provider reports a successful flush.
+/// Returns `true` only when the provider reports a successful flush
+/// within `timeout`. The SDK flush is synchronous and offers no
+/// cancellation, so on timeout it is abandoned on its own thread
+/// rather than stopped: it runs on a dedicated detached thread — not
+/// the runtime's bounded blocking pool — so an abandoned flush strands
+/// only that thread (reaped at process exit) instead of pinning a
+/// `spawn_blocking` slot for the rest of the process.
 pub async fn force_flush_bounded(
     provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
     timeout: std::time::Duration,
 ) -> bool {
     let provider = provider.clone();
-    let flush = tokio::task::spawn_blocking(move || provider.force_flush());
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("otel-metrics-flush".to_owned())
+        .spawn(move || {
+            let _ = result_tx.send(provider.force_flush());
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "Failed to spawn OpenTelemetry metrics flush thread");
+        return false;
+    }
 
-    match tokio::time::timeout(timeout, flush).await {
+    match tokio::time::timeout(timeout, result_rx).await {
         Ok(Ok(Ok(()))) => true,
         Ok(Ok(Err(error))) => {
             tracing::warn!(%error, "Failed to force-flush OpenTelemetry metrics");
             false
         }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "OpenTelemetry metrics flush task failed");
+        Ok(Err(_dropped)) => {
+            tracing::warn!("OpenTelemetry metrics flush thread exited without reporting");
             false
         }
         Err(error) => {

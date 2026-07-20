@@ -265,9 +265,11 @@ fn build_log_filter() -> EnvFilter {
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     telemetry::init()?;
 ///
-///     // Your application code here...
+///     // Your application code here, ending in a graceful drain that
+///     // reports its pre-exit metrics flush outcome...
+///     let metrics_flush = telemetry::flush_metrics_before_exit().await;
 ///
-///     telemetry::shutdown();
+///     telemetry::shutdown(metrics_flush);
 ///     Ok(())
 /// }
 /// ```
@@ -438,33 +440,44 @@ pub(crate) fn mark_span_error(description: impl std::fmt::Display) {
         .set_status(opentelemetry::trace::Status::error(description.to_string()));
 }
 
-/// Set when the pre-exit metrics flush failed or timed out, so
-/// [`shutdown`] skips the meter provider instead of burning another
-/// bounded wait on the same stalled exporter (the abandoned
-/// `spawn_blocking` flush may also still hold the reader's worker).
-static METRICS_FLUSH_FAILED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Outcome of [`flush_metrics_before_exit`], threaded explicitly from
+/// the drain path back through `main` into [`shutdown`] so the
+/// "skip the stalled meter provider" decision travels as a value
+/// instead of hiding in shared mutable state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "pass this to telemetry::shutdown so it can skip a stalled meter provider"]
+pub enum MetricsFlush {
+    /// The pre-exit flush succeeded, or there was no meter provider to
+    /// flush (local telemetry).
+    Completed,
+    /// The pre-exit flush failed or timed out; the exporter may still
+    /// be stalled (the abandoned flush thread can also still hold the
+    /// reader's worker).
+    Failed,
+}
 
 /// Flush metrics recorded during graceful drain before control returns to `main`.
 ///
-/// Local telemetry has no meter provider, so this is a no-op when [`init_local`]
-/// was used.
-pub async fn flush_metrics_before_exit() {
+/// Local telemetry has no meter provider, so this reports
+/// [`MetricsFlush::Completed`] without flushing when [`init_local`] was used.
+pub async fn flush_metrics_before_exit() -> MetricsFlush {
     let Some(provider) = METER_PROVIDER.get() else {
-        return;
+        return MetricsFlush::Completed;
     };
 
-    let flushed =
-        waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await;
-    if !flushed {
-        METRICS_FLUSH_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    if waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await {
+        MetricsFlush::Completed
+    } else {
+        MetricsFlush::Failed
     }
 }
 
 /// Shutdown telemetry, flushing any pending spans and metrics.
 ///
-/// Call this before application exit to ensure all telemetry data is sent.
-pub fn shutdown() {
+/// Call this before application exit to ensure all telemetry data is
+/// sent, passing the [`flush_metrics_before_exit`] outcome from the
+/// drain path.
+pub fn shutdown(metrics_flush: MetricsFlush) {
     tracing::info!("Shutting down telemetry...");
 
     // Shutdown tracer provider
@@ -478,7 +491,7 @@ pub fn shutdown() {
     // failed against a stalled exporter, in which case another export
     // attempt can only delay exit (the SDK bounds it at ~5s) without
     // ever succeeding.
-    if METRICS_FLUSH_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+    if metrics_flush == MetricsFlush::Failed {
         tracing::warn!("Skipping meter provider shutdown: pre-exit flush already failed");
     } else if let Some(provider) = METER_PROVIDER.get() {
         if let Err(e) = provider.shutdown() {

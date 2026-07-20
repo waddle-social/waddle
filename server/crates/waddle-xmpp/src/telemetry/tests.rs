@@ -230,7 +230,7 @@ fn prometheus_total_suffix_is_rejected() {
     let _ = validate_metric_name("waddle.messages_total");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn warn_events_leave_span_status_unset_error_events_mark_it() {
     // The production bridge maps ERROR-level events to span status
     // (#1428). Benign outcomes are logged at warn or below, so this
