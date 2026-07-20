@@ -38,7 +38,7 @@ import java.io.IOException
 class OutboundLifecycleStateStoreLifecycleTest {
     @Test
     fun `concurrent disconnect callers share one generation operation`() = runTest {
-        val fixture = coordinatorFixture()
+        val fixture = stateStoreFixture()
         val lifecycle = fixture.start()
         val activation = fixture.messenger.activateAttempt(lifecycle)
         val client = FakeWaddleClient()
@@ -84,7 +84,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
 
     @Test
     fun `same owner old lifecycle cannot stop replacement lifecycle`() = runTest {
-        val fixture = coordinatorFixture()
+        val fixture = stateStoreFixture()
         val predecessor = fixture.start()
         fixture.stop(predecessor)
 
@@ -99,7 +99,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
         )
 
         val admitted = fixture.messenger.sendOrEnqueue(
-            conversationJid = COORDINATOR_PEER,
+            conversationJid = STATE_STORE_PEER,
             isGroupchat = false,
             body = "replacement remains authoritative",
         )
@@ -120,7 +120,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
         )
         phases.forEach { target ->
             val reached = CompletableDeferred<Unit>()
-            val fixture = coordinatorFixture(
+            val fixture = stateStoreFixture(
                 phaseObserver = OutboundLifecyclePhaseObserver { phase ->
                     if (phase == target) {
                         reached.complete(Unit)
@@ -136,7 +136,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
             assertTrue("phase $target was not observed", reached.isCompleted)
             activation.cancelAndJoin()
             runCurrent()
-            assertNull(fixture.queue.activeAttempt(COORDINATOR_OWNER))
+            assertNull(fixture.queue.activeAttempt(STATE_STORE_OWNER))
             assertNull(fixture.activeSession.attemptRef)
             fixture.stop(lifecycle)
         }
@@ -145,7 +145,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
     @Test
     fun `I rotation cancellation after journal commit releases its exact lease`() = runTest {
         val committed = CompletableDeferred<Unit>()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
                 if (phase == OutboundLifecyclePhase.ROTATION_JOURNALED) {
                     committed.complete(Unit)
@@ -175,7 +175,7 @@ class OutboundLifecycleStateStoreLifecycleTest {
         rotation.cancelAndJoin()
         runCurrent()
 
-        assertNull(fixture.queue.activeAttempt(COORDINATOR_OWNER))
+        assertNull(fixture.queue.activeAttempt(STATE_STORE_OWNER))
         assertNull(fixture.activeSession.attemptRef)
         assertEquals(
             AttemptCloseOutcome.OwnedBySessionShutdown,

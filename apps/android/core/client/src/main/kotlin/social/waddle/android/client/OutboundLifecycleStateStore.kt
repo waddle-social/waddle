@@ -43,6 +43,8 @@ internal class OutboundLifecycleStateStore(
     private val workerExitEvidence: WorkerExitEvidence,
 ) {
     private val gate = Mutex()
+    private val drainCriticalMutex = Mutex()
+    private var activeDrainCriticalLease: DrainCriticalSectionLease? = null
     private val drainWorker = OutboundDrainWorker(workerExitEvidence, drain)
     private val terminalWorker = DeliveryTerminalWorker(journal, dispatchEvent, evidence = workerExitEvidence)
     private val phaseOperations = OutboundLifecyclePhaseOperations(
@@ -64,6 +66,18 @@ internal class OutboundLifecycleStateStore(
     private val ownerFinalizer = ownerFinalizer ?: finalizationOperations::finalizeOwner
     internal suspend fun currentLifecycle(): SessionLifecycleRef? =
         gate.withLock { state.lifecycleOrNull() }
+
+    internal suspend fun acquireDrainCriticalSection(): DrainCriticalSectionLease {
+        drainCriticalMutex.lock()
+        check(activeDrainCriticalLease == null) { "drain critical section already has a lease" }
+        return DrainCriticalSectionLease.issue().also { activeDrainCriticalLease = it }
+    }
+
+    internal fun releaseDrainCriticalSection(lease: DrainCriticalSectionLease) {
+        check(activeDrainCriticalLease === lease) { "drain critical section lease is not owned" }
+        activeDrainCriticalLease = null
+        drainCriticalMutex.unlock()
+    }
 
     internal suspend fun decideSiblingStop(
         claim: WorkerRecoveryClaim,

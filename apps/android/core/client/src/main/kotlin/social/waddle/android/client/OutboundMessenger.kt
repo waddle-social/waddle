@@ -2,19 +2,13 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
-import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliverySource
+import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryTerminalKind
-import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.QueuedOutboundContent
-import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
-import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.QueuedOutboundReply
 import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.QueuedOutboundThread
@@ -47,7 +41,8 @@ internal class OutboundMessenger(
     private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
-    private val drainMutex = Mutex()
+    private val sendService = OutboundSendService(journal, stores.timelineStore)
+    private val drainService = OutboundDrainService(journal, sendService)
     private val lifecycle = OutboundLifecycleStateStore(
         activeSession = activeSession,
         journal = journal,
@@ -164,16 +159,57 @@ internal class OutboundMessenger(
         }
         var primary: Throwable? = null
         try {
-            val draft = queuedMessage(
-                owner = lease.lifecycle.ownerBareJid,
+            val request = OutboundSendRequest(
+                target = QueuedOutboundTarget.from(conversationJid, isGroupchat),
+                content = queuedContent(body, extras),
                 source = source,
-                payload = queuedPayload(conversationJid, isGroupchat, body, extras),
             )
             return when (lease) {
-                is OutboundAdmissionLease.OfflineOutbound ->
-                    enqueueOffline(draft)
-                is OutboundAdmissionLease.LiveOutbound ->
-                    sendLive(draft, lease)
+                is OutboundAdmissionLease.OfflineOutbound -> when (
+                    val disposition = sendService.send(
+                        request,
+                        OutboundSendAdmission.Offline(DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid)),
+                    )
+                ) {
+                    is OutboundSendDisposition.Completed -> disposition.result
+                    is OutboundSendDisposition.Queued,
+                    is OutboundSendDisposition.TerminalRequired,
+                    -> error("offline admission cannot produce $disposition")
+                }
+                is OutboundAdmissionLease.LiveOutbound -> when (
+                    val disposition = sendService.send(
+                        request,
+                        OutboundSendAdmission.Live(
+                            owner = DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid),
+                            attempt = lease.attempt,
+                            client = lease.client,
+                        ),
+                    )
+                ) {
+                    is OutboundSendDisposition.Completed -> disposition.result
+                    is OutboundSendDisposition.Queued -> {
+                        lifecycle.signalDrain(lease.attempt)
+                        disposition.result
+                    }
+                    is OutboundSendDisposition.TerminalRequired -> {
+                        requireTerminalCommitted(
+                            lifecycle.submitTerminal(
+                                disposition.row.ownerBareJid,
+                                disposition.row.clientStanzaId,
+                                disposition.ownership.attempt,
+                                DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                            ),
+                        )
+                        drainDeliveryJournal()
+                        SendResult(
+                            if (disposition.wireOutcome is WaddleSendMessageOutcome.Sent) {
+                                WaddleSendMessageOutcome.Error
+                            } else {
+                                disposition.wireOutcome
+                            },
+                        )
+                    }
+                }
                 is OutboundAdmissionLease.Terminal ->
                     error("terminal lease cannot admit outbound messages")
             }
@@ -194,77 +230,10 @@ internal class OutboundMessenger(
         }
     }
 
-    private suspend fun enqueueOffline(
-        draft: QueuedOutboundDraft,
-    ): SendResult {
-        val enqueue = persistQueueMutation {
-            journal.enqueueReady(draft)
-        } ?: return SendResult(WaddleSendMessageOutcome.Error)
-        val stored = when (enqueue) {
-            is EnqueueResult.Stored -> enqueue.row
-            is EnqueueResult.Conflict,
-            EnqueueResult.CapacityExhausted,
-            EnqueueResult.StaleAttempt,
-            -> return SendResult(WaddleSendMessageOutcome.Error)
-        }
-        return SendResult(
-            outcome = WaddleSendMessageOutcome.NotConnected,
-            delivery = DeliveryOutcomeRef(stored.identity, stored.source),
-        )
-    }
-
-    private suspend fun sendLive(
-        draft: QueuedOutboundDraft,
-        lease: OutboundAdmissionLease.LiveOutbound,
-    ): SendResult {
-        val admission = persistQueueMutation {
-            journal.enqueueAndClaimAbsoluteHead(draft, lease.attempt)
-        } ?: return SendResult(WaddleSendMessageOutcome.Error)
-        return when (admission) {
-            is LiveAdmissionResult.Claimed -> {
-                val stored = admission.row
-                val ownership = stored.ownership as? OutboundOwnership.NativeOwned
-                    ?: return SendResult(WaddleSendMessageOutcome.Error)
-                val outcome = sendMessage(stored, lease.client)
-                reconcileInitialOutcome(stored, ownership, outcome)
-            }
-            is LiveAdmissionResult.Queued -> {
-                lifecycle.signalDrain(lease.attempt)
-                SendResult(
-                    outcome = WaddleSendMessageOutcome.NotConnected,
-                    delivery = DeliveryOutcomeRef(
-                        admission.row.identity,
-                        admission.row.source,
-                    ),
-                )
-            }
-            is LiveAdmissionResult.Conflict,
-            LiveAdmissionResult.CapacityExhausted,
-            LiveAdmissionResult.StaleAttempt,
-            -> SendResult(WaddleSendMessageOutcome.Error)
-        }
-    }
-
-    private fun queuedMessage(
-        owner: String,
-        source: DeliverySource,
-        payload: QueuedOutboundPayload,
-    ): QueuedOutboundDraft = QueuedOutboundDraft.create(
-        ownerBareJid = owner,
-        clientStanzaId = newClientStanzaId(),
-        enqueuedAtMillis = System.currentTimeMillis(),
-        payload = payload,
-        source = source,
-    )
-
-    private fun queuedPayload(
-        conversationJid: String,
-        isGroupchat: Boolean,
+    private fun queuedContent(
         body: String,
         extras: MessageSendExtras?,
-    ): QueuedOutboundPayload = QueuedOutboundPayload(
-        target = QueuedOutboundTarget.from(conversationJid, isGroupchat),
-        content = QueuedOutboundContent(
+    ): QueuedOutboundContent = QueuedOutboundContent(
             body = body,
             reply = QueuedOutboundReply(
                 id = extras?.replyToId,
@@ -277,57 +246,7 @@ internal class OutboundMessenger(
             ),
             sharedFiles = extras?.sharedFiles.orEmpty(),
             mentions = extras?.mentions.orEmpty(),
-        ),
-    )
-
-    private suspend fun reconcileInitialOutcome(
-        row: QueuedOutboundMessage,
-        ownership: OutboundOwnership.NativeOwned,
-        outcome: WaddleSendMessageOutcome,
-    ): SendResult {
-        val delivery = DeliveryOutcomeRef(row.identity, row.source)
-        if (
-            outcome is WaddleSendMessageOutcome.Sent &&
-            outcome.stanzaId == row.clientStanzaId
-        ) {
-            return SendResult(outcome, delivery)
-        }
-        if (isQueueableFailure(outcome)) {
-            val released = persistQueueMutation {
-                journal.release(row.identity, ownership)
-            }
-            return if (released == true) {
-                SendResult(outcome, delivery)
-            } else {
-                SendResult(WaddleSendMessageOutcome.Error)
-            }
-        }
-
-        requireTerminalCommitted(
-            lifecycle.submitTerminal(
-                ownerBareJid = row.ownerBareJid,
-                clientStanzaId = row.clientStanzaId,
-                attempt = ownership.attempt,
-                kind = DeliveryTerminalKind.NONRETRYABLE_DELETE,
-            ),
         )
-        drainDeliveryJournal()
-        return SendResult(
-            if (outcome is WaddleSendMessageOutcome.Sent) {
-                WaddleSendMessageOutcome.Error
-            } else {
-                outcome
-            },
-        )
-    }
-
-    private suspend fun <T> persistQueueMutation(block: suspend () -> T): T? = try {
-        block()
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (_: Throwable) {
-        null
-    }
 
     /**
      * Replay owner Ready rows after the startup terminal barrier. Rows already
@@ -348,47 +267,38 @@ internal class OutboundMessenger(
                 ?: return
         var primary: Throwable? = null
         try {
-            drainMutex.withLock {
-                if (!lifecycle.matches(handle, expectedAttempt)) return@withLock
+            val critical = lifecycle.acquireDrainCriticalSection()
+            try {
+                if (!lifecycle.matches(handle, expectedAttempt)) return
                 awaitStartupTerminalDrain(sessionLifecycle.ownerBareJid)
                 while (lifecycle.matches(handle, expectedAttempt)) {
-                    val claimed =
-                        journal.claimAbsoluteReadyHead(
-                            sessionLifecycle.ownerBareJid,
-                            expectedAttempt,
-                        ) ?: return@withLock
-                    val ownership = claimed.ownership as OutboundOwnership.NativeOwned
-                    when (val outcome = sendMessage(claimed, lease.client)) {
-                        is WaddleSendMessageOutcome.Sent -> {
-                            if (outcome.stanzaId != claimed.clientStanzaId) {
-                                requireTerminalCommitted(
-                                    lifecycle.submitTerminal(
-                                        sessionLifecycle.ownerBareJid,
-                                        claimed.clientStanzaId,
-                                        ownership.attempt,
-                                        DeliveryTerminalKind.NONRETRYABLE_DELETE,
-                                    ),
-                                )
-                            }
-                        }
-                        WaddleSendMessageOutcome.NotConnected,
-                        WaddleSendMessageOutcome.TransportError,
-                        -> {
-                            journal.release(claimed.identity, ownership)
-                            return@withLock
-                        }
-                        else -> {
+                    when (
+                        val disposition = drainService.drainOne(
+                            OutboundDrainOperation(
+                                owner = DeliveryOwnerBareJid(sessionLifecycle.ownerBareJid),
+                                attempt = expectedAttempt,
+                                client = lease.client,
+                            ),
+                        )
+                    ) {
+                        OutboundDrainDisposition.NoReady,
+                        OutboundDrainDisposition.AwaitingNativeAck,
+                        OutboundDrainDisposition.RetryableReleased,
+                        -> return
+                        is OutboundDrainDisposition.TerminalRequired -> {
                             requireTerminalCommitted(
                                 lifecycle.submitTerminal(
-                                    sessionLifecycle.ownerBareJid,
-                                    claimed.clientStanzaId,
-                                    ownership.attempt,
+                                    disposition.row.ownerBareJid,
+                                    disposition.row.clientStanzaId,
+                                    disposition.ownership.attempt,
                                     DeliveryTerminalKind.NONRETRYABLE_DELETE,
                                 ),
                             )
                         }
                     }
                 }
+            } finally {
+                lifecycle.releaseDrainCriticalSection(critical)
             }
         } catch (failure: Throwable) {
             primary = failure
@@ -470,41 +380,4 @@ internal class OutboundMessenger(
         }
     }
 
-    private suspend fun sendMessage(
-        queued: QueuedOutboundMessage,
-        client: WaddleClientInterface,
-    ): WaddleSendMessageOutcome {
-        val (finalBody, options) = preparedSend(
-            queued.clientStanzaId,
-            queued.body,
-            queued.sendExtras(),
-        )
-        val outcome = try {
-            if (queued.isGroupchat) {
-                client.sendGroupchatMessage(queued.conversationJid, finalBody, options)
-            } else {
-                client.sendChatMessage(queued.conversationJid, finalBody, options)
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            WaddleSendMessageOutcome.TransportError
-        }
-        if (!queued.isGroupchat && outcome is WaddleSendMessageOutcome.Sent) {
-            stores.timelineStore.onLiveMessage(
-                ownDmEcho(
-                    ownJid = queued.ownerBareJid,
-                    peerJid = queued.conversationJid,
-                    stanzaId = queued.clientStanzaId,
-                    body = finalBody,
-                    options = options,
-                ),
-            )
-        }
-        return outcome
-    }
-
-    private fun isQueueableFailure(outcome: WaddleSendMessageOutcome): Boolean =
-        outcome == WaddleSendMessageOutcome.NotConnected ||
-            outcome == WaddleSendMessageOutcome.TransportError
 }

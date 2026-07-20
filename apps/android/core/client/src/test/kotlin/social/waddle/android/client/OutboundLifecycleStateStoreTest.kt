@@ -38,7 +38,7 @@ import java.io.IOException
 class OutboundLifecycleStateStoreTest {
     @Test
     fun `blocked live send fences shutdown and refuses restart`() = runTest {
-        val fixture = coordinatorFixture(transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS)
+        val fixture = stateStoreFixture(transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS)
         val lifecycle = fixture.start()
         val activation = fixture.messenger.activateAttempt(lifecycle)
         val client = FakeWaddleClient()
@@ -57,7 +57,7 @@ class OutboundLifecycleStateStoreTest {
             releaseSend.await()
         }
         val send = async {
-            fixture.messenger.sendOrEnqueue(COORDINATOR_PEER, false, "in flight")
+            fixture.messenger.sendOrEnqueue(STATE_STORE_PEER, false, "in flight")
         }
         runCurrent()
         assertTrue(sendEntered.isCompleted)
@@ -77,7 +77,7 @@ class OutboundLifecycleStateStoreTest {
             ),
         )
         runCurrent()
-        advanceTimeBy(COORDINATOR_TEST_TIMEOUT_MILLIS + 1)
+        advanceTimeBy(STATE_STORE_TEST_TIMEOUT_MILLIS + 1)
         runCurrent()
         val outcome = shutdown.await()
         assertTrue(outcome is LifecycleShutdownOutcome.FencedWithPending)
@@ -85,7 +85,7 @@ class OutboundLifecycleStateStoreTest {
         assertEquals(LifecyclePendingComponent.ATTEMPT_LEASES, outcome.component)
         assertTrue(
             runCatching {
-                fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+                fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.isFailure,
         )
 
@@ -98,9 +98,9 @@ class OutboundLifecycleStateStoreTest {
     @Test
     fun `post commit storage barrier fences shutdown and refuses restart`() = runTest {
         val dataStore = FailingPreferencesDataStore()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             dataStore = dataStore,
-            transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS,
+            transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS,
         )
         val lifecycle = fixture.start()
         runCurrent()
@@ -111,7 +111,7 @@ class OutboundLifecycleStateStoreTest {
             release.await()
         }
         val send = async {
-            fixture.messenger.sendOrEnqueue(COORDINATOR_PEER, false, "durably committed")
+            fixture.messenger.sendOrEnqueue(STATE_STORE_PEER, false, "durably committed")
         }
         runCurrent()
         assertTrue(committed.isCompleted)
@@ -123,7 +123,7 @@ class OutboundLifecycleStateStoreTest {
             )
         }
         runCurrent()
-        advanceTimeBy(COORDINATOR_TEST_TIMEOUT_MILLIS + 1)
+        advanceTimeBy(STATE_STORE_TEST_TIMEOUT_MILLIS + 1)
         runCurrent()
         val outcome = shutdown.await()
         assertTrue(outcome is LifecycleShutdownOutcome.FencedWithPending)
@@ -131,7 +131,7 @@ class OutboundLifecycleStateStoreTest {
         assertEquals(LifecyclePendingComponent.ATTEMPT_LEASES, outcome.component)
         assertTrue(
             runCatching {
-                fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+                fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.isFailure,
         )
 
@@ -143,7 +143,7 @@ class OutboundLifecycleStateStoreTest {
 
     @Test
     fun `I superseded construction retains then accepts its documented exact retry`() = runTest {
-        val fixture = coordinatorFixture(transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS)
+        val fixture = stateStoreFixture(transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS)
         val lifecycle = fixture.start()
         val activation = fixture.messenger.activateAttempt(lifecycle)
         val construction = fixture.messenger.beginTransportConstruction(activation.handle)
@@ -173,10 +173,10 @@ class OutboundLifecycleStateStoreTest {
 
     @Test
     fun `I messenger offline live terminal and drain admissions release before shutdown`() = runTest {
-        val fixture = coordinatorFixture()
+        val fixture = stateStoreFixture()
         val lifecycle = fixture.start()
 
-        val offline = fixture.messenger.sendOrEnqueue(COORDINATOR_PEER, false, "offline")
+        val offline = fixture.messenger.sendOrEnqueue(STATE_STORE_PEER, false, "offline")
         assertEquals(WaddleSendMessageOutcome.NotConnected, offline.outcome)
 
         val activation = fixture.messenger.activateAttempt(lifecycle)
@@ -191,7 +191,7 @@ class OutboundLifecycleStateStoreTest {
                 activation.bootstrap.attempt,
             ),
         )
-        val live = fixture.messenger.sendOrEnqueue(COORDINATOR_PEER, false, "live")
+        val live = fixture.messenger.sendOrEnqueue(STATE_STORE_PEER, false, "live")
         val liveId = checkNotNull(live.delivery).identity.clientStanzaId
         assertTrue(
             !fixture.messenger.reconcileDeliveryEvent(
@@ -210,7 +210,7 @@ class OutboundLifecycleStateStoreTest {
     @Test
     fun `I messenger finally rethrows cancellation with exact release violation suppressed`() = runTest {
         val primary = kotlinx.coroutines.CancellationException("live send cancelled")
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             admissionReleaseOperations = OutboundAdmissionReleaseOperations { lifecycle, lease ->
                 assertEquals(LifecycleReleaseOutcome.Released, lifecycle.releaseAdmission(lease))
                 LifecycleReleaseOutcome.NotOwned
@@ -225,7 +225,7 @@ class OutboundLifecycleStateStoreTest {
         assertTrue(fixture.messenger.markReady(activation.handle, client, activation.bootstrap.attempt))
 
         try {
-            fixture.messenger.sendOrEnqueue(COORDINATOR_PEER, false, "cancelled")
+            fixture.messenger.sendOrEnqueue(STATE_STORE_PEER, false, "cancelled")
             throw AssertionError("expected cancellation")
         } catch (actual: kotlinx.coroutines.CancellationException) {
             assertTrue(actual === primary)
@@ -246,7 +246,7 @@ class OutboundLifecycleStateStoreTest {
 
     @Test
     fun `I attached construction releases claim but requires transport close proof`() = runTest {
-        val fixture = coordinatorFixture(transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS)
+        val fixture = stateStoreFixture(transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS)
         val lifecycle = fixture.start()
         val activation = fixture.messenger.activateAttempt(lifecycle)
         val construction = fixture.messenger.beginTransportConstruction(activation.handle)

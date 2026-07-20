@@ -40,27 +40,27 @@ import java.io.IOException
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundLifecycleStateStoreRecoveryTest {
     @Test
-    fun `B cancellation before both workers are ready returns reachable lifecycle and replacement coordinator starts`() = runTest {
+    fun `B cancellation before both workers are ready returns reachable lifecycle and replacement state store starts`() = runTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
-        val fixture = coordinatorFixture(scope = ownerScope)
-        val startup = async { fixture.messenger.start(ownerScope, COORDINATOR_OWNER) }
+        val fixture = stateStoreFixture(scope = ownerScope)
+        val startup = async { fixture.messenger.start(ownerScope, STATE_STORE_OWNER) }
 
         ownerJob.cancel()
         runCurrent()
 
         assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
-        val replacement = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
+        val replacement = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
         fixture.stop(replacement)
     }
 
     @Test
-    fun `B cancellation after first exact worker ready compensates before replacement coordinator starts`() = runTest {
+    fun `B cancellation after first exact worker ready compensates before replacement state store starts`() = runTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val firstReady = CompletableDeferred<Unit>()
         val installedLifecycle = CompletableDeferred<SessionLifecycleRef>()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             scope = ownerScope,
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
                 if (phase == OutboundLifecyclePhase.TERMINAL_WORKER_READY) {
@@ -76,7 +76,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
                 }
             },
         )
-        val startup = async { fixture.messenger.start(ownerScope, COORDINATOR_OWNER) }
+        val startup = async { fixture.messenger.start(ownerScope, STATE_STORE_OWNER) }
 
         runCurrent()
         firstReady.await()
@@ -87,7 +87,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
             WorkerRecoveryOutcome.NotFenced,
             fixture.messenger.recoverFencedWorkers(installedLifecycle.await()),
         )
-        val replacement = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
+        val replacement = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
         fixture.stop(replacement)
     }
 
@@ -95,10 +95,10 @@ class OutboundLifecycleStateStoreRecoveryTest {
     fun `B startup seams compensate ordinary failure cancellation and error`() = runTest {
         listOf(false, true).forEach { afterTerminal ->
             val exception = IllegalStateException("startup exception $afterTerminal")
-            val ordinaryFixture = coordinatorFixture(
+            val ordinaryFixture = stateStoreFixture(
                 workerStartHooks = failingStartHooks(afterTerminal, exception),
             )
-            val failed = ordinaryFixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+            val failed = ordinaryFixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
             assertEquals(
                 LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED,
                 failed.cause,
@@ -106,17 +106,17 @@ class OutboundLifecycleStateStoreRecoveryTest {
             ordinaryFixture.stop(ordinaryFixture.start())
 
             val cancellation = CancellationException("startup cancellation $afterTerminal")
-            val cancellationFixture = coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, cancellation))
+            val cancellationFixture = stateStoreFixture(workerStartHooks = failingStartHooks(afterTerminal, cancellation))
             val cancelled = runCatching {
-                cancellationFixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+                cancellationFixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.exceptionOrNull()
             assertTrue(cancelled === cancellation)
             cancellationFixture.stop(cancellationFixture.start())
 
             val error = AssertionError("startup error $afterTerminal")
-            val errorFixture = coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, error))
+            val errorFixture = stateStoreFixture(workerStartHooks = failingStartHooks(afterTerminal, error))
             val thrown = runCatching {
-                errorFixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+                errorFixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.exceptionOrNull()
             assertTrue(thrown === error)
             errorFixture.stop(errorFixture.start())
@@ -135,7 +135,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
         val terminalExitAwaiter = CompletableDeferred<Deferred<WorkerExit>>()
         val installed = CompletableDeferred<OwnerWorkers>()
         var exerciseFailure = true
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             dataStore = dataStore,
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
                 if (exerciseFailure) {
@@ -158,7 +158,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
 
                 override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
                     terminalExitAwaiter.complete(backgroundScope.async {
-                        val exit = when (val outcome = terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)) {
+                        val exit = when (val outcome = terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)) {
                             is WorkerAwaitOutcome.Exited -> outcome.exit
                             WorkerAwaitOutcome.TimedOut -> error("terminal startup worker did not exit")
                         }
@@ -173,7 +173,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
             },
         )
         val startupFailure = backgroundScope.async {
-            runCatching { fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) }.exceptionOrNull()
+            runCatching { fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) }.exceptionOrNull()
         }
         terminalReadyEntered.await()
         drainReadyEntered.await()
@@ -189,7 +189,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
         assertEquals(workers.terminalOwnership, terminalExit.ownership())
 
         assertSame(drainPrimary, startupFailure.await())
-        val drainExit = workers.drain.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS) as WorkerAwaitOutcome.Exited
+        val drainExit = workers.drain.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS) as WorkerAwaitOutcome.Exited
         assertEquals(
             WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
             drainExit.exit.reason,
@@ -205,11 +205,11 @@ class OutboundLifecycleStateStoreRecoveryTest {
     fun `B after install ordinary failure stops both workers before typed result`() = runTest {
         val installed = CompletableDeferred<OwnerWorkers>()
         val failure = IllegalStateException("after install ordinary failure")
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = failingAfterInstall(installed, failure),
         )
 
-        val result = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+        val result = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
 
         assertEquals(LifecycleStartFailure.WORKER_READINESS_FAILED, result.cause)
         assertRequestedStop(installed.await())
@@ -220,12 +220,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
     fun `B after install cancellation stops both workers before exact rethrow`() = runTest {
         val installed = CompletableDeferred<OwnerWorkers>()
         val cancellation = CancellationException("after install cancellation")
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = failingAfterInstall(installed, cancellation),
         )
 
         assertSame(cancellation, runCatching {
-            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+            fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
         }.exceptionOrNull())
         assertRequestedStop(installed.await())
         fixture.stop(fixture.start())
@@ -235,12 +235,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
     fun `B after install error stops both workers before exact rethrow`() = runTest {
         val installed = CompletableDeferred<OwnerWorkers>()
         val error = AssertionError("after install error")
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = failingAfterInstall(installed, error),
         )
 
         assertSame(error, runCatching {
-            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+            fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
         }.exceptionOrNull())
         assertRequestedStop(installed.await())
         fixture.stop(fixture.start())
@@ -254,13 +254,13 @@ class OutboundLifecycleStateStoreRecoveryTest {
         ).forEach { primary ->
             val installed = CompletableDeferred<OwnerWorkers>()
             val cleanup = IllegalStateException("startup cleanup failure ${primary.message}")
-            val fixture = coordinatorFixture(
+            val fixture = stateStoreFixture(
                 workerStartHooks = failingAfterInstall(installed, primary),
                 workerExitEvidence = FailThirdDiscardEvidence(cleanup),
             )
 
             assertSame(primary, runCatching {
-                fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+                fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.exceptionOrNull())
             assertRequestedStop(installed.await())
             assertEquals(1, primary.suppressed.size)
@@ -271,7 +271,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
     @Test
     fun `B unexpected terminal stop before install is retained as bootstrap failure and no pair is installed`() = runTest {
         val terminalExited = CompletableDeferred<Unit>()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = object : WorkerStartHooks {
                 private var stopped = false
 
@@ -281,7 +281,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
                     if (!stopped) {
                         stopped = true
                         terminal.requestStop()
-                        terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+                        terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
                         terminalExited.complete(Unit)
                     }
                 }
@@ -290,7 +290,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
             },
         )
 
-        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+        val failed = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
 
         terminalExited.await()
         assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
@@ -299,11 +299,11 @@ class OutboundLifecycleStateStoreRecoveryTest {
 
     @Test
     fun `B explicit partial teardown requested stop remains record-only`() = runTest {
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = failingStartHooks(true, IllegalStateException("after terminal")),
         )
 
-        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+        val failed = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
 
         assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
         fixture.stop(fixture.start())
@@ -312,7 +312,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
     @Test
     fun `B terminal exit immediately after install enters full fenced recovery`() = runTest {
         val terminalExited = CompletableDeferred<Unit>()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             workerStartHooks = object : WorkerStartHooks {
                 private var stopped = false
 
@@ -323,14 +323,14 @@ class OutboundLifecycleStateStoreRecoveryTest {
                     if (!stopped) {
                         stopped = true
                         workers.terminal.requestStop()
-                        workers.terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+                        workers.terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
                         terminalExited.complete(Unit)
                     }
                 }
             },
         )
 
-        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+        val failed = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
 
         terminalExited.await()
         assertEquals(LifecycleStartFailure.WORKER_READINESS_FAILED, failed.cause)
@@ -381,8 +381,8 @@ class OutboundLifecycleStateStoreRecoveryTest {
     }
 
     private suspend fun assertRequestedStop(workers: OwnerWorkers) {
-        val terminal = workers.terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
-        val drain = workers.drain.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+        val terminal = workers.terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
+        val drain = workers.drain.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
         assertEquals(
             WorkerExitReason.RequestedStop,
             (terminal as WorkerAwaitOutcome.Exited).exit.reason,
@@ -414,7 +414,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val finalizerEntered = CompletableDeferred<Unit>()
         val releaseFinalizer = CompletableDeferred<Unit>()
-        val fixture = coordinatorFixture(
+        val fixture = stateStoreFixture(
             scope = ownerScope,
             ownerFinalizer = { _, _, _ ->
                 finalizerEntered.complete(Unit)
@@ -447,12 +447,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
         val failSiblingDependency = CompletableDeferred<Unit>()
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
-        prefs.activateSession(COORDINATOR_OWNER, COORDINATOR_SESSION_ID)
+        prefs.activateSession(STATE_STORE_OWNER, STATE_STORE_SESSION_ID)
         val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
         resume.start(backgroundScope)
-        val activeSession = ActiveSession().also { it.ownBareJid = COORDINATOR_OWNER }
-        val coordinator = OutboundLifecycleStateStore(
+        val activeSession = ActiveSession().also { it.ownBareJid = STATE_STORE_OWNER }
+        val stateStore = OutboundLifecycleStateStore(
             activeSession = activeSession,
             journal = queue,
             resume = resume,
@@ -462,21 +462,21 @@ class OutboundLifecycleStateStoreRecoveryTest {
                 failSiblingDependency.await()
                 throw IOException("injected drain dependency failure")
             },
-            transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS,
+            transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS,
             workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
-        val lifecycle = coordinator.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
-        val activation = coordinator.activate(lifecycle)
+        val lifecycle = stateStore.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
+        val activation = stateStore.activate(lifecycle)
         val terminalId = "f3-terminal"
         assertTrue(
             queue.enqueueAndClaimAbsoluteHead(
                 QueuedOutboundDraft.create(
-                    ownerBareJid = COORDINATOR_OWNER,
+                    ownerBareJid = STATE_STORE_OWNER,
                     clientStanzaId = terminalId,
                     enqueuedAtMillis = 1_000,
                     payload = QueuedOutboundPayload(
-                        target = QueuedOutboundTarget.Chat(COORDINATOR_PEER),
+                        target = QueuedOutboundTarget.Chat(STATE_STORE_PEER),
                         content = QueuedOutboundContent("f3 terminal"),
                     ),
                     source = DeliverySource.Composer,
@@ -489,26 +489,26 @@ class OutboundLifecycleStateStoreRecoveryTest {
             releaseRequestedDependency.await()
         }
         val terminal = async {
-            coordinator.submitTerminal(
-                COORDINATOR_OWNER,
+            stateStore.submitTerminal(
+                STATE_STORE_OWNER,
                 terminalId,
                 activation.bootstrap.attempt,
                 DeliveryTerminalKind.ACK,
             )
         }
         requestedDependencyEntered.await()
-        coordinator.signalDrain(activation.bootstrap.attempt)
+        stateStore.signalDrain(activation.bootstrap.attempt)
         siblingDependencyEntered.await()
 
         val shutdown = async {
-            coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
+            stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
         }
         runCurrent()
         assertFalse(shutdown.isCompleted)
 
         failSiblingDependency.complete(Unit)
         runCurrent()
-        val first = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
+        val first = stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
             as LifecycleShutdownOutcome.WorkerFenced
         val firstFence = first.cause as LifecycleFenceCause.WorkerExited
         assertEquals(lifecycle, first.lifecycle)
@@ -518,9 +518,9 @@ class OutboundLifecycleStateStoreRecoveryTest {
             firstFence.fence.exit.reason,
         )
 
-        val recovering = async { coordinator.recoverFencedWorkers(lifecycle) }
+        val recovering = async { stateStore.recoverFencedWorkers(lifecycle) }
         runCurrent()
-        val losingRecovery = coordinator.recoverFencedWorkers(lifecycle)
+        val losingRecovery = stateStore.recoverFencedWorkers(lifecycle)
             as WorkerRecoveryOutcome.RecoveryInProgress
         assertEquals(firstFence.fence, losingRecovery.claim.fence)
         assertEquals(lifecycle, losingRecovery.claim.lifecycle)
@@ -530,8 +530,8 @@ class OutboundLifecycleStateStoreRecoveryTest {
         assertEquals(TerminalCommandOutcome.Committed, terminal.await())
         runCurrent()
         assertEquals(first, shutdown.await())
-        assertEquals(first, coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)))
-        assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(lifecycle))
-        assertEquals(WorkerRecoveryOutcome.NotFenced, coordinator.recoverFencedWorkers(lifecycle))
+        assertEquals(first, stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)))
+        assertEquals(WorkerRecoveryOutcome.Recovered, stateStore.recoverFencedWorkers(lifecycle))
+        assertEquals(WorkerRecoveryOutcome.NotFenced, stateStore.recoverFencedWorkers(lifecycle))
     }
 }

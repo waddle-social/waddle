@@ -34,7 +34,7 @@ import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
 
-internal suspend fun TestScope.coordinatorFixture(
+internal suspend fun TestScope.stateStoreFixture(
     dataStore: FailingPreferencesDataStore = FailingPreferencesDataStore(),
     transitionTimeoutMillis: Long = 5_000L,
     scope: CoroutineScope = backgroundScope,
@@ -45,14 +45,14 @@ internal suspend fun TestScope.coordinatorFixture(
     workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence(),
     admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
-): CoordinatorFixture {
+): StateStoreFixture {
     val prefs = SessionPrefs(dataStore)
-    prefs.activateSession(COORDINATOR_OWNER, COORDINATOR_SESSION_ID)
+    prefs.activateSession(STATE_STORE_OWNER, STATE_STORE_SESSION_ID)
     val queue = DeliveryJournalStore(prefs)
     val resume = ResumePersistence(prefs, queue)
     resume.start(backgroundScope)
     val activeSession = ActiveSession().also {
-        it.ownBareJid = COORDINATOR_OWNER
+        it.ownBareJid = STATE_STORE_OWNER
     }
     val messenger = OutboundMessenger(
         activeSession = activeSession,
@@ -67,7 +67,7 @@ internal suspend fun TestScope.coordinatorFixture(
         workerExitEvidence = workerExitEvidence,
         admissionReleaseOperations = admissionReleaseOperations,
     )
-    return CoordinatorFixture(
+    return StateStoreFixture(
         messenger,
         scope,
         queue,
@@ -75,14 +75,14 @@ internal suspend fun TestScope.coordinatorFixture(
     )
 }
 
-internal data class CoordinatorFixture(
+internal data class StateStoreFixture(
     val messenger: OutboundMessenger,
     val scope: CoroutineScope,
     val queue: DeliveryJournalStore,
     val activeSession: ActiveSession,
 ) {
     suspend fun start(): SessionLifecycleRef =
-        messenger.start(scope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
+        messenger.start(scope, STATE_STORE_OWNER).startedStateStoreLifecycle()
 
     suspend fun stop(lifecycle: SessionLifecycleRef) {
         assertTrue(messenger.beginShutdown(lifecycle) is BeginShutdownDecision.Begun)
@@ -109,11 +109,11 @@ internal data class CoordinatorFixture(
     }
 }
 
-internal const val COORDINATOR_OWNER = "icepuma@waddle.test"
-internal const val COORDINATOR_PEER = "alice@waddle.test"
-internal const val COORDINATOR_SESSION_ID = "session-1"
-internal const val COORDINATOR_TEST_TIMEOUT_MILLIS = 100L
+internal const val STATE_STORE_OWNER = "icepuma@waddle.test"
+internal const val STATE_STORE_PEER = "alice@waddle.test"
+internal const val STATE_STORE_SESSION_ID = "session-1"
+internal const val STATE_STORE_TEST_TIMEOUT_MILLIS = 100L
 
-internal fun LifecycleStartResult.startedCoordinatorLifecycle(): SessionLifecycleRef =
+internal fun LifecycleStartResult.startedStateStoreLifecycle(): SessionLifecycleRef =
     (this as? LifecycleStartResult.Started)?.lifecycle
         ?: error("test lifecycle startup failed: $this")
