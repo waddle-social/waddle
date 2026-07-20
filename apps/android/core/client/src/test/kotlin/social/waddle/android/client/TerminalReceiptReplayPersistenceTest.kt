@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
@@ -72,6 +73,14 @@ class TerminalReceiptReplayPersistenceTest {
             val prefs = SessionPrefs(store)
             val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "replay-prefix-$prefix", effectCount = 2)
             seed(prefs, receipt)
+            val claimedAtCommit = CompletableDeferred<TerminalReceiptClaimState.Claimed>()
+            store.installAfterCommitReturnsOnceWhen(matches = { before, after ->
+                before[DELIVERY_JOURNAL_KEY] != after[DELIVERY_JOURNAL_KEY]
+            }) {
+                val claimed = (receiptState(prefs) as TerminalReceiptState.Pending).claim
+                    as TerminalReceiptClaimState.Claimed
+                claimedAtCommit.complete(claimed)
+            }
             val canonical = (receipt.state as TerminalReceiptState.Pending).effects.map(::eventFor)
             val firstEvents = mutableListOf<XmppEvent>()
             val crash = IllegalStateException("process crashed after prefix $prefix")
@@ -94,7 +103,7 @@ class TerminalReceiptReplayPersistenceTest {
             assertEquals(canonical.take(prefix), firstEvents)
             val released = receiptState(prefs) as TerminalReceiptState.Pending
             assertEquals(TerminalReceiptClaimState.Unclaimed, released.claim)
-            assertTrue("prefix $prefix must durably retain its released lease", released.releasedClaim != null)
+            assertEquals("prefix $prefix must durably retain its exact claim", claimedAtCommit.await(), released.releasedClaim)
 
             val replayed = mutableListOf<XmppEvent>()
             val replacementEpoch = ProcessEpoch(uuid("replay-replacement-$prefix"))
