@@ -137,6 +137,7 @@ internal class OutboundLifecycleCoordinator(
                 currentAttempt = null
                 lastClosedAttempt = null
                 state = OutboundLifecycleState.Stopped
+                discardWorkerEvidence(workers)
             }
         }
     }
@@ -158,7 +159,11 @@ internal class OutboundLifecycleCoordinator(
     /** Callback completes only after this exact exit has closed future admission. */
     private suspend fun onWorkerExit(exit: WorkerExit) {
         gate.withLock {
-            val workers = ownerWorkers ?: return@withLock
+            val workers = ownerWorkers
+            if (workers == null) {
+                WorkerExitExceptionEvidence.discard(exit.ownership())
+                return@withLock
+            }
             val decision = decideWorkerExitGate(
                 state = state,
                 exactOwner = workers.lifecycle == exit.lifecycle && workers.owns(exit.ownership()),
@@ -171,6 +176,8 @@ internal class OutboundLifecycleCoordinator(
                     exit.lifecycle,
                     decision.cause,
                 )
+            } else {
+                WorkerExitExceptionEvidence.discard(exit.ownership())
             }
         }
     }
@@ -785,8 +792,10 @@ internal class OutboundLifecycleCoordinator(
             currentAttempt = null
             lastClosedAttempt = null
             pendingShutdown = null
+            val clearedWorkers = ownerWorkers
             ownerWorkers = null
             state = OutboundLifecycleState.Stopped
+            clearedWorkers?.let(::discardWorkerEvidence)
             LifecycleShutdownOutcome.Stopped
         }
     }
@@ -919,6 +928,7 @@ internal class OutboundLifecycleCoordinator(
                 ownerWorkers = null
                 recoveryClaim = null
                 state = OutboundLifecycleState.Stopped
+                discardWorkerEvidence(workers)
                 WorkerRecoveryOutcome.Recovered
             }
         } finally {
@@ -935,6 +945,11 @@ internal class OutboundLifecycleCoordinator(
 
     private suspend fun clearRecoveryClaim(claim: WorkerRecoveryClaim) {
         gate.withLock { if (recoveryClaim === claim) recoveryClaim = null }
+    }
+
+    private fun discardWorkerEvidence(workers: OwnerWorkers) {
+        WorkerExitExceptionEvidence.discard(workers.terminalOwnership)
+        WorkerExitExceptionEvidence.discard(workers.drainOwnership)
     }
 
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) =

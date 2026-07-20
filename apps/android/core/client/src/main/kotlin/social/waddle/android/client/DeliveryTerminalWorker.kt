@@ -141,6 +141,7 @@ internal class DeliveryTerminalWorker(
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
                 startupDrain.cancel(cancellation)
+                WorkerExitExceptionEvidence.record(ownership, cancellation)
                 activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
                 if (activeSignal != null) pendingCommands.decrementAndGet()
                 activeSignal = null
@@ -158,6 +159,7 @@ internal class DeliveryTerminalWorker(
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
                 startupDrain.completeExceptionally(failure)
+                WorkerExitExceptionEvidence.record(ownership, failure)
                 val cause = when (val receiptFailure = terminalReceiptFailure(failure)) {
                     is TerminalReceiptFailureExtraction.Found ->
                         WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure)

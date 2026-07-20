@@ -107,6 +107,7 @@ internal class OutboundDrainWorker(
                 }
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
+                WorkerExitExceptionEvidence.record(ownership, cancellation)
                 reason = if (stopRequested) {
                     WorkerExitReason.RequestedStop
                 } else {
@@ -114,6 +115,7 @@ internal class OutboundDrainWorker(
                 }
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
+                WorkerExitExceptionEvidence.record(ownership, failure)
                 val cause = WorkerFailureKind.DEPENDENCY_FAILURE
                 reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "outbound predecessor drain worker stopped", failure)

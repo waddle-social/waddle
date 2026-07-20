@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -287,5 +288,77 @@ class XmppSessionManagerWorkerRecoveryTest {
         assertEquals(exit.generation, retainedExit.generation)
         assertEquals(exit.kind, retainedExit.kind)
         assertEquals(exit.reason, retainedExit.reason)
+    }
+
+    @Test
+    fun `Q recovery exception preserves exact failure outside typed fence`() {
+        val lifecycle = SessionLifecycleRef.create("q-evidence@waddle.test")
+        val exit = WorkerExit(
+            lifecycle = lifecycle,
+            generation = WorkerGeneration.random(),
+            kind = WorkerKind.OUTBOUND_DRAIN,
+            reason = WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
+        )
+        val original = AssertionError("drain dependency failed")
+        WorkerExitExceptionEvidence.record(exit.ownership(), original)
+        val manager = XmppSessionManager.withLifecyclePhaseObserver(
+            sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
+            clientFactory = FakeClientFactory(),
+            networkSignal = FakeNetworkSignal(),
+            userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
+            reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
+            dispatcher = StandardTestDispatcher(),
+            lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+        )
+
+        val failure = runCatching {
+            manager.requireStopped(
+                lifecycle,
+                LifecycleShutdownOutcome.WorkerFenced(
+                    lifecycle,
+                    LifecycleFenceCause.WorkerExited(WorkerFence(exit)),
+                ),
+            )
+        }.exceptionOrNull() as WorkerRecoveryException
+
+        assertSame(original, failure.cause)
+        assertEquals(exit.reason, ((failure.outcome as WorkerRecoveryOutcome.WorkerFenced)
+            .cause as LifecycleFenceCause.WorkerExited).fence.exit.reason)
+    }
+
+    @Test
+    fun `Q intermediate recovery outcome cannot consume fenced failure evidence`() {
+        val lifecycle = SessionLifecycleRef.create("q-intermediate@waddle.test")
+        val exit = WorkerExit(
+            lifecycle = lifecycle,
+            generation = WorkerGeneration.random(),
+            kind = WorkerKind.DELIVERY_TERMINAL,
+            reason = WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
+        )
+        val fence = WorkerFence(exit)
+        val original = IllegalStateException("terminal dependency failed")
+        WorkerExitExceptionEvidence.record(exit.ownership(), original)
+        val claim = WorkerRecoveryClaim(lifecycle, fence, WorkerRecoveryToken.random())
+
+        assertSame(original, WorkerRecoveryException(WorkerRecoveryOutcome.RecoveryInProgress(claim)).cause)
+        assertSame(
+            original,
+            WorkerRecoveryException(
+                WorkerRecoveryOutcome.WorkerFenced(
+                    lifecycle,
+                    LifecycleFenceCause.WorkerExited(fence),
+                ),
+            ).cause,
+        )
+
+        WorkerExitExceptionEvidence.discard(exit.ownership())
+        assertNull(
+            WorkerRecoveryException(
+                WorkerRecoveryOutcome.WorkerFenced(
+                    lifecycle,
+                    LifecycleFenceCause.WorkerExited(fence),
+                ),
+            ).cause,
+        )
     }
 }
