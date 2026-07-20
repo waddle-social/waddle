@@ -463,7 +463,7 @@ class DeliveryTerminalWorkerTest {
                 DeliveryTerminalWorker(
                     journal = OutboundQueue(prefs),
                     dispatchEvent = {
-                        store.failNextUpdate = true
+                        store.failAllUpdates = true
                         throw primary
                     },
                     processEpoch = ProcessEpoch(uuid("release-failure-process")),
@@ -471,19 +471,23 @@ class DeliveryTerminalWorkerTest {
                 this,
             )
 
+            advanceTimeBy(8_750)
+            runCurrent()
             val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
             val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
                 as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
             assertEquals(
                 TerminalReceiptCleanupFailureCategory.IO_FAILURE,
                 (workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved)
-                    .evidence.category,
+                    .evidence.reason.let { it as TerminalReceiptCleanupReason.Persistence }.category,
             )
             assertEquals(primary, handler.observed)
             assertEquals(1, primary.suppressed.size)
             val cleanup = primary.suppressed.single() as TerminalReceiptCleanupException
-            assertEquals(TerminalReceiptOperation.RELEASE, cleanup.evidence.operation)
-            assertEquals(TerminalReceiptCleanupFailureCategory.IO_FAILURE, cleanup.evidence.category)
+            assertEquals(
+                TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+                (cleanup.evidence.reason as TerminalReceiptCleanupReason.Persistence).category,
+            )
             assertTrue(cleanup.cause is java.io.IOException)
             val pending = prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state
                 as TerminalReceiptState.Pending

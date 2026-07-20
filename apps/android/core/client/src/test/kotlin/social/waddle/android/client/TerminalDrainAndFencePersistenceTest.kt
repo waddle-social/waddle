@@ -243,7 +243,7 @@ class TerminalDrainAndFencePersistenceTest {
         val failure = runCatching {
             prefs.persistTerminalDrainAndFence(request(attempt("active"), "receipt"))
         }.exceptionOrNull()
-        assertTrue(failure is kotlinx.serialization.SerializationException)
+        assertTrue(failure is social.waddle.android.client.prefs.DeliveryJournalDecodeException)
         assertEquals(malformed, store.data.first()[DELIVERY_JOURNAL_KEY])
     }
 
@@ -293,7 +293,7 @@ class TerminalDrainAndFencePersistenceTest {
         val failure = runCatching {
             prefs.persistTerminalDrainAndFence(request(active, "receipt"))
         }.exceptionOrNull()
-        assertTrue(failure is kotlinx.serialization.SerializationException)
+        assertTrue(failure is social.waddle.android.client.prefs.DeliveryJournalDecodeException)
         assertEquals(raw, store.data.first()[DELIVERY_JOURNAL_KEY])
     }
 

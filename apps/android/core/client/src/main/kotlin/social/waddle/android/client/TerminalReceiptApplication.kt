@@ -53,14 +53,8 @@ internal enum class TerminalReceiptCorruption {
     EMPTY_EFFECTS,
     DUPLICATE_EFFECT,
     EFFECT_BINDING_MISMATCH,
-}
-
-internal enum class TerminalReceiptOperation {
-    DISCOVERY,
-    CLAIM,
-    ACKNOWLEDGE,
-    RELEASE,
-    DISPATCH,
+    REVERSED_EFFECT_ORDER,
+    PERSISTED_DECODE_FAILURE,
 }
 
 /**
@@ -71,21 +65,26 @@ internal enum class TerminalReceiptOperation {
  */
 internal data class TerminalReceiptCleanupEvidence(
     val lease: TerminalReceiptLease,
-    val operation: TerminalReceiptOperation,
     val attempts: Int,
-    val category: TerminalReceiptCleanupFailureCategory,
+    val reason: TerminalReceiptCleanupReason,
 ) {
     init {
-        require(operation == TerminalReceiptOperation.RELEASE) {
-            "terminal receipt cleanup can only release an exact lease"
-        }
         require(attempts > 0) { "terminal receipt cleanup attempts must be positive" }
     }
+}
+
+internal sealed interface TerminalReceiptCleanupReason {
+    data class Persistence(val category: TerminalReceiptCleanupFailureCategory) : TerminalReceiptCleanupReason
+    data class LeaseMismatch(val current: TerminalReceiptClaimState.Claimed?) : TerminalReceiptCleanupReason
+    data object ReceiptMissing : TerminalReceiptCleanupReason
+    data class ReceiptReplaced(val actual: TerminalReceiptRef) : TerminalReceiptCleanupReason
+    data class Corrupt(val corruption: TerminalReceiptCorruption) : TerminalReceiptCleanupReason
 }
 
 internal enum class TerminalReceiptCleanupFailureCategory {
     IO_FAILURE,
     CANCELLATION,
+    CODEC_FAILURE,
     INVARIANT_FAILURE,
     RUNTIME_FAILURE,
     ERROR_FAILURE,
@@ -94,7 +93,7 @@ internal enum class TerminalReceiptCleanupFailureCategory {
 internal sealed interface TerminalReceiptCleanupResult {
     data object Released : TerminalReceiptCleanupResult
     data class Unresolved(
-        val failure: TerminalReceiptCleanupException,
+        val evidence: TerminalReceiptCleanupEvidence,
     ) : TerminalReceiptCleanupResult
 }
 
@@ -102,7 +101,7 @@ internal sealed interface TerminalReceiptRecoveryCleanupResult {
     data object NoPendingLease : TerminalReceiptRecoveryCleanupResult
     data object Released : TerminalReceiptRecoveryCleanupResult
     data class Unresolved(
-        val failure: TerminalReceiptCleanupException,
+        val evidence: TerminalReceiptCleanupEvidence,
     ) : TerminalReceiptRecoveryCleanupResult
 }
 
@@ -132,10 +131,6 @@ internal sealed interface TerminalReceiptApplicationFailure {
     data class AcknowledgeMissing(val result: TerminalReceiptAcknowledgeResult.ReceiptMissing) : TerminalReceiptApplicationFailure
     data class AcknowledgeReplaced(val result: TerminalReceiptAcknowledgeResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
     data class AcknowledgeCorrupt(val result: TerminalReceiptAcknowledgeResult.Corrupt) : TerminalReceiptApplicationFailure
-    data class ReleaseLeaseMismatch(val result: TerminalReceiptReleaseResult.LeaseMismatch) : TerminalReceiptApplicationFailure
-    data class ReleaseMissing(val result: TerminalReceiptReleaseResult.ReceiptMissing) : TerminalReceiptApplicationFailure
-    data class ReleaseReplaced(val result: TerminalReceiptReleaseResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
-    data class ReleaseCorrupt(val result: TerminalReceiptReleaseResult.Corrupt) : TerminalReceiptApplicationFailure
     data class CleanupUnresolved(
         val evidence: TerminalReceiptCleanupEvidence,
     ) : TerminalReceiptApplicationFailure
@@ -413,6 +408,9 @@ private fun DeliveryOwnerJournal.validateReceiptApplication(
                 effect.callback.attempt != receipt.attempt
         }
     ) return TerminalReceiptCorruption.EFFECT_BINDING_MISMATCH
+    if (!pending.effects.zipWithNext().all { (first, second) -> first.row.sequence < second.row.sequence }) {
+        return TerminalReceiptCorruption.REVERSED_EFFECT_ORDER
+    }
     return null
 }
 

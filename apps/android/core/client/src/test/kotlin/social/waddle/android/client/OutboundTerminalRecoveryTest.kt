@@ -71,7 +71,7 @@ class OutboundTerminalRecoveryTest {
             dispatchEvent = { event ->
                 events += event
                 if (failDispatch) {
-                    store.failNextUpdate = true
+                    store.failAllUpdates = true
                     error("dispatch failed after the receipt claim")
                 }
             },
@@ -79,24 +79,28 @@ class OutboundTerminalRecoveryTest {
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
         )
 
-        val failed = coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Failed
-        val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(failed.lifecycle))
+        val started = coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started
+        advanceTimeBy(8_750)
+        runCurrent()
+        val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(started.lifecycle))
             as LifecycleShutdownOutcome.WorkerFenced
         val exit = (fenced.cause as LifecycleFenceCause.WorkerExited).fence.exit
         val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
             as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
         val cleanup = workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved
-        assertEquals(TerminalReceiptOperation.RELEASE, cleanup.evidence.operation)
-        assertEquals(TerminalReceiptCleanupFailureCategory.IO_FAILURE, cleanup.evidence.category)
+        assertEquals(
+            TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+            (cleanup.evidence.reason as TerminalReceiptCleanupReason.Persistence).category,
+        )
         assertEquals(1, events.size)
 
         store.failAllUpdates = true
-        val pending = coordinator.recoverFencedWorkers(failed.lifecycle)
+        val pending = coordinator.recoverFencedWorkers(started.lifecycle)
             as WorkerRecoveryOutcome.TerminalReceiptCleanupFailed
         assertEquals(cleanup.evidence, pending.cleanup)
         assertEquals(1, events.size)
         store.failAllUpdates = false
-        assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(failed.lifecycle))
+        assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(started.lifecycle))
         assertEquals(1, events.size)
         assertTrue(
             (prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as

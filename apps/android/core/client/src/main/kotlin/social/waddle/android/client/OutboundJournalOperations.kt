@@ -10,20 +10,26 @@ import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SmResumeSnapshot
 import social.waddle.android.client.prefs.SmResumeStanzaKind
 import social.waddle.android.client.prefs.SmResumeXmlToken
+import social.waddle.android.client.prefs.TerminalReceiptState
 
 internal fun DeliveryJournal.beginDeliveryAttempt(
     ownerBareJid: String,
     replacement: DeliveryAttemptRef,
     nowMillis: Long,
-): DeliveryJournalMutation<OutboundQueue.AttemptBootstrap> {
+): DeliveryJournalMutation<OutboundQueue.BeginAttemptResult> {
     check(activeOwnerBareJid == ownerBareJid) {
         "cannot begin a delivery attempt for an inactive owner"
     }
     val owner = owners[ownerBareJid] ?: DeliveryOwnerJournal()
-    val snapshot = owner.sm.snapshot
-        ?.takeIf { owner.sm.version > owner.sm.tombstoneVersion }
+    val terminalGate = owner.advancePastTerminalReceipt()
+    if (terminalGate is TerminalReceiptAttemptGate.Blocked) {
+        return DeliveryJournalMutation(this, terminalGate.result)
+    }
+    val gatedOwner = (terminalGate as TerminalReceiptAttemptGate.Ready).owner
+    val snapshot = gatedOwner.sm.snapshot
+        ?.takeIf { gatedOwner.sm.version > gatedOwner.sm.tombstoneVersion }
     val resumeIds = snapshot?.messageStanzaIds().orEmpty()
-    val reconciledRows = owner.outboundRows.map { row ->
+    val reconciledRows = gatedOwner.outboundRows.map { row ->
         when {
             row.ownership is OutboundOwnership.Terminal -> row
             row.clientStanzaId in resumeIds -> row.copy(
@@ -37,25 +43,59 @@ internal fun DeliveryJournal.beginDeliveryAttempt(
             else -> row
         }
     }
-    val consumedSm = owner.sm.copy(
+    val consumedSm = gatedOwner.sm.copy(
         tombstoneVersion =
-            if (snapshot == null) owner.sm.tombstoneVersion else owner.sm.version,
-        writerAttempt = replacement.takeIf { owner.sm.version > 0 },
+            if (snapshot == null) gatedOwner.sm.tombstoneVersion else gatedOwner.sm.version,
+        writerAttempt = replacement.takeIf { gatedOwner.sm.version > 0 },
         snapshot = null,
     )
-    val nextOwner = owner.copy(
+    val nextOwner = gatedOwner.copy(
         activeAttempt = replacement,
         sm = consumedSm,
         outboundRows = reconciledRows,
     ).gcTransitionReceipts(nowMillis)
     return DeliveryJournalMutation(
         journal = withOwner(ownerBareJid, nextOwner),
-        result = OutboundQueue.AttemptBootstrap(
-            attempt = replacement,
-            resumeSnapshot = snapshot,
-            smVersion = consumedSm.version,
+        result = OutboundQueue.BeginAttemptResult.Started(
+            OutboundQueue.AttemptBootstrap(
+                attempt = replacement,
+                resumeSnapshot = snapshot,
+                smVersion = consumedSm.version,
+            ),
         ),
     )
+}
+
+private sealed interface TerminalReceiptAttemptGate {
+    data class Ready(val owner: DeliveryOwnerJournal) : TerminalReceiptAttemptGate
+    data class Blocked(val result: OutboundQueue.BeginAttemptResult) : TerminalReceiptAttemptGate
+}
+
+/**
+ * A terminal tombstone belongs to the old attempt. A fresh attempt may clear
+ * it only after the fence has removed every mutable terminal projection.
+ */
+private fun DeliveryOwnerJournal.advancePastTerminalReceipt(): TerminalReceiptAttemptGate {
+    val receipt = terminalReceipt ?: return TerminalReceiptAttemptGate.Ready(this)
+    val ref = TerminalReceiptRef(receipt.owner, receipt.attempt, receipt.id)
+    return when (val state = receipt.state) {
+        is TerminalReceiptState.Pending -> TerminalReceiptAttemptGate.Blocked(
+            OutboundQueue.BeginAttemptResult.PendingReceipt(ref, state.claim),
+        )
+        is TerminalReceiptState.Acknowledged,
+        TerminalReceiptState.PreAcknowledged,
+        -> if (
+            activeAttempt == null &&
+            terminalIntents.isEmpty() &&
+            outboundRows.none { it.ownership is OutboundOwnership.Terminal }
+        ) {
+            TerminalReceiptAttemptGate.Ready(copy(terminalReceipt = null))
+        } else {
+            TerminalReceiptAttemptGate.Blocked(
+                OutboundQueue.BeginAttemptResult.TombstoneNotPostFence(ref, state),
+            )
+        }
+    }
 }
 
 internal fun DeliveryOwnerJournal.absoluteHeadOrThrow(

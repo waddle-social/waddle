@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlin.random.Random
 
@@ -159,7 +160,13 @@ class SessionPrefs(
 
     private fun decodeDeliveryJournal(prefs: Preferences): DeliveryJournal {
         val stored = prefs[KEY_DELIVERY_JOURNAL] ?: return DeliveryJournal()
-        return deliveryJournalJson.decodeFromString<DeliveryJournal>(stored).also { journal ->
+        return try {
+            deliveryJournalJson.decodeFromString<DeliveryJournal>(stored)
+        } catch (failure: SerializationException) {
+            throw DeliveryJournalDecodeException(failure)
+        } catch (failure: IllegalArgumentException) {
+            throw DeliveryJournalDecodeException(failure)
+        }.also { journal ->
             require(journal.schemaVersion == DeliveryJournal.CURRENT_SCHEMA_VERSION) {
                 "unsupported delivery journal schema version: ${journal.schemaVersion}"
             }
@@ -182,3 +189,8 @@ class SessionPrefs(
         const val HEX_ALPHABET = "0123456789abcdef"
     }
 }
+
+/** The raw preference value is deliberately left untouched after decode failure. */
+class DeliveryJournalDecodeException(
+    cause: Throwable,
+) : IllegalStateException("delivery journal decode failed", cause)

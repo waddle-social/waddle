@@ -16,6 +16,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.SerializationException
+import social.waddle.android.client.prefs.DeliveryJournalDecodeException
 import kotlinx.coroutines.yield
 import social.waddle.android.client.OutboundQueue.TerminalEffect
 import social.waddle.android.client.OutboundQueue.TerminalRecordResult
@@ -236,6 +238,20 @@ internal class DeliveryTerminalWorker(
 
         private suspend fun drainTerminalReceipts() {
             val owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(ownership.lifecycle.ownerBareJid)
+            try {
+                drainTerminalReceipts(owner)
+            } catch (failure: DeliveryJournalDecodeException) {
+                throw TerminalReceiptApplicationException(
+                    TerminalReceiptApplicationFailure.DiscoveryCorrupt(
+                        owner,
+                        TerminalReceiptCorruption.PERSISTED_DECODE_FAILURE,
+                    ),
+                    failure,
+                )
+            }
+        }
+
+        private suspend fun drainTerminalReceipts(owner: social.waddle.android.client.prefs.DeliveryOwnerBareJid) {
             when (val discovery = receiptRetrying(
                 operation = TerminalReceiptPersistenceOperation.DISCOVERY,
                 owner = owner,
@@ -304,23 +320,27 @@ internal class DeliveryTerminalWorker(
                     is TerminalReceiptAcknowledgeResult.Corrupt -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeCorrupt(acknowledgement))
                 }
             } catch (cancellation: CancellationException) {
-                when (val cleanup = releaseReceiptClaim(claimed.lease)) {
-                    TerminalReceiptCleanupResult.Released -> Unit
-                    is TerminalReceiptCleanupResult.Unresolved -> {
-                        unresolvedReceiptCleanup = cleanup.failure
-                        cancellation.addSuppressed(cleanup.failure)
-                    }
-                }
+                preservePrimaryWithRelease(cancellation, claimed.lease)
                 throw cancellation
             } catch (failure: Throwable) {
-                when (val cleanup = releaseReceiptClaim(claimed.lease)) {
+                preservePrimaryWithRelease(failure, claimed.lease)
+                throw failure
+            }
+        }
+
+        private suspend fun preservePrimaryWithRelease(primary: Throwable, lease: TerminalReceiptLease) {
+            try {
+                when (val cleanup = releaseReceiptClaim(lease)) {
                     TerminalReceiptCleanupResult.Released -> Unit
                     is TerminalReceiptCleanupResult.Unresolved -> {
-                        unresolvedReceiptCleanup = cleanup.failure
-                        failure.addSuppressed(cleanup.failure)
+                        val failure = TerminalReceiptCleanupException(cleanup.evidence)
+                        unresolvedReceiptCleanup = failure
+                        primary.addSuppressed(failure)
                     }
                 }
-                throw failure
+            } catch (failure: TerminalReceiptCleanupException) {
+                unresolvedReceiptCleanup = failure
+                primary.addSuppressed(failure)
             }
         }
 
@@ -336,46 +356,53 @@ internal class DeliveryTerminalWorker(
                     TerminalReceiptRecoveryCleanupResult.Released
                 }
                 is TerminalReceiptCleanupResult.Unresolved ->
-                    TerminalReceiptRecoveryCleanupResult.Unresolved(recovered.failure)
+                    TerminalReceiptRecoveryCleanupResult.Unresolved(recovered.evidence)
             }
         }
 
         private suspend fun releaseReceiptClaim(
             lease: TerminalReceiptLease,
-        ): TerminalReceiptCleanupResult = try {
-            withContext(NonCancellable) {
+        ): TerminalReceiptCleanupResult = withContext(NonCancellable) {
+            var attempts = 0
+            var lastFailure: Throwable? = null
+            while (attempts < RECEIPT_MAX_ATTEMPTS) {
                 try {
+                    attempts += 1
                     when (val release = journal.releaseTerminalReceipt(lease)) {
                         is TerminalReceiptReleaseResult.Released,
                         is TerminalReceiptReleaseResult.AlreadyAcknowledged,
-                        -> TerminalReceiptCleanupResult.Released
-                        is TerminalReceiptReleaseResult.LeaseMismatch -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
-                            lease,
-                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
-                        ))
-                        is TerminalReceiptReleaseResult.ReceiptMissing -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
-                            lease,
-                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
-                        ))
-                        is TerminalReceiptReleaseResult.ReceiptReplaced -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
-                            lease,
-                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
-                        ))
-                        is TerminalReceiptReleaseResult.Corrupt -> TerminalReceiptCleanupResult.Unresolved(unresolvedCleanup(
-                            lease,
-                            TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE,
-                        ))
+                        -> return@withContext TerminalReceiptCleanupResult.Released
+                        is TerminalReceiptReleaseResult.LeaseMismatch
+                        -> return@withContext TerminalReceiptCleanupResult.Unresolved(
+                            cleanupEvidence(lease, TerminalReceiptCleanupReason.LeaseMismatch(release.current), attempts),
+                        )
+                        is TerminalReceiptReleaseResult.ReceiptMissing ->
+                            return@withContext TerminalReceiptCleanupResult.Unresolved(
+                                cleanupEvidence(lease, TerminalReceiptCleanupReason.ReceiptMissing, attempts),
+                            )
+                        is TerminalReceiptReleaseResult.ReceiptReplaced ->
+                            return@withContext TerminalReceiptCleanupResult.Unresolved(
+                                cleanupEvidence(lease, TerminalReceiptCleanupReason.ReceiptReplaced(release.actual), attempts),
+                            )
+                        is TerminalReceiptReleaseResult.Corrupt ->
+                            return@withContext TerminalReceiptCleanupResult.Unresolved(
+                                cleanupEvidence(lease, TerminalReceiptCleanupReason.Corrupt(release.reason), attempts),
+                            )
                     }
                 } catch (failure: Throwable) {
+                    lastFailure = failure
                     LOGGER.log(Level.WARNING, "terminal receipt release failed", failure)
-                    TerminalReceiptCleanupResult.Unresolved(
-                        unresolvedCleanup(lease, cleanupCategory(failure), failure),
-                    )
+                    if (attempts == RECEIPT_MAX_ATTEMPTS) {
+                        throw unresolvedCleanup(lease, cleanupCategory(failure), failure, attempts)
+                    }
+                    delay(RECEIPT_RETRY_DELAYS_MILLIS[attempts - 1])
                 }
             }
-        } catch (failure: Throwable) {
-            TerminalReceiptCleanupResult.Unresolved(
-                unresolvedCleanup(lease, cleanupCategory(failure), failure),
+            throw unresolvedCleanup(
+                lease,
+                cleanupCategory(checkNotNull(lastFailure)),
+                checkNotNull(lastFailure),
+                attempts,
             )
         }
 
@@ -383,19 +410,22 @@ internal class DeliveryTerminalWorker(
             lease: TerminalReceiptLease,
             category: TerminalReceiptCleanupFailureCategory,
             cause: Throwable? = null,
+            attempts: Int = 1,
         ): TerminalReceiptCleanupException = TerminalReceiptCleanupException(
-            TerminalReceiptCleanupEvidence(
-                lease = lease,
-                operation = TerminalReceiptOperation.RELEASE,
-                attempts = 1,
-                category = category,
-            ),
+            cleanupEvidence(lease, TerminalReceiptCleanupReason.Persistence(category), attempts),
             cause,
         )
+
+        private fun cleanupEvidence(
+            lease: TerminalReceiptLease,
+            reason: TerminalReceiptCleanupReason,
+            attempts: Int = 1,
+        ): TerminalReceiptCleanupEvidence = TerminalReceiptCleanupEvidence(lease, attempts, reason)
 
         private fun cleanupCategory(failure: Throwable): TerminalReceiptCleanupFailureCategory = when (failure) {
             is IOException -> TerminalReceiptCleanupFailureCategory.IO_FAILURE
             is CancellationException -> TerminalReceiptCleanupFailureCategory.CANCELLATION
+            is SerializationException -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
             is Error -> TerminalReceiptCleanupFailureCategory.ERROR_FAILURE
             is IllegalStateException -> TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE
             else -> TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE
@@ -513,6 +543,7 @@ internal class DeliveryTerminalWorker(
         val LOGGER: Logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
         val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
         val RECEIPT_RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
+        const val RECEIPT_MAX_ATTEMPTS = 6
         const val COMMAND_CAPACITY = 256
 
     }
@@ -532,7 +563,7 @@ internal class TerminalReceiptCleanupException(
     val evidence: TerminalReceiptCleanupEvidence,
     cause: Throwable? = null,
 ) : IllegalStateException(
-    "terminal receipt cleanup failed: ${evidence.operation} ${evidence.category}",
+    "terminal receipt cleanup failed: ${evidence.reason}",
     cause,
 )
 

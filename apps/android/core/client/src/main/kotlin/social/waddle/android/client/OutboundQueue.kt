@@ -78,6 +78,21 @@ class OutboundQueue(
         val smVersion: Long,
     )
 
+    /** Exact next-attempt gate for terminal receipt tombstones. */
+    internal sealed interface BeginAttemptResult {
+        data class Started(val bootstrap: AttemptBootstrap) : BeginAttemptResult
+
+        data class PendingReceipt(
+            val receipt: TerminalReceiptRef,
+            val claim: social.waddle.android.client.prefs.TerminalReceiptClaimState,
+        ) : BeginAttemptResult
+
+        data class TombstoneNotPostFence(
+            val receipt: TerminalReceiptRef,
+            val state: social.waddle.android.client.prefs.TerminalReceiptState,
+        ) : BeginAttemptResult
+    }
+
     sealed interface TerminalRecordResult {
         data class Recorded(
             val intent: DeliveryTerminalIntent,
@@ -124,7 +139,14 @@ class OutboundQueue(
      * Atomically consume this owner's SM snapshot, rotate durable UUID
      * attempt identity, and reconcile only this owner's rows.
      */
-    suspend fun beginAttempt(ownerBareJid: String): AttemptBootstrap {
+    suspend fun beginAttempt(ownerBareJid: String): AttemptBootstrap = when (val result = beginAttemptResult(ownerBareJid)) {
+        is BeginAttemptResult.Started -> result.bootstrap
+        is BeginAttemptResult.PendingReceipt,
+        is BeginAttemptResult.TombstoneNotPostFence,
+        -> throw TerminalReceiptAttemptBlockedException(result)
+    }
+
+    internal suspend fun beginAttemptResult(ownerBareJid: String): BeginAttemptResult {
         val replacement = DeliveryAttemptRef(
             ownerBareJid = ownerBareJid,
             attemptId = DeliveryAttemptId.random(),
@@ -606,3 +628,7 @@ class OutboundQueue(
         const val TRANSITION_RECEIPT_RETENTION_MILLIS = 8L * 24L * 60L * 60L * 1_000L
     }
 }
+
+internal class TerminalReceiptAttemptBlockedException(
+    val result: OutboundQueue.BeginAttemptResult,
+) : IllegalStateException("terminal receipt blocks the next delivery attempt")
