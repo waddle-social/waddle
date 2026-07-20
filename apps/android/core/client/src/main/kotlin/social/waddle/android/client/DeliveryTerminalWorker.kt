@@ -224,9 +224,11 @@ internal class DeliveryTerminalWorker(
 
         private suspend fun drainTerminalReceipts() {
             val owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(ownership.lifecycle.ownerBareJid)
-            when (val discovery = retryingResult("terminal receipt discovery") {
-                journal.discoverTerminalReceipt(owner)
-            }) {
+            when (val discovery = receiptRetrying(
+                operation = TerminalReceiptPersistenceOperation.DISCOVERY,
+                owner = owner,
+                receipt = null,
+            ) { journal.discoverTerminalReceipt(owner) }) {
                 is TerminalReceiptDiscovery.Pending -> {
                     val claim = TerminalReceiptClaimState.Claimed(
                         id = TerminalClaimId.random(),
@@ -234,60 +236,60 @@ internal class DeliveryTerminalWorker(
                         processEpoch = processEpoch,
                     )
                     val requested = TerminalReceiptClaimRequest(discovery.ref, claim)
-                    when (val result = retryingResult("terminal receipt claim") {
-                        journal.claimTerminalReceipt(requested)
-                    }) {
-                        is TerminalReceiptApplicationResult.Claimed -> applyClaimedReceipt(result)
-                        is TerminalReceiptApplicationResult.Busy,
-                        is TerminalReceiptApplicationResult.AlreadyAcknowledged,
-                        is TerminalReceiptApplicationResult.None,
-                        is TerminalReceiptApplicationResult.Stale,
-                        -> Unit
-                        is TerminalReceiptApplicationResult.Corrupt -> throw TerminalReceiptApplicationException(
-                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.CLAIM, result.reason),
+                    when (val result = receiptRetrying(
+                        operation = TerminalReceiptPersistenceOperation.CLAIM,
+                        owner = owner,
+                        receipt = discovery.ref,
+                    ) { journal.claimTerminalReceipt(requested) }) {
+                        is TerminalReceiptClaimResult.Claimed -> applyClaimedReceipt(result)
+                        is TerminalReceiptClaimResult.AlreadyAcknowledged -> Unit
+                        is TerminalReceiptClaimResult.Busy -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.ClaimBusy(result),
                         )
-                        is TerminalReceiptApplicationResult.Acknowledged,
-                        is TerminalReceiptApplicationResult.Released,
-                        -> throw TerminalReceiptApplicationException(
-                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.CLAIM, null),
+                        is TerminalReceiptClaimResult.ReceiptMissing -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.ClaimMissing(result),
+                        )
+                        is TerminalReceiptClaimResult.ReceiptReplaced -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.ClaimReplaced(result),
+                        )
+                        is TerminalReceiptClaimResult.OwnerFenced -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.ClaimOwnerFenced(result),
+                        )
+                        is TerminalReceiptClaimResult.Corrupt -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.ClaimCorrupt(result),
                         )
                     }
                 }
                 is TerminalReceiptDiscovery.Corrupt -> throw TerminalReceiptApplicationException(
-                    TerminalReceiptApplicationFailure(TerminalReceiptOperation.DISCOVERY, discovery.reason),
+                    TerminalReceiptApplicationFailure.DiscoveryCorrupt(owner, discovery.reason),
                 )
                 TerminalReceiptDiscovery.None,
                 is TerminalReceiptDiscovery.AlreadyAcknowledged,
                 -> Unit
-                TerminalReceiptDiscovery.Stale -> throw TerminalReceiptApplicationException(
-                    TerminalReceiptApplicationFailure(
-                        TerminalReceiptOperation.DISCOVERY,
-                        TerminalReceiptCorruption.ACTIVE_OWNER_MISMATCH,
+                is TerminalReceiptDiscovery.OwnerFenced -> throw TerminalReceiptApplicationException(
+                    TerminalReceiptApplicationFailure.DiscoveryOwnerFenced(
+                        discovery.requested,
+                        discovery.actual,
                     ),
                 )
             }
         }
 
-        private suspend fun applyClaimedReceipt(claimed: TerminalReceiptApplicationResult.Claimed) {
+        private suspend fun applyClaimedReceipt(claimed: TerminalReceiptClaimResult.Claimed) {
             try {
                 claimed.effects.forEach(::applyReceiptEffect)
-                when (val acknowledgement = retryingResult("terminal receipt acknowledge") {
-                    journal.acknowledgeTerminalReceipt(claimed.lease)
-                }) {
-                    is TerminalReceiptApplicationResult.Acknowledged,
-                    is TerminalReceiptApplicationResult.AlreadyAcknowledged,
+                when (val acknowledgement = receiptRetrying(
+                    operation = TerminalReceiptPersistenceOperation.ACKNOWLEDGE,
+                    owner = claimed.lease.ref.owner,
+                    receipt = claimed.lease.ref,
+                ) { journal.acknowledgeTerminalReceipt(claimed.lease) }) {
+                    is TerminalReceiptAcknowledgeResult.Acknowledged,
+                    is TerminalReceiptAcknowledgeResult.AlreadyAcknowledged,
                     -> Unit
-                    is TerminalReceiptApplicationResult.Busy,
-                    is TerminalReceiptApplicationResult.None,
-                    is TerminalReceiptApplicationResult.Stale,
-                    is TerminalReceiptApplicationResult.Released,
-                    is TerminalReceiptApplicationResult.Claimed,
-                    -> throw TerminalReceiptApplicationException(
-                        TerminalReceiptApplicationFailure(TerminalReceiptOperation.ACKNOWLEDGE, null),
-                    )
-                    is TerminalReceiptApplicationResult.Corrupt -> throw TerminalReceiptApplicationException(
-                        TerminalReceiptApplicationFailure(TerminalReceiptOperation.ACKNOWLEDGE, acknowledgement.reason),
-                    )
+                    is TerminalReceiptAcknowledgeResult.LeaseMismatch -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeLeaseMismatch(acknowledgement))
+                    is TerminalReceiptAcknowledgeResult.ReceiptMissing -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeMissing(acknowledgement))
+                    is TerminalReceiptAcknowledgeResult.ReceiptReplaced -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeReplaced(acknowledgement))
+                    is TerminalReceiptAcknowledgeResult.Corrupt -> throw TerminalReceiptApplicationException(TerminalReceiptApplicationFailure.AcknowledgeCorrupt(acknowledgement))
                 }
             } catch (cancellation: CancellationException) {
                 releaseReceiptClaim(claimed.lease)?.let { releaseFailure ->
@@ -307,21 +309,17 @@ internal class DeliveryTerminalWorker(
         ): TerminalReceiptApplicationFailure? = withContext(NonCancellable) {
                 try {
                     when (val release = journal.releaseTerminalReceipt(lease)) {
-                        is TerminalReceiptApplicationResult.Released,
-                        is TerminalReceiptApplicationResult.AlreadyAcknowledged,
-                        is TerminalReceiptApplicationResult.Stale,
-                        is TerminalReceiptApplicationResult.None,
+                        is TerminalReceiptReleaseResult.Released,
+                        is TerminalReceiptReleaseResult.AlreadyAcknowledged,
                         -> null
-                        is TerminalReceiptApplicationResult.Busy,
-                        is TerminalReceiptApplicationResult.Claimed,
-                        is TerminalReceiptApplicationResult.Acknowledged,
-                        -> TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, null)
-                        is TerminalReceiptApplicationResult.Corrupt ->
-                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, release.reason)
+                        is TerminalReceiptReleaseResult.LeaseMismatch -> TerminalReceiptApplicationFailure.ReleaseLeaseMismatch(release)
+                        is TerminalReceiptReleaseResult.ReceiptMissing -> TerminalReceiptApplicationFailure.ReleaseMissing(release)
+                        is TerminalReceiptReleaseResult.ReceiptReplaced -> TerminalReceiptApplicationFailure.ReleaseReplaced(release)
+                        is TerminalReceiptReleaseResult.Corrupt -> TerminalReceiptApplicationFailure.ReleaseCorrupt(release)
                     }
                 } catch (failure: IOException) {
                     LOGGER.log(Level.WARNING, "terminal receipt release failed", failure)
-                    TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, null)
+                    TerminalReceiptApplicationFailure.ReleaseIo(lease)
                 }
         }
 
@@ -377,6 +375,39 @@ internal class DeliveryTerminalWorker(
             }
         }
 
+        /** Receipt persistence is bounded; legacy terminal intents retain their established retry policy. */
+        private suspend fun <T> receiptRetrying(
+            operation: TerminalReceiptPersistenceOperation,
+            owner: social.waddle.android.client.prefs.DeliveryOwnerBareJid,
+            receipt: TerminalReceiptRef?,
+            block: suspend () -> T,
+        ): T {
+            var retryIndex = 0
+            var attempts = 0
+            while (true) {
+                try {
+                    attempts += 1
+                    return block()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: IOException) {
+                    if (retryIndex >= RECEIPT_RETRY_DELAYS_MILLIS.size) {
+                        throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure.PersistenceExhausted(
+                                operation,
+                                owner,
+                                receipt,
+                                attempts,
+                            ),
+                            failure,
+                        )
+                    }
+                    delay(RECEIPT_RETRY_DELAYS_MILLIS[retryIndex])
+                    retryIndex += 1
+                }
+            }
+        }
+
         private data class TerminalSignal(
             val clientStanzaId: String,
             val attempt: DeliveryAttemptRef,
@@ -388,6 +419,7 @@ internal class DeliveryTerminalWorker(
     private companion object {
         val LOGGER: Logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
         val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
+        val RECEIPT_RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
         const val COMMAND_CAPACITY = 256
 
     }
@@ -395,7 +427,8 @@ internal class DeliveryTerminalWorker(
 
 internal class TerminalReceiptApplicationException(
     val failure: TerminalReceiptApplicationFailure,
-) : IllegalStateException()
+    cause: Throwable? = null,
+) : IllegalStateException("terminal receipt application failed: ${failure::class.simpleName}", cause)
 
 private fun WorkerOwnership.toTerminalReceiptClaimant(): TerminalReceiptClaimant.Worker =
     TerminalReceiptClaimant.Worker(

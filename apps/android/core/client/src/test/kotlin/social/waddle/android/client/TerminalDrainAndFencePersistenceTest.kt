@@ -97,7 +97,7 @@ class TerminalDrainAndFencePersistenceTest {
         val request = request(attempt, "receipt")
 
         val prepared = prefs.persistTerminalDrainAndFence(request) as TerminalDrainAndFenceResult.Prepared
-        assertEquals(TerminalReceiptState.Acknowledged, prepared.receipt.state)
+        assertEquals(TerminalReceiptState.PreAcknowledged, prepared.receipt.state)
         assertEquals(
             TerminalDrainAndFenceResult.AlreadyAcknowledged(prepared.journal, prepared.receipt),
             prefs.persistTerminalDrainAndFence(request),

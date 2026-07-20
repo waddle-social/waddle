@@ -33,7 +33,7 @@ class TerminalDrainAndFenceTest {
         val before = journal(attempt)
 
         val prepared = before.prepareTerminalDrainAndFence(request) as TerminalDrainAndFenceResult.Prepared
-        assertEquals(TerminalReceiptState.Acknowledged, prepared.receipt.state)
+        assertEquals(TerminalReceiptState.PreAcknowledged, prepared.receipt.state)
         assertEquals(null, prepared.journal.owners[OWNER]?.activeAttempt)
         assertEquals(prepared.receipt, prepared.journal.owners[OWNER]?.terminalReceipt)
 
@@ -412,7 +412,7 @@ class TerminalDrainAndFenceTest {
         id = TerminalReceiptId(uuid(id)),
         originProcessEpoch = ProcessEpoch(uuid("epoch-$id")),
         preparedAtMillis = 1,
-        state = TerminalReceiptState.Acknowledged,
+        state = TerminalReceiptState.PreAcknowledged,
     )
 
     private fun DeliveryJournal.withRows(rows: List<QueuedOutboundMessage>): DeliveryJournal {

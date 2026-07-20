@@ -93,10 +93,7 @@ class DeliveryTerminalWorkerTest {
         run.awaitStartupDrain()
 
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(
-            TerminalReceiptState.Acknowledged,
-            prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state,
-        )
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(run)
     }
 
@@ -133,10 +130,7 @@ class DeliveryTerminalWorkerTest {
         runCurrent()
         run.awaitStartupDrain()
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(
-            TerminalReceiptState.Acknowledged,
-            prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state,
-        )
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(run)
     }
 
@@ -164,10 +158,39 @@ class DeliveryTerminalWorkerTest {
         }
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, epoch), this)
-        run.awaitStartupDrain()
+        val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertTrue(effects.isEmpty())
         assertEquals(receipt, prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt)
-        assertRequested(run)
+        assertTrue(
+            (exit.reason as WorkerExitReason.UnexpectedFailure).kind is
+                WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION,
+        )
+    }
+
+    @Test
+    fun `receipt discovery io exhausts after the bounded six attempts`() = runTest {
+        val store = FailingPreferencesDataStore().also { it.failAllUpdates = true }
+        val run = terminalRun(
+            DeliveryTerminalWorker(OutboundQueue(SessionPrefs(store)), dispatchEvent = {}),
+            this,
+        )
+
+        advanceTimeBy(8_750)
+        runCurrent()
+
+        val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
+        val failure = ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as
+            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure
+        assertEquals(
+            TerminalReceiptApplicationFailure.PersistenceExhausted(
+                TerminalReceiptPersistenceOperation.DISCOVERY,
+                DeliveryOwnerBareJid(OWNER),
+                null,
+                6,
+            ),
+            failure,
+        )
+        assertEquals(6, store.updateAttempts.get())
     }
 
     @Test
@@ -195,7 +218,7 @@ class DeliveryTerminalWorkerTest {
         val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, ProcessEpoch(uuid("new-epoch"))), this)
         run.awaitStartupDrain()
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(TerminalReceiptState.Acknowledged, prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state)
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(run)
     }
 
@@ -229,10 +252,7 @@ class DeliveryTerminalWorkerTest {
         run.awaitStartupDrain()
 
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(
-            TerminalReceiptState.Acknowledged,
-            prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state,
-        )
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(run)
     }
 
@@ -286,10 +306,7 @@ class DeliveryTerminalWorkerTest {
         second.awaitStartupDrain()
 
         assertEquals(2, replayed.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(
-            TerminalReceiptState.Acknowledged,
-            prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state,
-        )
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
         assertRequested(second)
     }
 
@@ -327,10 +344,7 @@ class DeliveryTerminalWorkerTest {
         val firstExit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertEquals(WorkerExitReason.OwnerScopeCancelled, firstExit.reason)
         assertEquals(1, firstEvents.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertEquals(
-            TerminalReceiptState.Acknowledged,
-            prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state,
-        )
+        assertTrue(prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
 
         val restartedEvents = mutableListOf<XmppEvent>()
         val second = terminalRun(
@@ -368,9 +382,9 @@ class DeliveryTerminalWorkerTest {
         val failure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
         assertEquals(
             WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(
-                TerminalReceiptApplicationFailure(
-                    TerminalReceiptOperation.DISCOVERY,
-                    TerminalReceiptCorruption.ACTIVE_OWNER_MISMATCH,
+                TerminalReceiptApplicationFailure.DiscoveryOwnerFenced(
+                    DeliveryOwnerBareJid(OWNER),
+                    DeliveryOwnerBareJid("other@waddle.test"),
                 ),
             ),
             failure,
@@ -407,8 +421,8 @@ class DeliveryTerminalWorkerTest {
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertEquals(
             WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(
-                TerminalReceiptApplicationFailure(
-                    TerminalReceiptOperation.DISCOVERY,
+                TerminalReceiptApplicationFailure.DiscoveryCorrupt(
+                    DeliveryOwnerBareJid(OWNER),
                     TerminalReceiptCorruption.NATIVE_OWNED_ROW_REMAINS,
                 ),
             ),
@@ -465,8 +479,9 @@ class DeliveryTerminalWorkerTest {
             assertEquals(primary, handler.observed)
             assertEquals(1, primary.suppressed.size)
             assertEquals(
-                TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, null),
-                (primary.suppressed.single() as TerminalReceiptApplicationException).failure,
+                true,
+                (primary.suppressed.single() as TerminalReceiptApplicationException).failure is
+                    TerminalReceiptApplicationFailure.ReleaseIo,
             )
             val pending = prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state
                 as TerminalReceiptState.Pending

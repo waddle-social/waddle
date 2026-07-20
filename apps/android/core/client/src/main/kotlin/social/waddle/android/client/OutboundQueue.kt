@@ -207,15 +207,15 @@ class OutboundQueue(
 
     internal suspend fun claimTerminalReceipt(
         request: TerminalReceiptClaimRequest,
-    ): TerminalReceiptApplicationResult = sessionPrefs.claimTerminalReceipt(request)
+    ): TerminalReceiptClaimResult = sessionPrefs.claimTerminalReceipt(request)
 
     internal suspend fun acknowledgeTerminalReceipt(
         lease: TerminalReceiptLease,
-    ): TerminalReceiptApplicationResult = sessionPrefs.acknowledgeTerminalReceipt(lease)
+    ): TerminalReceiptAcknowledgeResult = sessionPrefs.acknowledgeTerminalReceipt(lease)
 
     internal suspend fun releaseTerminalReceipt(
         lease: TerminalReceiptLease,
-    ): TerminalReceiptApplicationResult = sessionPrefs.releaseTerminalReceipt(lease)
+    ): TerminalReceiptReleaseResult = sessionPrefs.releaseTerminalReceipt(lease)
 
     /**
      * Exact durability barrier for one Rust-minted failed-resume handoff.

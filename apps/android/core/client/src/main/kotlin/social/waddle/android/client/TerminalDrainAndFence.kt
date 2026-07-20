@@ -110,7 +110,9 @@ internal fun DeliveryJournal.prepareTerminalDrainAndFence(
         when (existing.state) {
             is TerminalReceiptState.Pending ->
                 return TerminalDrainAndFenceResult.PriorReceiptPending(this, existing)
-            TerminalReceiptState.Acknowledged -> {
+            is TerminalReceiptState.Acknowledged,
+            TerminalReceiptState.PreAcknowledged,
+            -> {
                 return TerminalDrainAndFenceResult.AlreadyAcknowledged(this, existing)
             }
         }
@@ -144,7 +146,7 @@ internal fun DeliveryJournal.prepareTerminalDrainAndFence(
         originProcessEpoch = request.originProcessEpoch,
         preparedAtMillis = request.nowMillis,
         state = if (effects.isEmpty()) {
-            TerminalReceiptState.Acknowledged
+            TerminalReceiptState.PreAcknowledged
         } else {
             TerminalReceiptState.Pending(
                 claim = social.waddle.android.client.prefs.TerminalReceiptClaimState.Unclaimed,

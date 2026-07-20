@@ -35,7 +35,7 @@ class TerminalReceiptSerializationTest {
                 ),
             ),
             claimedPending(TerminalReceiptClaimant.BootstrapProcess),
-            TerminalReceiptState.Acknowledged,
+            acknowledged(),
         )
         states.forEachIndexed { index, state ->
             val receipt = receipt("state-$index", state)
@@ -82,7 +82,7 @@ class TerminalReceiptSerializationTest {
                 id = TerminalReceiptId(uuid("mismatch")),
                 originProcessEpoch = ProcessEpoch(uuid("epoch")),
                 preparedAtMillis = 1,
-                state = TerminalReceiptState.Acknowledged,
+                state = acknowledged(),
             )
         }
         assertInvalid {
@@ -92,7 +92,7 @@ class TerminalReceiptSerializationTest {
                 id = TerminalReceiptId(uuid("negative")),
                 originProcessEpoch = ProcessEpoch(uuid("epoch-negative")),
                 preparedAtMillis = -1,
-                state = TerminalReceiptState.Acknowledged,
+                state = acknowledged(),
             )
         }
         val validRow = row()
@@ -178,7 +178,7 @@ class TerminalReceiptSerializationTest {
 
         val journal = DeliveryJournal(
             activeOwnerBareJid = OWNER,
-            owners = mapOf(OWNER to DeliveryOwnerJournal(terminalReceipt = receipt("ack", TerminalReceiptState.Acknowledged))),
+            owners = mapOf(OWNER to DeliveryOwnerJournal(terminalReceipt = receipt("ack", acknowledged()))),
         )
         assertInvalid {
             json.decodeFromString<DeliveryJournal>(
@@ -196,6 +196,14 @@ class TerminalReceiptSerializationTest {
             ),
             effects = listOf(effect()),
         )
+
+    private fun acknowledged(): TerminalReceiptState.Acknowledged = TerminalReceiptState.Acknowledged(
+        TerminalReceiptClaimState.Claimed(
+            TerminalClaimId(uuid("ack-claim")),
+            TerminalReceiptClaimant.BootstrapProcess,
+            ProcessEpoch(uuid("ack-epoch")),
+        ),
+    )
 
     private fun assertDecodeInvalid(encoded: String) {
         assertInvalid { json.decodeFromString<TerminalReceipt>(encoded) }

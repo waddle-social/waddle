@@ -13,7 +13,14 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
 
-/** Complete in-memory identity of one durable terminal receipt. */
+/**
+ * Complete in-memory identity of one durable terminal receipt.
+ *
+ * Effects are dispatched before the acknowledgement write. A process death
+ * after a dispatched prefix can replay the complete ordered receipt under a
+ * new process epoch; consumers must use the exact delivery identity
+ * idempotently.
+ */
 internal data class TerminalReceiptRef(
     val owner: DeliveryOwnerBareJid,
     val attempt: DeliveryAttemptRef,
@@ -57,20 +64,51 @@ internal enum class TerminalReceiptOperation {
 }
 
 /** Typed poison evidence carried from receipt validation into the worker fence. */
-internal data class TerminalReceiptApplicationFailure(
-    val operation: TerminalReceiptOperation,
-    val corruption: TerminalReceiptCorruption?,
-)
+internal sealed interface TerminalReceiptApplicationFailure {
+    data class PersistenceExhausted(
+        val operation: TerminalReceiptPersistenceOperation,
+        val owner: DeliveryOwnerBareJid,
+        val receipt: TerminalReceiptRef?,
+        val attempts: Int,
+    ) : TerminalReceiptApplicationFailure
+    data class DiscoveryCorrupt(val owner: DeliveryOwnerBareJid, val reason: TerminalReceiptCorruption) : TerminalReceiptApplicationFailure
+    data class DiscoveryOwnerFenced(val requested: DeliveryOwnerBareJid, val actual: DeliveryOwnerBareJid?) : TerminalReceiptApplicationFailure
+    data class ClaimBusy(val result: TerminalReceiptClaimResult.Busy) : TerminalReceiptApplicationFailure
+    data class ClaimMissing(val result: TerminalReceiptClaimResult.ReceiptMissing) : TerminalReceiptApplicationFailure
+    data class ClaimReplaced(val result: TerminalReceiptClaimResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
+    data class ClaimOwnerFenced(val result: TerminalReceiptClaimResult.OwnerFenced) : TerminalReceiptApplicationFailure
+    data class ClaimCorrupt(val result: TerminalReceiptClaimResult.Corrupt) : TerminalReceiptApplicationFailure
+    data class AcknowledgeLeaseMismatch(val result: TerminalReceiptAcknowledgeResult.LeaseMismatch) : TerminalReceiptApplicationFailure
+    data class AcknowledgeMissing(val result: TerminalReceiptAcknowledgeResult.ReceiptMissing) : TerminalReceiptApplicationFailure
+    data class AcknowledgeReplaced(val result: TerminalReceiptAcknowledgeResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
+    data class AcknowledgeCorrupt(val result: TerminalReceiptAcknowledgeResult.Corrupt) : TerminalReceiptApplicationFailure
+    data class ReleaseLeaseMismatch(val result: TerminalReceiptReleaseResult.LeaseMismatch) : TerminalReceiptApplicationFailure
+    data class ReleaseMissing(val result: TerminalReceiptReleaseResult.ReceiptMissing) : TerminalReceiptApplicationFailure
+    data class ReleaseReplaced(val result: TerminalReceiptReleaseResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
+    data class ReleaseCorrupt(val result: TerminalReceiptReleaseResult.Corrupt) : TerminalReceiptApplicationFailure
+    data class ReleaseIo(val lease: TerminalReceiptLease) : TerminalReceiptApplicationFailure
+    data class DispatchFailed(val lease: TerminalReceiptLease) : TerminalReceiptApplicationFailure
+}
+
+internal enum class TerminalReceiptPersistenceOperation {
+    DISCOVERY,
+    CLAIM,
+    ACKNOWLEDGE,
+    RELEASE,
+}
 
 internal sealed interface TerminalReceiptDiscovery {
     data class Pending(val receipt: TerminalReceipt, val ref: TerminalReceiptRef) : TerminalReceiptDiscovery
     data class AlreadyAcknowledged(val receipt: TerminalReceipt) : TerminalReceiptDiscovery
     data object None : TerminalReceiptDiscovery
-    data object Stale : TerminalReceiptDiscovery
+    data class OwnerFenced(
+        val requested: DeliveryOwnerBareJid,
+        val actual: DeliveryOwnerBareJid?,
+    ) : TerminalReceiptDiscovery
     data class Corrupt(val reason: TerminalReceiptCorruption) : TerminalReceiptDiscovery
 }
 
-internal sealed interface TerminalReceiptApplicationResult {
+internal sealed interface TerminalReceiptClaimResult {
     val journal: DeliveryJournal
 
     data class Claimed(
@@ -78,35 +116,82 @@ internal sealed interface TerminalReceiptApplicationResult {
         val receipt: TerminalReceipt,
         val lease: TerminalReceiptLease,
         val effects: List<social.waddle.android.client.prefs.TerminalReceiptEffect>,
-    ) : TerminalReceiptApplicationResult
+    ) : TerminalReceiptClaimResult
 
     data class AlreadyAcknowledged(
         override val journal: DeliveryJournal,
         val receipt: TerminalReceipt,
-    ) : TerminalReceiptApplicationResult
+        val acknowledgedBy: TerminalReceiptClaimState.Claimed?,
+    ) : TerminalReceiptClaimResult
 
     data class Busy(
         override val journal: DeliveryJournal,
-        val lease: TerminalReceiptLease,
-    ) : TerminalReceiptApplicationResult
+        val requested: TerminalReceiptClaimRequest,
+        val current: TerminalReceiptLease,
+    ) : TerminalReceiptClaimResult
 
-    data class None(override val journal: DeliveryJournal) : TerminalReceiptApplicationResult
-
-    data class Stale(override val journal: DeliveryJournal) : TerminalReceiptApplicationResult
-    data class Released(override val journal: DeliveryJournal) : TerminalReceiptApplicationResult
-    data class Acknowledged(
+    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptClaimResult
+    data class ReceiptReplaced(
         override val journal: DeliveryJournal,
-        val receipt: TerminalReceipt,
-    ) : TerminalReceiptApplicationResult
+        val requested: TerminalReceiptRef,
+        val actual: TerminalReceiptRef,
+    ) : TerminalReceiptClaimResult
+
+    data class OwnerFenced(
+        override val journal: DeliveryJournal,
+        val requested: DeliveryOwnerBareJid,
+        val actual: DeliveryOwnerBareJid?,
+    ) : TerminalReceiptClaimResult
 
     data class Corrupt(
         override val journal: DeliveryJournal,
+        val ref: TerminalReceiptRef,
         val reason: TerminalReceiptCorruption,
-    ) : TerminalReceiptApplicationResult
+    ) : TerminalReceiptClaimResult
+}
+
+internal sealed interface TerminalReceiptAcknowledgeResult {
+    val journal: DeliveryJournal
+
+    data class Acknowledged(override val journal: DeliveryJournal, val receipt: TerminalReceipt) : TerminalReceiptAcknowledgeResult
+    data class AlreadyAcknowledged(
+        override val journal: DeliveryJournal,
+        val receipt: TerminalReceipt,
+        val acknowledgedBy: TerminalReceiptClaimState.Claimed?,
+    ) : TerminalReceiptAcknowledgeResult
+    data class LeaseMismatch(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptLease,
+        val current: TerminalReceiptClaimState.Claimed?,
+    ) : TerminalReceiptAcknowledgeResult
+    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptAcknowledgeResult
+    data class ReceiptReplaced(override val journal: DeliveryJournal, val requested: TerminalReceiptRef, val actual: TerminalReceiptRef) : TerminalReceiptAcknowledgeResult
+    data class Corrupt(override val journal: DeliveryJournal, val ref: TerminalReceiptRef, val reason: TerminalReceiptCorruption) : TerminalReceiptAcknowledgeResult
+}
+
+internal sealed interface TerminalReceiptReleaseResult {
+    val journal: DeliveryJournal
+
+    data class Released(override val journal: DeliveryJournal, val lease: TerminalReceiptLease) : TerminalReceiptReleaseResult
+    data class AlreadyAcknowledged(
+        override val journal: DeliveryJournal,
+        val receipt: TerminalReceipt,
+        val acknowledgedBy: TerminalReceiptClaimState.Claimed?,
+    ) : TerminalReceiptReleaseResult
+    data class LeaseMismatch(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptLease,
+        val current: TerminalReceiptClaimState.Claimed?,
+    ) : TerminalReceiptReleaseResult
+    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptReleaseResult
+    data class ReceiptReplaced(override val journal: DeliveryJournal, val requested: TerminalReceiptRef, val actual: TerminalReceiptRef) : TerminalReceiptReleaseResult
+    data class Corrupt(override val journal: DeliveryJournal, val ref: TerminalReceiptRef, val reason: TerminalReceiptCorruption) : TerminalReceiptReleaseResult
 }
 
 internal fun DeliveryJournal.discoverTerminalReceipt(owner: DeliveryOwnerBareJid): TerminalReceiptDiscovery {
-    if (activeOwnerBareJid != owner.value) return TerminalReceiptDiscovery.Stale
+    if (activeOwnerBareJid != owner.value) {
+        return TerminalReceiptDiscovery.OwnerFenced(owner, activeOwnerBareJid?.let(::DeliveryOwnerBareJid))
+    }
     val bucket = owners[owner.value] ?: return TerminalReceiptDiscovery.None
     val receipt = bucket.terminalReceipt ?: return TerminalReceiptDiscovery.None
     val ref = TerminalReceiptRef(receipt.owner, receipt.attempt, receipt.id)
@@ -114,36 +199,47 @@ internal fun DeliveryJournal.discoverTerminalReceipt(owner: DeliveryOwnerBareJid
     if (validation != null) return TerminalReceiptDiscovery.Corrupt(validation)
     return when (receipt.state) {
         is TerminalReceiptState.Pending -> TerminalReceiptDiscovery.Pending(receipt, ref)
-        TerminalReceiptState.Acknowledged -> TerminalReceiptDiscovery.AlreadyAcknowledged(receipt)
+        is TerminalReceiptState.Acknowledged,
+        TerminalReceiptState.PreAcknowledged,
+        -> TerminalReceiptDiscovery.AlreadyAcknowledged(receipt)
     }
 }
 
 internal fun DeliveryJournal.claimTerminalReceipt(
     request: TerminalReceiptClaimRequest,
-): TerminalReceiptApplicationResult {
+): TerminalReceiptClaimResult {
     val owner = request.ref.owner
-    if (activeOwnerBareJid != owner.value) return TerminalReceiptApplicationResult.Stale(this)
-    val bucket = owners[owner.value] ?: return TerminalReceiptApplicationResult.None(this)
-    val receipt = bucket.terminalReceipt ?: return TerminalReceiptApplicationResult.None(this)
-    if (!receipt.matches(request.ref)) return TerminalReceiptApplicationResult.Stale(this)
+    if (activeOwnerBareJid != owner.value) {
+        return TerminalReceiptClaimResult.OwnerFenced(this, owner, activeOwnerBareJid?.let(::DeliveryOwnerBareJid))
+    }
+    val bucket = owners[owner.value] ?: return TerminalReceiptClaimResult.ReceiptMissing(this, request.ref)
+    val receipt = bucket.terminalReceipt ?: return TerminalReceiptClaimResult.ReceiptMissing(this, request.ref)
+    if (!receipt.matches(request.ref)) {
+        return TerminalReceiptClaimResult.ReceiptReplaced(this, request.ref, receipt.ref())
+    }
     val validation = bucket.validateReceiptApplication(owner, receipt, request.ref)
-    if (validation != null) return TerminalReceiptApplicationResult.Corrupt(this, validation)
+    if (validation != null) return TerminalReceiptClaimResult.Corrupt(this, request.ref, validation)
     val pending = receipt.state as? TerminalReceiptState.Pending
-        ?: return TerminalReceiptApplicationResult.AlreadyAcknowledged(this, receipt)
+        ?: return TerminalReceiptClaimResult.AlreadyAcknowledged(
+            this,
+            receipt,
+            (receipt.state as? TerminalReceiptState.Acknowledged)?.claim,
+        )
     val nextClaim = request.claim
     val nextReceipt = when (val current = pending.claim) {
         TerminalReceiptClaimState.Unclaimed -> receipt.withClaim(nextClaim)
         is TerminalReceiptClaimState.Claimed -> when {
             current == nextClaim -> receipt
             current.processEpoch != nextClaim.processEpoch -> receipt.withClaim(nextClaim)
-            else -> return TerminalReceiptApplicationResult.Busy(
+            else -> return TerminalReceiptClaimResult.Busy(
                 this,
+                request,
                 TerminalReceiptLease(request.ref, current),
             )
         }
     }
     val nextJournal = withOwner(owner.value, bucket.copy(terminalReceipt = nextReceipt))
-    return TerminalReceiptApplicationResult.Claimed(
+    return TerminalReceiptClaimResult.Claimed(
         journal = nextJournal,
         receipt = nextReceipt,
         lease = TerminalReceiptLease(request.ref, nextClaim),
@@ -153,45 +249,89 @@ internal fun DeliveryJournal.claimTerminalReceipt(
 
 internal fun DeliveryJournal.acknowledgeTerminalReceipt(
     lease: TerminalReceiptLease,
-): TerminalReceiptApplicationResult = mutateExactLease(lease, acknowledge = true)
+): TerminalReceiptAcknowledgeResult {
+    val resolved = resolveExactLease(lease)
+    return when (resolved) {
+        is ExactLeaseResolution.Pending -> {
+            if (resolved.pending.claim != lease.claim) {
+                TerminalReceiptAcknowledgeResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
+            } else {
+                val receipt = resolved.receipt.copy(state = TerminalReceiptState.Acknowledged(lease.claim))
+                TerminalReceiptAcknowledgeResult.Acknowledged(
+                    withOwner(lease.ref.owner.value, resolved.bucket.copy(terminalReceipt = receipt)),
+                    receipt,
+                )
+            }
+        }
+        is ExactLeaseResolution.Acknowledged -> if (resolved.claim == lease.claim) {
+            TerminalReceiptAcknowledgeResult.AlreadyAcknowledged(this, resolved.receipt, resolved.claim)
+        } else {
+            TerminalReceiptAcknowledgeResult.LeaseMismatch(this, lease, resolved.claim)
+        }
+        is ExactLeaseResolution.PreAcknowledged -> TerminalReceiptAcknowledgeResult.LeaseMismatch(this, lease, null)
+        is ExactLeaseResolution.Missing -> TerminalReceiptAcknowledgeResult.ReceiptMissing(this, lease.ref)
+        is ExactLeaseResolution.Replaced -> TerminalReceiptAcknowledgeResult.ReceiptReplaced(this, lease.ref, resolved.actual)
+        is ExactLeaseResolution.Corrupt -> TerminalReceiptAcknowledgeResult.Corrupt(this, lease.ref, resolved.reason)
+    }
+}
 
 internal fun DeliveryJournal.releaseTerminalReceipt(
     lease: TerminalReceiptLease,
-): TerminalReceiptApplicationResult = mutateExactLease(lease, acknowledge = false)
+): TerminalReceiptReleaseResult {
+    val resolved = resolveExactLease(lease)
+    return when (resolved) {
+        is ExactLeaseResolution.Pending -> {
+            if (resolved.pending.claim != lease.claim) {
+                TerminalReceiptReleaseResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
+            } else {
+                val receipt = resolved.receipt.copy(
+                    state = resolved.pending.copy(claim = TerminalReceiptClaimState.Unclaimed),
+                )
+                TerminalReceiptReleaseResult.Released(
+                    withOwner(lease.ref.owner.value, resolved.bucket.copy(terminalReceipt = receipt)),
+                    lease,
+                )
+            }
+        }
+        is ExactLeaseResolution.Acknowledged -> if (resolved.claim == lease.claim) {
+            TerminalReceiptReleaseResult.AlreadyAcknowledged(this, resolved.receipt, resolved.claim)
+        } else {
+            TerminalReceiptReleaseResult.LeaseMismatch(this, lease, resolved.claim)
+        }
+        is ExactLeaseResolution.PreAcknowledged -> TerminalReceiptReleaseResult.LeaseMismatch(this, lease, null)
+        is ExactLeaseResolution.Missing -> TerminalReceiptReleaseResult.ReceiptMissing(this, lease.ref)
+        is ExactLeaseResolution.Replaced -> TerminalReceiptReleaseResult.ReceiptReplaced(this, lease.ref, resolved.actual)
+        is ExactLeaseResolution.Corrupt -> TerminalReceiptReleaseResult.Corrupt(this, lease.ref, resolved.reason)
+    }
+}
 
-private fun DeliveryJournal.mutateExactLease(
-    lease: TerminalReceiptLease,
-    acknowledge: Boolean,
-): TerminalReceiptApplicationResult {
-    val owner = lease.ref.owner
-    if (activeOwnerBareJid != owner.value) return TerminalReceiptApplicationResult.Stale(this)
-    val bucket = owners[owner.value] ?: return TerminalReceiptApplicationResult.None(this)
-    val receipt = bucket.terminalReceipt ?: return TerminalReceiptApplicationResult.None(this)
-    if (!receipt.matches(lease.ref)) return TerminalReceiptApplicationResult.Stale(this)
-    val validation = bucket.validateReceiptApplication(owner, receipt, lease.ref)
-    if (validation != null) return TerminalReceiptApplicationResult.Corrupt(this, validation)
-    val pending = receipt.state as? TerminalReceiptState.Pending
-        ?: return TerminalReceiptApplicationResult.AlreadyAcknowledged(this, receipt)
-    if (pending.claim != lease.claim) {
-        val current = pending.claim as? TerminalReceiptClaimState.Claimed
-            ?: return TerminalReceiptApplicationResult.Stale(this)
-        return TerminalReceiptApplicationResult.Busy(this, TerminalReceiptLease(lease.ref, current))
-    }
-    val nextReceipt = if (acknowledge) {
-        receipt.copy(state = TerminalReceiptState.Acknowledged)
-    } else {
-        receipt.copy(state = pending.copy(claim = TerminalReceiptClaimState.Unclaimed))
-    }
-    val nextJournal = withOwner(owner.value, bucket.copy(terminalReceipt = nextReceipt))
-    return if (acknowledge) {
-        TerminalReceiptApplicationResult.Acknowledged(nextJournal, nextReceipt)
-    } else {
-        TerminalReceiptApplicationResult.Released(nextJournal)
+private sealed interface ExactLeaseResolution {
+    data class Pending(val bucket: DeliveryOwnerJournal, val receipt: TerminalReceipt, val pending: TerminalReceiptState.Pending) : ExactLeaseResolution
+    data class Acknowledged(val receipt: TerminalReceipt, val claim: TerminalReceiptClaimState.Claimed) : ExactLeaseResolution
+    data object PreAcknowledged : ExactLeaseResolution
+    data object Missing : ExactLeaseResolution
+    data class Replaced(val actual: TerminalReceiptRef) : ExactLeaseResolution
+    data class Corrupt(val reason: TerminalReceiptCorruption) : ExactLeaseResolution
+}
+
+/** A committed lease is non-revocable by a later active-owner switch. */
+private fun DeliveryJournal.resolveExactLease(lease: TerminalReceiptLease): ExactLeaseResolution {
+    val bucket = owners[lease.ref.owner.value] ?: return ExactLeaseResolution.Missing
+    val receipt = bucket.terminalReceipt ?: return ExactLeaseResolution.Missing
+    if (!receipt.matches(lease.ref)) return ExactLeaseResolution.Replaced(receipt.ref())
+    val validation = bucket.validateReceiptApplication(lease.ref.owner, receipt, lease.ref)
+    if (validation != null) return ExactLeaseResolution.Corrupt(validation)
+    return when (val state = receipt.state) {
+        is TerminalReceiptState.Pending -> ExactLeaseResolution.Pending(bucket, receipt, state)
+        is TerminalReceiptState.Acknowledged -> ExactLeaseResolution.Acknowledged(receipt, state.claim)
+        TerminalReceiptState.PreAcknowledged -> ExactLeaseResolution.PreAcknowledged
     }
 }
 
 private fun TerminalReceipt.matches(ref: TerminalReceiptRef): Boolean =
     owner == ref.owner && attempt == ref.attempt && id == ref.id
+
+private fun TerminalReceipt.ref(): TerminalReceiptRef = TerminalReceiptRef(owner, attempt, id)
 
 private fun TerminalReceipt.withClaim(claim: TerminalReceiptClaimState.Claimed): TerminalReceipt = copy(
     state = (state as TerminalReceiptState.Pending).copy(claim = claim),
@@ -233,21 +373,21 @@ internal suspend fun SessionPrefs.discoverTerminalReceipt(
 
 internal suspend fun SessionPrefs.claimTerminalReceipt(
     request: TerminalReceiptClaimRequest,
-): TerminalReceiptApplicationResult = updateDeliveryJournal { journal ->
+): TerminalReceiptClaimResult = updateDeliveryJournal { journal ->
     val result = journal.claimTerminalReceipt(request)
     DeliveryJournalMutation(result.journal, result)
 }
 
 internal suspend fun SessionPrefs.acknowledgeTerminalReceipt(
     lease: TerminalReceiptLease,
-): TerminalReceiptApplicationResult = updateDeliveryJournal { journal ->
+): TerminalReceiptAcknowledgeResult = updateDeliveryJournal { journal ->
     val result = journal.acknowledgeTerminalReceipt(lease)
     DeliveryJournalMutation(result.journal, result)
 }
 
 internal suspend fun SessionPrefs.releaseTerminalReceipt(
     lease: TerminalReceiptLease,
-): TerminalReceiptApplicationResult = updateDeliveryJournal { journal ->
+): TerminalReceiptReleaseResult = updateDeliveryJournal { journal ->
     val result = journal.releaseTerminalReceipt(lease)
     DeliveryJournalMutation(result.journal, result)
 }

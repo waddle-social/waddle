@@ -159,12 +159,27 @@ sealed interface TerminalReceiptState {
             require(effects.map { it.row.identity }.toSet().size == effects.size) {
                 "a pending terminal receipt cannot repeat row identities"
             }
+            require(effects.zipWithNext().all { (first, second) -> first.row.sequence < second.row.sequence }) {
+                "terminal receipt effects must be in strictly increasing queue sequence order"
+            }
         }
     }
 
     @Serializable
+    /**
+     * A durable acknowledgement committed by exactly [claim]. The claim is
+     * retained so only that lease can prove an uncertain acknowledgement
+     * commit was successful.
+     */
     @SerialName("acknowledged")
-    data object Acknowledged : TerminalReceiptState
+    data class Acknowledged(
+        val claim: TerminalReceiptClaimState.Claimed,
+    ) : TerminalReceiptState
+
+    /** A zero-effect fence created already acknowledged during preparation. */
+    @Serializable
+    @SerialName("pre-acknowledged")
+    data object PreAcknowledged : TerminalReceiptState
 }
 
 @Serializable
@@ -181,8 +196,9 @@ data class TerminalReceipt(
             "terminal receipt owner must match its delivery attempt"
         }
         require(preparedAtMillis >= 0) { "terminal receipt timestamp must be non-negative" }
-        if (state is TerminalReceiptState.Pending) {
-            require(state.effects.all { effect ->
+        val effects = (state as? TerminalReceiptState.Pending)?.effects
+        if (effects != null) {
+            require(effects.all { effect ->
                 effect.row.ownerBareJid == owner.value &&
                     effect.callback.attempt == attempt
             }) { "terminal receipt effects must match the receipt owner and attempt" }
