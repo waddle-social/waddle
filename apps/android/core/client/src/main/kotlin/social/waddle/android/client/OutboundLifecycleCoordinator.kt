@@ -138,7 +138,7 @@ internal class OutboundLifecycleCoordinator(
             lastClosedAttempt = null
             pendingShutdown = null
             recoveryClaim = null
-            bootstrapWorkers.reset()
+            bootstrapWorkers.begin(lifecycle)
             state = OutboundLifecycleState.Bootstrapping(lifecycle)
             createdWorkers
         }
@@ -171,6 +171,7 @@ internal class OutboundLifecycleCoordinator(
             workers.drain.awaitReady()
             val opened = gate.withLock {
                 if (state == OutboundLifecycleState.Bootstrapping(lifecycle) && workers.bothReady()) {
+                    bootstrapWorkers.finishStartup(lifecycle)
                     state = OutboundLifecycleState.Open(lifecycle)
                     true
                 } else {
@@ -327,6 +328,8 @@ internal class OutboundLifecycleCoordinator(
                 }
                 return@withLock
             }
+            val exactOwner = workers.lifecycle == exit.lifecycle && workers.owns(exit.ownership())
+            val firstExactExit = workers.recordExactExit(exit)
             val decision = if (
                 state is OutboundLifecycleState.Bootstrapping &&
                 bootstrapWorkers.isExpectedTeardown(exit)
@@ -335,8 +338,8 @@ internal class OutboundLifecycleCoordinator(
             } else {
                 decideWorkerExitGate(
                     state = state,
-                    exactOwner = workers.lifecycle == exit.lifecycle && workers.owns(exit.ownership()),
-                    firstExactExit = workers.recordExactExit(exit),
+                    exactOwner = exactOwner,
+                    firstExactExit = firstExactExit,
                     exit = exit,
                 )
             }
@@ -346,7 +349,11 @@ internal class OutboundLifecycleCoordinator(
                     exit.lifecycle,
                     decision.cause,
                 )
-            } else {
+            } else if (
+                decision !is WorkerExitGateDecision.Ignore ||
+                !exactOwner ||
+                !bootstrapWorkers.retainsIgnoredExitEvidence(exit.lifecycle, workers)
+            ) {
                 workerExitEvidence.discard(exit.ownership())
             }
         }

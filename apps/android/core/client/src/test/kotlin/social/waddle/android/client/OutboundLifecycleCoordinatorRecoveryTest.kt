@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -123,56 +124,80 @@ class OutboundLifecycleCoordinatorRecoveryTest {
     }
 
     @Test
-    fun `B terminal startup evidence wins over distinct drain startup evidence`() = runTest {
-        val terminalPrimary = AssertionError("terminal startup primary")
-        val drainPrimary = AssertionError("drain startup secondary")
-        val drainPublished = CompletableDeferred<Unit>()
-        var failStartup = true
+    fun `B drain startup error wins when terminal startup evidence already exists`() = runTest {
+        val dataStore = FailingPreferencesDataStore()
+        val terminalPrimary = AssertionError("terminal startup dependency failure")
+        val drainPrimary = AssertionError("drain startup primary")
+        val terminalReadyEntered = CompletableDeferred<Unit>()
+        val releaseTerminalReady = CompletableDeferred<Unit>()
+        val drainReadyEntered = CompletableDeferred<Unit>()
+        val terminalExitObserved = CompletableDeferred<WorkerExit>()
+        val terminalExitAwaiter = CompletableDeferred<Deferred<WorkerExit>>()
+        val installed = CompletableDeferred<OwnerWorkers>()
+        var exerciseFailure = true
         val fixture = coordinatorFixture(
+            dataStore = dataStore,
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
-                if (failStartup) {
+                if (exerciseFailure) {
                     when (phase) {
-                        OutboundLifecyclePhase.TERMINAL_WORKER_READY -> throw terminalPrimary
+                        OutboundLifecyclePhase.TERMINAL_WORKER_READY -> {
+                            terminalReadyEntered.complete(Unit)
+                            releaseTerminalReady.await()
+                        }
                         OutboundLifecyclePhase.DRAIN_WORKER_READY -> {
-                            drainPublished.complete(Unit)
+                            drainReadyEntered.complete(Unit)
+                            terminalExitObserved.await()
                             throw drainPrimary
                         }
                         else -> Unit
                     }
                 }
             },
-        )
+            workerStartHooks = object : WorkerStartHooks {
+                override suspend fun beforeTerminal() = Unit
 
-        assertSame(terminalPrimary, runCatching {
-            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
-        }.exceptionOrNull())
-        drainPublished.await()
-        failStartup = false
-        fixture.stop(fixture.start())
-    }
+                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
+                    terminalExitAwaiter.complete(backgroundScope.async {
+                        val exit = when (val outcome = terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)) {
+                            is WorkerAwaitOutcome.Exited -> outcome.exit
+                            WorkerAwaitOutcome.TimedOut -> error("terminal startup worker did not exit")
+                        }
+                        terminalExitObserved.complete(exit)
+                        exit
+                    })
+                }
 
-    @Test
-    fun `B drain startup evidence wins after terminal readiness`() = runTest {
-        val drainPrimary = CancellationException("drain startup primary")
-        val terminalReady = CompletableDeferred<Unit>()
-        var failStartup = true
-        val fixture = coordinatorFixture(
-            phaseObserver = OutboundLifecyclePhaseObserver { phase ->
-                if (failStartup) {
-                    when (phase) {
-                        OutboundLifecyclePhase.TERMINAL_WORKER_READY -> terminalReady.complete(Unit)
-                        OutboundLifecyclePhase.DRAIN_WORKER_READY -> throw drainPrimary
-                        else -> Unit
-                    }
+                override suspend fun afterInstall(workers: OwnerWorkers) {
+                    installed.complete(workers)
                 }
             },
         )
+        val startupFailure = backgroundScope.async {
+            runCatching { fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) }.exceptionOrNull()
+        }
+        terminalReadyEntered.await()
+        drainReadyEntered.await()
+        val workers = installed.await()
+        dataStore.failAllUpdatesWith = terminalPrimary
+        releaseTerminalReady.complete(Unit)
 
-        assertSame(drainPrimary, runCatching {
-            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
-        }.exceptionOrNull())
-        terminalReady.await()
-        failStartup = false
+        val terminalExit = terminalExitAwaiter.await().await()
+        assertEquals(
+            WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
+            terminalExit.reason,
+        )
+        assertEquals(workers.terminalOwnership, terminalExit.ownership())
+
+        assertSame(drainPrimary, startupFailure.await())
+        val drainExit = workers.drain.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS) as WorkerAwaitOutcome.Exited
+        assertEquals(
+            WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
+            drainExit.exit.reason,
+        )
+        assertEquals(WorkerRecoveryOutcome.NotFenced, fixture.messenger.recoverFencedWorkers(workers.lifecycle))
+
+        exerciseFailure = false
+        dataStore.failAllUpdatesWith = null
         fixture.stop(fixture.start())
     }
 

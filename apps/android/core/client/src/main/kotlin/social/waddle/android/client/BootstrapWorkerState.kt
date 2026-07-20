@@ -9,13 +9,33 @@ package social.waddle.android.client
  * its gate.
  */
 internal class BootstrapWorkerBookkeeping {
+    private var startupLifecycle: SessionLifecycleRef? = null
     private var teardownOwnerships: Set<WorkerOwnership> = emptySet()
     private var workerExit: BootstrapWorkerExitFailure? = null
 
-    fun reset() {
+    fun begin(lifecycle: SessionLifecycleRef) {
+        startupLifecycle = lifecycle
         teardownOwnerships = emptySet()
         workerExit = null
     }
+
+    fun reset() {
+        startupLifecycle = null
+        teardownOwnerships = emptySet()
+        workerExit = null
+    }
+
+    fun finishStartup(lifecycle: SessionLifecycleRef) {
+        if (startupLifecycle == lifecycle) startupLifecycle = null
+    }
+
+    /**
+     * A second exact exit can supply the primary thrown by an in-flight
+     * readiness await. Keep only that bootstrap-pair evidence until start
+     * compensates or opens; every other ignored exit is disposed immediately.
+     */
+    fun retainsIgnoredExitEvidence(lifecycle: SessionLifecycleRef, workers: OwnerWorkers): Boolean =
+        startupLifecycle == lifecycle && workers.isInstalled()
 
     fun installIfCurrent(
         state: OutboundLifecycleState,
