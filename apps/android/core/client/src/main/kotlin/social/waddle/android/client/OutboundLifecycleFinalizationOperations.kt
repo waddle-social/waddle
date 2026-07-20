@@ -168,15 +168,21 @@ internal class OutboundLifecycleFinalizationOperations(
 
     suspend fun disconnect(claim: DisconnectClaim): Boolean {
         if (claim is DisconnectClaim.Execute) {
-            val client = claim.record.client
-            val disconnected = if (client == null) {
-                true
-            } else {
-                withTimeoutOrNull(transitionTimeoutMillis) {
-                    runCatching { client.disconnect() }.isSuccess
-                } == true
+            try {
+                val client = claim.record.client
+                val disconnected = if (client == null) {
+                    true
+                } else {
+                    withTimeoutOrNull(transitionTimeoutMillis) {
+                        client.disconnect()
+                        true
+                    } == true
+                }
+                claim.result.complete(disconnected)
+            } catch (failure: Throwable) {
+                claim.result.completeExceptionally(failure)
+                throw failure
             }
-            claim.result.complete(disconnected)
         }
         return withTimeoutOrNull(transitionTimeoutMillis) {
             claim.result.await()
