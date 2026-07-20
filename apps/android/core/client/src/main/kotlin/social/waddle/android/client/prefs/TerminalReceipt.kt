@@ -150,6 +150,8 @@ sealed interface TerminalReceiptState {
     data class Pending(
         val claim: TerminalReceiptClaimState,
         val effects: List<TerminalReceiptEffect>,
+        /** Exact lease that most recently released this unclaimed receipt. */
+        val releasedClaim: TerminalReceiptClaimState.Claimed? = null,
     ) : TerminalReceiptState {
         init {
             require(effects.isNotEmpty()) { "a pending terminal receipt requires effects" }

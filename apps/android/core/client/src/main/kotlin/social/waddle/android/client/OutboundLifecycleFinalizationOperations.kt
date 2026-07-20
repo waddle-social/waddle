@@ -34,11 +34,13 @@ internal sealed interface OwnerFinalizationResult {
 
 internal interface WorkerStartHooks {
     suspend fun beforeTerminal()
-    suspend fun afterTerminal()
+    suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run)
+    suspend fun afterInstall(workers: OwnerWorkers)
 
     data object None : WorkerStartHooks {
         override suspend fun beforeTerminal() = Unit
-        override suspend fun afterTerminal() = Unit
+        override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) = Unit
+        override suspend fun afterInstall(workers: OwnerWorkers) = Unit
     }
 }
 
@@ -119,8 +121,11 @@ internal class OutboundLifecycleFinalizationOperations(
         workers: OwnerWorkers,
         onReady: suspend (WorkerOwnership) -> Unit,
         onExit: suspend (WorkerExit) -> Unit,
+        installWorkers: suspend (DeliveryTerminalWorker.Run, OutboundDrainWorker.Run) -> Boolean,
+        onPartialTeardown: suspend (WorkerOwnership) -> Unit,
     ): OwnerWorkers {
         var terminal: DeliveryTerminalWorker.Run? = null
+        var drain: OutboundDrainWorker.Run? = null
         var installed = false
         try {
             workerStartHooks.beforeTerminal()
@@ -130,21 +135,24 @@ internal class OutboundLifecycleFinalizationOperations(
                 onReady,
                 onExit,
             )
-            workerStartHooks.afterTerminal()
-            val drain = drainWorker.start(
+            workerStartHooks.afterTerminal(requireNotNull(terminal))
+            drain = drainWorker.start(
                 scope,
                 workers.drainOwnership,
                 onReady,
                 onExit,
             )
-            workers.install(terminal, drain)
-            installed = true
+            installed = installWorkers(requireNotNull(terminal), requireNotNull(drain))
+            if (installed) workerStartHooks.afterInstall(workers)
             return workers
         } finally {
             if (!installed) {
                 withContext(NonCancellable) {
+                    terminal?.let { onPartialTeardown(workers.terminalOwnership) }
                     terminal?.requestStop()
+                    drain?.requestStop()
                     terminal?.awaitExit(transitionTimeoutMillis)
+                    drain?.awaitExit(transitionTimeoutMillis)
                 }
             }
         }

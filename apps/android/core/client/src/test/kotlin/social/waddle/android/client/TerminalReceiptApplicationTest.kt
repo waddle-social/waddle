@@ -79,6 +79,22 @@ class TerminalReceiptApplicationTest {
     }
 
     @Test
+    fun `only the exact released lease is idempotent after a later epoch reclaims`() {
+        val initial = journal()
+        val first = initial.claimTerminalReceipt(request(initial, "released-first", "released-epoch-a"))
+            as TerminalReceiptClaimResult.Claimed
+        val released = first.journal.releaseTerminalReceipt(first.lease)
+            as TerminalReceiptReleaseResult.Released
+        assertTrue(released.journal.releaseTerminalReceipt(first.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+        val second = released.journal.claimTerminalReceipt(request(released.journal, "released-second", "released-epoch-b"))
+            as TerminalReceiptClaimResult.Claimed
+        val releasedSecond = second.journal.releaseTerminalReceipt(second.lease)
+            as TerminalReceiptReleaseResult.Released
+        assertTrue(releasedSecond.journal.releaseTerminalReceipt(first.lease) is TerminalReceiptReleaseResult.LeaseMismatch)
+        assertTrue(releasedSecond.journal.releaseTerminalReceipt(second.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+    }
+
+    @Test
     fun `claim owner fence and post claim owner change follow their exact boundaries`() {
         val initial = journal()
         val fenced = initial.copy(activeOwnerBareJid = "other@waddle.test")

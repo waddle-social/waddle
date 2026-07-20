@@ -47,12 +47,8 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         ownerJob.cancel()
         runCurrent()
 
-        val failed = startup.await() as LifecycleStartResult.Failed
-        assertEquals(LifecycleStartFailure.CANCELLED, failed.cause)
-        assertNotNull(failed.lifecycle)
-        assertEquals(WorkerRecoveryOutcome.Recovered, fixture.messenger.recoverFencedWorkers(failed.lifecycle))
+        assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
         val replacement = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
-        assertNotEquals(failed.lifecycle, replacement)
         fixture.stop(replacement)
     }
 
@@ -61,12 +57,20 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val firstReady = CompletableDeferred<Unit>()
+        val installedLifecycle = CompletableDeferred<SessionLifecycleRef>()
         val fixture = coordinatorFixture(
             scope = ownerScope,
             phaseObserver = OutboundLifecyclePhaseObserver { phase ->
                 if (phase == OutboundLifecyclePhase.TERMINAL_WORKER_READY) {
                     firstReady.complete(Unit)
                     ownerJob.cancel()
+                }
+            },
+            workerStartHooks = object : WorkerStartHooks {
+                override suspend fun beforeTerminal() = Unit
+                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) = Unit
+                override suspend fun afterInstall(workers: OwnerWorkers) {
+                    installedLifecycle.complete(workers.lifecycle)
                 }
             },
         )
@@ -76,12 +80,9 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         firstReady.await()
         runCurrent()
 
-        val failed = startup.await() as LifecycleStartResult.Failed
-        assertEquals(LifecycleStartFailure.CANCELLED, failed.cause)
-        assertNotNull(failed.lifecycle)
-        assertEquals(WorkerRecoveryOutcome.Recovered, fixture.messenger.recoverFencedWorkers(failed.lifecycle))
+        assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
+        assertEquals(WorkerRecoveryOutcome.Recovered, fixture.messenger.recoverFencedWorkers(installedLifecycle.await()))
         val replacement = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
-        assertNotEquals(failed.lifecycle, replacement)
         fixture.stop(replacement)
     }
 
@@ -89,38 +90,125 @@ class OutboundLifecycleCoordinatorRecoveryTest {
     fun `B startup seams compensate ordinary failure cancellation and error`() = runTest {
         listOf(false, true).forEach { afterTerminal ->
             val exception = IllegalStateException("startup exception $afterTerminal")
-            val failed = coordinatorFixture(
+            val ordinaryFixture = coordinatorFixture(
                 workerStartHooks = failingStartHooks(afterTerminal, exception),
-            ).messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+            )
+            val failed = ordinaryFixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
             assertEquals(
                 LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED,
                 failed.cause,
             )
+            ordinaryFixture.stop(ordinaryFixture.start())
 
             val cancellation = CancellationException("startup cancellation $afterTerminal")
-            val cancelled = coordinatorFixture(
-                workerStartHooks = failingStartHooks(afterTerminal, cancellation),
-            ).messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
-            assertEquals(LifecycleStartFailure.CANCELLED, cancelled.cause)
+            val cancellationFixture = coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, cancellation))
+            val cancelled = runCatching {
+                cancellationFixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+            }.exceptionOrNull()
+            assertTrue(cancelled === cancellation)
+            cancellationFixture.stop(cancellationFixture.start())
 
             val error = AssertionError("startup error $afterTerminal")
+            val errorFixture = coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, error))
             val thrown = runCatching {
-                coordinatorFixture(workerStartHooks = failingStartHooks(afterTerminal, error))
-                    .messenger.start(backgroundScope, COORDINATOR_OWNER)
+                errorFixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
             }.exceptionOrNull()
             assertTrue(thrown === error)
+            errorFixture.stop(errorFixture.start())
         }
+    }
+
+    @Test
+    fun `B unexpected terminal stop before install is retained as bootstrap failure and no pair is installed`() = runTest {
+        val terminalExited = CompletableDeferred<Unit>()
+        val fixture = coordinatorFixture(
+            workerStartHooks = object : WorkerStartHooks {
+                private var stopped = false
+
+                override suspend fun beforeTerminal() = Unit
+
+                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
+                    if (!stopped) {
+                        stopped = true
+                        terminal.requestStop()
+                        terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+                        terminalExited.complete(Unit)
+                    }
+                }
+
+                override suspend fun afterInstall(workers: OwnerWorkers) = Unit
+            },
+        )
+
+        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+
+        terminalExited.await()
+        assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B explicit partial teardown requested stop remains record-only`() = runTest {
+        val fixture = coordinatorFixture(
+            workerStartHooks = failingStartHooks(true, IllegalStateException("after terminal")),
+        )
+
+        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+
+        assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B terminal exit immediately after install enters full fenced recovery`() = runTest {
+        val terminalExited = CompletableDeferred<Unit>()
+        val fixture = coordinatorFixture(
+            workerStartHooks = object : WorkerStartHooks {
+                private var stopped = false
+
+                override suspend fun beforeTerminal() = Unit
+                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) = Unit
+
+                override suspend fun afterInstall(workers: OwnerWorkers) {
+                    if (!stopped) {
+                        stopped = true
+                        workers.terminal.requestStop()
+                        workers.terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+                        terminalExited.complete(Unit)
+                    }
+                }
+            },
+        )
+
+        val failed = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+
+        terminalExited.await()
+        assertEquals(LifecycleStartFailure.WORKER_READINESS_FAILED, failed.cause)
+        val fence = fixture.messenger.beginShutdown(failed.lifecycle) as BeginShutdownDecision.WorkerFenced
+        assertEquals(WorkerKind.DELIVERY_TERMINAL, (fence.cause as LifecycleFenceCause.WorkerExited).fence.exit.kind)
+        assertEquals(WorkerRecoveryOutcome.Recovered, fixture.messenger.recoverFencedWorkers(failed.lifecycle))
+        fixture.stop(fixture.start())
     }
 
     private fun failingStartHooks(afterTerminal: Boolean, failure: Throwable): WorkerStartHooks =
         object : WorkerStartHooks {
+            private var fired = false
+
             override suspend fun beforeTerminal() {
-                if (!afterTerminal) throw failure
+                if (!afterTerminal && !fired) {
+                    fired = true
+                    throw failure
+                }
             }
 
-            override suspend fun afterTerminal() {
-                if (afterTerminal) throw failure
+            override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
+                if (afterTerminal && !fired) {
+                    fired = true
+                    throw failure
+                }
             }
+
+            override suspend fun afterInstall(workers: OwnerWorkers) = Unit
         }
 
     @Test

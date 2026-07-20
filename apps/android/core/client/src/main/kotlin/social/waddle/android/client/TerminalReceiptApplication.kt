@@ -2,12 +2,9 @@ package social.waddle.android.client
 
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryJournal
-import social.waddle.android.client.prefs.DeliveryJournalMutation
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
-import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.ProcessEpoch
-import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TerminalReceipt
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptId
@@ -329,13 +326,18 @@ internal fun DeliveryJournal.releaseTerminalReceipt(
     val resolved = resolveExactLease(lease)
     return when (resolved) {
         is ExactLeaseResolution.Pending -> {
-            if (resolved.pending.claim == TerminalReceiptClaimState.Unclaimed) {
+            if (resolved.pending.claim == TerminalReceiptClaimState.Unclaimed &&
+                resolved.pending.releasedClaim == lease.claim
+            ) {
                 TerminalReceiptReleaseResult.AlreadyReleased(this, resolved.receipt)
             } else if (resolved.pending.claim != lease.claim) {
                 TerminalReceiptReleaseResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
             } else {
                 val receipt = resolved.receipt.copy(
-                    state = resolved.pending.copy(claim = TerminalReceiptClaimState.Unclaimed),
+                    state = resolved.pending.copy(
+                        claim = TerminalReceiptClaimState.Unclaimed,
+                        releasedClaim = lease.claim,
+                    ),
                 )
                 TerminalReceiptReleaseResult.Released(
                     withOwner(lease.ref.owner.value, resolved.bucket.copy(terminalReceipt = receipt)),
@@ -378,69 +380,11 @@ private fun DeliveryJournal.resolveExactLease(lease: TerminalReceiptLease): Exac
     }
 }
 
-private fun TerminalReceipt.matches(ref: TerminalReceiptRef): Boolean =
+internal fun TerminalReceipt.matches(ref: TerminalReceiptRef): Boolean =
     owner == ref.owner && attempt == ref.attempt && id == ref.id
 
 private fun TerminalReceipt.ref(): TerminalReceiptRef = TerminalReceiptRef(owner, attempt, id)
 
 private fun TerminalReceipt.withClaim(claim: TerminalReceiptClaimState.Claimed): TerminalReceipt = copy(
-    state = (state as TerminalReceiptState.Pending).copy(claim = claim),
+    state = (state as TerminalReceiptState.Pending).copy(claim = claim, releasedClaim = null),
 )
-
-private fun DeliveryOwnerJournal.validateReceiptApplication(
-    requestedOwner: DeliveryOwnerBareJid,
-    receipt: TerminalReceipt,
-    ref: TerminalReceiptRef,
-): TerminalReceiptCorruption? {
-    if (receipt.owner != requestedOwner || !receipt.matches(ref) || receipt.attempt.ownerBareJid != requestedOwner.value) {
-        return TerminalReceiptCorruption.RECEIPT_BINDING_MISMATCH
-    }
-    if (activeAttempt != null) return TerminalReceiptCorruption.ACTIVE_ATTEMPT_REMAINS
-    if (terminalIntents.isNotEmpty()) return TerminalReceiptCorruption.TERMINAL_INTENTS_REMAIN
-    if (outboundRows.map { it.identity }.toSet().size != outboundRows.size) return TerminalReceiptCorruption.DUPLICATE_ROW
-    if (outboundRows.any { it.identity.ownerBareJid != requestedOwner.value }) return TerminalReceiptCorruption.ROW_OWNER_MISMATCH
-    if (outboundRows.any { it.ownership is OutboundOwnership.Terminal }) return TerminalReceiptCorruption.TERMINAL_ROW_REMAINS
-    if (outboundRows.any { it.ownership is OutboundOwnership.NativeOwned }) return TerminalReceiptCorruption.NATIVE_OWNED_ROW_REMAINS
-    val pending = receipt.state as? TerminalReceiptState.Pending ?: return null
-    if (pending.effects.isEmpty()) return TerminalReceiptCorruption.EMPTY_EFFECTS
-    if (pending.effects.map { it.callback }.toSet().size != pending.effects.size ||
-        pending.effects.map { it.row.identity }.toSet().size != pending.effects.size
-    ) return TerminalReceiptCorruption.DUPLICATE_EFFECT
-    if (pending.effects.any { effect ->
-            effect.row.identity.ownerBareJid != requestedOwner.value ||
-                effect.callback.row != effect.row.identity ||
-                effect.callback.attempt != receipt.attempt
-        }
-    ) return TerminalReceiptCorruption.EFFECT_BINDING_MISMATCH
-    if (!pending.effects.zipWithNext().all { (first, second) -> first.row.sequence < second.row.sequence }) {
-        return TerminalReceiptCorruption.REVERSED_EFFECT_ORDER
-    }
-    return null
-}
-
-internal suspend fun SessionPrefs.discoverTerminalReceipt(
-    owner: DeliveryOwnerBareJid,
-): TerminalReceiptDiscovery = updateDeliveryJournal { journal ->
-    DeliveryJournalMutation(journal, journal.discoverTerminalReceipt(owner))
-}
-
-internal suspend fun SessionPrefs.claimTerminalReceipt(
-    request: TerminalReceiptClaimRequest,
-): TerminalReceiptClaimResult = updateDeliveryJournal { journal ->
-    val result = journal.claimTerminalReceipt(request)
-    DeliveryJournalMutation(result.journal, result)
-}
-
-internal suspend fun SessionPrefs.acknowledgeTerminalReceipt(
-    lease: TerminalReceiptLease,
-): TerminalReceiptAcknowledgeResult = updateDeliveryJournal { journal ->
-    val result = journal.acknowledgeTerminalReceipt(lease)
-    DeliveryJournalMutation(result.journal, result)
-}
-
-internal suspend fun SessionPrefs.releaseTerminalReceipt(
-    lease: TerminalReceiptLease,
-): TerminalReceiptReleaseResult = updateDeliveryJournal { journal ->
-    val result = journal.releaseTerminalReceipt(lease)
-    DeliveryJournalMutation(result.journal, result)
-}

@@ -103,6 +103,17 @@ internal data class WorkerExit(
     val reason: WorkerExitReason,
 )
 
+/**
+ * The first exact worker exit observed while a lifecycle is still building its
+ * worker pair. It is deliberately separate from [OutboundLifecycleState.Fenced]:
+ * recovery assumes a fully-installed pair, while this record lets startup
+ * compensate a partial pair without dereferencing a worker that does not yet
+ * exist.
+ */
+internal data class BootstrapWorkerExitFailure(
+    val exit: WorkerExit,
+)
+
 internal sealed interface WorkerExitGateDecision {
     data object Ignore : WorkerExitGateDecision
     data object RecordOnly : WorkerExitGateDecision
@@ -296,6 +307,12 @@ internal class OwnerWorkers(
     }
 
     fun isInstalled(): Boolean = installed
+
+    fun terminalOrNull(): DeliveryTerminalWorker.Run? =
+        if (::terminal.isInitialized) terminal else null
+
+    fun drainOrNull(): OutboundDrainWorker.Run? =
+        if (::drain.isInitialized) drain else null
 
     fun markReady(ownership: WorkerOwnership): Boolean = when (ownership) {
         terminalOwnership -> !terminalReady.also { terminalReady = true }

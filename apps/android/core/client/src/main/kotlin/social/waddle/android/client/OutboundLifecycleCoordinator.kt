@@ -113,6 +113,8 @@ internal class OutboundLifecycleCoordinator(
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
     private var recoveryClaim: WorkerRecoveryClaim? = null
+    private var bootstrapTeardownOwnership: WorkerOwnership? = null
+    private var bootstrapWorkerExit: BootstrapWorkerExitFailure? = null
 
     @Volatile
     private var state: OutboundLifecycleState = OutboundLifecycleState.Stopped
@@ -136,6 +138,8 @@ internal class OutboundLifecycleCoordinator(
             lastClosedAttempt = null
             pendingShutdown = null
             recoveryClaim = null
+            bootstrapTeardownOwnership = null
+            bootstrapWorkerExit = null
             state = OutboundLifecycleState.Bootstrapping(lifecycle)
             createdWorkers
         }
@@ -146,8 +150,29 @@ internal class OutboundLifecycleCoordinator(
                 workers = workers,
                 onReady = ::onWorkerReady,
                 onExit = ::onWorkerExit,
+                installWorkers = { terminal, drain ->
+                    gate.withLock {
+                        if (
+                            state == OutboundLifecycleState.Bootstrapping(lifecycle) &&
+                            bootstrapWorkerExit == null
+                        ) {
+                            workers.install(terminal, drain)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                },
+                onPartialTeardown = ::markBootstrapTeardown,
             )
-            workersInstalled = true
+            workersInstalled = workers.isInstalled()
+            bootstrapWorkerExit(lifecycle)?.let { failure ->
+                return finishBootstrapWorkerExit(lifecycle, failure)
+            }
+            if (!workersInstalled) {
+                compensateFailedStart(lifecycle)
+                return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED)
+            }
             workers.terminal.awaitReady()
             workers.drain.awaitReady()
             val opened = gate.withLock {
@@ -164,8 +189,12 @@ internal class OutboundLifecycleCoordinator(
                 LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_READINESS_FAILED)
             }
         } catch (cancelled: CancellationException) {
-            compensateFailedStart(lifecycle)
-            return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.CANCELLED)
+            try {
+                compensateFailedStart(lifecycle)
+            } catch (cleanup: Throwable) {
+                cancelled.addSuppressed(cleanup)
+            }
+            throw cancelled
         } catch (_: Exception) {
             compensateFailedStart(lifecycle)
             return LifecycleStartResult.Failed(
@@ -183,13 +212,15 @@ internal class OutboundLifecycleCoordinator(
     }
 
     private suspend fun compensateFailedStart(lifecycle: SessionLifecycleRef) = withContext(NonCancellable) {
-        val workers = gate.withLock { ownerWorkers?.takeIf { it.lifecycle == lifecycle } }
-        if (workers?.isInstalled() == true) {
-            workers.terminal.requestStop()
-            workers.drain.requestStop()
-            workers.terminal.awaitExit(transitionTimeoutMillis)
-            workers.drain.awaitExit(transitionTimeoutMillis)
+        val workers = gate.withLock {
+            ownerWorkers?.takeIf { it.lifecycle == lifecycle }?.also {
+                if (it.terminalOrNull() != null) bootstrapTeardownOwnership = it.terminalOwnership
+            }
         }
+        workers?.terminalOrNull()?.requestStop()
+        workers?.drainOrNull()?.requestStop()
+        workers?.terminalOrNull()?.awaitExit(transitionTimeoutMillis)
+        workers?.drainOrNull()?.awaitExit(transitionTimeoutMillis)
         gate.withLock {
             if (state.lifecycleOrNull() == lifecycle && state !is OutboundLifecycleState.Fenced) {
                 retainedOperations?.closeAdmissions()
@@ -198,8 +229,51 @@ internal class OutboundLifecycleCoordinator(
                 currentAttempt = null
                 lastClosedAttempt = null
                 state = OutboundLifecycleState.Stopped
+                bootstrapTeardownOwnership = null
+                bootstrapWorkerExit = null
                 workers?.let(::discardWorkerEvidence)
             }
+        }
+    }
+
+    private suspend fun markBootstrapTeardown(ownership: WorkerOwnership) {
+        gate.withLock {
+            val workers = ownerWorkers
+            if (
+                state is OutboundLifecycleState.Bootstrapping &&
+                workers?.terminalOwnership == ownership &&
+                workers.terminalOrNull() != null
+            ) {
+                bootstrapTeardownOwnership = ownership
+            }
+        }
+    }
+
+    private suspend fun bootstrapWorkerExit(lifecycle: SessionLifecycleRef): BootstrapWorkerExitFailure? =
+        gate.withLock {
+            bootstrapWorkerExit?.takeIf { it.exit.lifecycle == lifecycle }
+        }
+
+    private suspend fun finishBootstrapWorkerExit(
+        lifecycle: SessionLifecycleRef,
+        failure: BootstrapWorkerExitFailure,
+    ): LifecycleStartResult {
+        val evidence = WorkerExitExceptionEvidence.lookup(
+            WorkerRecoveryOutcome.WorkerExitPending(lifecycle, failure.exit.ownership()),
+        )
+        try {
+            compensateFailedStart(lifecycle)
+        } catch (cleanup: Throwable) {
+            when (evidence) {
+                is CancellationException,
+                is Error,
+                -> evidence.addSuppressed(cleanup)
+            }
+        }
+        when (evidence) {
+            is CancellationException -> throw evidence
+            is Error -> throw evidence
+            else -> return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED)
         }
     }
 
@@ -221,16 +295,38 @@ internal class OutboundLifecycleCoordinator(
     private suspend fun onWorkerExit(exit: WorkerExit) {
         gate.withLock {
             val workers = ownerWorkers
-            if (workers == null) {
-                WorkerExitExceptionEvidence.discard(exit.ownership())
+            if (workers == null || !workers.isInstalled()) {
+                val isBootstrapExit =
+                    workers != null &&
+                        state is OutboundLifecycleState.Bootstrapping &&
+                        workers.lifecycle == exit.lifecycle &&
+                        workers.owns(exit.ownership())
+                val expectedTeardown =
+                    isBootstrapExit &&
+                        bootstrapTeardownOwnership == exit.ownership() &&
+                        exit.reason is WorkerExitReason.RequestedStop
+                if (isBootstrapExit && !expectedTeardown && bootstrapWorkerExit == null) {
+                    workers.recordExactExit(exit)
+                    bootstrapWorkerExit = BootstrapWorkerExitFailure(exit)
+                } else if (!isBootstrapExit || bootstrapWorkerExit?.exit?.ownership() != exit.ownership()) {
+                    WorkerExitExceptionEvidence.discard(exit.ownership())
+                }
                 return@withLock
             }
-            val decision = decideWorkerExitGate(
-                state = state,
-                exactOwner = workers.lifecycle == exit.lifecycle && workers.owns(exit.ownership()),
-                firstExactExit = workers.recordExactExit(exit),
-                exit = exit,
-            )
+            val decision = if (
+                state is OutboundLifecycleState.Bootstrapping &&
+                bootstrapTeardownOwnership == exit.ownership() &&
+                exit.reason is WorkerExitReason.RequestedStop
+            ) {
+                WorkerExitGateDecision.RecordOnly
+            } else {
+                decideWorkerExitGate(
+                    state = state,
+                    exactOwner = workers.lifecycle == exit.lifecycle && workers.owns(exit.ownership()),
+                    firstExactExit = workers.recordExactExit(exit),
+                    exit = exit,
+                )
+            }
             if (decision is WorkerExitGateDecision.Fence) {
                 retainedOperations?.closeAdmissions()
                 state = OutboundLifecycleState.Fenced(
