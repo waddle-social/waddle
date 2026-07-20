@@ -257,8 +257,9 @@ class DeliveryTerminalReceiptApplicationTest {
     }
 
     @Test
-    fun `dispatch prefix failure releases then a new process replays the whole receipt`() = runTest {
-        val prefs = SessionPrefs(InMemoryPreferencesDataStore())
+    fun `post commit release uncertainty is idempotent before a new process replays the receipt`() = runTest {
+        val store = FailingPreferencesDataStore()
+        val prefs = SessionPrefs(store)
         val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "prefix", effectCount = 2)
         prefs.updateDeliveryJournal { journal ->
             DeliveryJournalMutation(
@@ -275,6 +276,10 @@ class DeliveryTerminalReceiptApplicationTest {
                 journal = OutboundQueue(prefs),
                 dispatchEvent = {
                     firstEvents += it
+                    store.afterCommitReturns = {
+                        store.afterCommitReturns = null
+                        throw java.io.IOException("release returned uncertain")
+                    }
                     throw IllegalStateException("dispatch prefix failed")
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("prefix-first-process")),
@@ -361,4 +366,3 @@ class DeliveryTerminalReceiptApplicationTest {
     }
 
 }
-

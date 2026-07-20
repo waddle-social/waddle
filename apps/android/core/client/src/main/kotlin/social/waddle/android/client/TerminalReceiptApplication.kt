@@ -219,6 +219,8 @@ internal sealed interface TerminalReceiptReleaseResult {
     val journal: DeliveryJournal
 
     data class Released(override val journal: DeliveryJournal, val lease: TerminalReceiptLease) : TerminalReceiptReleaseResult
+    /** The exact receipt is already pending and unclaimed after a prior release commit. */
+    data class AlreadyReleased(override val journal: DeliveryJournal, val receipt: TerminalReceipt) : TerminalReceiptReleaseResult
     data class AlreadyAcknowledged(
         override val journal: DeliveryJournal,
         val receipt: TerminalReceipt,
@@ -327,7 +329,9 @@ internal fun DeliveryJournal.releaseTerminalReceipt(
     val resolved = resolveExactLease(lease)
     return when (resolved) {
         is ExactLeaseResolution.Pending -> {
-            if (resolved.pending.claim != lease.claim) {
+            if (resolved.pending.claim == TerminalReceiptClaimState.Unclaimed) {
+                TerminalReceiptReleaseResult.AlreadyReleased(this, resolved.receipt)
+            } else if (resolved.pending.claim != lease.claim) {
                 TerminalReceiptReleaseResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
             } else {
                 val receipt = resolved.receipt.copy(

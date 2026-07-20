@@ -137,6 +137,7 @@ internal class OutboundLifecycleCoordinator(
             state = OutboundLifecycleState.Bootstrapping(lifecycle)
             createdWorkers
         }
+        var workersInstalled = false
         try {
             finalizationOperations.startWorkers(
                 scope = scope,
@@ -144,6 +145,7 @@ internal class OutboundLifecycleCoordinator(
                 onReady = ::onWorkerReady,
                 onExit = ::onWorkerExit,
             )
+            workersInstalled = true
             workers.terminal.awaitReady()
             workers.drain.awaitReady()
             val opened = gate.withLock {
@@ -162,6 +164,19 @@ internal class OutboundLifecycleCoordinator(
         } catch (cancelled: CancellationException) {
             compensateFailedStart(lifecycle)
             return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.CANCELLED)
+        } catch (_: Exception) {
+            compensateFailedStart(lifecycle)
+            return LifecycleStartResult.Failed(
+                lifecycle,
+                if (workersInstalled) {
+                    LifecycleStartFailure.WORKER_READINESS_FAILED
+                } else {
+                    LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED
+                },
+            )
+        } catch (error: Error) {
+            compensateFailedStart(lifecycle)
+            throw error
         }
     }
 
