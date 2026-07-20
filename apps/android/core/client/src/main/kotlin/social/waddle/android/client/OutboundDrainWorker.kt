@@ -17,6 +17,7 @@ import java.util.logging.Logger
 
 /** Creates isolated outbound-drain workers; lifecycle state is held only by [Run]. */
 internal class OutboundDrainWorker(
+    private val evidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
     private val drain: suspend (
         SessionLifecycleRef,
         ConnectionAttemptHandle,
@@ -32,7 +33,7 @@ internal class OutboundDrainWorker(
         check(ownership.kind == WorkerKind.OUTBOUND_DRAIN) {
             "outbound drain worker requires a drain ownership"
         }
-        return Run(drain, ownership, onReady, onExit, scope)
+        return Run(drain, ownership, onReady, onExit, evidence, scope)
     }
 
     internal class Run internal constructor(
@@ -44,6 +45,7 @@ internal class OutboundDrainWorker(
         val ownership: WorkerOwnership,
         private val onReady: suspend (WorkerOwnership) -> Unit,
         private val onExit: suspend (WorkerExit) -> Unit,
+        private val evidence: WorkerExitEvidence,
         scope: CoroutineScope,
     ) {
         private val signals = Channel<DrainWakeSignal>(Channel.CONFLATED)
@@ -107,7 +109,7 @@ internal class OutboundDrainWorker(
                 }
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
-                WorkerExitExceptionEvidence.record(ownership, cancellation)
+                evidence.record(ownership, cancellation)
                 reason = if (stopRequested) {
                     WorkerExitReason.RequestedStop
                 } else {
@@ -115,7 +117,7 @@ internal class OutboundDrainWorker(
                 }
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
-                WorkerExitExceptionEvidence.record(ownership, failure)
+                evidence.record(ownership, failure)
                 val cause = WorkerFailureKind.DEPENDENCY_FAILURE
                 reason = WorkerExitReason.UnexpectedFailure(cause)
                 LOGGER.log(Level.SEVERE, "outbound predecessor drain worker stopped", failure)

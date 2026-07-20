@@ -2,23 +2,29 @@ package social.waddle.android.client
 
 import java.util.concurrent.ConcurrentHashMap
 
+/** Exception-only evidence associated with one exact worker ownership. */
+internal interface WorkerExitEvidence {
+    fun record(ownership: WorkerOwnership, failure: Throwable)
+    fun discard(ownership: WorkerOwnership)
+    fun lookup(outcome: WorkerRecoveryOutcome): Throwable?
+}
+
 /**
- * Exception-only evidence for an exact worker ownership. Durable lifecycle
- * values deliberately remain Throwable-free. Evidence is retained while its
- * exact lifecycle remains fenced and disposed only by lifecycle transitions.
+ * Process production owner for exact worker evidence. Durable lifecycle values
+ * deliberately remain Throwable-free; first-cause ownership is immutable.
  */
-internal object WorkerExitExceptionEvidence {
+internal object WorkerExitExceptionEvidence : WorkerExitEvidence {
     private val failures = ConcurrentHashMap<WorkerOwnership, Throwable>()
 
-    fun record(ownership: WorkerOwnership, failure: Throwable) {
+    override fun record(ownership: WorkerOwnership, failure: Throwable) {
         failures.putIfAbsent(ownership, failure)
     }
 
-    fun discard(ownership: WorkerOwnership) {
+    override fun discard(ownership: WorkerOwnership) {
         failures.remove(ownership)
     }
 
-    fun lookup(outcome: WorkerRecoveryOutcome): Throwable? =
+    override fun lookup(outcome: WorkerRecoveryOutcome): Throwable? =
         ownership(outcome)?.let(failures::get)
 
     private fun ownership(outcome: WorkerRecoveryOutcome): WorkerOwnership? = when (outcome) {

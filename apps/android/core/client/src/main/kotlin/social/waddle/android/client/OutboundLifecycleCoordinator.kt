@@ -40,10 +40,11 @@ internal class OutboundLifecycleCoordinator(
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     durableRecoveryCleanup: DurableRecoveryCleanup? = null,
     workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
+    private val workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
 ) {
     private val gate = Mutex()
-    private val drainWorker = OutboundDrainWorker(drain)
-    private val terminalWorker = DeliveryTerminalWorker(journal, dispatchEvent)
+    private val drainWorker = OutboundDrainWorker(workerExitEvidence, drain)
+    private val terminalWorker = DeliveryTerminalWorker(journal, dispatchEvent, evidence = workerExitEvidence)
     private val phaseOperations = OutboundLifecyclePhaseOperations(
         activeSession,
         journal,
@@ -233,7 +234,7 @@ internal class OutboundLifecycleCoordinator(
         lifecycle: SessionLifecycleRef,
         failure: BootstrapWorkerExitFailure,
     ): LifecycleStartResult {
-        val evidence = WorkerExitExceptionEvidence.lookup(
+        val evidence = workerExitEvidence.lookup(
             WorkerRecoveryOutcome.WorkerExitPending(lifecycle, failure.exit.ownership()),
         )
         try {
@@ -279,7 +280,7 @@ internal class OutboundLifecycleCoordinator(
                     BootstrapExitDisposition.ExpectedTeardown,
                     BootstrapExitDisposition.SecondaryFailure,
                     ->
-                    WorkerExitExceptionEvidence.discard(exit.ownership())
+                    workerExitEvidence.discard(exit.ownership())
                 }
                 return@withLock
             }
@@ -303,7 +304,7 @@ internal class OutboundLifecycleCoordinator(
                     decision.cause,
                 )
             } else {
-                WorkerExitExceptionEvidence.discard(exit.ownership())
+                workerExitEvidence.discard(exit.ownership())
             }
         }
     }
@@ -984,8 +985,8 @@ internal class OutboundLifecycleCoordinator(
     }
 
     private fun discardWorkerEvidence(workers: OwnerWorkers) {
-        WorkerExitExceptionEvidence.discard(workers.terminalOwnership)
-        WorkerExitExceptionEvidence.discard(workers.drainOwnership)
+        workerExitEvidence.discard(workers.terminalOwnership)
+        workerExitEvidence.discard(workers.drainOwnership)
     }
 
     suspend fun awaitStartupTerminalDrain(ownerBareJid: String) =

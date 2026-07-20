@@ -42,6 +42,7 @@ internal class OutboundMessenger(
         OutboundLifecyclePhaseObserver.NONE,
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
+    private val workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
     private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,
 ) {
@@ -56,7 +57,11 @@ internal class OutboundMessenger(
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
         workerStartHooks = workerStartHooks,
+        workerExitEvidence = workerExitEvidence,
     )
+
+    internal fun workerRecoveryException(outcome: WorkerRecoveryOutcome): WorkerRecoveryException =
+        WorkerRecoveryException(outcome, workerExitEvidence.lookup(outcome))
 
     suspend fun start(
         scope: CoroutineScope,

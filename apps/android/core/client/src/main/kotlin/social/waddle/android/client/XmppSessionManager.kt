@@ -54,6 +54,7 @@ class XmppSessionManager private constructor(
     private val dispatcher: CoroutineDispatcher,
     connectTimeoutMillis: Long,
     lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
+    workerExitEvidence: WorkerExitEvidence,
 ) {
     constructor(
         sessionPrefs: SessionPrefs,
@@ -72,6 +73,7 @@ class XmppSessionManager private constructor(
         dispatcher,
         connectTimeoutMillis,
         OutboundLifecyclePhaseObserver.NONE,
+        WorkerExitExceptionEvidence,
     )
 
     private val stores = SessionStores()
@@ -120,6 +122,7 @@ class XmppSessionManager private constructor(
         resume = resume,
         dispatchEvent = router::dispatch,
         phaseObserver = lifecyclePhaseObserver,
+        workerExitEvidence = workerExitEvidence,
     )
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
@@ -368,11 +371,11 @@ class XmppSessionManager private constructor(
                     is BeginShutdownDecision.AlreadyClosing,
                     -> Unit
                     is BeginShutdownDecision.WorkerFenced ->
-                        throw WorkerRecoveryException(
+                        throw messenger.workerRecoveryException(
                             WorkerRecoveryOutcome.WorkerFenced(shutdown.lifecycle, shutdown.cause),
                         )
                     is BeginShutdownDecision.Stale ->
-                        throw WorkerRecoveryException(
+                        throw messenger.workerRecoveryException(
                             WorkerRecoveryOutcome.OwnershipMismatch(shutdown.requested, shutdown.actual),
                         )
                 }
@@ -453,7 +456,7 @@ class XmppSessionManager private constructor(
                         return
                     }
                     is BeginShutdownDecision.Stale ->
-                        throw WorkerRecoveryException(
+                        throw messenger.workerRecoveryException(
                             WorkerRecoveryOutcome.OwnershipMismatch(shutdown.requested, shutdown.actual),
                         )
                 }
@@ -506,7 +509,7 @@ class XmppSessionManager private constructor(
                 )
             }
             is LifecycleShutdownOutcome.WorkerFenced ->
-                throw WorkerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(outcome.lifecycle, outcome.cause))
+                throw messenger.workerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(outcome.lifecycle, outcome.cause))
             LifecycleShutdownOutcome.AttemptClosed,
             LifecycleShutdownOutcome.Stale,
             -> error("current owner shutdown lost lifecycle authority")
@@ -527,7 +530,7 @@ class XmppSessionManager private constructor(
             is WorkerRecoveryOutcome.RetainedOperationsPending,
             is WorkerRecoveryOutcome.WorkerFenced,
             is WorkerRecoveryOutcome.WorkerExitPending,
-            -> throw WorkerRecoveryException(recovered)
+            -> throw messenger.workerRecoveryException(recovered)
         }
         sessionLoopJob = null
         sessionLifecycle = null
@@ -540,7 +543,7 @@ class XmppSessionManager private constructor(
         cause: LifecycleFenceCause,
     ) {
         if (!recoverFencedWorkers(lifecycle)) {
-            throw WorkerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(lifecycle, cause))
+            throw messenger.workerRecoveryException(WorkerRecoveryOutcome.WorkerFenced(lifecycle, cause))
         }
     }
 
@@ -573,6 +576,7 @@ class XmppSessionManager private constructor(
             dispatcher: CoroutineDispatcher,
             lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
             connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+            workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
         ): XmppSessionManager = XmppSessionManager(
             sessionPrefs,
             clientFactory,
@@ -582,6 +586,7 @@ class XmppSessionManager private constructor(
             dispatcher,
             connectTimeoutMillis,
             lifecyclePhaseObserver,
+            workerExitEvidence,
         )
 
         /** Web parity: 15s budget from connect to `SessionReady`. */

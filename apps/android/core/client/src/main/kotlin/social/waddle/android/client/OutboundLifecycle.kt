@@ -264,7 +264,7 @@ internal sealed interface WorkerRecoveryOutcome {
 
 internal class WorkerRecoveryException(
     val outcome: WorkerRecoveryOutcome,
-    cause: Throwable? = WorkerExitExceptionEvidence.lookup(outcome),
+    cause: Throwable?,
 ) : IllegalStateException("worker recovery failed: $outcome", cause)
 
 internal sealed interface WorkerRecoveryClaimDecision {

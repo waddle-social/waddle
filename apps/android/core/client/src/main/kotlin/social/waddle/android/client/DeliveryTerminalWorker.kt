@@ -38,6 +38,7 @@ internal class DeliveryTerminalWorker(
     private val dispatchEvent: (XmppEvent) -> Unit,
     private val processEpoch: ProcessEpoch = DeliveryProcessEpoch.current,
     private val commandCapacity: Int = COMMAND_CAPACITY,
+    private val evidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
 ) {
     init {
         require(commandCapacity > 0) { "terminal command capacity must be positive" }
@@ -52,7 +53,7 @@ internal class DeliveryTerminalWorker(
         check(ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
             "delivery terminal worker requires a terminal ownership"
         }
-        return Run(journal, dispatchEvent, processEpoch, commandCapacity, ownership, onReady, onExit, scope)
+        return Run(journal, dispatchEvent, processEpoch, commandCapacity, ownership, onReady, onExit, evidence, scope)
     }
 
     internal class Run internal constructor(
@@ -63,6 +64,7 @@ internal class DeliveryTerminalWorker(
         val ownership: WorkerOwnership,
         private val onReady: suspend (WorkerOwnership) -> Unit,
         private val onExit: suspend (WorkerExit) -> Unit,
+        private val evidence: WorkerExitEvidence,
         scope: CoroutineScope,
     ) {
         private val commands = Channel<TerminalSignal>(commandCapacity)
@@ -139,7 +141,7 @@ internal class DeliveryTerminalWorker(
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
                 startupDrain.cancel(cancellation)
-                WorkerExitExceptionEvidence.record(ownership, cancellation)
+                evidence.record(ownership, cancellation)
                 activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
                 if (activeSignal != null) pendingCommands.decrementAndGet()
                 activeSignal = null
@@ -157,7 +159,7 @@ internal class DeliveryTerminalWorker(
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
                 startupDrain.completeExceptionally(failure)
-                WorkerExitExceptionEvidence.record(ownership, failure)
+                evidence.record(ownership, failure)
                 val cause = when (val receiptFailure = terminalReceiptFailure(failure)) {
                     is TerminalReceiptFailureExtraction.Found ->
                         WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure)
