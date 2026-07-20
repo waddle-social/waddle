@@ -143,6 +143,7 @@ internal class OutboundLifecycleCoordinator(
             createdWorkers
         }
         var workersInstalled = false
+        var awaitedStartupOwnership: WorkerOwnership? = null
         try {
             finalizationOperations.startWorkers(
                 scope = scope,
@@ -164,7 +165,9 @@ internal class OutboundLifecycleCoordinator(
                 compensateFailedStart(lifecycle, forceStopped = true)
                 return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED)
             }
+            awaitedStartupOwnership = workers.terminalOwnership
             workers.terminal.awaitReady()
+            awaitedStartupOwnership = workers.drainOwnership
             workers.drain.awaitReady()
             val opened = gate.withLock {
                 if (state == OutboundLifecycleState.Bootstrapping(lifecycle) && workers.bothReady()) {
@@ -180,7 +183,9 @@ internal class OutboundLifecycleCoordinator(
                 LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_READINESS_FAILED)
             }
         } catch (cancelled: CancellationException) {
-            val primary = startupEvidence(lifecycle, workers) as? CancellationException ?: cancelled
+            val primary = awaitedStartupOwnership
+                ?.let { startupEvidence(lifecycle, it) as? CancellationException }
+                ?: cancelled
             compensateFailedStartPreservingPrimary(lifecycle, primary)
             throw primary
         } catch (_: Exception) {
@@ -195,17 +200,19 @@ internal class OutboundLifecycleCoordinator(
                 },
             )
         } catch (error: Error) {
-            val primary = startupEvidence(lifecycle, workers) as? Error ?: error
+            val primary = awaitedStartupOwnership
+                ?.let { startupEvidence(lifecycle, it) as? Error }
+                ?: error
             compensateFailedStartPreservingPrimary(lifecycle, primary)
             throw primary
         }
     }
 
-    private fun startupEvidence(lifecycle: SessionLifecycleRef, workers: OwnerWorkers): Throwable? =
-        listOf(workers.terminalOwnership, workers.drainOwnership)
-            .firstNotNullOfOrNull { ownership ->
-                workerExitEvidence.lookup(WorkerRecoveryOutcome.WorkerExitPending(lifecycle, ownership))
-            }
+    private fun startupEvidence(
+        lifecycle: SessionLifecycleRef,
+        ownership: WorkerOwnership,
+    ): Throwable? =
+        workerExitEvidence.lookup(WorkerRecoveryOutcome.WorkerExitPending(lifecycle, ownership))
 
     /** Stops an installed partial lifecycle without replacing its primary cancellation or error. */
     private suspend fun compensateFailedStartPreservingPrimary(

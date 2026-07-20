@@ -123,6 +123,60 @@ class OutboundLifecycleCoordinatorRecoveryTest {
     }
 
     @Test
+    fun `B terminal startup evidence wins over distinct drain startup evidence`() = runTest {
+        val terminalPrimary = AssertionError("terminal startup primary")
+        val drainPrimary = AssertionError("drain startup secondary")
+        val drainPublished = CompletableDeferred<Unit>()
+        var failStartup = true
+        val fixture = coordinatorFixture(
+            phaseObserver = OutboundLifecyclePhaseObserver { phase ->
+                if (failStartup) {
+                    when (phase) {
+                        OutboundLifecyclePhase.TERMINAL_WORKER_READY -> throw terminalPrimary
+                        OutboundLifecyclePhase.DRAIN_WORKER_READY -> {
+                            drainPublished.complete(Unit)
+                            throw drainPrimary
+                        }
+                        else -> Unit
+                    }
+                }
+            },
+        )
+
+        assertSame(terminalPrimary, runCatching {
+            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+        }.exceptionOrNull())
+        drainPublished.await()
+        failStartup = false
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B drain startup evidence wins after terminal readiness`() = runTest {
+        val drainPrimary = CancellationException("drain startup primary")
+        val terminalReady = CompletableDeferred<Unit>()
+        var failStartup = true
+        val fixture = coordinatorFixture(
+            phaseObserver = OutboundLifecyclePhaseObserver { phase ->
+                if (failStartup) {
+                    when (phase) {
+                        OutboundLifecyclePhase.TERMINAL_WORKER_READY -> terminalReady.complete(Unit)
+                        OutboundLifecyclePhase.DRAIN_WORKER_READY -> throw drainPrimary
+                        else -> Unit
+                    }
+                }
+            },
+        )
+
+        assertSame(drainPrimary, runCatching {
+            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+        }.exceptionOrNull())
+        terminalReady.await()
+        failStartup = false
+        fixture.stop(fixture.start())
+    }
+
+    @Test
     fun `B after install ordinary failure stops both workers before typed result`() = runTest {
         val installed = CompletableDeferred<OwnerWorkers>()
         val failure = IllegalStateException("after install ordinary failure")
