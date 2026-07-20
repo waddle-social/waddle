@@ -13,7 +13,7 @@ internal interface WorkerExitEvidence {
  * Process production owner for exact worker evidence. Durable lifecycle values
  * deliberately remain Throwable-free; first-cause ownership is immutable.
  */
-internal object WorkerExitExceptionEvidence : WorkerExitEvidence {
+internal class WorkerExitExceptionEvidence : WorkerExitEvidence {
     private val failures = ConcurrentHashMap<WorkerOwnership, Throwable>()
 
     override fun record(ownership: WorkerOwnership, failure: Throwable) {

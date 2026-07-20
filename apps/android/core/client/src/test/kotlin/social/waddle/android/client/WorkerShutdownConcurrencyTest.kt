@@ -175,6 +175,7 @@ class WorkerShutdownConcurrencyTest {
             },
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
             ownerFinalizer = ownerFinalizer,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         suspend fun start(): Started {

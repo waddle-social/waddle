@@ -178,6 +178,7 @@ class WorkerShutdownTimeoutRecoveryTest {
                 drain = { _, _, _ -> },
                 transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
                 phaseObserver = phaseObserver,
+                workerExitEvidence = WorkerExitExceptionEvidence(),
             )
         }
 

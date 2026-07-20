@@ -40,6 +40,7 @@ class XmppSessionManagerTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
             lifecyclePhaseObserver = phaseObserver,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
     }
 

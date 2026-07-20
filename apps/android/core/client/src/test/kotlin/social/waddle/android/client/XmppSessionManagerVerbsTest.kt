@@ -30,13 +30,15 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 class XmppSessionManagerVerbsTest {
     private class Harness(testScope: TestScope) {
         val factory = FakeClientFactory()
-        val manager = XmppSessionManager(
+        val manager = XmppSessionManager.withLifecyclePhaseObserver(
             sessionPrefs = SessionPrefs(InMemoryPreferencesDataStore()),
             clientFactory = factory,
             networkSignal = FakeNetworkSignal(),
             userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         suspend fun loginReady(scope: TestScope) {

@@ -50,6 +50,7 @@ class WorkerRecoveryClaimLinearizationTest {
                 releaseDrain.await()
             },
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         val lifecycle = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
         val attempt = coordinator.activate(lifecycle).bootstrap.attempt

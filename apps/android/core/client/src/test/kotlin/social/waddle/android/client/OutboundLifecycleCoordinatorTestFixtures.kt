@@ -63,6 +63,7 @@ internal suspend fun TestScope.coordinatorFixture(
         phaseObserver = phaseObserver,
         ownerFinalizer = ownerFinalizer,
         workerStartHooks = workerStartHooks,
+        workerExitEvidence = WorkerExitExceptionEvidence(),
         admissionReleaseOperations = admissionReleaseOperations,
     )
     return CoordinatorFixture(

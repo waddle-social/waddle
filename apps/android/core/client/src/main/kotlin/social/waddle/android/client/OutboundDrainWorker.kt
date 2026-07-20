@@ -17,7 +17,7 @@ import java.util.logging.Logger
 
 /** Creates isolated outbound-drain workers; lifecycle state is held only by [Run]. */
 internal class OutboundDrainWorker(
-    private val evidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+    private val evidence: WorkerExitEvidence,
     private val drain: suspend (
         SessionLifecycleRef,
         ConnectionAttemptHandle,
@@ -109,10 +109,10 @@ internal class OutboundDrainWorker(
                 }
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
-                evidence.record(ownership, cancellation)
                 reason = if (stopRequested) {
                     WorkerExitReason.RequestedStop
                 } else {
+                    evidence.record(ownership, cancellation)
                     WorkerExitReason.OwnerScopeCancelled
                 }
             } catch (failure: Throwable) {

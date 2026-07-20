@@ -56,7 +56,7 @@ class XmppSessionManager private constructor(
     lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
     workerExitEvidence: WorkerExitEvidence,
 ) {
-    constructor(
+    internal constructor(
         sessionPrefs: SessionPrefs,
         clientFactory: ClientFactory,
         networkSignal: NetworkSignal,
@@ -64,6 +64,7 @@ class XmppSessionManager private constructor(
         reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
         dispatcher: CoroutineDispatcher = Dispatchers.Default,
         connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+        workerExitEvidence: WorkerExitEvidence,
     ) : this(
         sessionPrefs,
         clientFactory,
@@ -73,7 +74,7 @@ class XmppSessionManager private constructor(
         dispatcher,
         connectTimeoutMillis,
         OutboundLifecyclePhaseObserver.NONE,
-        WorkerExitExceptionEvidence,
+        workerExitEvidence,
     )
 
     private val stores = SessionStores()
@@ -576,7 +577,7 @@ class XmppSessionManager private constructor(
             dispatcher: CoroutineDispatcher,
             lifecyclePhaseObserver: OutboundLifecyclePhaseObserver,
             connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
-            workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+            workerExitEvidence: WorkerExitEvidence,
         ): XmppSessionManager = XmppSessionManager(
             sessionPrefs,
             clientFactory,

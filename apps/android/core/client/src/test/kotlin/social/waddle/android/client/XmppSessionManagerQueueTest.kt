@@ -200,12 +200,15 @@ class XmppSessionManagerQueueTest {
     private fun TestScope.manager(
         prefs: SessionPrefs,
         factory: FakeClientFactory,
-    ): XmppSessionManager = XmppSessionManager(
+    ): XmppSessionManager = XmppSessionManager.withLifecyclePhaseObserver(
         sessionPrefs = prefs,
         clientFactory = factory,
         networkSignal = FakeNetworkSignal(),
         userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
+        reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
         dispatcher = StandardTestDispatcher(testScheduler),
+        lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+        workerExitEvidence = WorkerExitExceptionEvidence(),
     )
 
     private companion object {

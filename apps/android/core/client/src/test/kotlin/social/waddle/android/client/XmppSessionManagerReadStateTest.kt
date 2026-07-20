@@ -27,13 +27,15 @@ class XmppSessionManagerReadStateTest {
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         val userPrefs = UserPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager(
+        val manager = XmppSessionManager.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
             userPrefs = userPrefs,
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         suspend fun loginReady(scope: TestScope) {

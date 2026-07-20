@@ -205,6 +205,7 @@ class OutboundDurableCleanupRecoveryTest {
                 },
                 transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
                 durableRecoveryCleanup = script,
+                workerExitEvidence = WorkerExitExceptionEvidence(),
             )
         }
 

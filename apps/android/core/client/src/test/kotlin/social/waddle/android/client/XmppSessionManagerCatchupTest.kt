@@ -31,13 +31,15 @@ class XmppSessionManagerCatchupTest {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager(
+        val manager = XmppSessionManager.withLifecyclePhaseObserver(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
             userPrefs = UserPrefs(InMemoryPreferencesDataStore()),
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
+            lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
     }
 

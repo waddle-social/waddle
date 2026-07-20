@@ -42,7 +42,7 @@ internal class OutboundMessenger(
         OutboundLifecyclePhaseObserver.NONE,
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
-    private val workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+    private val workerExitEvidence: WorkerExitEvidence,
     outboundDrain: (suspend (SessionLifecycleRef, ConnectionAttemptHandle, DeliveryAttemptRef) -> Unit)? = null,
     private val admissionReleaseOperations: OutboundAdmissionReleaseOperations =
         OutboundAdmissionReleaseOperations.COORDINATOR,

@@ -266,6 +266,7 @@ class OutboundLifecycleCoordinatorRecoveryTest {
                 throw IOException("injected drain dependency failure")
             },
             transitionTimeoutMillis = COORDINATOR_TEST_TIMEOUT_MILLIS,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         val lifecycle = coordinator.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()

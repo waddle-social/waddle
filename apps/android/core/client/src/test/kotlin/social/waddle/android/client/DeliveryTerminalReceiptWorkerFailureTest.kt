@@ -60,7 +60,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}),
+            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
             this,
         )
 
@@ -100,7 +100,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}),
+            DeliveryTerminalWorker(OutboundQueue(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
             this,
         )
 
@@ -153,6 +153,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
                         throw primary
                     },
                     processEpoch = ProcessEpoch(terminalWorkerUuid("release-failure-process")),
+                    evidence = WorkerExitExceptionEvidence(),
                 ),
                 this,
             )
@@ -226,6 +227,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
                             throw primary
                         },
                         processEpoch = ProcessEpoch(terminalWorkerUuid("cleanup-process-$index")),
+                        evidence = WorkerExitExceptionEvidence(),
                     ),
                     this,
                 )
@@ -277,6 +279,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
                     throw primary
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("cleanup-retry-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )

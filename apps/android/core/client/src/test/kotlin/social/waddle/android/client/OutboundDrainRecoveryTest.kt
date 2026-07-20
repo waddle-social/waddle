@@ -48,6 +48,7 @@ class OutboundDrainRecoveryTest {
                 replacementDrain.complete(Unit)
             },
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         val lifecycle = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
         val activation = coordinator.activate(lifecycle)

@@ -19,7 +19,8 @@ class OutboundDrainWorkerTest {
     @Test
     fun `closed run atomically denies bind and signal admission`() = runTest {
         val ownership = ownership()
-        val run = OutboundDrainWorker { _, _, _ -> }.start(this, ownership, {}, {})
+        val run = OutboundDrainWorker(WorkerExitExceptionEvidence()) { _, _, _ -> }
+            .start(this, ownership, {}, {})
         val handle = ConnectionAttemptHandle.random()
         val attempt = attempt()
 
@@ -36,7 +37,8 @@ class OutboundDrainWorkerTest {
     fun `requested stop emits one matching exit`() = runTest {
         val exits = mutableListOf<WorkerExit>()
         val ownership = ownership()
-        val run = OutboundDrainWorker { _, _, _ -> }.start(this, ownership, {}, { exits += it })
+        val run = OutboundDrainWorker(WorkerExitExceptionEvidence()) { _, _, _ -> }
+            .start(this, ownership, {}, { exits += it })
 
         runCurrent()
         run.requestStop()
@@ -55,7 +57,8 @@ class OutboundDrainWorkerTest {
         val scope = CoroutineScope(coroutineContext + ownerJob)
         val ownership = ownership()
         val exits = mutableListOf<WorkerExit>()
-        val run = OutboundDrainWorker { _, _, _ -> }.start(scope, ownership, {}, { exits += it })
+        val run = OutboundDrainWorker(WorkerExitExceptionEvidence()) { _, _, _ -> }
+            .start(scope, ownership, {}, { exits += it })
 
         ownerJob.cancel()
         runCurrent()
@@ -71,7 +74,7 @@ class OutboundDrainWorkerTest {
     @Test
     fun `fatal drain dependency failure exits with exact ownership`() = runTest {
         val ownership = ownership()
-        val run = OutboundDrainWorker { _, _, _ -> error("drain exploded") }
+        val run = OutboundDrainWorker(WorkerExitExceptionEvidence()) { _, _, _ -> error("drain exploded") }
             .start(this, ownership, {}, { })
         val handle = ConnectionAttemptHandle.random()
         val attempt = attempt()
@@ -93,7 +96,7 @@ class OutboundDrainWorkerTest {
     @Test
     fun `replacement run has a distinct generation and ignores old signals`() = runTest {
         val observed = mutableListOf<ConnectionAttemptHandle>()
-        val worker = OutboundDrainWorker { _, handle, _ -> observed += handle }
+        val worker = OutboundDrainWorker(WorkerExitExceptionEvidence()) { _, handle, _ -> observed += handle }
         val lifecycle = SessionLifecycleRef.create(OWNER)
         val firstOwnership = WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random())
         val secondOwnership = WorkerOwnership(lifecycle, WorkerKind.OUTBOUND_DRAIN, WorkerGeneration.random())

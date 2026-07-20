@@ -45,6 +45,7 @@ class XmppSessionManagerWorkerRecoveryTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScheduler),
             lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         manager.login(testSessionInfo())
         runCurrent()
@@ -139,6 +140,7 @@ class XmppSessionManagerWorkerRecoveryTest {
                     releaseShutdownFinalized.await()
                 }
             },
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         manager.login(testSessionInfo())
@@ -276,6 +278,7 @@ class XmppSessionManagerWorkerRecoveryTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(),
             lifecyclePhaseObserver = OutboundLifecyclePhaseObserver.NONE,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         val failure = runCatching {
             manager.requireStopped(lifecycle, LifecycleShutdownOutcome.WorkerFenced(lifecycle, cause))

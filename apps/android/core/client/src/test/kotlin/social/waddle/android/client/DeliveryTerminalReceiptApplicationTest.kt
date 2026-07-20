@@ -89,6 +89,7 @@ class DeliveryTerminalReceiptApplicationTest {
                 journal = OutboundQueue(prefs),
                 dispatchEvent = { effects += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("worker-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -123,6 +124,7 @@ class DeliveryTerminalReceiptApplicationTest {
                     store.failNextUpdate = true
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("retry-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -160,7 +162,10 @@ class DeliveryTerminalReceiptApplicationTest {
             )
         }
         val effects = mutableListOf<XmppEvent>()
-        val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, epoch), this)
+        val run = terminalRun(
+            DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, epoch, evidence = WorkerExitExceptionEvidence()),
+            this,
+        )
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertTrue(effects.isEmpty())
         assertEquals(receipt, prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt)
@@ -219,7 +224,11 @@ class DeliveryTerminalReceiptApplicationTest {
     fun `receipt discovery io exhausts after the bounded six attempts`() = runTest {
         val store = FailingPreferencesDataStore().also { it.failAllUpdates = true }
         val run = terminalRun(
-            DeliveryTerminalWorker(OutboundQueue(SessionPrefs(store)), dispatchEvent = {}),
+            DeliveryTerminalWorker(
+                OutboundQueue(SessionPrefs(store)),
+                dispatchEvent = {},
+                evidence = WorkerExitExceptionEvidence(),
+            ),
             this,
         )
 
@@ -263,7 +272,15 @@ class DeliveryTerminalReceiptApplicationTest {
             )
         }
         val effects = mutableListOf<XmppEvent>()
-        val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), { effects += it }, ProcessEpoch(terminalWorkerUuid("new-epoch"))), this)
+        val run = terminalRun(
+            DeliveryTerminalWorker(
+                OutboundQueue(prefs),
+                { effects += it },
+                ProcessEpoch(terminalWorkerUuid("new-epoch")),
+                evidence = WorkerExitExceptionEvidence(),
+            ),
+            this,
+        )
         run.awaitStartupDrain()
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
         assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
@@ -291,6 +308,7 @@ class DeliveryTerminalReceiptApplicationTest {
                 journal = OutboundQueue(prefs),
                 dispatchEvent = { effects += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("claim-uncertain-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -331,6 +349,7 @@ class DeliveryTerminalReceiptApplicationTest {
                     throw IllegalStateException("dispatch prefix failed")
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("prefix-first-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -353,6 +372,7 @@ class DeliveryTerminalReceiptApplicationTest {
                 journal = OutboundQueue(prefs),
                 dispatchEvent = { replayed += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("prefix-second-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -391,6 +411,7 @@ class DeliveryTerminalReceiptApplicationTest {
                     throw cancellation
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("release-cancel-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -399,11 +420,6 @@ class DeliveryTerminalReceiptApplicationTest {
         runCurrent()
         val exit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertEquals(WorkerExitReason.OwnerScopeCancelled, exit.reason)
-        assertTrue(
-            WorkerExitExceptionEvidence.lookup(
-                WorkerRecoveryOutcome.WorkerExitPending(first.ownership.lifecycle, first.ownership),
-            ) === cancellation,
-        )
         assertEquals(1, events.size)
         val pending = prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state
             as TerminalReceiptState.Pending
@@ -414,7 +430,6 @@ class DeliveryTerminalReceiptApplicationTest {
             requireNotNull(pending.releasedClaim),
         )
         assertTrue(prefs.releaseTerminalReceipt(lease) is TerminalReceiptReleaseResult.AlreadyReleased)
-        WorkerExitExceptionEvidence.discard(first.ownership)
     }
 
     @Test
@@ -444,6 +459,7 @@ class DeliveryTerminalReceiptApplicationTest {
                     }
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("ack-cancel-first-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )
@@ -459,6 +475,7 @@ class DeliveryTerminalReceiptApplicationTest {
                 journal = OutboundQueue(prefs),
                 dispatchEvent = { restartedEvents += it },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("ack-cancel-second-process")),
+                evidence = WorkerExitExceptionEvidence(),
             ),
             this,
         )

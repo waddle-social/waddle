@@ -77,6 +77,7 @@ class OutboundTerminalRecoveryTest {
             },
             drain = { _, _, _ -> },
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
 
         val started = coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started
@@ -145,6 +146,7 @@ class OutboundTerminalRecoveryTest {
                 releaseDrain.await()
             },
             transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         val lifecycle = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
         val activation = coordinator.activate(lifecycle)

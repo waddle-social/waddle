@@ -40,7 +40,7 @@ internal class OutboundLifecycleCoordinator(
     ownerFinalizer: (suspend (OwnerWorkers, SessionLifecycleRef, AttemptRecord?) -> OwnerFinalizationResult)? = null,
     durableRecoveryCleanup: DurableRecoveryCleanup? = null,
     workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
-    private val workerExitEvidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+    private val workerExitEvidence: WorkerExitEvidence,
 ) {
     private val gate = Mutex()
     private val drainWorker = OutboundDrainWorker(workerExitEvidence, drain)

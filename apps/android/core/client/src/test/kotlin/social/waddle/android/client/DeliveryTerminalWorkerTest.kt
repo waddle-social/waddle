@@ -56,6 +56,7 @@ class DeliveryTerminalWorkerTest {
             journal = queue,
             dispatchEvent = { effects += it },
             commandCapacity = 256,
+            evidence = WorkerExitExceptionEvidence(),
         )
         val run = terminalRun(worker, this)
         runCurrent()
@@ -101,6 +102,7 @@ class DeliveryTerminalWorkerTest {
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = {},
+            evidence = WorkerExitExceptionEvidence(),
         )
         val run = terminalRun(worker, this)
         runCurrent()
@@ -151,6 +153,7 @@ class DeliveryTerminalWorkerTest {
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
         )
 
         val run = terminalRun(worker, this)
@@ -177,6 +180,7 @@ class DeliveryTerminalWorkerTest {
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
         )
         store.failAllUpdates = true
 
@@ -208,10 +212,12 @@ class DeliveryTerminalWorkerTest {
         val first = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
         )
         val second = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
         )
 
         val firstRun = terminalRun(first, this)
@@ -241,6 +247,7 @@ class DeliveryTerminalWorkerTest {
         val worker = DeliveryTerminalWorker(
             journal = queue,
             dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
         )
         store.failAllUpdates = true
         val run = terminalRun(worker, this)
@@ -270,7 +277,11 @@ class DeliveryTerminalWorkerTest {
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         queue.recordTerminal(TERMINAL_WORKER_OWNER, row.clientStanzaId, attempt, DeliveryTerminalKind.ACK)
-        val worker = DeliveryTerminalWorker(queue, dispatchEvent = { error("terminal exploded") })
+        val worker = DeliveryTerminalWorker(
+            queue,
+            dispatchEvent = { error("terminal exploded") },
+            evidence = WorkerExitExceptionEvidence(),
+        )
         val run = terminalRun(worker, this)
 
         runCurrent()
@@ -294,7 +305,10 @@ class DeliveryTerminalWorkerTest {
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         val effects = mutableListOf<XmppEvent>()
-        val run = terminalRun(DeliveryTerminalWorker(queue, { effects += it }), this)
+        val run = terminalRun(
+            DeliveryTerminalWorker(queue, { effects += it }, evidence = WorkerExitExceptionEvidence()),
+            this,
+        )
         run.awaitStartupDrain()
         store.failAllUpdates = true
 
@@ -322,7 +336,10 @@ class DeliveryTerminalWorkerTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         prefs.activateSession(TERMINAL_WORKER_OWNER, "sess-a")
         val exits = mutableListOf<WorkerExit>()
-        val run = terminalRun(DeliveryTerminalWorker(OutboundQueue(prefs), {}), this) { exits += it }
+        val run = terminalRun(
+            DeliveryTerminalWorker(OutboundQueue(prefs), {}, evidence = WorkerExitExceptionEvidence()),
+            this,
+        ) { exits += it }
 
         runCurrent()
         run.requestStop()
@@ -343,7 +360,11 @@ class DeliveryTerminalWorkerTest {
         val attempt = queue.beginAttempt(TERMINAL_WORKER_OWNER).attempt
         val row = terminalWorkerClaimed(queue.enqueueAndClaimAbsoluteHead(terminalWorkerDraft("m-1"), attempt))
         val effects = mutableListOf<XmppEvent>()
-        val worker = DeliveryTerminalWorker(queue, dispatchEvent = { effects += it })
+        val worker = DeliveryTerminalWorker(
+            queue,
+            dispatchEvent = { effects += it },
+            evidence = WorkerExitExceptionEvidence(),
+        )
         val firstExits = mutableListOf<WorkerExit>()
         val first = terminalRun(worker, this) { firstExits += it }
         first.awaitStartupDrain()
@@ -373,4 +394,3 @@ class DeliveryTerminalWorkerTest {
     }
 
 }
-

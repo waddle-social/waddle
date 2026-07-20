@@ -38,7 +38,7 @@ internal class DeliveryTerminalWorker(
     private val dispatchEvent: (XmppEvent) -> Unit,
     private val processEpoch: ProcessEpoch = DeliveryProcessEpoch.current,
     private val commandCapacity: Int = COMMAND_CAPACITY,
-    private val evidence: WorkerExitEvidence = WorkerExitExceptionEvidence,
+    private val evidence: WorkerExitEvidence,
 ) {
     init {
         require(commandCapacity > 0) { "terminal command capacity must be positive" }
@@ -141,18 +141,19 @@ internal class DeliveryTerminalWorker(
             } catch (cancellation: CancellationException) {
                 ready.cancel(cancellation)
                 startupDrain.cancel(cancellation)
-                evidence.record(ownership, cancellation)
                 activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
                 if (activeSignal != null) pendingCommands.decrementAndGet()
                 activeSignal = null
-                reason = when (val receiptFailure = terminalReceiptFailure(cancellation)) {
-                    is TerminalReceiptFailureExtraction.Found ->
-                        WorkerExitReason.UnexpectedFailure(
-                            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure),
-                        )
-                    TerminalReceiptFailureExtraction.None -> if (stopRequested) {
-                        WorkerExitReason.RequestedStop
-                    } else {
+                reason = if (stopRequested) {
+                    WorkerExitReason.RequestedStop
+                } else {
+                    evidence.record(ownership, cancellation)
+                    when (val receiptFailure = terminalReceiptFailure(cancellation)) {
+                        is TerminalReceiptFailureExtraction.Found ->
+                            WorkerExitReason.UnexpectedFailure(
+                                WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure),
+                            )
+                        TerminalReceiptFailureExtraction.None ->
                         WorkerExitReason.OwnerScopeCancelled
                     }
                 }

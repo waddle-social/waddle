@@ -62,6 +62,7 @@ internal class ConnectionLoopPullHarness(
             deliveryEvents += event
             router.dispatch(event)
         },
+        workerExitEvidence = WorkerExitExceptionEvidence(),
     )
     val loop = ConnectionLoop(
         attemptClientFactory = ConnectionAttemptClientFactory(factory, prefs),
