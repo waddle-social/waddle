@@ -78,8 +78,12 @@ internal data class WorkerOwnership(
 )
 
 /** Structured worker failure information deliberately excludes the Throwable. */
-internal enum class WorkerFailureKind {
-    DEPENDENCY_FAILURE,
+internal sealed interface WorkerFailureKind {
+    data object DEPENDENCY_FAILURE : WorkerFailureKind
+
+    data class TERMINAL_RECEIPT_APPLICATION(
+        val failure: TerminalReceiptApplicationFailure,
+    ) : WorkerFailureKind
 }
 
 internal sealed interface WorkerExitReason {

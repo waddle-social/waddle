@@ -201,6 +201,22 @@ class OutboundQueue(
             }
         }
 
+    internal suspend fun discoverTerminalReceipt(
+        owner: social.waddle.android.client.prefs.DeliveryOwnerBareJid,
+    ): TerminalReceiptDiscovery = sessionPrefs.discoverTerminalReceipt(owner)
+
+    internal suspend fun claimTerminalReceipt(
+        request: TerminalReceiptClaimRequest,
+    ): TerminalReceiptApplicationResult = sessionPrefs.claimTerminalReceipt(request)
+
+    internal suspend fun acknowledgeTerminalReceipt(
+        lease: TerminalReceiptLease,
+    ): TerminalReceiptApplicationResult = sessionPrefs.acknowledgeTerminalReceipt(lease)
+
+    internal suspend fun releaseTerminalReceipt(
+        lease: TerminalReceiptLease,
+    ): TerminalReceiptApplicationResult = sessionPrefs.releaseTerminalReceipt(lease)
+
     /**
      * Exact durability barrier for one Rust-minted failed-resume handoff.
      *

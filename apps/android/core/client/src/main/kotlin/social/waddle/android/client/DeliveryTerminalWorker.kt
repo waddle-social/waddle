@@ -21,11 +21,20 @@ import social.waddle.android.client.OutboundQueue.TerminalEffect
 import social.waddle.android.client.OutboundQueue.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryTerminalKind
+import social.waddle.android.client.prefs.LifecycleGeneration
+import social.waddle.android.client.prefs.ProcessEpoch
+import social.waddle.android.client.prefs.TerminalClaimId
+import social.waddle.android.client.prefs.TerminalReceiptClaimState
+import social.waddle.android.client.prefs.TerminalReceiptClaimant
+import social.waddle.android.client.prefs.TerminalReceiptEffect
+import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
+import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGeneration
 
 /** Creates isolated terminal workers; each [Run] belongs to one lifecycle generation. */
 internal class DeliveryTerminalWorker(
     private val journal: OutboundQueue,
     private val dispatchEvent: (XmppEvent) -> Unit,
+    private val processEpoch: ProcessEpoch = DeliveryProcessEpoch.current,
     private val commandCapacity: Int = COMMAND_CAPACITY,
 ) {
     init {
@@ -41,12 +50,13 @@ internal class DeliveryTerminalWorker(
         check(ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
             "delivery terminal worker requires a terminal ownership"
         }
-        return Run(journal, dispatchEvent, commandCapacity, ownership, onReady, onExit, scope)
+        return Run(journal, dispatchEvent, processEpoch, commandCapacity, ownership, onReady, onExit, scope)
     }
 
     internal class Run internal constructor(
         private val journal: OutboundQueue,
         private val dispatchEvent: (XmppEvent) -> Unit,
+        private val processEpoch: ProcessEpoch,
         commandCapacity: Int,
         val ownership: WorkerOwnership,
         private val onReady: suspend (WorkerOwnership) -> Unit,
@@ -111,6 +121,7 @@ internal class DeliveryTerminalWorker(
                 yield()
                 withContext(NonCancellable) { onReady(ownership) }
                 ready.complete(Unit)
+                drainTerminalReceipts()
                 drainPersisted()
                 startupDrain.complete(Unit)
                 for (signal in commands) {
@@ -135,7 +146,9 @@ internal class DeliveryTerminalWorker(
             } catch (failure: Throwable) {
                 ready.completeExceptionally(failure)
                 startupDrain.completeExceptionally(failure)
-                val cause = WorkerFailureKind.DEPENDENCY_FAILURE
+                val cause = (failure as? TerminalReceiptApplicationException)?.failure
+                    ?.let(WorkerFailureKind::TERMINAL_RECEIPT_APPLICATION)
+                    ?: WorkerFailureKind.DEPENDENCY_FAILURE
                 activeSignal?.committed?.complete(
                     TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)),
                 )
@@ -209,12 +222,126 @@ internal class DeliveryTerminalWorker(
             }
         }
 
+        private suspend fun drainTerminalReceipts() {
+            val owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(ownership.lifecycle.ownerBareJid)
+            when (val discovery = retryingResult("terminal receipt discovery") {
+                journal.discoverTerminalReceipt(owner)
+            }) {
+                is TerminalReceiptDiscovery.Pending -> {
+                    val claim = TerminalReceiptClaimState.Claimed(
+                        id = TerminalClaimId.random(),
+                        claimant = ownership.toTerminalReceiptClaimant(),
+                        processEpoch = processEpoch,
+                    )
+                    val requested = TerminalReceiptClaimRequest(discovery.ref, claim)
+                    when (val result = retryingResult("terminal receipt claim") {
+                        journal.claimTerminalReceipt(requested)
+                    }) {
+                        is TerminalReceiptApplicationResult.Claimed -> applyClaimedReceipt(result)
+                        is TerminalReceiptApplicationResult.Busy,
+                        is TerminalReceiptApplicationResult.AlreadyAcknowledged,
+                        is TerminalReceiptApplicationResult.None,
+                        is TerminalReceiptApplicationResult.Stale,
+                        -> Unit
+                        is TerminalReceiptApplicationResult.Corrupt -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.CLAIM, result.reason),
+                        )
+                        is TerminalReceiptApplicationResult.Acknowledged,
+                        is TerminalReceiptApplicationResult.Released,
+                        -> throw TerminalReceiptApplicationException(
+                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.CLAIM, null),
+                        )
+                    }
+                }
+                is TerminalReceiptDiscovery.Corrupt -> throw TerminalReceiptApplicationException(
+                    TerminalReceiptApplicationFailure(TerminalReceiptOperation.DISCOVERY, discovery.reason),
+                )
+                TerminalReceiptDiscovery.None,
+                is TerminalReceiptDiscovery.AlreadyAcknowledged,
+                -> Unit
+                TerminalReceiptDiscovery.Stale -> throw TerminalReceiptApplicationException(
+                    TerminalReceiptApplicationFailure(
+                        TerminalReceiptOperation.DISCOVERY,
+                        TerminalReceiptCorruption.ACTIVE_OWNER_MISMATCH,
+                    ),
+                )
+            }
+        }
+
+        private suspend fun applyClaimedReceipt(claimed: TerminalReceiptApplicationResult.Claimed) {
+            try {
+                claimed.effects.forEach(::applyReceiptEffect)
+                when (val acknowledgement = retryingResult("terminal receipt acknowledge") {
+                    journal.acknowledgeTerminalReceipt(claimed.lease)
+                }) {
+                    is TerminalReceiptApplicationResult.Acknowledged,
+                    is TerminalReceiptApplicationResult.AlreadyAcknowledged,
+                    -> Unit
+                    is TerminalReceiptApplicationResult.Busy,
+                    is TerminalReceiptApplicationResult.None,
+                    is TerminalReceiptApplicationResult.Stale,
+                    is TerminalReceiptApplicationResult.Released,
+                    is TerminalReceiptApplicationResult.Claimed,
+                    -> throw TerminalReceiptApplicationException(
+                        TerminalReceiptApplicationFailure(TerminalReceiptOperation.ACKNOWLEDGE, null),
+                    )
+                    is TerminalReceiptApplicationResult.Corrupt -> throw TerminalReceiptApplicationException(
+                        TerminalReceiptApplicationFailure(TerminalReceiptOperation.ACKNOWLEDGE, acknowledgement.reason),
+                    )
+                }
+            } catch (cancellation: CancellationException) {
+                releaseReceiptClaim(claimed.lease)?.let { releaseFailure ->
+                    cancellation.addSuppressed(TerminalReceiptApplicationException(releaseFailure))
+                }
+                throw cancellation
+            } catch (failure: Throwable) {
+                releaseReceiptClaim(claimed.lease)?.let { releaseFailure ->
+                    failure.addSuppressed(TerminalReceiptApplicationException(releaseFailure))
+                }
+                throw failure
+            }
+        }
+
+        private suspend fun releaseReceiptClaim(
+            lease: TerminalReceiptLease,
+        ): TerminalReceiptApplicationFailure? = withContext(NonCancellable) {
+                try {
+                    when (val release = journal.releaseTerminalReceipt(lease)) {
+                        is TerminalReceiptApplicationResult.Released,
+                        is TerminalReceiptApplicationResult.AlreadyAcknowledged,
+                        is TerminalReceiptApplicationResult.Stale,
+                        is TerminalReceiptApplicationResult.None,
+                        -> null
+                        is TerminalReceiptApplicationResult.Busy,
+                        is TerminalReceiptApplicationResult.Claimed,
+                        is TerminalReceiptApplicationResult.Acknowledged,
+                        -> TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, null)
+                        is TerminalReceiptApplicationResult.Corrupt ->
+                            TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, release.reason)
+                    }
+                } catch (failure: IOException) {
+                    LOGGER.log(Level.WARNING, "terminal receipt release failed", failure)
+                    TerminalReceiptApplicationFailure(TerminalReceiptOperation.RELEASE, null)
+                }
+        }
+
         private fun applyEffect(effect: TerminalEffect) {
             when (effect) {
                 is TerminalEffect.Acknowledged -> dispatchEvent(
                     XmppEvent.DeliveryAcked(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
                 )
                 is TerminalEffect.Failed -> dispatchEvent(
+                    XmppEvent.DeliveryFailed(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
+                )
+            }
+        }
+
+        private fun applyReceiptEffect(effect: TerminalReceiptEffect) {
+            when (effect) {
+                is TerminalReceiptEffect.Acknowledged -> dispatchEvent(
+                    XmppEvent.DeliveryAcked(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
+                )
+                is TerminalReceiptEffect.Failed -> dispatchEvent(
                     XmppEvent.DeliveryFailed(DeliveryOutcomeRef(effect.row.identity, effect.row.source)),
                 )
             }
@@ -262,5 +389,17 @@ internal class DeliveryTerminalWorker(
         val LOGGER: Logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
         val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
         const val COMMAND_CAPACITY = 256
+
     }
 }
+
+internal class TerminalReceiptApplicationException(
+    val failure: TerminalReceiptApplicationFailure,
+) : IllegalStateException()
+
+private fun WorkerOwnership.toTerminalReceiptClaimant(): TerminalReceiptClaimant.Worker =
+    TerminalReceiptClaimant.Worker(
+        lifecycleGeneration = LifecycleGeneration(lifecycle.id.value.toString()),
+        kind = TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
+        workerGeneration = ReceiptWorkerGeneration(generation.value.toString()),
+    )
