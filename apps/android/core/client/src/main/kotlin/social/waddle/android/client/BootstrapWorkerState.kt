@@ -1,14 +1,14 @@
 package social.waddle.android.client
 
 /**
- * Gate-confined state for building one worker pair.
+ * Gate-confined bookkeeping for building one worker pair.
  *
  * This state never fences a lifecycle: a pre-install failure cannot use the
  * normal recovery path because the sibling may not exist yet. The coordinator
  * owns the enclosing lifecycle state and invokes every method while holding
  * its gate.
  */
-internal class BootstrapWorkerState {
+internal class BootstrapWorkerBookkeeping {
     private var teardownOwnership: WorkerOwnership? = null
     private var workerExit: BootstrapWorkerExitFailure? = null
 
@@ -36,8 +36,7 @@ internal class BootstrapWorkerState {
     ) {
         if (
             state is OutboundLifecycleState.Bootstrapping &&
-            workers?.terminalOwnership == ownership &&
-            workers.terminalOrNull() != null
+            workers?.terminalOwnership == ownership
         ) {
             teardownOwnership = ownership
         }

@@ -114,7 +114,7 @@ internal class OutboundLifecycleCoordinator(
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
     private var recoveryClaim: WorkerRecoveryClaim? = null
-    private val bootstrapWorkers = BootstrapWorkerState()
+    private val bootstrapWorkers = BootstrapWorkerBookkeeping()
 
     @Volatile
     private var state: OutboundLifecycleState = OutboundLifecycleState.Stopped
@@ -157,7 +157,7 @@ internal class OutboundLifecycleCoordinator(
                 onPartialTeardown = ::markBootstrapTeardown,
             )
             workersInstalled = workers.isInstalled()
-            bootstrapWorkers.failureFor(lifecycle)?.let { failure ->
+            gate.withLock { bootstrapWorkers.failureFor(lifecycle) }?.let { failure ->
                 return finishBootstrapWorkerExit(lifecycle, failure)
             }
             if (!workersInstalled) {
