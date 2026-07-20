@@ -282,9 +282,27 @@ schema.#Project & {
 					if [ "${folder_lookup_status}" = "200" ]; then
 					  folder_uid="$(jq -er '.uid' "${folder_response}")"
 					else
-					  folder_uid="$(curl --fail-with-body -sS "${grafana_url}/api/folders" \
+					  # Fall back to the listing: first by the stable uid (covers a
+					  # renamed title and the observed list-ok/uid-endpoint-404
+					  # state), then by unique title. Several folders titled
+					  # Waddle is an ambiguity a human must resolve — creating
+					  # yet another folder would strand the existing ones.
+					  curl --fail-with-body -sS "${grafana_url}/api/folders" \
 					    -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
-					    | jq -r '[.[] | select(.title == "Waddle")] | if length == 1 then .[0].uid else "" end')"
+					    > "${folder_response}"
+					  folder_uid="$(jq -r \
+					    '[.[] | select(.uid == "waddle")] | if length == 1 then .[0].uid else "" end' \
+					    "${folder_response}")"
+					  if [ -z "${folder_uid}" ]; then
+					    title_matches="$(jq -r '[.[] | select(.title == "Waddle")] | length' "${folder_response}")"
+					    if [ "${title_matches}" -gt 1 ]; then
+					      echo "Refusing to sync: ${title_matches} folders titled \"Waddle\" and none with uid \"waddle\"; resolve the duplicates manually." >&2
+					      exit 1
+					    fi
+					    if [ "${title_matches}" = "1" ]; then
+					      folder_uid="$(jq -er '[.[] | select(.title == "Waddle")] | .[0].uid' "${folder_response}")"
+					    fi
+					  fi
 					fi
 					if [ -z "${folder_uid}" ]; then
 					  folder_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
