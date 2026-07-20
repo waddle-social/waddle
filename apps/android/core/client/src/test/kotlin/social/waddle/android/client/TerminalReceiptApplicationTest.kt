@@ -10,6 +10,7 @@ import social.waddle.android.client.prefs.DeliveryCallbackRef
 import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
+import social.waddle.android.client.prefs.LifecycleGeneration
 import social.waddle.android.client.prefs.NativeConnectionGeneration
 import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.ProcessEpoch
@@ -24,6 +25,8 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimant
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
+import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
+import social.waddle.android.client.prefs.WorkerGeneration
 
 class TerminalReceiptApplicationTest {
     @Test
@@ -75,6 +78,21 @@ class TerminalReceiptApplicationTest {
         assertTrue(changedOwner.acknowledgeTerminalReceipt(claimed.lease) is TerminalReceiptAcknowledgeResult.Acknowledged)
     }
 
+    @Test
+    fun `every wrong exact lease field is a no-op for pending and acknowledged receipts`() {
+        val claimed = journal().claimTerminalReceipt(request(journal(), "claim", "epoch"))
+            as TerminalReceiptClaimResult.Claimed
+        val acknowledged = claimed.journal.acknowledgeTerminalReceipt(claimed.lease)
+            as TerminalReceiptAcknowledgeResult.Acknowledged
+
+        wrongLeases(claimed.lease).forEach { wrong ->
+            assertEquals(claimed.journal, claimed.journal.acknowledgeTerminalReceipt(wrong).journal)
+            assertEquals(claimed.journal, claimed.journal.releaseTerminalReceipt(wrong).journal)
+            assertEquals(acknowledged.journal, acknowledged.journal.acknowledgeTerminalReceipt(wrong).journal)
+            assertEquals(acknowledged.journal, acknowledged.journal.releaseTerminalReceipt(wrong).journal)
+        }
+    }
+
     private fun journal(): DeliveryJournal {
         val attempt = DeliveryAttemptRef(OWNER, DeliveryAttemptId(uuid("attempt")), NativeConnectionGeneration(1u))
         val row = QueuedOutboundDraft.create(
@@ -111,6 +129,22 @@ class TerminalReceiptApplicationTest {
             ),
         )
     }
+
+    private fun wrongLeases(lease: TerminalReceiptLease): List<TerminalReceiptLease> = listOf(
+        lease.copy(claim = lease.claim.copy(id = TerminalClaimId(uuid("wrong-id")))),
+        lease.copy(claim = lease.claim.copy(claimant = TerminalReceiptClaimant.Worker(
+            LifecycleGeneration(uuid("wrong-lifecycle")),
+            TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
+            WorkerGeneration(uuid("wrong-worker")),
+        ))),
+        lease.copy(claim = lease.claim.copy(processEpoch = ProcessEpoch(uuid("wrong-epoch")))),
+        lease.copy(ref = lease.ref.copy(
+            owner = DeliveryOwnerBareJid("other@waddle.test"),
+            attempt = lease.ref.attempt.copy(ownerBareJid = "other@waddle.test"),
+        )),
+        lease.copy(ref = lease.ref.copy(attempt = lease.ref.attempt.copy(attemptId = DeliveryAttemptId(uuid("wrong-attempt"))))),
+        lease.copy(ref = lease.ref.copy(id = TerminalReceiptId(uuid("wrong-receipt")))),
+    )
 
     private fun uuid(seed: String): String = UUID.nameUUIDFromBytes(seed.toByteArray()).toString()
 
