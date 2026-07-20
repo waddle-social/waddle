@@ -137,7 +137,7 @@ internal class OutboundLifecycleCoordinator(
                 currentAttempt = null
                 lastClosedAttempt = null
                 state = OutboundLifecycleState.Stopped
-                discardWorkerEvidence(workers)
+                workers?.let(::discardWorkerEvidence)
             }
         }
     }
