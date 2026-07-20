@@ -35,6 +35,7 @@ class TerminalReceiptCleanupExecutorTest {
             seed(prefs, "retry-$index")
             val primary = IllegalStateException("primary-$index")
             val events = mutableListOf<XmppEvent>()
+            val attemptsBeforeWorker = store.updateAttempts.get()
             val run = terminalRun(
                 DeliveryTerminalWorker(
                     OutboundQueue(prefs),
@@ -50,9 +51,15 @@ class TerminalReceiptCleanupExecutorTest {
             )
 
             runCurrent()
-            store.failAllUpdatesWith = null
-            advanceTimeBy(250)
+            val attemptsAfterFirstCleanup = store.updateAttempts.get()
+            assertTrue(attemptsAfterFirstCleanup > attemptsBeforeWorker)
+            advanceTimeBy(249)
             runCurrent()
+            assertEquals(attemptsAfterFirstCleanup, store.updateAttempts.get())
+            store.failAllUpdatesWith = null
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(attemptsAfterFirstCleanup + 1, store.updateAttempts.get())
 
             val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
             assertEquals(WorkerFailureKind.DEPENDENCY_FAILURE, (exit.reason as WorkerExitReason.UnexpectedFailure).kind)
@@ -115,7 +122,10 @@ class TerminalReceiptCleanupExecutorTest {
         runCurrent()
         var attempts = store.updateAttempts.get()
         listOf(250L, 500L, 1_000L, 2_000L, 5_000L).forEach { delay ->
-            advanceTimeBy(delay)
+            advanceTimeBy(delay - 1)
+            runCurrent()
+            assertEquals(attempts, store.updateAttempts.get())
+            advanceTimeBy(1)
             runCurrent()
             attempts += 1
             assertEquals(attempts, store.updateAttempts.get())
@@ -125,6 +135,8 @@ class TerminalReceiptCleanupExecutorTest {
         val cleanup = ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as
             WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure as TerminalReceiptApplicationFailure.CleanupUnresolved
         assertEquals(6, cleanup.evidence.attempts)
+        runCurrent()
+        assertEquals(attempts, store.updateAttempts.get())
     }
 
     private suspend fun seed(prefs: SessionPrefs, seed: String) {
