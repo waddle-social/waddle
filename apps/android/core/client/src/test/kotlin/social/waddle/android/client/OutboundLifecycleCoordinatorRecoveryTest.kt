@@ -18,6 +18,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.DeliveryAttemptId
@@ -53,7 +54,7 @@ class OutboundLifecycleCoordinatorRecoveryTest {
     }
 
     @Test
-    fun `B cancellation after first exact worker ready returns reachable lifecycle and replacement coordinator starts`() = runTest {
+    fun `B cancellation after first exact worker ready compensates before replacement coordinator starts`() = runTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val firstReady = CompletableDeferred<Unit>()
@@ -81,7 +82,10 @@ class OutboundLifecycleCoordinatorRecoveryTest {
         runCurrent()
 
         assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
-        assertEquals(WorkerRecoveryOutcome.Recovered, fixture.messenger.recoverFencedWorkers(installedLifecycle.await()))
+        assertEquals(
+            WorkerRecoveryOutcome.NotFenced,
+            fixture.messenger.recoverFencedWorkers(installedLifecycle.await()),
+        )
         val replacement = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER).startedCoordinatorLifecycle()
         fixture.stop(replacement)
     }
@@ -115,6 +119,73 @@ class OutboundLifecycleCoordinatorRecoveryTest {
             }.exceptionOrNull()
             assertTrue(thrown === error)
             errorFixture.stop(errorFixture.start())
+        }
+    }
+
+    @Test
+    fun `B after install ordinary failure stops both workers before typed result`() = runTest {
+        val installed = CompletableDeferred<OwnerWorkers>()
+        val failure = IllegalStateException("after install ordinary failure")
+        val fixture = coordinatorFixture(
+            workerStartHooks = failingAfterInstall(installed, failure),
+        )
+
+        val result = fixture.messenger.start(backgroundScope, COORDINATOR_OWNER) as LifecycleStartResult.Failed
+
+        assertEquals(LifecycleStartFailure.WORKER_READINESS_FAILED, result.cause)
+        assertRequestedStop(installed.await())
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B after install cancellation stops both workers before exact rethrow`() = runTest {
+        val installed = CompletableDeferred<OwnerWorkers>()
+        val cancellation = CancellationException("after install cancellation")
+        val fixture = coordinatorFixture(
+            workerStartHooks = failingAfterInstall(installed, cancellation),
+        )
+
+        assertSame(cancellation, runCatching {
+            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+        }.exceptionOrNull())
+        assertRequestedStop(installed.await())
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B after install error stops both workers before exact rethrow`() = runTest {
+        val installed = CompletableDeferred<OwnerWorkers>()
+        val error = AssertionError("after install error")
+        val fixture = coordinatorFixture(
+            workerStartHooks = failingAfterInstall(installed, error),
+        )
+
+        assertSame(error, runCatching {
+            fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+        }.exceptionOrNull())
+        assertRequestedStop(installed.await())
+        fixture.stop(fixture.start())
+    }
+
+    @Test
+    fun `B after install cancellation and error suppress one cleanup failure in order`() = runTest {
+        listOf<Throwable>(
+            CancellationException("after install cancellation primary"),
+            AssertionError("after install error primary"),
+        ).forEach { primary ->
+            val installed = CompletableDeferred<OwnerWorkers>()
+            val cleanup = IllegalStateException("startup cleanup failure ${primary.message}")
+            val fixture = coordinatorFixture(
+                workerStartHooks = failingAfterInstall(installed, primary),
+                workerExitEvidence = FailThirdDiscardEvidence(cleanup),
+            )
+
+            assertSame(primary, runCatching {
+                fixture.messenger.start(backgroundScope, COORDINATOR_OWNER)
+            }.exceptionOrNull())
+            assertRequestedStop(installed.await())
+            assertEquals(1, primary.suppressed.size)
+            assertSame(cleanup, primary.suppressed.single())
         }
     }
 
@@ -210,6 +281,53 @@ class OutboundLifecycleCoordinatorRecoveryTest {
 
             override suspend fun afterInstall(workers: OwnerWorkers) = Unit
         }
+
+    private fun failingAfterInstall(
+        installed: CompletableDeferred<OwnerWorkers>,
+        failure: Throwable,
+    ): WorkerStartHooks = object : WorkerStartHooks {
+        private var fired = false
+
+        override suspend fun beforeTerminal() = Unit
+
+        override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) = Unit
+
+        override suspend fun afterInstall(workers: OwnerWorkers) {
+            installed.complete(workers)
+            if (!fired) {
+                fired = true
+                throw failure
+            }
+        }
+    }
+
+    private suspend fun assertRequestedStop(workers: OwnerWorkers) {
+        val terminal = workers.terminal.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+        val drain = workers.drain.awaitExit(COORDINATOR_TEST_TIMEOUT_MILLIS)
+        assertEquals(
+            WorkerExitReason.RequestedStop,
+            (terminal as WorkerAwaitOutcome.Exited).exit.reason,
+        )
+        assertEquals(
+            WorkerExitReason.RequestedStop,
+            (drain as WorkerAwaitOutcome.Exited).exit.reason,
+        )
+    }
+
+    private class FailThirdDiscardEvidence(
+        private val cleanup: Throwable,
+    ) : WorkerExitEvidence {
+        private var discardCount = 0
+
+        override fun record(ownership: WorkerOwnership, failure: Throwable) = Unit
+
+        override fun lookup(outcome: WorkerRecoveryOutcome): Throwable? = null
+
+        override fun discard(ownership: WorkerOwnership) {
+            discardCount += 1
+            if (discardCount == 3) throw cleanup
+        }
+    }
 
     @Test
     fun `F2 owner scope cancellation while shutdown is outside gate preserves worker fence`() = runTest {

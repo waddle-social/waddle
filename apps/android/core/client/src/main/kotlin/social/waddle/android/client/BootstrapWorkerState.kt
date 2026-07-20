@@ -9,11 +9,11 @@ package social.waddle.android.client
  * its gate.
  */
 internal class BootstrapWorkerBookkeeping {
-    private var teardownOwnership: WorkerOwnership? = null
+    private var teardownOwnerships: Set<WorkerOwnership> = emptySet()
     private var workerExit: BootstrapWorkerExitFailure? = null
 
     fun reset() {
-        teardownOwnership = null
+        teardownOwnerships = emptySet()
         workerExit = null
     }
 
@@ -38,7 +38,7 @@ internal class BootstrapWorkerBookkeeping {
             state is OutboundLifecycleState.Bootstrapping &&
             workers?.terminalOwnership == ownership
         ) {
-            teardownOwnership = ownership
+            teardownOwnerships = setOf(ownership)
         }
     }
 
@@ -47,7 +47,7 @@ internal class BootstrapWorkerBookkeeping {
         workers: OwnerWorkers?,
     ) {
         if (state is OutboundLifecycleState.Bootstrapping && workers?.terminalOrNull() != null) {
-            teardownOwnership = workers.terminalOwnership
+            teardownOwnerships = setOf(workers.terminalOwnership, workers.drainOwnership)
         }
     }
 
@@ -55,7 +55,7 @@ internal class BootstrapWorkerBookkeeping {
         workerExit?.takeIf { it.exit.lifecycle == lifecycle }
 
     fun isExpectedTeardown(exit: WorkerExit): Boolean =
-        teardownOwnership == exit.ownership() && exit.reason is WorkerExitReason.RequestedStop
+        exit.ownership() in teardownOwnerships && exit.reason is WorkerExitReason.RequestedStop
 
     /** Records only the first exact exit for this not-yet-installed pair. */
     fun recordPreInstallExit(

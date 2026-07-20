@@ -161,7 +161,7 @@ internal class OutboundLifecycleCoordinator(
                 return finishBootstrapWorkerExit(lifecycle, failure)
             }
             if (!workersInstalled) {
-                compensateFailedStart(lifecycle)
+                compensateFailedStart(lifecycle, forceStopped = true)
                 return LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED)
             }
             workers.terminal.awaitReady()
@@ -180,48 +180,80 @@ internal class OutboundLifecycleCoordinator(
                 LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_READINESS_FAILED)
             }
         } catch (cancelled: CancellationException) {
-            try {
-                compensateFailedStart(lifecycle)
-            } catch (cleanup: Throwable) {
-                cancelled.addSuppressed(cleanup)
-            }
-            throw cancelled
+            val primary = startupEvidence(lifecycle, workers) as? CancellationException ?: cancelled
+            compensateFailedStartPreservingPrimary(lifecycle, primary)
+            throw primary
         } catch (_: Exception) {
-            compensateFailedStart(lifecycle)
+            val installedAtFailure = workers.isInstalled()
+            compensateFailedStart(lifecycle, forceStopped = true)
             return LifecycleStartResult.Failed(
                 lifecycle,
-                if (workersInstalled) {
+                if (workersInstalled || installedAtFailure) {
                     LifecycleStartFailure.WORKER_READINESS_FAILED
                 } else {
                     LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED
                 },
             )
         } catch (error: Error) {
-            compensateFailedStart(lifecycle)
-            throw error
+            val primary = startupEvidence(lifecycle, workers) as? Error ?: error
+            compensateFailedStartPreservingPrimary(lifecycle, primary)
+            throw primary
         }
     }
 
-    private suspend fun compensateFailedStart(lifecycle: SessionLifecycleRef) = withContext(NonCancellable) {
-        val workers = gate.withLock {
-            ownerWorkers?.takeIf { it.lifecycle == lifecycle }?.also { bootstrapWorkers.markCompensation(state, it) }
+    private fun startupEvidence(lifecycle: SessionLifecycleRef, workers: OwnerWorkers): Throwable? =
+        listOf(workers.terminalOwnership, workers.drainOwnership)
+            .firstNotNullOfOrNull { ownership ->
+                workerExitEvidence.lookup(WorkerRecoveryOutcome.WorkerExitPending(lifecycle, ownership))
+            }
+
+    /** Stops an installed partial lifecycle without replacing its primary cancellation or error. */
+    private suspend fun compensateFailedStartPreservingPrimary(
+        lifecycle: SessionLifecycleRef,
+        primary: Throwable,
+    ) {
+        try {
+            compensateFailedStart(lifecycle, forceStopped = true)
+        } catch (cleanup: Throwable) {
+            primary.addSuppressed(cleanup)
         }
-        workers?.terminalOrNull()?.requestStop()
-        workers?.drainOrNull()?.requestStop()
-        workers?.terminalOrNull()?.awaitExit(transitionTimeoutMillis)
-        workers?.drainOrNull()?.awaitExit(transitionTimeoutMillis)
-        gate.withLock {
-            if (state.lifecycleOrNull() == lifecycle && state !is OutboundLifecycleState.Fenced) {
-                retainedOperations?.closeAdmissions()
-                ownerWorkers = null
-                retainedOperations = null
-                currentAttempt = null
-                lastClosedAttempt = null
-                state = OutboundLifecycleState.Stopped
-                bootstrapWorkers.reset()
-                workers?.let(::discardWorkerEvidence)
+    }
+
+    private suspend fun compensateFailedStart(
+        lifecycle: SessionLifecycleRef,
+        forceStopped: Boolean = false,
+    ) {
+        val cleanupFailure = withContext(NonCancellable) {
+            try {
+                val workers = gate.withLock {
+                    ownerWorkers?.takeIf { it.lifecycle == lifecycle }
+                        ?.also { bootstrapWorkers.markCompensation(state, it) }
+                }
+                workers?.terminalOrNull()?.requestStop()
+                workers?.drainOrNull()?.requestStop()
+                workers?.terminalOrNull()?.awaitExit(transitionTimeoutMillis)
+                workers?.drainOrNull()?.awaitExit(transitionTimeoutMillis)
+                gate.withLock {
+                    if (
+                        state.lifecycleOrNull() == lifecycle &&
+                        (forceStopped || state !is OutboundLifecycleState.Fenced)
+                    ) {
+                        retainedOperations?.closeAdmissions()
+                        ownerWorkers = null
+                        retainedOperations = null
+                        currentAttempt = null
+                        lastClosedAttempt = null
+                        state = OutboundLifecycleState.Stopped
+                        bootstrapWorkers.reset()
+                        workers?.let(::discardWorkerEvidence)
+                    }
+                }
+                null
+            } catch (failure: Throwable) {
+                failure
             }
         }
+        cleanupFailure?.let { throw it }
     }
 
     private suspend fun markBootstrapTeardown(ownership: WorkerOwnership) {
@@ -237,14 +269,11 @@ internal class OutboundLifecycleCoordinator(
         val evidence = workerExitEvidence.lookup(
             WorkerRecoveryOutcome.WorkerExitPending(lifecycle, failure.exit.ownership()),
         )
-        try {
-            compensateFailedStart(lifecycle)
-        } catch (cleanup: Throwable) {
-            when (evidence) {
-                is CancellationException,
-                is Error,
-                -> evidence.addSuppressed(cleanup)
-            }
+        when (evidence) {
+            is CancellationException,
+            is Error,
+            -> compensateFailedStartPreservingPrimary(lifecycle, evidence)
+            else -> compensateFailedStart(lifecycle, forceStopped = true)
         }
         when (evidence) {
             is CancellationException -> throw evidence
@@ -258,13 +287,20 @@ internal class OutboundLifecycleCoordinator(
             val workers = ownerWorkers ?: return@withLock false
             workers.lifecycle == ownership.lifecycle && workers.markReady(ownership)
         }
-        if (accepted) phaseObserver.after(
-            if (ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
-                OutboundLifecyclePhase.TERMINAL_WORKER_READY
-            } else {
-                OutboundLifecyclePhase.DRAIN_WORKER_READY
-            },
-        )
+        if (accepted) {
+            try {
+                phaseObserver.after(
+                    if (ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
+                        OutboundLifecyclePhase.TERMINAL_WORKER_READY
+                    } else {
+                        OutboundLifecyclePhase.DRAIN_WORKER_READY
+                    },
+                )
+            } catch (failure: Throwable) {
+                workerExitEvidence.record(ownership, failure)
+                throw failure
+            }
+        }
     }
 
     /** Callback completes only after this exact exit has closed future admission. */

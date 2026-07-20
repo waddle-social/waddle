@@ -22,7 +22,7 @@ internal sealed interface LifecycleStartResult {
     data class Failed(override val lifecycle: SessionLifecycleRef, val cause: LifecycleStartFailure) : LifecycleStartResult
 }
 
-internal enum class LifecycleStartFailure { WORKER_CONSTRUCTION_FAILED, WORKER_READINESS_FAILED, CANCELLED }
+internal enum class LifecycleStartFailure { WORKER_CONSTRUCTION_FAILED, WORKER_READINESS_FAILED }
 internal class LifecycleStartException(val result: LifecycleStartResult.Failed) : IllegalStateException("outbound worker startup failed: ${result.cause}")
 
 internal sealed interface BeginShutdownDecision {

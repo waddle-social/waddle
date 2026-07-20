@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.OutboundOwnership
@@ -32,7 +33,7 @@ class XmppSessionManagerTest {
         val factory = FakeClientFactory()
         val network = FakeNetworkSignal()
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
-        val manager = XmppSessionManager.withLifecyclePhaseObserver(
+        val manager = XmppSessionManager.withOwnedWorkerExitEvidence(
             sessionPrefs = prefs,
             clientFactory = factory,
             networkSignal = network,
@@ -40,31 +41,48 @@ class XmppSessionManagerTest {
             reconnectPolicy = ReconnectPolicy(PinnedRandom(0.5)),
             dispatcher = StandardTestDispatcher(testScope.testScheduler),
             lifecyclePhaseObserver = phaseObserver,
-            workerExitEvidence = WorkerExitExceptionEvidence(),
         )
     }
 
     @Test
-    fun `B manager retains and recovers one ready startup cancellation before replacement login`() = runTest {
+    fun `B manager rethrows exact ready startup cancellation before replacement login`() = runTest {
         var cancelFirstReady = true
+        val cancellation = CancellationException("cancel first startup worker")
         val harness = Harness(
             this,
             OutboundLifecyclePhaseObserver { phase ->
                 if (cancelFirstReady && phase == OutboundLifecyclePhase.TERMINAL_WORKER_READY) {
                     cancelFirstReady = false
-                    throw CancellationException("cancel first startup worker")
+                    throw cancellation
                 }
             },
         )
 
-        val failed = try {
-            harness.manager.login(testSessionInfo())
-            throw AssertionError("expected typed startup failure")
-        } catch (expected: LifecycleStartException) {
-            expected
-        }
-        assertEquals(LifecycleStartFailure.CANCELLED, failed.result.cause)
-        assertNotNull(failed.result.lifecycle)
+        assertSame(cancellation, runCatching { harness.manager.login(testSessionInfo()) }.exceptionOrNull())
+
+        harness.manager.login(testSessionInfo(sessionId = "replacement"))
+        runCurrent()
+        assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
+        assertEquals(1, harness.factory.clients.size)
+        assertEquals("replacement", harness.prefs.sessionId.first())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `B manager rethrows exact ready startup error before replacement login`() = runTest {
+        var throwFirstReady = true
+        val error = AssertionError("first startup worker error")
+        val harness = Harness(
+            this,
+            OutboundLifecyclePhaseObserver { phase ->
+                if (throwFirstReady && phase == OutboundLifecyclePhase.TERMINAL_WORKER_READY) {
+                    throwFirstReady = false
+                    throw error
+                }
+            },
+        )
+
+        assertSame(error, runCatching { harness.manager.login(testSessionInfo()) }.exceptionOrNull())
 
         harness.manager.login(testSessionInfo(sessionId = "replacement"))
         runCurrent()
