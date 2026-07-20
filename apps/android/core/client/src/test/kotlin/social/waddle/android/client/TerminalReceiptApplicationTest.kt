@@ -10,6 +10,7 @@ import social.waddle.android.client.prefs.DeliveryCallbackRef
 import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
+import social.waddle.android.client.prefs.FinalizerGeneration
 import social.waddle.android.client.prefs.LifecycleGeneration
 import social.waddle.android.client.prefs.NativeConnectionGeneration
 import social.waddle.android.client.prefs.OutboundOwnership
@@ -29,6 +30,24 @@ import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
 import social.waddle.android.client.prefs.WorkerGeneration
 
 class TerminalReceiptApplicationTest {
+    @Test
+    fun `two discovery snapshots admit one exact same-process claimant and preserve the busy journal`() {
+        val initial = journal()
+        assertTrue(initial.discoverTerminalReceipt(DeliveryOwnerBareJid(OWNER)) is TerminalReceiptDiscovery.Pending)
+        assertTrue(initial.discoverTerminalReceipt(DeliveryOwnerBareJid(OWNER)) is TerminalReceiptDiscovery.Pending)
+
+        val winner = initial.claimTerminalReceipt(request(initial, "winner", "epoch"))
+            as TerminalReceiptClaimResult.Claimed
+        val losingRequest = request(winner.journal, "loser", "epoch")
+        val loser = winner.journal.claimTerminalReceipt(losingRequest)
+
+        assertEquals(
+            TerminalReceiptClaimResult.Busy(winner.journal, losingRequest, winner.lease),
+            loser,
+        )
+        assertEquals(winner.journal, loser.journal)
+    }
+
     @Test
     fun `claim is idempotent and same epoch competitors are busy`() {
         val journal = journal()
@@ -93,6 +112,47 @@ class TerminalReceiptApplicationTest {
         }
     }
 
+    @Test
+    fun `worker and finalizer generation fields are exact lease identity`() {
+        val worker = TerminalReceiptClaimant.Worker(
+            LifecycleGeneration(uuid("worker-lifecycle")),
+            TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
+            WorkerGeneration(uuid("worker-generation")),
+        )
+        val workerJournal = journal()
+        val workerClaim = workerJournal.claimTerminalReceipt(request(workerJournal, "worker", "epoch", worker))
+            as TerminalReceiptClaimResult.Claimed
+        val workerIdentity = workerClaim.lease.claim.claimant as TerminalReceiptClaimant.Worker
+        val workerWrongGenerations = listOf(
+            workerClaim.lease.copy(claim = workerClaim.lease.claim.copy(
+                claimant = workerIdentity.copy(lifecycleGeneration = LifecycleGeneration(uuid("other-lifecycle"))),
+            )),
+            workerClaim.lease.copy(claim = workerClaim.lease.claim.copy(
+                claimant = workerIdentity.copy(workerGeneration = WorkerGeneration(uuid("other-worker"))),
+            )),
+        )
+
+        val finalizer = TerminalReceiptClaimant.Finalizer(
+            LifecycleGeneration(uuid("finalizer-lifecycle")),
+            FinalizerGeneration(uuid("finalizer-generation")),
+        )
+        val finalizerJournal = journal()
+        val finalizerClaim = finalizerJournal.claimTerminalReceipt(
+            request(finalizerJournal, "finalizer", "epoch", finalizer),
+        )
+            as TerminalReceiptClaimResult.Claimed
+        val finalizerIdentity = finalizerClaim.lease.claim.claimant as TerminalReceiptClaimant.Finalizer
+        val finalizerWrongGeneration = finalizerClaim.lease.copy(claim = finalizerClaim.lease.claim.copy(
+            claimant = finalizerIdentity.copy(finalizerGeneration = FinalizerGeneration(uuid("other-finalizer"))),
+        ))
+
+        (workerWrongGenerations + finalizerWrongGeneration).forEach { wrong ->
+            val source = if (wrong.ref == workerClaim.lease.ref) workerClaim else finalizerClaim
+            assertEquals(source.journal, source.journal.releaseTerminalReceipt(wrong).journal)
+            assertEquals(source.journal, source.journal.acknowledgeTerminalReceipt(wrong).journal)
+        }
+    }
+
     private fun journal(): DeliveryJournal {
         val attempt = DeliveryAttemptRef(OWNER, DeliveryAttemptId(uuid("attempt")), NativeConnectionGeneration(1u))
         val row = QueuedOutboundDraft.create(
@@ -118,13 +178,18 @@ class TerminalReceiptApplicationTest {
         )
     }
 
-    private fun request(journal: DeliveryJournal, claim: String, epoch: String): TerminalReceiptClaimRequest {
+    private fun request(
+        journal: DeliveryJournal,
+        claim: String,
+        epoch: String,
+        claimant: TerminalReceiptClaimant = TerminalReceiptClaimant.BootstrapProcess,
+    ): TerminalReceiptClaimRequest {
         val receipt = journal.owners.getValue(OWNER).terminalReceipt!!
         return TerminalReceiptClaimRequest(
             TerminalReceiptRef(receipt.owner, receipt.attempt, receipt.id),
             TerminalReceiptClaimState.Claimed(
                 TerminalClaimId(uuid(claim)),
-                TerminalReceiptClaimant.BootstrapProcess,
+                claimant,
                 ProcessEpoch(uuid(epoch)),
             ),
         )
