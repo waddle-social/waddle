@@ -23,6 +23,7 @@ pub(super) async fn handle_roster_iq(
     let storage = match roster_storage_for_state(state).await {
         Ok(storage) => storage,
         Err(error) => {
+            mark_span_error("failed to access roster storage");
             warn!(error = %error, "Failed to access roster storage");
             return vec![build_xmpp_error_response(
                 iq,
@@ -69,6 +70,7 @@ async fn handle_roster_get(
     let (rows, version) = match storage.snapshot_roster(user_jid).await {
         Ok(pair) => pair,
         Err(error) => {
+            mark_span_error("failed to snapshot roster");
             warn!(user = %user_jid, error = %error, "Failed to snapshot roster");
             return vec![build_xmpp_error_response(
                 iq,
@@ -79,6 +81,7 @@ async fn handle_roster_get(
     let items = match roster_rows_to_items(rows) {
         Ok(items) => items,
         Err(error) => {
+            mark_span_error("failed to convert roster rows");
             warn!(user = %user_jid, error = %error, "Failed to convert roster rows");
             return vec![build_xmpp_error_response(
                 iq,
@@ -164,6 +167,7 @@ async fn handle_roster_set(
             Ok(Some(row)) => match roster_row_to_item(row) {
                 Ok(item) => Some(item),
                 Err(error) => {
+                    mark_span_error("failed to convert removed roster item");
                     warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to convert removed roster item");
                     return vec![build_xmpp_error_response(
                         iq,
@@ -173,6 +177,7 @@ async fn handle_roster_set(
             },
             Ok(None) => None,
             Err(error) => {
+                mark_span_error("failed to load roster item before remove");
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to load roster item before remove");
                 return vec![build_xmpp_error_response(
                     iq,
@@ -196,6 +201,7 @@ async fn handle_roster_set(
                 )];
             }
             Err(error) => {
+                mark_span_error("failed to remove roster item");
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to remove roster item");
                 return vec![build_xmpp_error_response(
                     iq,
@@ -208,6 +214,7 @@ async fn handle_roster_set(
             Ok(Some(row)) => match roster_row_to_item(row) {
                 Ok(item) => item,
                 Err(error) => {
+                    mark_span_error("failed to convert roster item");
                     warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to convert roster item");
                     return vec![build_xmpp_error_response(
                         iq,
@@ -217,6 +224,7 @@ async fn handle_roster_set(
             },
             Ok(None) => RosterItem::new(requested.jid.clone()),
             Err(error) => {
+                mark_span_error("failed to load roster item");
                 warn!(user = %user_jid, contact = %requested.jid, error = %error, "Failed to load roster item");
                 return vec![build_xmpp_error_response(
                     iq,
@@ -243,6 +251,7 @@ async fn handle_roster_set(
                 (result, mutation.version, lock)
             }
             Err(error) => {
+                mark_span_error("failed to store roster item");
                 warn!(user = %user_jid, contact = %item.jid, error = %error, "Failed to store roster item");
                 return vec![build_xmpp_error_response(
                     iq,

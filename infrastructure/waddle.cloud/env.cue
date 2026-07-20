@@ -72,6 +72,12 @@ schema.#Project & {
 			GRAFANA_CLOUD_RULER_TOKEN: schema.#OnePasswordRef & {
 				ref: "op://waddle-production/Grafana-Cloud-Alerting/ruler-token"
 			}
+			GRAFANA_CLOUD_URL: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Dashboards/url"
+			}
+			GRAFANA_CLOUD_DASHBOARDS_TOKEN: schema.#OnePasswordRef & {
+				ref: "op://waddle-production/Grafana-Cloud-Dashboards/service-account-token"
+			}
 		}
 	}
 
@@ -97,12 +103,12 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush, _t.rulesSync]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesSync, _t.dashboardsSync]
 		}
 		pullRequest: {
 			derivePaths: true
 			when: pullRequest: true
-			tasks: [_t.rulesLint]
+			tasks: [_t.rulesLint, _t.dashboardsLint]
 		}
 	}
 
@@ -161,6 +167,43 @@ schema.#Project & {
 				"""#]
 			inputs: ["gitops/**", "env.cue"]
 		}
+		// Record the GitOps artifact push as a Grafana organization
+		// annotation. Flux reconciliation is asynchronous, so this marks the
+		// rollout handoff rather than claiming the pods are already ready.
+		// Sequenced after both pushes so a failed push never gets a marker.
+		deployAnnotation: schema.#Task & {
+			dependsOn: [helmPush, gitopsPush]
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${GRAFANA_CLOUD_URL:?missing — create the Grafana-Cloud-Dashboards 1Password item (see dashboards/README.md)}"
+					: "${GRAFANA_CLOUD_DASHBOARDS_TOKEN:?missing 1Password field service-account-token}"
+					grafana_url="${GRAFANA_CLOUD_URL%/}"
+					revision="$(git rev-parse --short HEAD)"
+					timestamp_ms="$(( $(date +%s) * 1000 ))"
+					annotation_response="$(mktemp)"
+					trap 'rm -f "${annotation_response}"' EXIT
+					annotation_status="$(jq -n \
+					  --arg text "waddle infra deploy ${revision}" \
+					  --argjson time "${timestamp_ms}" \
+					  '{text: $text, tags: ["deploy", "waddle"], time: $time}' \
+					  | curl -sS -o "${annotation_response}" -w '%{http_code}' \
+					      -X POST "${grafana_url}/api/annotations" \
+					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					      -H 'Content-Type: application/json' \
+					      --data-binary @-)"
+					case "${annotation_status}" in
+					  2??) ;;
+					  *)
+					    echo "Grafana annotation creation failed with HTTP ${annotation_status}:" >&2
+					    cat "${annotation_response}" >&2
+					    exit 1
+					    ;;
+					esac
+					echo "Grafana deploy annotation posted for ${revision}."
+				"""#]
+			inputs: ["gitops/**", "charts/**", "env.cue"]
+		}
 		// Lint every alert-rule file (alerts-as-code, #1324). Runs on
 		// every PR touching rules/** so a broken rule fails the PR,
 		// not the pager.
@@ -173,6 +216,16 @@ schema.#Project & {
 					echo "All alert rule files lint clean."
 				"""#]
 			inputs: ["rules/**", "env.cue"]
+		}
+		// Validate every dashboard document on PRs. The skeleton exemption is
+		// declared in the dashboard's own tags rather than hidden in CI logic.
+		dashboardsLint: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					./scripts/validate-dashboards.sh
+				"""#]
+			inputs: ["dashboards/**", "scripts/validate-dashboards.sh", "env.cue"]
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push
 		// only). Sync is authoritative within the `waddle` namespace;
@@ -201,6 +254,106 @@ schema.#Project & {
 					echo "Alert rules synced to Grafana Cloud rulers."
 				"""#]
 			inputs: ["rules/**", "env.cue"]
+		}
+		// Publish dashboards to the stable Waddle folder. Folder lookup plus
+		// stable dashboard UIDs and overwrite=true make repeated syncs safe.
+		dashboardsSync: schema.#Task & {
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					: "${GRAFANA_CLOUD_URL:?missing — create the Grafana-Cloud-Dashboards 1Password item (see dashboards/README.md)}"
+					: "${GRAFANA_CLOUD_DASHBOARDS_TOKEN:?missing 1Password field service-account-token}"
+					grafana_url="${GRAFANA_CLOUD_URL%/}"
+					folder_response="$(mktemp)"
+					trap 'rm -f "${folder_response}"' EXIT
+
+					folder_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					  -X POST "${grafana_url}/api/folders" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					  -H 'Content-Type: application/json' \
+					  --data '{"uid":"waddle","title":"Waddle"}')"
+					case "${folder_status}" in
+					  200|201|409) ;;
+					  *)
+					    echo "Grafana folder creation failed with HTTP ${folder_status}:" >&2
+					    cat "${folder_response}" >&2
+					    exit 1
+					    ;;
+					esac
+
+					# Resolve the folder by its stable uid, matching the create
+					# above; the title-based lookup is only a fallback for a
+					# pre-existing folder that was created under another uid
+					# (create then 409s on the duplicate title).
+					folder_lookup_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					  "${grafana_url}/api/folders/uid/waddle" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}")"
+					if [ "${folder_lookup_status}" = "200" ]; then
+					  folder_uid="$(jq -er '.uid' "${folder_response}")"
+					else
+					  folder_uid="$(curl --fail-with-body -sS "${grafana_url}/api/folders" \
+					    -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					    | jq -er '[.[] | select(.title == "Waddle")] | if length == 1 then .[0].uid else error("expected exactly one Waddle folder") end')"
+					fi
+
+					for dashboard_file in dashboards/*.json; do
+					  dashboard_status="$(jq -c --arg folder_uid "${folder_uid}" \
+					    '{dashboard: (. + {id: null}), folderUid: $folder_uid, overwrite: true}' \
+					    "${dashboard_file}" \
+					    | curl -sS -o "${folder_response}" -w '%{http_code}' \
+					        -X POST "${grafana_url}/api/dashboards/db" \
+					        -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					        -H 'Content-Type: application/json' \
+					        --data-binary @-)"
+					  case "${dashboard_status}" in
+					    2??) ;;
+					    *)
+					      echo "Grafana dashboard sync failed for ${dashboard_file} with HTTP ${dashboard_status}:" >&2
+					      cat "${folder_response}" >&2
+					      exit 1
+					      ;;
+					  esac
+					  echo "Synced ${dashboard_file} to Grafana folder Waddle."
+					done
+					# The repo is the single source of truth: any dashboard left in
+					# the Waddle folder whose uid no longer exists in
+					# dashboards/*.json was deleted or renamed in source control and
+					# is pruned.
+					local_uids="$(jq -r '.uid' dashboards/*.json)"
+					# The jq folderUid re-check is deliberate defense-in-depth for
+					# this destructive loop: if the server ever ignored the
+					# folderUIDs query parameter, the client-side filter still
+					# confines the prune to the Waddle folder.
+					remote_uids="$(curl --fail-with-body -sS \
+					  "${grafana_url}/api/search?type=dash-db&folderUIDs=${folder_uid}&limit=1000" \
+					  -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}" \
+					  | jq -r --arg folder_uid "${folder_uid}" \
+					      '.[] | select(.folderUid == $folder_uid) | .uid')"
+					# validate-dashboards.sh enforces this charset for every
+					# repo-owned uid, so this skip can only fire for dashboards
+					# created outside this pipeline.
+					for remote_uid in ${remote_uids}; do
+					  if [[ ! "${remote_uid}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+					    echo "Skipping prune of dashboard with unexpected uid ${remote_uid@Q} (not URL-safe)." >&2
+					    continue
+					  fi
+					  if ! grep -qx "${remote_uid}" <<< "${local_uids}"; then
+					    delete_status="$(curl -sS -o "${folder_response}" -w '%{http_code}' \
+					      -X DELETE "${grafana_url}/api/dashboards/uid/${remote_uid}" \
+					      -H "Authorization: Bearer ${GRAFANA_CLOUD_DASHBOARDS_TOKEN}")"
+					    case "${delete_status}" in
+					      2??) echo "Pruned dashboard ${remote_uid} (no longer in source control)." ;;
+					      *)
+					        echo "Failed to prune dashboard ${remote_uid} with HTTP ${delete_status}:" >&2
+					        cat "${folder_response}" >&2
+					        exit 1
+					        ;;
+					    esac
+					  fi
+					done
+					echo "All dashboards synced to Grafana Cloud."
+				"""#]
+			inputs: ["dashboards/**", "env.cue"]
 		}
 	}
 }

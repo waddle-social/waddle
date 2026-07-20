@@ -7,6 +7,7 @@
 //! cannot become a metric attribute by construction. Adding a new
 //! attribute key or value means editing this file, where review can
 //! hold the cardinality line.
+//! [`crate::metrics`] is a documented pre-existing exception pending migration under #1330.
 
 use opentelemetry::KeyValue;
 

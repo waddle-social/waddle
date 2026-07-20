@@ -74,6 +74,8 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
+use crate::telemetry::mark_span_error;
+
 mod archive_inbox_upload;
 pub(crate) mod blocking;
 mod caps_result;

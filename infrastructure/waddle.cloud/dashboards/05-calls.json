@@ -1,0 +1,40 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Reserved for LiveKit capacity, call lifecycle, media path, SFU gate, and token-mint panels when #1317–#1319 land.",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["waddle", "calls", "skeleton"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus"
+      },
+      {
+        "name": "DS_LOKI",
+        "type": "datasource",
+        "query": "loki"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Waddle calls",
+  "uid": "waddle-calls",
+  "version": 1
+}

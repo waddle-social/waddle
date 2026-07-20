@@ -185,6 +185,11 @@ pub async fn promote_session_unacked(
         storage_failed = summary.storage_failed,
         "Q6 promotion: session summary"
     );
+    // Counts live on the summary log line above; span status carries
+    // only the stable phrase.
+    if summary.has_storage_failure() {
+        crate::telemetry::mark_span_error("Q6 promotion: unacked stanzas failed durable storage");
+    }
     summary
 }
 

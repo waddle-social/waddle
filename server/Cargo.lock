@@ -7816,6 +7816,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "unicode-segmentation",
  "url",

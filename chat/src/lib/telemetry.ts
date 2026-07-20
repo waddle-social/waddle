@@ -257,6 +257,10 @@ export function initTelemetry(options: InitTelemetryOptions): void {
 // error through the sanitizing `reportError()` path instead.
 
 const GLOBAL_ERROR_DEDUPE_WINDOW_MS = 5_000;
+const BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES = new Set([
+  "ResizeObserver loop completed with undelivered notifications.",
+  "ResizeObserver loop limit exceeded",
+]);
 // Guard is per-window (not a process-lifetime latch) so a swapped
 // `window` — a fresh test stub, an HMR-recreated document — gets its
 // own listeners instead of a silent no-op.
@@ -288,7 +292,15 @@ export function installGlobalErrorTelemetry(): void {
 export function handleWindowErrorEvent(event: { error?: unknown; message?: unknown }): void {
   const error = event.error
     ?? new Error(typeof event.message === "string" && event.message ? event.message : "window-error");
+  if (isBenignResizeObserverError(error)) return;
   reportGlobalError("window-error", error);
+}
+
+function isBenignResizeObserverError(error: unknown): boolean {
+  // Same normalization as reportGlobalError: browsers may surface the
+  // window-error payload as a bare string rather than an Error.
+  const message = error instanceof Error ? error.message : String(error);
+  return BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES.has(message);
 }
 
 /** Exported for tests and for {@link installGlobalErrorTelemetry}. */

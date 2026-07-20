@@ -855,6 +855,75 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn storage_failure_exports_error_promotion_span() {
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let session = detached_session_with_unacked(
+        "stream-span-failure",
+        full("alice@example.com/laptop"),
+        vec![dm_xml(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "transient backend down",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.storage_failed, 1);
+    assert!(matches!(
+        spans.status_of("promote_session_unacked"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_promotion_exports_unset_promotion_span() {
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let session = detached_session_with_unacked(
+        "stream-span-success",
+        full("alice@example.com/laptop"),
+        vec![dm_xml(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "stored while offline",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.queued, 1);
+    assert_eq!(
+        spans.status_of("promote_session_unacked"),
+        Some(opentelemetry::trace::Status::Unset)
+    );
+}
+
 #[tokio::test]
 async fn promotion_prefers_existing_self_stamp_time_over_queue_receipt_time() {
     // Multi-hop Q6 chain (issue #1178 round-3 review): a message

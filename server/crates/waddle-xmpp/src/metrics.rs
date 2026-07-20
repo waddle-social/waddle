@@ -3,6 +3,12 @@
 //! These metrics follow the naming conventions from ADR-0014.
 //! Uses the global OpenTelemetry meter provider which must be initialized
 //! by the host application (waddle-server).
+//!
+//! These instruments predate the create-at-increment macros in [`crate::telemetry`].
+//! Their `kind`, `payload_ns`, `type`, `direction`, `mechanism`, `result`, `actor`,
+//! `operation`, `class`, `reason`, and `transport` attributes therefore bypass the
+//! [`crate::telemetry::attributes`] allowlist by construction. This is an intentional
+//! legacy exception slated for migration under #1330, not a pattern for new metrics.
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::KeyValue;
@@ -43,7 +49,8 @@ pub fn stanzas_processed() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.stanzas.processed")
         .with_description("Total XMPP stanzas processed")
-        .with_unit("stanza")
+        // UCUM annotation; a bare noun would suffix the exported name.
+        .with_unit("{stanza}")
         .build()
 }
 
@@ -52,7 +59,7 @@ pub fn auth_attempts() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.auth.attempts")
         .with_description("Total authentication attempts")
-        .with_unit("attempt")
+        .with_unit("{attempt}")
         .build()
 }
 
@@ -61,7 +68,7 @@ pub fn muc_messages() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.muc.messages")
         .with_description("Total MUC messages sent")
-        .with_unit("message")
+        .with_unit("{message}")
         .build()
 }
 
@@ -70,7 +77,7 @@ pub fn muc_presence_events() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.muc.presence")
         .with_description("Total MUC presence events (joins and leaves)")
-        .with_unit("event")
+        .with_unit("{event}")
         .build()
 }
 
@@ -121,7 +128,8 @@ fn ensure_pod_gauges() {
             meter()
                 .i64_observable_gauge("xmpp.muc.occupants")
                 .with_description("Current number of MUC occupants")
-                .with_unit("user")
+                // UCUM annotation; a bare noun would suffix the exported name.
+                .with_unit("{user}")
                 .with_callback(|observer| {
                     observer.observe(MUC_OCCUPANT_TOTAL.load(Ordering::Relaxed), &[]);
                 })
@@ -148,7 +156,7 @@ pub fn actor_mailbox_depth() -> Gauge<i64> {
     meter()
         .i64_gauge("xmpp.actor.mailbox.depth")
         .with_description("Current actor mailbox depth")
-        .with_unit("message")
+        .with_unit("{message}")
         .build()
 }
 
@@ -166,7 +174,7 @@ pub fn actor_dropped_requests() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.actor.requests.dropped")
         .with_description("Actor requests dropped due to backpressure or actor shutdown")
-        .with_unit("request")
+        .with_unit("{request}")
         .build()
 }
 
@@ -175,7 +183,7 @@ pub fn actor_request_timeouts() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.actor.requests.timeout")
         .with_description("Actor requests timed out waiting on mailbox or reply")
-        .with_unit("request")
+        .with_unit("{request}")
         .build()
 }
 
@@ -205,7 +213,7 @@ pub fn actor_restarts() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.actor.restarts")
         .with_description("Actor restarts performed by runtime supervision policy")
-        .with_unit("restart")
+        .with_unit("{restart}")
         .build()
 }
 
@@ -399,7 +407,7 @@ pub fn extension_embeds_added() -> Counter<u64> {
     meter()
         .u64_counter("xmpp.extensions.embeds.added")
         .with_description("Extension embed elements added to messages")
-        .with_unit("embed")
+        .with_unit("{embed}")
         .build()
 }
 
@@ -578,6 +586,54 @@ mod tests {
             attribute_counts.iter().all(|&count| count == 2),
             "timeout attribute schema is exactly kind + payload_ns: {attribute_counts:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn all_pre_macro_instruments_export_ucum_unit_annotations() {
+        let guard = test_support::acquire().await;
+
+        record_stanza("message", "inbound");
+        record_auth_attempt("SCRAM-SHA-256", true);
+        record_muc_message();
+        record_muc_presence("join");
+        adjust_connections_active(1);
+        publish_muc_rooms_active(1);
+        adjust_muc_occupant_total(1);
+        record_stanza_latency(1.0, "message");
+        record_actor_mailbox_depth("user", "request", 1, 32);
+        record_actor_mailbox_latency("user", "send", "request", 1.0);
+        record_actor_request_dropped("user", "send", "request", "mailbox_full");
+        record_actor_request_timeout("user", "send", "request");
+        record_stanza_handler_timeout("message", "jabber:client");
+        record_actor_restart("user", "panic");
+        record_extension_enrichment(1.0, 1);
+
+        const EXPECTED_UNITS: [(&str, &str); 16] = [
+            ("xmpp.stanzas.processed", "{stanza}"),
+            ("xmpp.auth.attempts", "{attempt}"),
+            ("xmpp.muc.messages", "{message}"),
+            ("xmpp.muc.presence", "{event}"),
+            ("xmpp.connections.active", "{connection}"),
+            ("xmpp.muc.rooms.active", "{room}"),
+            ("xmpp.muc.occupants", "{user}"),
+            ("xmpp.stanza.latency", "ms"),
+            ("xmpp.actor.mailbox.depth", "{message}"),
+            ("xmpp.actor.mailbox.latency", "ms"),
+            ("xmpp.actor.requests.dropped", "{request}"),
+            ("xmpp.actor.requests.timeout", "{request}"),
+            ("xmpp.stanza.handler.timeout", "{stanza}"),
+            ("xmpp.actor.restarts", "{restart}"),
+            ("xmpp.extensions.enrichment.latency", "ms"),
+            ("xmpp.extensions.embeds.added", "{embed}"),
+        ];
+
+        for (name, expected_unit) in EXPECTED_UNITS {
+            assert_eq!(
+                guard.metric_unit(name).as_deref(),
+                Some(expected_unit),
+                "unexpected unit for {name}",
+            );
+        }
     }
 }
 

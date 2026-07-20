@@ -42,10 +42,12 @@ anyhow = { workspace = true }
 # Observability
 tracing = { workspace = true }
 opentelemetry = { workspace = true }
-# SDK is test-only: production metric emission goes through the API
-# crate (`telemetry` module macros); the SDK is needed solely for the
-# in-memory metric-reader test seam.
-opentelemetry_sdk = { workspace = true, features = ["testing"], optional = true }
+# Production metric emission goes through the API crate (`telemetry`
+# module macros); the SDK is used directly only for bounded provider
+# flushing and the in-memory metric/span exporter test seams.
+opentelemetry_sdk = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 # Utilities
 uuid = { workspace = true }
@@ -90,6 +92,7 @@ tokio-test = "0.4"
 tokio = { workspace = true }
 tempfile = "3.27"
 tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 serde_json = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 mockito = "1.7"
@@ -104,4 +107,9 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # Enabling `test-utils` here transitively enables the same feature on
 # `waddle-xmpp-core` so the `ArchivedMessage::for_test` fixture
 # constructor is also visible to consumers.
-test-utils = ["waddle-xmpp-core/test-utils", "dep:opentelemetry_sdk"]
+test-utils = [
+  "waddle-xmpp-core/test-utils",
+  "opentelemetry_sdk/testing",
+  "dep:tracing-opentelemetry",
+  "dep:tracing-subscriber",
+]

@@ -18,7 +18,7 @@ pub struct DatabasePool {
 }
 
 impl DatabasePool {
-    #[instrument(skip_all)]
+    #[instrument(skip_all, err)]
     pub async fn new(
         config: DatabaseConfig,
         _pool_config: PoolConfig,
@@ -52,6 +52,7 @@ impl DatabasePool {
         let global_healthy = match self.global_actor.ask(DbHealthCheck).await {
             Ok(healthy) => healthy,
             Err(e) => {
+                crate::telemetry::mark_span_error("global database health check failed");
                 tracing::warn!(error = %e, "Global DB health check failed");
                 false
             }

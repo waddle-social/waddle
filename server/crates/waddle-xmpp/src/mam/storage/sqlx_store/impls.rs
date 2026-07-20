@@ -25,6 +25,7 @@ use super::{MamDatabaseBackend, SqlxMamStorage};
 impl MamStorage for SqlxMamStorage {
     #[instrument(
         skip(self, message),
+        err,
         fields(
             archive = %archive_jid,
             message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),
@@ -42,6 +43,7 @@ impl MamStorage for SqlxMamStorage {
 
     #[instrument(
         skip(self, message, fence),
+        err,
         fields(
             archive = %archive_jid,
             message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),

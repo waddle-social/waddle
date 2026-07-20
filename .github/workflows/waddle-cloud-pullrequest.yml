@@ -7,10 +7,13 @@ on:
     paths:
     - .github/workflows/waddle-cloud-pullrequest.yml
     - cue.mod/**
+    - infrastructure/waddle.cloud/dashboards/**
     - infrastructure/waddle.cloud/env.cue
     - infrastructure/waddle.cloud/env.cue/**
     - infrastructure/waddle.cloud/rules/**
     - infrastructure/waddle.cloud/schema/**
+    - infrastructure/waddle.cloud/scripts/validate-dashboards.sh
+    - infrastructure/waddle.cloud/scripts/validate-dashboards.sh/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

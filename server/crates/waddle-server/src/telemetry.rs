@@ -26,6 +26,8 @@ static METER_PROVIDER: std::sync::OnceLock<SdkMeterProvider> = std::sync::OnceLo
 /// The global logger provider, stored for shutdown.
 static LOGGER_PROVIDER: std::sync::OnceLock<SdkLoggerProvider> = std::sync::OnceLock::new();
 
+const METRICS_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Build the OpenTelemetry resource with service information.
 fn build_resource() -> Resource {
     let service_name =
@@ -263,9 +265,11 @@ fn build_log_filter() -> EnvFilter {
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     telemetry::init()?;
 ///
-///     // Your application code here...
+///     // Your application code here, ending in a graceful drain that
+///     // reports its pre-exit metrics flush outcome...
+///     let metrics_flush = telemetry::flush_metrics_before_exit().await;
 ///
-///     telemetry::shutdown();
+///     telemetry::shutdown(metrics_flush);
 ///     Ok(())
 /// }
 /// ```
@@ -360,7 +364,10 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_line_number(true);
 
     // Build the OpenTelemetry tracing layer
-    let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let telemetry_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_error_events_to_status(true)
+        .with_error_records_to_exceptions(true);
 
     // Bridge `tracing` events into the OTLP log pipeline. Scope its
     // own filter so the HTTP/gRPC transports used by the OTLP exporter
@@ -421,10 +428,59 @@ pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+/// Mark the current tracing span as failed so it matches Tempo
+/// `status=error` queries (#1428).
+///
+/// The single home for the idiom: every failure site marks its span
+/// through this helper, keeping the "what counts as an error span"
+/// decision in one place. The description is deliberately
+/// `&'static str`: span status is exported trace metadata, so it must
+/// be a short, stable phrase — full error text (which can embed raw
+/// row values or DSN-adjacent detail) belongs only on the adjacent
+/// log line.
+pub(crate) fn mark_span_error(description: &'static str) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    tracing::Span::current().set_status(opentelemetry::trace::Status::error(description));
+}
+
+/// Outcome of [`flush_metrics_before_exit`], threaded explicitly from
+/// the drain path back through `main` into [`shutdown`] so the
+/// "skip the stalled meter provider" decision travels as a value
+/// instead of hiding in shared mutable state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "pass this to telemetry::shutdown so it can skip a stalled meter provider"]
+pub enum MetricsFlush {
+    /// The pre-exit flush succeeded, or there was no meter provider to
+    /// flush (local telemetry).
+    Completed,
+    /// The pre-exit flush failed or timed out; the exporter may still
+    /// be stalled (the abandoned flush thread can also still hold the
+    /// reader's worker).
+    Failed,
+}
+
+/// Flush metrics recorded during graceful drain before control returns to `main`.
+///
+/// Local telemetry has no meter provider, so this reports
+/// [`MetricsFlush::Completed`] without flushing when [`init_local`] was used.
+pub async fn flush_metrics_before_exit() -> MetricsFlush {
+    let Some(provider) = METER_PROVIDER.get() else {
+        return MetricsFlush::Completed;
+    };
+
+    if waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await {
+        MetricsFlush::Completed
+    } else {
+        MetricsFlush::Failed
+    }
+}
+
 /// Shutdown telemetry, flushing any pending spans and metrics.
 ///
-/// Call this before application exit to ensure all telemetry data is sent.
-pub fn shutdown() {
+/// Call this before application exit to ensure all telemetry data is
+/// sent, passing the [`flush_metrics_before_exit`] outcome from the
+/// drain path.
+pub fn shutdown(metrics_flush: MetricsFlush) {
     tracing::info!("Shutting down telemetry...");
 
     // Shutdown tracer provider
@@ -434,8 +490,13 @@ pub fn shutdown() {
         }
     }
 
-    // Shutdown meter provider
-    if let Some(provider) = METER_PROVIDER.get() {
+    // Shutdown meter provider — unless the pre-exit flush already
+    // failed against a stalled exporter, in which case another export
+    // attempt can only delay exit (the SDK bounds it at ~5s) without
+    // ever succeeding.
+    if metrics_flush == MetricsFlush::Failed {
+        tracing::warn!("Skipping meter provider shutdown: pre-exit flush already failed");
+    } else if let Some(provider) = METER_PROVIDER.get() {
         if let Err(e) = provider.shutdown() {
             tracing::error!(error = %e, "Error shutting down meter provider");
         }

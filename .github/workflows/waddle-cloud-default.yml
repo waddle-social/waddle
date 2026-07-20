@@ -9,7 +9,9 @@ on:
     paths:
     - .github/workflows/waddle-cloud-default.yml
     - cue.mod/**
+    - infrastructure/waddle.cloud/charts/**
     - infrastructure/waddle.cloud/charts/livekit-sfu/**
+    - infrastructure/waddle.cloud/dashboards/**
     - infrastructure/waddle.cloud/env.cue
     - infrastructure/waddle.cloud/env.cue/**
     - infrastructure/waddle.cloud/gitops/**

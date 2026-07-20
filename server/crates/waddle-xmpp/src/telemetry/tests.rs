@@ -6,6 +6,20 @@ use super::attributes::{
 };
 use super::test_support;
 use super::validate_metric_name;
+use std::time::Duration;
+
+#[tokio::test]
+async fn bounded_flush_exports_shutdown_tail_counter() {
+    let guard = test_support::acquire().await;
+
+    super::reliability::increment_sm_drain_timeout();
+
+    assert!(
+        super::force_flush_bounded(&guard.provider(), Duration::from_secs(1)).await,
+        "in-memory meter provider must flush within the bound"
+    );
+    assert_eq!(guard.counter_sum("xmpp.sm.drain_timeout", &[]), Some(1));
+}
 
 #[tokio::test]
 async fn counter_is_created_at_first_increment_only() {
@@ -214,6 +228,35 @@ fn segment_starting_with_digit_is_rejected() {
 #[should_panic(expected = "_total")]
 fn prometheus_total_suffix_is_rejected() {
     let _ = validate_metric_name("waddle.messages_total");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn warn_events_leave_span_status_unset_error_events_mark_it() {
+    // The production bridge maps ERROR-level events to span status
+    // (#1428). Benign outcomes are logged at warn or below, so this
+    // pins the contract that keeps `status=error` meaningful: warns
+    // must never mark a span, errors must.
+    let spans = test_support::acquire_spans();
+
+    {
+        let span = tracing::info_span!("benign_op");
+        let _entered = span.enter();
+        tracing::warn!("expected, benign outcome");
+    }
+    {
+        let span = tracing::info_span!("failing_op");
+        let _entered = span.enter();
+        tracing::error!("operation failed");
+    }
+
+    assert_eq!(
+        spans.status_of("benign_op"),
+        Some(opentelemetry::trace::Status::Unset)
+    );
+    assert!(matches!(
+        spans.status_of("failing_op"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
 }
 
 #[test]

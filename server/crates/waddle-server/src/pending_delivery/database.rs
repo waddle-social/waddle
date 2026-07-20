@@ -288,7 +288,7 @@ impl DatabasePendingDeliveryStorage {
 
 #[async_trait]
 impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
-    #[instrument(skip(self, row), fields(recipient = %row.recipient))]
+    #[instrument(skip(self, row), fields(recipient = %row.recipient), err)]
     async fn insert(&self, row: PendingRow) -> Result<InsertOutcome, PendingStorageError> {
         // Per-recipient lock to serialize concurrent inserts for the
         // same recipient. This makes the `INSERT … SELECT … WHERE
@@ -369,7 +369,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         }
     }
 
-    #[instrument(skip(self, row), fields(recipient = %row.recipient, origin_stream_id))]
+    #[instrument(
+        skip(self, row),
+        fields(recipient = %row.recipient, origin_stream_id),
+        err
+    )]
     async fn insert_fenced(
         &self,
         row: PendingRow,
