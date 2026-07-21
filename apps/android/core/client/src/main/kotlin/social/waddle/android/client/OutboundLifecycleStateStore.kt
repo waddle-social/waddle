@@ -210,16 +210,20 @@ internal class OutboundLifecycleStateStore(
         var awaitedStartupOwnership: WorkerOwnership? = null
         try {
             finalizationOperations.startWorkers(
-                scope = scope,
-                workers = workers,
-                onReady = ::onWorkerReady,
-                onExit = ::onWorkerExit,
-                installWorkers = { terminal, drain ->
-                    gate.withLock {
-                        installBootstrapWorkers(lifecycle, workers, terminal, drain)
-                    }
-                },
-                onPartialTeardown = ::markBootstrapTeardown,
+                WorkerStartRequest(
+                    scope = scope,
+                    workers = workers,
+                    callbacks = WorkerStartCallbacks(
+                        onReady = ::onWorkerReady,
+                        onExit = ::onWorkerExit,
+                        installWorkers = { terminal, drain ->
+                            gate.withLock {
+                                installBootstrapWorkers(lifecycle, workers, terminal, drain)
+                            }
+                        },
+                        onPartialTeardown = ::markBootstrapTeardown,
+                    ),
+                ),
             )
             workersInstalled = workers.isInstalled()
             gate.withLock { bootstrapFailureFor(lifecycle) }?.let { failure ->
@@ -1207,7 +1211,6 @@ internal class OutboundLifecycleStateStore(
         val completed =
             finalizationOperations.compensateHandoff(
                 requireNotNull(ownerWorkers),
-                lifecycle,
                 handle,
                 transition,
             )

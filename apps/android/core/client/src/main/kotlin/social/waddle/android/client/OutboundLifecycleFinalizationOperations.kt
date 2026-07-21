@@ -101,6 +101,19 @@ internal class ProductionDurableRecoveryCleanup(
     }
 }
 
+internal data class WorkerStartRequest(
+    val scope: CoroutineScope,
+    val workers: OwnerWorkers,
+    val callbacks: WorkerStartCallbacks,
+)
+
+internal data class WorkerStartCallbacks(
+    val onReady: suspend (WorkerOwnership) -> Unit,
+    val onExit: suspend (WorkerExit) -> Unit,
+    val installWorkers: suspend (DeliveryTerminalWorker.Run, OutboundDrainWorker.Run) -> Boolean,
+    val onPartialTeardown: suspend (WorkerOwnership) -> Unit,
+)
+
 /**
  * Stateless, bounded cleanup for durable attempt projections and workers.
  * It never reads or mutates coordinator lifecycle state.
@@ -116,39 +129,34 @@ internal class OutboundLifecycleFinalizationOperations(
         ProductionDurableRecoveryCleanup(journal, resume, activeSession),
     private val workerStartHooks: WorkerStartHooks = WorkerStartHooks.None,
 ) {
-    suspend fun startWorkers(
-        scope: CoroutineScope,
-        workers: OwnerWorkers,
-        onReady: suspend (WorkerOwnership) -> Unit,
-        onExit: suspend (WorkerExit) -> Unit,
-        installWorkers: suspend (DeliveryTerminalWorker.Run, OutboundDrainWorker.Run) -> Boolean,
-        onPartialTeardown: suspend (WorkerOwnership) -> Unit,
-    ): OwnerWorkers {
+    suspend fun startWorkers(request: WorkerStartRequest): OwnerWorkers {
+        val workers = request.workers
+        val callbacks = request.callbacks
         var terminal: DeliveryTerminalWorker.Run? = null
         var drain: OutboundDrainWorker.Run? = null
         var installed = false
         try {
             workerStartHooks.beforeTerminal()
             terminal = terminalWorker.start(
-                scope,
+                request.scope,
                 workers.terminalOwnership,
-                onReady,
-                onExit,
+                callbacks.onReady,
+                callbacks.onExit,
             )
             workerStartHooks.afterTerminal(requireNotNull(terminal))
             drain = drainWorker.start(
-                scope,
+                request.scope,
                 workers.drainOwnership,
-                onReady,
-                onExit,
+                callbacks.onReady,
+                callbacks.onExit,
             )
-            installed = installWorkers(requireNotNull(terminal), requireNotNull(drain))
+            installed = callbacks.installWorkers(requireNotNull(terminal), requireNotNull(drain))
             if (installed) workerStartHooks.afterInstall(workers)
             return workers
         } finally {
             if (!installed) {
                 withContext(NonCancellable) {
-                    terminal?.let { onPartialTeardown(workers.terminalOwnership) }
+                    terminal?.let { callbacks.onPartialTeardown(workers.terminalOwnership) }
                     terminal?.requestStop()
                     drain?.requestStop()
                     terminal?.awaitExit(transitionTimeoutMillis)
@@ -369,7 +377,6 @@ internal class OutboundLifecycleFinalizationOperations(
 
     suspend fun compensateHandoff(
         workers: OwnerWorkers,
-        lifecycle: SessionLifecycleRef,
         handle: ConnectionAttemptHandle,
         transition: DeliveryAttemptTransition,
     ): Boolean = withTimeoutOrNull(transitionTimeoutMillis) {

@@ -19,6 +19,8 @@ import social.waddle.android.client.ResumeHandoffOutcome
 import social.waddle.android.client.SaslRetryDisposition
 import social.waddle.android.client.SessionLifecycleRef
 import social.waddle.android.client.SessionReadyKind
+import social.waddle.android.client.TransportAttachOutcome
+import social.waddle.android.client.TransportConstructionClaim
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.XmppEventRouter
 import social.waddle.android.client.auth.WaddleSessionInfo
@@ -55,81 +57,96 @@ internal class ConnectionAttemptRunner(
         lifecycle: SessionLifecycleRef,
         onReady: SessionReadyListener,
     ): ConnectionAttemptOutcome {
-        var activation: AttemptActivation? = null
-        var client: WaddleClientInterface? = null
-        var activeAttempt: ActiveAttempt? = null
-        var construction: social.waddle.android.client.TransportConstructionClaim? = null
-        var attachedConstruction = false
+        val state = PhysicalAttemptState()
         try {
-            val resource = attemptClientFactory.resource()
-            val prepared = messenger.activateAttempt(lifecycle)
-            activation = prepared
-            val constructionClaim =
-                messenger.beginTransportConstruction(prepared.handle)
-                    ?: return ConnectionAttemptOutcome.FencedOrReplaced
-            construction = constructionClaim
-            val liveClient = attemptClientFactory.create(session, resource, prepared.bootstrap)
-            client = liveClient
-            when (messenger.attachConstructedTransport(constructionClaim, liveClient)) {
-                social.waddle.android.client.TransportAttachOutcome.Attached -> {
-                    construction = null
-                    attachedConstruction = true
-                }
-                social.waddle.android.client.TransportAttachOutcome.SupersededAndClose -> {
-                    closeAttemptTransport(liveClient)
-                    messenger.finishSupersededConstruction(constructionClaim)
-                    construction = null
-                    client = null
-                    return ConnectionAttemptOutcome.FencedOrReplaced
-                }
-            }
-            val connected = withTimeoutOrNull(connectTimeoutMillis) {
-                try {
-                    liveClient.connect()
-                    true
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (_: Throwable) {
-                    false
-                }
-            } == true
-            if (!connected) return ConnectionAttemptOutcome.RetryableFailure
-            return coroutineScope {
-                val attempt = ActiveAttempt(
-                    client = liveClient,
-                    session = session,
-                    scope = this,
-                    lifecycle = lifecycle,
-                    handle = prepared.handle,
-                )
-                activeAttempt = attempt
-                consumeEvents(liveClient, prepared.bridge.events, attempt, onReady)
-            }
+            val client = constructTransport(session, lifecycle, state)
+                ?: return ConnectionAttemptOutcome.FencedOrReplaced
+            if (!connect(client)) return ConnectionAttemptOutcome.RetryableFailure
+            return consumeConnectedAttempt(client, session, lifecycle, onReady, state)
         } finally {
-            withContext(NonCancellable) {
-                construction?.let { claim ->
-                    val constructedClient = client
-                    if (constructedClient != null) {
-                        closeAttemptTransport(constructedClient)
-                    }
-                    messenger.finishSupersededConstruction(claim)
-                    client = null
+            cleanupPhysicalAttempt(state)
+        }
+    }
+
+    private suspend fun constructTransport(
+        session: WaddleSessionInfo,
+        lifecycle: SessionLifecycleRef,
+        state: PhysicalAttemptState,
+    ): WaddleClientInterface? {
+        val resource = attemptClientFactory.resource()
+        val activation = messenger.activateAttempt(lifecycle)
+        state.activation = activation
+        val construction = messenger.beginTransportConstruction(activation.handle) ?: return null
+        state.construction = construction
+        val client = attemptClientFactory.create(session, resource, activation.bootstrap)
+        state.client = client
+        return when (messenger.attachConstructedTransport(construction, client)) {
+            TransportAttachOutcome.Attached -> client.also {
+                state.construction = null
+                state.attachedConstruction = true
+            }
+            TransportAttachOutcome.SupersededAndClose -> {
+                closeAttemptTransport(client)
+                messenger.finishSupersededConstruction(construction)
+                state.construction = null
+                state.client = null
+                null
+            }
+        }
+    }
+
+    private suspend fun connect(client: WaddleClientInterface): Boolean =
+        withTimeoutOrNull(connectTimeoutMillis) {
+            try {
+                client.connect()
+                true
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                false
+            }
+        } == true
+
+    private suspend fun consumeConnectedAttempt(
+        client: WaddleClientInterface,
+        session: WaddleSessionInfo,
+        lifecycle: SessionLifecycleRef,
+        onReady: SessionReadyListener,
+        state: PhysicalAttemptState,
+    ): ConnectionAttemptOutcome = coroutineScope {
+        val activation = requireNotNull(state.activation)
+        val attempt = ActiveAttempt(
+            client = client,
+            session = session,
+            scope = this,
+            lifecycle = lifecycle,
+            handle = activation.handle,
+        )
+        state.activeAttempt = attempt
+        consumeEvents(client, activation.bridge.events, attempt, onReady)
+    }
+
+    private suspend fun cleanupPhysicalAttempt(state: PhysicalAttemptState) {
+        withContext(NonCancellable) {
+            state.construction?.let { construction ->
+                val constructedClient = state.client
+                if (constructedClient != null) {
+                    closeAttemptTransport(constructedClient)
                 }
-                activation?.let { prepared ->
-                    val disconnected = if (activeAttempt == null) {
-                        messenger.disconnectTransport(prepared.handle)
-                    } else {
-                        activeAttempt.producerQuiesced
-                    }
-                    val closed = closeAttemptTransport(client)
-                    if (attachedConstruction) {
-                        messenger.markTransportClosed(prepared.handle, closed)
-                    }
-                    messenger.closeAttempt(
-                        prepared.handle,
-                        producerQuiesced = disconnected && closed,
-                    )
+                messenger.finishSupersededConstruction(construction)
+                state.client = null
+            }
+            state.activation?.let { activation ->
+                val disconnected = state.activeAttempt?.producerQuiesced
+                    ?: messenger.disconnectTransport(activation.handle)
+                val closed = closeAttemptTransport(state.client)
+                if (state.attachedConstruction) {
+                    messenger.markTransportClosed(activation.handle, closed)
                 }
+                messenger.closeAttempt(
+                    activation.handle,
+                    producerQuiesced = disconnected && closed,
+                )
             }
         }
     }
@@ -297,6 +314,14 @@ internal class ConnectionAttemptRunner(
         is XmppEvent.NativeDeliveryAcked -> attempt
         is XmppEvent.NativeDeliveryFailed -> attempt
         else -> null
+    }
+
+    private class PhysicalAttemptState {
+        var activation: AttemptActivation? = null
+        var client: WaddleClientInterface? = null
+        var activeAttempt: ActiveAttempt? = null
+        var construction: TransportConstructionClaim? = null
+        var attachedConstruction: Boolean = false
     }
 
     private data class ActiveAttempt(
