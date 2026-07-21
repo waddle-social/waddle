@@ -17,6 +17,7 @@ import {
 } from "./check-root-sync-drift.mjs";
 
 const tempDirectories: string[] = [];
+const cuenvBinary = "/tmp/cuenv-root-sync";
 const canonicalGitignore = ".cuenv\nnode_modules\n";
 const canonicalLock = `version = 4
 
@@ -28,6 +29,10 @@ type = "nix"
 flake = ".."
 digest = "sha256:22c72a3faea22e798923cadadad88c625122228e05204cc052fc74d5f2d8d883"
 lockfile = "chat/../flake.lock"
+
+[runtimes."ci/root-sync"]
+type = "nix"
+flake = "../.."
 
 [runtimes.colony]
 type = "nix"
@@ -44,6 +49,7 @@ type = "nix"
 const projectPaths = Object.freeze({
 	"waddle-android": "apps/android/env.cue",
 	"waddle-chat": "chat/env.cue",
+	"waddle-root-sync": "ci/root-sync/env.cue",
 	"waddle-cloud": "infrastructure/waddle.cloud/env.cue",
 	"waddle-colony": "colony/env.cue",
 	"waddle-server": "server/env.cue",
@@ -109,13 +115,13 @@ function commandHarness({
 			if (command === "git" && args.join(" ") === "show HEAD:.gitignore") {
 				return { stdout: canonicalGitignore, stderr: "" };
 			}
-			if (command === "cuenv" && args.join(" ") === "sync lock -A") {
+			if (command === cuenvBinary && args.join(" ") === "sync lock -A") {
 				calls.lockSync += 1;
 				onLockSync?.(calls.lockSync, repository);
 				return { stdout: "Lockfile is up to date.\n", stderr: "" };
 			}
 			if (
-				command === "cuenv" &&
+				command === cuenvBinary &&
 				args[0] === "sync" &&
 				args[1] === "--check" &&
 				args[2] === "-p"
@@ -136,19 +142,20 @@ afterEach(() => {
 });
 
 describe("root sync fail-closed contract", () => {
-	test("accepts exactly six runtimes, six projects, sixteen workflows, and two stable lock syncs", () => {
+	test("accepts seven runtimes, seven projects, eighteen workflows, and two stable lock syncs", () => {
 		const repository = createRepository();
 		const harness = commandHarness();
 
 		const result = checkRootSyncDrift({
 			repoRoot: repository,
 			commandRunner: harness.commandRunner,
+			cuenvBinary,
 		});
 
 		expect(result).toEqual({
 			exitCode: 0,
 			stdout:
-					"Root sync guard verified 6 runtimes, 6 projects, 16 workflows, and two byte-stable workspace lock synchronizations.\n",
+				"Root sync guard verified 7 runtimes, 7 projects, 18 workflows, and two byte-stable workspace lock synchronizations.\n",
 			stderr: "",
 		});
 		expect(harness.calls).toEqual({ lockSync: 2, rootSync: 1 });
@@ -162,6 +169,7 @@ describe("root sync fail-closed contract", () => {
 		const result = checkRootSyncDrift({
 			repoRoot: repository,
 			commandRunner: harness.commandRunner,
+			cuenvBinary,
 		});
 
 		expect(result.exitCode).toBe(1);
@@ -205,6 +213,8 @@ describe("root sync fail-closed contract", () => {
 		const missing = checkRootSyncDrift({
 			repoRoot: missingRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
+			cuenvBinary,
 		});
 		expect(missing.stderr).toContain("workspace project names mismatch");
 		expect(missing.stderr).toContain("missing: waddle-website");
@@ -218,6 +228,8 @@ describe("root sync fail-closed contract", () => {
 		const extra = checkRootSyncDrift({
 			repoRoot: extraRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
+			cuenvBinary,
 		});
 		expect(extra.stderr).toContain("extra: waddle-extra");
 	});
@@ -230,6 +242,7 @@ describe("root sync fail-closed contract", () => {
 		const missing = checkRootSyncDrift({
 			repoRoot: missingRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
 		});
 		expect(missing.stderr).toContain(
 			"generated workflows for waddle-chat mismatch",
@@ -245,6 +258,7 @@ describe("root sync fail-closed contract", () => {
 		const extra = checkRootSyncDrift({
 			repoRoot: extraRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
 		});
 		expect(extra.stderr).toContain("extra: waddle-chat-unexpected.yml");
 	});
@@ -257,6 +271,7 @@ describe("root sync fail-closed contract", () => {
 		const missing = checkRootSyncDrift({
 			repoRoot: missingRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
 		});
 		expect(missing.stderr).toContain(
 			"generated workflows for waddle-cloud mismatch",
@@ -272,6 +287,7 @@ describe("root sync fail-closed contract", () => {
 		const extra = checkRootSyncDrift({
 			repoRoot: extraRepository,
 			commandRunner: commandHarness().commandRunner,
+			cuenvBinary,
 		});
 		expect(extra.stderr).toContain("extra: waddle-cloud-unexpected.yml");
 	});
@@ -287,6 +303,7 @@ describe("root sync fail-closed contract", () => {
 		const result = checkRootSyncDrift({
 			repoRoot: repository,
 			commandRunner: harness.commandRunner,
+			cuenvBinary,
 		});
 
 		expect(result.stderr).toContain("missing: chat");
@@ -307,6 +324,7 @@ describe("root sync fail-closed contract", () => {
 		const result = checkRootSyncDrift({
 			repoRoot: repository,
 			commandRunner: harness.commandRunner,
+			cuenvBinary,
 		});
 
 		expect(result.stderr).toContain(
@@ -329,6 +347,7 @@ describe("root sync fail-closed contract", () => {
 		const result = checkRootSyncDrift({
 			repoRoot: repository,
 			commandRunner: harness.commandRunner,
+			cuenvBinary,
 		});
 
 		expect(result.stderr).toContain(
@@ -338,26 +357,22 @@ describe("root sync fail-closed contract", () => {
 	});
 });
 
-describe("root sync task wiring", () => {
-	test("runs tests and the guard sequentially inside the existing task node", () => {
+describe("root sync workflow wiring", () => {
+	test("moves the guard out of the server task and into its dedicated project", () => {
 		const repositoryRoot = resolve(import.meta.dir, "..", "..");
-		const source = readFileSync(
+		const serverSource = readFileSync(
 			join(repositoryRoot, "server", "env.cue"),
 			"utf8",
 		);
-		const start = source.indexOf("\t\tcheckRootSyncDrift: schema.#Task");
-		const end = source.indexOf(
-			"\n\t\tcheckSwitchableAlternativeProgram:",
-			start,
+		const rootSyncSource = readFileSync(
+			join(repositoryRoot, "ci", "root-sync", "env.cue"),
+			"utf8",
 		);
-		const task = source.slice(start, end);
 
-		expect(start).toBeGreaterThanOrEqual(0);
-		expect(end).toBeGreaterThan(start);
-		expect(task).toContain("set -euo pipefail");
-		expect(
-			task.indexOf("bun test scripts/check-root-sync-drift.test.ts"),
-		).toBeLessThan(task.indexOf("bun scripts/check-root-sync-drift.mjs"));
-		expect(source.match(/checkRootSyncDrift: schema\.#Task/gu)).toHaveLength(1);
+		expect(serverSource).not.toContain("checkRootSyncDrift");
+		expect(rootSyncSource).toContain('id: "rootSyncGuard"');
+		expect(rootSyncSource).toContain('"cuenv:contributor:nix.install"');
+		expect(rootSyncSource).toContain('"cuenv:contributor:cuenv.setup"');
+		expect(rootSyncSource).toContain('cache: mode: "never"');
 	});
 });

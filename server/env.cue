@@ -163,7 +163,6 @@ schema.#Project & {
 				}
 			}
 			tasks: [
-				_t.checkRootSyncDrift,
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
 				_t.fmt,
@@ -205,7 +204,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -242,28 +241,6 @@ schema.#Project & {
 			args: ["scripts/check-ci-drift.mjs"]
 			dependsOn: [tasks.testCiDrift]
 			inputs: _ciDriftInputs
-		}
-
-		checkRootSyncDrift: schema.#Task & {
-			command: "bash"
-			args: ["-c", #"""
-					set -euo pipefail
-					bun test scripts/check-root-sync-drift.test.ts
-					bun scripts/check-root-sync-drift.mjs
-				"""#]
-			inputs: [
-				"../.github/workflows/**",
-				"../env.cue",
-				"../**/env.cue",
-				"../cuenv.lock",
-				"../cue.mod/**",
-				"../flake.lock",
-				"../flake.nix",
-				"../.rules.cue",
-				"../.gitignore",
-				"scripts/check-root-sync-drift.mjs",
-				"scripts/check-root-sync-drift.test.ts",
-			]
 		}
 
 		checkSwitchableAlternativeProgram: schema.#Task & {

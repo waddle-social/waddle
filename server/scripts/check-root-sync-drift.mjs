@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export const EXPECTED_RUNTIME_KEYS = Object.freeze([
 	"apps/android",
 	"chat",
+	"ci/root-sync",
 	"colony",
 	"infrastructure/waddle.cloud",
 	"server",
@@ -22,6 +23,10 @@ export const EXPECTED_PROJECT_WORKFLOWS = Object.freeze({
 		"waddle-chat-default.yml",
 		"waddle-chat-publishwasm.yml",
 		"waddle-chat-pullrequest.yml",
+	]),
+	"waddle-root-sync": Object.freeze([
+		"waddle-root-sync-default.yml",
+		"waddle-root-sync-pullrequest.yml",
 	]),
 	"waddle-cloud": Object.freeze([
 		"waddle-cloud-default.yml",
@@ -247,14 +252,23 @@ function runCommand(command, args, cwd) {
 	return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
+function requireCuenvBinary(candidate) {
+	if (typeof candidate !== "string" || !isAbsolute(candidate)) {
+		throw new Error("ROOT_SYNC_CUENV must be an absolute executable path");
+	}
+	return candidate;
+}
+
 export function checkRootSyncDrift({
 	repoRoot = resolve(import.meta.dir, "..", ".."),
 	commandRunner = runCommand,
+	cuenvBinary = process.env.ROOT_SYNC_CUENV,
 } = {}) {
 	const lockPath = join(repoRoot, "cuenv.lock");
 	let canonicalLock;
 	let syncStarted = false;
 	try {
+		const cuenvBinaryPath = requireCuenvBinary(cuenvBinary);
 		canonicalLock = commandRunner(
 			"git",
 			["show", "HEAD:cuenv.lock"],
@@ -286,7 +300,7 @@ export function checkRootSyncDrift({
 		syncStarted = true;
 		let firstSynchronizedLock;
 		for (let attempt = 1; attempt <= 2; attempt += 1) {
-			commandRunner("cuenv", ["sync", "lock", "-A"], repoRoot);
+			commandRunner(cuenvBinaryPath, ["sync", "lock", "-A"], repoRoot);
 			const synchronizedLock = readFileSync(lockPath, "utf8");
 			assertLockContract(synchronizedLock);
 			assertByteStable(
@@ -304,7 +318,7 @@ export function checkRootSyncDrift({
 			firstSynchronizedLock = synchronizedLock;
 		}
 
-		commandRunner("cuenv", ["sync", "--check", "-p", repoRoot], repoRoot);
+		commandRunner(cuenvBinaryPath, ["sync", "--check", "-p", repoRoot], repoRoot);
 		assertByteStable(
 			"cuenv.lock after root rules/VCS synchronization check",
 			readFileSync(lockPath, "utf8"),
