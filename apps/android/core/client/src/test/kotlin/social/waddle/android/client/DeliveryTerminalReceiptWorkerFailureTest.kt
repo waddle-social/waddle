@@ -35,13 +35,19 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = "other@waddle.test",
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)
+                    ),
                 ),
                 Unit,
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(DeliveryJournalStore(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(
+                DeliveryJournalStore(prefs),
+                dispatchEvent = {},
+                evidence = WorkerExitExceptionEvidence(),
+            ),
             this,
         )
 
@@ -81,7 +87,11 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             )
         }
         val run = terminalRun(
-            DeliveryTerminalWorker(DeliveryJournalStore(prefs), dispatchEvent = {}, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(
+                DeliveryJournalStore(prefs),
+                dispatchEvent = {},
+                evidence = WorkerExitExceptionEvidence(),
+            ),
             this,
         )
 
@@ -106,7 +116,9 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)
+                    ),
                 ),
                 Unit,
             )
@@ -167,15 +179,7 @@ class DeliveryTerminalReceiptWorkerFailureTest {
 
     @Test
     fun `release cleanup exhausts every persistence category with the primary preserved`() = runTest {
-        val cases = listOf(
-            IOException("cleanup io") to TerminalReceiptCleanupFailureCategory.IO_FAILURE,
-            SerializationException("cleanup codec") to TerminalReceiptCleanupFailureCategory.CODEC_FAILURE,
-            IllegalArgumentException("cleanup runtime") to TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE,
-            CancellationException("cleanup cancellation") to TerminalReceiptCleanupFailureCategory.CANCELLATION,
-            AssertionError("cleanup error") to TerminalReceiptCleanupFailureCategory.ERROR_FAILURE,
-        )
-
-        cases.forEachIndexed { index, (storageFailure, category) ->
+        cleanupFailureCases().forEachIndexed { index, (storageFailure, category) ->
             val store = FailingPreferencesDataStore()
             val prefs = SessionPrefs(store)
             val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "cleanup-$index")
@@ -183,7 +187,9 @@ class DeliveryTerminalReceiptWorkerFailureTest {
                 DeliveryJournalMutation(
                     journal.copy(
                         activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                        owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                        owners = journal.owners + (
+                            TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)
+                        ),
                     ),
                     Unit,
                 )
@@ -226,8 +232,11 @@ class DeliveryTerminalReceiptWorkerFailureTest {
                 val cleanup = primary.suppressed.single() as TerminalReceiptCleanupException
                 assertEquals(evidence, cleanup.evidence)
                 assertTrue(cleanup.cause === storageFailure)
-                val pending = prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state
-                    as TerminalReceiptState.Pending
+                val pending = prefs.deliveryJournal.first()
+                    .owners
+                    .getValue(TERMINAL_WORKER_OWNER)
+                    .terminalReceipt
+                    ?.state as TerminalReceiptState.Pending
                 assertTrue(pending.claim is TerminalReceiptClaimState.Claimed)
             } finally {
                 logger.removeHandler(handler)
@@ -244,7 +253,9 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)
+                    ),
                 ),
                 Unit,
             )
@@ -278,4 +289,12 @@ class DeliveryTerminalReceiptWorkerFailureTest {
             ).claim is TerminalReceiptClaimState.Unclaimed,
         )
     }
+
+    private fun cleanupFailureCases() = listOf(
+        IOException("cleanup io") to TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+        SerializationException("cleanup codec") to TerminalReceiptCleanupFailureCategory.CODEC_FAILURE,
+        IllegalArgumentException("cleanup runtime") to TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE,
+        CancellationException("cleanup cancellation") to TerminalReceiptCleanupFailureCategory.CANCELLATION,
+        AssertionError("cleanup error") to TerminalReceiptCleanupFailureCategory.ERROR_FAILURE,
+    )
 }
