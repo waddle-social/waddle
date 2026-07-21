@@ -544,6 +544,75 @@ class CallStoreTest {
     }
 
     @Test
+    fun `losing the tie-break does not ring a propose the peer already retracted`() = runTest {
+        val f = Fixture(sid = { "c-zz" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+
+        // Stanza burst: winning propose queued, tie-break reject of our
+        // sid, then the peer retracts their own propose — all reduced
+        // before the queued effect runs. The retract matches no slot
+        // (ours is c-zz), so only the aborted-sid memory can stop the
+        // effect from resurrecting c-aa as an unbounded ghost ring.
+        f.store.onCallEvent(propose(peerFull, "c-aa"))
+        f.store.onCallEvent(reject(peerFull, "c-zz", tieBreak = true))
+        f.store.onCallEvent(retract(peerFull, "c-aa"))
+        runCurrent()
+
+        assertEquals(CallState.Ended("c-zz", CallEndReason.Expired), f.store.state.value)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Ringing })
+    }
+
+    @Test
+    fun `hanging up an accepting ring finishes with cancel instead of a late reject`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(peerFull, "c1"))
+        runCurrent()
+        assertTrue(f.store.acceptIncoming())
+        f.client.callVerbs.clear()
+
+        f.store.hangUp()
+
+        assertTrue(
+            RecordedCallVerb.FinishWithReason(peerFull, "c1", WaddleJingleReason.CANCEL) in
+                f.client.callVerbs,
+        )
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
+        assertEquals(CallState.Idle, f.store.state.value)
+    }
+
+    @Test
+    fun `migration abort after a concurrent hang-up finishes the proceeded sid with cancel`() = runTest {
+        val f = Fixture(sid = { "c-old" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+        f.store.onCallEvent(proceed(peerFull, "c-old"))
+        f.store.onCallEvent(sessionAccept(peerFull, "c-old"))
+        runCurrent()
+
+        // Stall the migration <proceed/> so the user's hang-up lands
+        // between the wire sends and the slot swap.
+        f.client.callProceedDelayMillis = 1_000
+        f.store.onCallEvent(propose(peerFull, "c-new"))
+        runCurrent()
+        f.store.hangUp()
+        f.client.callVerbs.clear()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        // The migration proceed for c-new is on the wire but the slot
+        // belongs to the hang-up now: the proceeded sid is abandoned
+        // with the finish bookend, never a contradictory late reject.
+        assertTrue(
+            RecordedCallVerb.FinishWithReason(peerFull, "c-new", WaddleJingleReason.CANCEL) in
+                f.client.callVerbs,
+        )
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
+        assertEquals(CallState.Idle, f.store.state.value)
+    }
+
+    @Test
     fun `declining an accepting ring finishes with cancel instead of a late reject`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)

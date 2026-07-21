@@ -242,6 +242,13 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var callTerminateDelayMillis = 0L
 
+    /**
+     * Virtual-time stall before [sendCallProceed] answers — lets tests
+     * land a concurrent action while a proceed is in flight.
+     */
+    @Volatile
+    var callProceedDelayMillis = 0L
+
     /** Canned XEP-0215 services served by [fetchExternalServices]. */
     @Volatile
     var externalServices: List<WaddleExternalService> = emptyList()
@@ -270,6 +277,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean {
+        if (callProceedDelayMillis > 0) delay(callProceedDelayMillis)
         callVerbs += RecordedCallVerb.Proceed(peerFullJid, sid)
         return callVerbResult
     }

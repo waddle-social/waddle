@@ -54,6 +54,20 @@ class CallStore internal constructor(
     private var outgoingTimer: Job? = null
     private var sessionAcceptTimer: Job? = null
 
+    /**
+     * Sids of Reject/Retract events the reducer could not apply (the
+     * slot held a different call). The web never needs this: its
+     * effects run inline, so a propose is always answered before the
+     * next event reduces. Here the reducer can outpace the queued
+     * effects, so a propose's abort may already have arrived by the
+     * time its effect runs — such a sid is DEAD and must not be rung,
+     * answered, or migrated to. Bounded LRU; guarded by [stateLock].
+     */
+    private val recentlyAbortedSids = object : LinkedHashMap<String, Unit>() {
+        override fun removeEldestEntry(eldest: Map.Entry<String, Unit>): Boolean =
+            size > ABORTED_SID_CAPACITY
+    }
+
     /** Bind the session scope; timers and wire effects run on it. */
     internal fun start(sessionScope: CoroutineScope) {
         val queue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
@@ -73,6 +87,7 @@ class CallStore internal constructor(
             effects?.close()
             effects = null
             scope = null
+            recentlyAbortedSids.clear()
             _state.value = CallState.Idle
             _lastError.value = null
         }
@@ -91,6 +106,12 @@ class CallStore internal constructor(
         val prev: CallState
         synchronized(stateLock) {
             prev = _state.value
+            val kind = event.kind
+            if ((kind is WaddleCallEventKind.Reject || kind is WaddleCallEventKind.Retract) &&
+                prev.sidOrNull != event.sid
+            ) {
+                recentlyAbortedSids[event.sid] = Unit
+            }
             if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall(prev, event)) {
                 applyCallEventLocked(prev, event)
             }
@@ -360,6 +381,11 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState,
     ) {
+        // The peer's own reject/retract for this sid already arrived
+        // while the effect was queued: the propose is concluded on the
+        // wire — ringing, answering, or migrating to it would resurrect
+        // a dead session (unbounded ghost ring).
+        if (isRecentlyAborted(event.sid)) return
         // Simultaneous propose tie-break (XEP-0353 §Tie Breaking,
         // anchor tie-break-1). Specific to both parties proposing to
         // the same bare peer at once; unrelated callers take the
@@ -389,61 +415,16 @@ class CallStore internal constructor(
         prev: CallState.Outgoing,
     ) {
         // The effect queue runs after the reducer pass that captured
-        // `prev`; the slot may have moved before this effect ran, and
-        // the CAUSE decides the answer (XEP-0353 tolerates no silent
-        // drop — the proposer rings until timeout). If the peer's
-        // tie-break reject already retired our sid (Ended + Expired),
-        // their propose is the tie-break WINNER and must ring — the
-        // web gets this ordering for free by running effects inline.
-        // Anything else (local hang-up/dismiss, a newer call) means we
-        // walked away: decline theirs like the busy path.
+        // `prev`; a slot that moved before this effect ran still owes
+        // the peer's propose an answer (XEP-0353 tolerates no silent
+        // drop — the proposer rings until timeout).
         if (!slotStillMatches(prev)) {
-            val lostTieBreakOnTheWire = synchronized(stateLock) {
-                val current = _state.value
-                if (current is CallState.Ended &&
-                    current.sid == prev.sid &&
-                    current.reason == CallEndReason.Expired
-                ) {
-                    cancelCallTimersLocked()
-                    _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
-                    _lastError.value = null
-                    true
-                } else {
-                    false
-                }
-            }
-            if (lostTieBreakOnTheWire) {
-                if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
-            } else if (!signaling.reject(event.from, event.sid)) {
-                reportError("call reject failed")
-            }
+            answerProposeAfterTieBreakSlotMoved(event, kind, prev)
             return
         }
         val ourJid = ownFullJid()
         if (ourJid == null) {
-            // Without a bound resource we cannot host the would-be
-            // session, but each tie-break direction still mandates its
-            // response (XEP-0353 tie-break-1) — and the sid comparison
-            // needs no JID (the JID is only the equal-sid fallback):
-            // a losing incoming sid gets the tie-break reject; a
-            // winning one means OUR sid loses — retract it, then
-            // decline the survivor since we cannot take the call.
-            if (compareOctetStrings(event.sid, prev.sid) < 0) {
-                if (!signaling.retractTieBreak(event.from, prev.sid)) {
-                    reportError("call tie-break retract failed")
-                }
-                if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
-                // Our sid is retracted on the wire; the local ring must
-                // die with it instead of ringing on a corpse.
-                synchronized(stateLock) {
-                    if (slotStillMatches(prev)) {
-                        cancelCallTimersLocked()
-                        _state.value = CallState.Ended(sid = prev.sid, reason = CallEndReason.Expired)
-                    }
-                }
-            } else if (!signaling.rejectTieBreak(event.from, event.sid)) {
-                reportError("call tie-break reject failed")
-            }
+            tieBreakWithoutBoundResource(event, prev)
             return
         }
         if (incomingProposeWinsTieBreak(event.sid, prev.sid, event.from, ourJid)) {
@@ -464,6 +445,74 @@ class CallStore internal constructor(
             // <tie-break/> + <expired/>; our own outgoing ring continues.
             if (!signaling.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
+            }
+        }
+    }
+
+    /**
+     * The slot moved between the reducer pass and the queued tie-break
+     * effect — the CAUSE decides the answer. If the peer's tie-break
+     * reject already retired our sid (Ended + Expired), their propose
+     * is the tie-break WINNER and must ring — the web gets this
+     * ordering for free by running effects inline. Anything else
+     * (local hang-up/dismiss, a newer call) means we walked away:
+     * decline theirs like the busy path.
+     */
+    private suspend fun answerProposeAfterTieBreakSlotMoved(
+        event: WaddleCallEvent,
+        kind: WaddleCallEventKind.Propose,
+        prev: CallState.Outgoing,
+    ) {
+        val lostTieBreakOnTheWire = synchronized(stateLock) {
+            val current = _state.value
+            if (current is CallState.Ended &&
+                current.sid == prev.sid &&
+                current.reason == CallEndReason.Expired
+            ) {
+                cancelCallTimersLocked()
+                _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
+                _lastError.value = null
+                true
+            } else {
+                false
+            }
+        }
+        if (lostTieBreakOnTheWire) {
+            if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+        } else if (!signaling.reject(event.from, event.sid)) {
+            reportError("call reject failed")
+        }
+    }
+
+    /**
+     * Without a bound resource we cannot host the would-be session,
+     * but each tie-break direction still mandates its response
+     * (XEP-0353 tie-break-1) — and the sid comparison needs no JID
+     * (the JID is only the equal-sid fallback): a losing incoming sid
+     * gets the tie-break reject; a winning one means OUR sid loses —
+     * retract it, then decline the survivor since we cannot take the
+     * call.
+     */
+    private suspend fun tieBreakWithoutBoundResource(
+        event: WaddleCallEvent,
+        prev: CallState.Outgoing,
+    ) {
+        if (compareOctetStrings(event.sid, prev.sid) >= 0) {
+            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+                reportError("call tie-break reject failed")
+            }
+            return
+        }
+        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+            reportError("call tie-break retract failed")
+        }
+        if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+        // Our sid is retracted on the wire; the local ring must die
+        // with it instead of ringing on a corpse.
+        synchronized(stateLock) {
+            if (slotStillMatches(prev)) {
+                cancelCallTimersLocked()
+                _state.value = CallState.Ended(sid = prev.sid, reason = CallEndReason.Expired)
             }
         }
     }
@@ -576,6 +625,10 @@ class CallStore internal constructor(
         if (!signaling.sessionAccept(event.from, ourJid, event.sid, kind.media)) {
             failCall(event.sid, "call session accept failed")
         }
+    }
+
+    private fun isRecentlyAborted(sid: String): Boolean = synchronized(stateLock) {
+        recentlyAbortedSids.containsKey(sid)
     }
 
     /**
@@ -755,6 +808,9 @@ class CallStore internal constructor(
 
         /** Session-accept gap timeout (web `SESSION_ACCEPT_TIMEOUT_MS`). */
         const val SESSION_ACCEPT_TIMEOUT_MILLIS = 45_000L
+
+        /** LRU bound for [recentlyAbortedSids]; a burst never holds more. */
+        private const val ABORTED_SID_CAPACITY = 16
     }
 }
 
