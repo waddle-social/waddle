@@ -7,6 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -85,38 +86,20 @@ class OutboundTerminalRecoveryTest {
         runCurrent()
         val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(started.lifecycle))
             as LifecycleShutdownOutcome.WorkerFenced
-        val exit = (fenced.cause as LifecycleFenceCause.WorkerExited).fence.exit
-        val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
-            as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
-        val cleanup = workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved
-        assertEquals(
-            TerminalReceiptCleanupFailureCategory.IO_FAILURE,
-            (cleanup.evidence.reason as TerminalReceiptCleanupReason.Persistence).category,
-        )
-        assertEquals(1, events.size)
-
-        store.failAllUpdates = true
-        val pending = coordinator.recoverFencedWorkers(started.lifecycle)
-            as WorkerRecoveryOutcome.TerminalReceiptCleanupFailed
-        assertEquals(cleanup.evidence, pending.cleanup)
-        assertEquals(1, events.size)
-        store.failAllUpdates = false
-        assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(started.lifecycle))
-        assertEquals(1, events.size)
-        assertTrue(
-            (
-                prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as
-                TerminalReceiptState.Pending
-            ).claim is TerminalReceiptClaimState.Unclaimed,
+        val cleanup = assertReceiptLeaseFailure(fenced, events)
+        assertReceiptLeaseRecovery(
+            ReceiptLeaseRecoveryScenario(
+                store,
+                coordinator,
+                started.lifecycle,
+                cleanup,
+                prefs,
+                events,
+            ),
         )
 
         failDispatch = false
-        val replacement = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
-        assertEquals(2, events.size)
-        assertEquals(
-            LifecycleShutdownOutcome.Stopped,
-            coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(replacement)),
-        )
+        assertReceiptReplacementAfterRecovery(coordinator, ownerScope, events)
         ownerJob.cancelAndJoin()
     }
 
@@ -151,82 +134,32 @@ class OutboundTerminalRecoveryTest {
             workerExitEvidence = WorkerExitExceptionEvidence(),
         )
         val lifecycle = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
-        val activation = coordinator.activate(lifecycle)
-        val attempt = activation.bootstrap.attempt
-        stageTerminalRow(queue, attempt, "fatal-terminal")
-        val admitted = checkNotNull(coordinator.acquireTerminal(attempt))
-
-        coordinator.signalDrain(attempt)
-        drainEntered.await()
-        val admittedCommand = async {
-            coordinator.submitTerminal(OWNER, "fatal-terminal", attempt, DeliveryTerminalKind.ACK)
-        }
-        runCurrent()
-        assertEquals(
-            TerminalCommandOutcome.Failed(TerminalWorkerFailure(WorkerFailureKind.DEPENDENCY_FAILURE)),
-            admittedCommand.await(),
+        val admission = acquireFatalTerminalAdmission(
+            coordinator,
+            queue,
+            lifecycle,
+            drainEntered,
         )
 
-        val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
-            as LifecycleShutdownOutcome.WorkerFenced
-        val cause = fenced.cause as LifecycleFenceCause.WorkerExited
-        val exit = cause.fence.exit
-        assertEquals(lifecycle, fenced.lifecycle)
-        assertEquals(lifecycle, exit.lifecycle)
-        assertEquals(WorkerKind.DELIVERY_TERMINAL, exit.kind)
-        assertEquals(
-            WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
-            exit.reason,
+        val fence = assertFatalTerminalFenceAndLateRejection(
+            coordinator,
+            lifecycle,
+            admission.attempt,
+            admission.lease,
         )
-
-        assertNull(coordinator.acquireTerminal(attempt))
-        assertEquals(
-            TerminalCommandOutcome.WorkerUnavailable,
-            coordinator.submitTerminal(OWNER, "late-terminal", attempt, DeliveryTerminalKind.ACK),
-        )
-        requireLifecycleRelease(
-            coordinator.releaseAdmission(admitted),
-            admitted.capability,
-            LifecycleReleaseSite.TERMINAL_COMMAND,
-        )
-
-        val recovery = async { coordinator.recoverFencedWorkers(lifecycle) }
-        runCurrent()
-        val losingRecovery = coordinator.recoverFencedWorkers(lifecycle)
-            as WorkerRecoveryOutcome.RecoveryInProgress
-        assertEquals(lifecycle, losingRecovery.claim.lifecycle)
-        assertEquals(cause.fence, losingRecovery.claim.fence)
-        assertEquals(exit.ownership(), losingRecovery.claim.fence.exit.ownership())
-
-        releaseDrain.complete(Unit)
-        runCurrent()
-        assertEquals(WorkerRecoveryOutcome.Recovered, recovery.await())
-        assertEquals(WorkerRecoveryOutcome.NotFenced, coordinator.recoverFencedWorkers(lifecycle))
-        assertTrue(ownerJob.isActive)
+        assertSingleWinningFatalRecovery(coordinator, lifecycle, fence, releaseDrain)
 
         fatalDispatch = false
-        val replacement = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
-        assertTrue(replacement != lifecycle)
-        val replacementActivation = coordinator.activate(replacement)
-        val replacementAttempt = replacementActivation.bootstrap.attempt
-        stageTerminalRow(queue, replacementAttempt, "replacement-terminal")
-        val replacementLease = checkNotNull(coordinator.acquireTerminal(replacementAttempt))
-        assertEquals(
-            TerminalCommandOutcome.Committed,
-            coordinator.submitTerminal(
-                OWNER,
-                "replacement-terminal",
-                replacementAttempt,
-                DeliveryTerminalKind.ACK,
+        assertReplacementTerminalLifecycle(
+            ReplacementTerminalScenario(
+                coordinator,
+                ownerScope,
+                queue,
+                lifecycle,
+                delivered,
+                ownerJob,
             ),
         )
-        requireLifecycleRelease(
-            coordinator.releaseAdmission(replacementLease),
-            replacementLease.capability,
-            LifecycleReleaseSite.TERMINAL_COMMAND,
-        )
-        assertEquals(1, delivered.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(ownerJob.isActive)
         ownerJob.cancelAndJoin()
     }
 
@@ -240,18 +173,7 @@ class OutboundTerminalRecoveryTest {
             runCurrent()
             val client = harness.factory.clients.single()
 
-            harness.dataStore.failAllUpdates = true
-            harness.factory.emitResumeStateChanged(testResumeState())
-            runCurrent()
-            advanceTimeBy(250)
-            runCurrent()
-            assertPulls(client, calls = 2, inFlight = 0)
-            assertEquals(0, client.disconnectCalls)
-
-            harness.dataStore.failAllUpdates = false
-            advanceTimeBy(500)
-            runCurrent()
-            assertPulls(client, calls = 3, inFlight = 1)
+            assertPersistentResumeRetry(harness, client)
 
             val sent = harness.messenger.sendOrEnqueue(PEER, false, "persist forever")
             val stanzaId = checkNotNull(sent.delivery).identity.clientStanzaId
@@ -334,6 +256,196 @@ class OutboundTerminalRecoveryTest {
             ) is LiveAdmissionResult.Claimed,
         )
     }
+
+    private fun assertReceiptLeaseFailure(
+        fenced: LifecycleShutdownOutcome.WorkerFenced,
+        events: List<XmppEvent>,
+    ): TerminalReceiptApplicationFailure.CleanupUnresolved {
+        val exit = (fenced.cause as LifecycleFenceCause.WorkerExited).fence.exit
+        val workerFailure = (exit.reason as WorkerExitReason.UnexpectedFailure).kind
+            as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+        val cleanup = workerFailure.failure as TerminalReceiptApplicationFailure.CleanupUnresolved
+        assertEquals(
+            TerminalReceiptCleanupFailureCategory.IO_FAILURE,
+            (cleanup.evidence.reason as TerminalReceiptCleanupReason.Persistence).category,
+        )
+        assertEquals(1, events.size)
+        return cleanup
+    }
+
+    private suspend fun assertReceiptLeaseRecovery(
+        scenario: ReceiptLeaseRecoveryScenario,
+    ) {
+        scenario.store.failAllUpdates = true
+        val pending = scenario.coordinator.recoverFencedWorkers(scenario.lifecycle)
+            as WorkerRecoveryOutcome.TerminalReceiptCleanupFailed
+        assertEquals(scenario.cleanup.evidence, pending.cleanup)
+        assertEquals(1, scenario.events.size)
+        scenario.store.failAllUpdates = false
+        assertEquals(
+            WorkerRecoveryOutcome.Recovered,
+            scenario.coordinator.recoverFencedWorkers(scenario.lifecycle),
+        )
+        assertEquals(1, scenario.events.size)
+        assertTrue(
+            (
+                scenario.prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as
+                TerminalReceiptState.Pending
+            ).claim is TerminalReceiptClaimState.Unclaimed,
+        )
+    }
+
+    private suspend fun assertFatalTerminalFenceAndLateRejection(
+        coordinator: OutboundLifecycleStateStore,
+        lifecycle: SessionLifecycleRef,
+        attempt: DeliveryAttemptRef,
+        admitted: OutboundAdmissionLease.Terminal,
+    ): WorkerFence {
+        val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
+            as LifecycleShutdownOutcome.WorkerFenced
+        val cause = fenced.cause as LifecycleFenceCause.WorkerExited
+        val exit = cause.fence.exit
+        assertEquals(lifecycle, fenced.lifecycle)
+        assertEquals(lifecycle, exit.lifecycle)
+        assertEquals(WorkerKind.DELIVERY_TERMINAL, exit.kind)
+        assertEquals(
+            WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
+            exit.reason,
+        )
+        assertNull(coordinator.acquireTerminal(attempt))
+        assertEquals(
+            TerminalCommandOutcome.WorkerUnavailable,
+            coordinator.submitTerminal(OWNER, "late-terminal", attempt, DeliveryTerminalKind.ACK),
+        )
+        requireLifecycleRelease(
+            coordinator.releaseAdmission(admitted),
+            admitted.capability,
+            LifecycleReleaseSite.TERMINAL_COMMAND,
+        )
+        return cause.fence
+    }
+
+    private suspend fun TestScope.assertSingleWinningFatalRecovery(
+        coordinator: OutboundLifecycleStateStore,
+        lifecycle: SessionLifecycleRef,
+        fence: WorkerFence,
+        releaseDrain: CompletableDeferred<Unit>,
+    ) {
+        val recovery = async { coordinator.recoverFencedWorkers(lifecycle) }
+        runCurrent()
+        val losingRecovery = coordinator.recoverFencedWorkers(lifecycle)
+            as WorkerRecoveryOutcome.RecoveryInProgress
+        assertEquals(lifecycle, losingRecovery.claim.lifecycle)
+        assertEquals(fence, losingRecovery.claim.fence)
+        assertEquals(fence.exit.ownership(), losingRecovery.claim.fence.exit.ownership())
+        releaseDrain.complete(Unit)
+        runCurrent()
+        assertEquals(WorkerRecoveryOutcome.Recovered, recovery.await())
+        assertEquals(WorkerRecoveryOutcome.NotFenced, coordinator.recoverFencedWorkers(lifecycle))
+    }
+
+    private suspend fun assertReplacementTerminalLifecycle(
+        scenario: ReplacementTerminalScenario,
+    ) {
+        val replacement = (
+            scenario.coordinator.start(scenario.ownerScope, OWNER) as LifecycleStartResult.Started
+        ).lifecycle
+        assertTrue(replacement != scenario.priorLifecycle)
+        val replacementAttempt = scenario.coordinator.activate(replacement).bootstrap.attempt
+        stageTerminalRow(scenario.queue, replacementAttempt, "replacement-terminal")
+        val replacementLease = checkNotNull(scenario.coordinator.acquireTerminal(replacementAttempt))
+        assertEquals(
+            TerminalCommandOutcome.Committed,
+            scenario.coordinator.submitTerminal(
+                OWNER,
+                "replacement-terminal",
+                replacementAttempt,
+                DeliveryTerminalKind.ACK,
+            ),
+        )
+        requireLifecycleRelease(
+            scenario.coordinator.releaseAdmission(replacementLease),
+            replacementLease.capability,
+            LifecycleReleaseSite.TERMINAL_COMMAND,
+        )
+        assertEquals(1, scenario.delivered.filterIsInstance<XmppEvent.DeliveryAcked>().size)
+        assertTrue(scenario.ownerJob.isActive)
+    }
+
+    private suspend fun TestScope.acquireFatalTerminalAdmission(
+        coordinator: OutboundLifecycleStateStore,
+        queue: DeliveryJournalStore,
+        lifecycle: SessionLifecycleRef,
+        drainEntered: CompletableDeferred<Unit>,
+    ): TerminalAdmission {
+        val attempt = coordinator.activate(lifecycle).bootstrap.attempt
+        stageTerminalRow(queue, attempt, "fatal-terminal")
+        val lease = checkNotNull(coordinator.acquireTerminal(attempt))
+        coordinator.signalDrain(attempt)
+        drainEntered.await()
+        val admittedCommand = async {
+            coordinator.submitTerminal(OWNER, "fatal-terminal", attempt, DeliveryTerminalKind.ACK)
+        }
+        runCurrent()
+        assertEquals(
+            TerminalCommandOutcome.Failed(TerminalWorkerFailure(WorkerFailureKind.DEPENDENCY_FAILURE)),
+            admittedCommand.await(),
+        )
+        return TerminalAdmission(attempt, lease)
+    }
+
+    private suspend fun TestScope.assertPersistentResumeRetry(
+        harness: ConnectionLoopPullHarness,
+        client: FakeWaddleClient,
+    ) {
+        harness.dataStore.failAllUpdates = true
+        harness.factory.emitResumeStateChanged(testResumeState())
+        runCurrent()
+        advanceTimeBy(250)
+        runCurrent()
+        assertPulls(client, calls = 2, inFlight = 0)
+        assertEquals(0, client.disconnectCalls)
+        harness.dataStore.failAllUpdates = false
+        advanceTimeBy(500)
+        runCurrent()
+        assertPulls(client, calls = 3, inFlight = 1)
+    }
+
+    private suspend fun assertReceiptReplacementAfterRecovery(
+        coordinator: OutboundLifecycleStateStore,
+        ownerScope: CoroutineScope,
+        events: List<XmppEvent>,
+    ) {
+        val replacement = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
+        assertEquals(2, events.size)
+        assertEquals(
+            LifecycleShutdownOutcome.Stopped,
+            coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(replacement)),
+        )
+    }
+
+    private data class ReceiptLeaseRecoveryScenario(
+        val store: FailingPreferencesDataStore,
+        val coordinator: OutboundLifecycleStateStore,
+        val lifecycle: SessionLifecycleRef,
+        val cleanup: TerminalReceiptApplicationFailure.CleanupUnresolved,
+        val prefs: SessionPrefs,
+        val events: List<XmppEvent>,
+    )
+
+    private data class ReplacementTerminalScenario(
+        val coordinator: OutboundLifecycleStateStore,
+        val ownerScope: CoroutineScope,
+        val queue: DeliveryJournalStore,
+        val priorLifecycle: SessionLifecycleRef,
+        val delivered: List<XmppEvent>,
+        val ownerJob: Job,
+    )
+
+    private data class TerminalAdmission(
+        val attempt: DeliveryAttemptRef,
+        val lease: OutboundAdmissionLease.Terminal,
+    )
 
     private fun pendingReceipt(seed: String): TerminalReceipt {
         val attempt = DeliveryAttemptRef(
