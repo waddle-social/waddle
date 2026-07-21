@@ -302,16 +302,11 @@ class TerminalDrainAndFenceTest {
     }
 
     @Test
-    fun `active owner without an owner journal fails fast without mutation`() {
+    fun `active owner without an owner journal is an ownership mismatch without mutation`() {
         val active = attempt("active")
         val before = DeliveryJournal(activeOwnerBareJid = OWNER)
 
-        val failure = runCatching {
-            before.prepareTerminalDrainAndFence(request(active, "receipt"))
-        }.exceptionOrNull()
-
-        assertTrue(failure is IllegalStateException)
-        assertEquals(DeliveryJournal(activeOwnerBareJid = OWNER), before)
+        assertMismatchUnchanged(before, request(active, "receipt"))
     }
 
     @Test

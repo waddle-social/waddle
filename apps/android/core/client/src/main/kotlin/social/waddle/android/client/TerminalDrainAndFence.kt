@@ -145,7 +145,7 @@ private fun DeliveryJournal.activeTerminalAttemptResult(
     requestedOwner: DeliveryOwnerBareJid,
     request: TerminalDrainAndFenceRequest,
 ): TerminalDrainAndFenceResult? {
-    if (activeOwnerBareJid != requestedOwner.value) {
+    if (activeOwnerBareJid != requestedOwner.value || owner?.activeAttempt != request.attempt) {
         return TerminalDrainAndFenceResult.OwnershipMismatch(
             journal = this,
             requested = request.attempt,
@@ -154,14 +154,6 @@ private fun DeliveryJournal.activeTerminalAttemptResult(
         )
     }
     val activeOwner = checkNotNull(owner)
-    if (activeOwner.activeAttempt != request.attempt) {
-        return TerminalDrainAndFenceResult.OwnershipMismatch(
-            journal = this,
-            requested = request.attempt,
-            actualOwner = activeOwnerBareJid?.let(::DeliveryOwnerBareJid),
-            actualAttempt = activeOwnerBareJid?.let(owners::get)?.activeAttempt,
-        )
-    }
     activeOwner.validateTerminalDrain(request)?.let { reason ->
         return TerminalDrainAndFenceResult.Corrupt(this, reason)
     }
