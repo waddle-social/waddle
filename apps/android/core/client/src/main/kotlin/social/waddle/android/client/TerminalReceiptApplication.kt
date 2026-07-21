@@ -116,17 +116,31 @@ internal sealed interface TerminalReceiptApplicationFailure {
         val receipt: TerminalReceiptRef?,
         val attempts: Int,
     ) : TerminalReceiptApplicationFailure
-    data class DiscoveryCorrupt(val owner: DeliveryOwnerBareJid, val reason: TerminalReceiptCorruption) : TerminalReceiptApplicationFailure
-    data class DiscoveryOwnerFenced(val requested: DeliveryOwnerBareJid, val actual: DeliveryOwnerBareJid?) : TerminalReceiptApplicationFailure
+    data class DiscoveryCorrupt(
+        val owner: DeliveryOwnerBareJid,
+        val reason: TerminalReceiptCorruption,
+    ) : TerminalReceiptApplicationFailure
+    data class DiscoveryOwnerFenced(
+        val requested: DeliveryOwnerBareJid,
+        val actual: DeliveryOwnerBareJid?,
+    ) : TerminalReceiptApplicationFailure
     data class ClaimBusy(val result: TerminalReceiptClaimResult.Busy) : TerminalReceiptApplicationFailure
     data class ClaimMissing(val result: TerminalReceiptClaimResult.ReceiptMissing) : TerminalReceiptApplicationFailure
     data class ClaimReplaced(val result: TerminalReceiptClaimResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
     data class ClaimOwnerFenced(val result: TerminalReceiptClaimResult.OwnerFenced) : TerminalReceiptApplicationFailure
     data class ClaimCorrupt(val result: TerminalReceiptClaimResult.Corrupt) : TerminalReceiptApplicationFailure
-    data class AcknowledgeLeaseMismatch(val result: TerminalReceiptAcknowledgeResult.LeaseMismatch) : TerminalReceiptApplicationFailure
-    data class AcknowledgeMissing(val result: TerminalReceiptAcknowledgeResult.ReceiptMissing) : TerminalReceiptApplicationFailure
-    data class AcknowledgeReplaced(val result: TerminalReceiptAcknowledgeResult.ReceiptReplaced) : TerminalReceiptApplicationFailure
-    data class AcknowledgeCorrupt(val result: TerminalReceiptAcknowledgeResult.Corrupt) : TerminalReceiptApplicationFailure
+    data class AcknowledgeLeaseMismatch(
+        val result: TerminalReceiptAcknowledgeResult.LeaseMismatch,
+    ) : TerminalReceiptApplicationFailure
+    data class AcknowledgeMissing(
+        val result: TerminalReceiptAcknowledgeResult.ReceiptMissing,
+    ) : TerminalReceiptApplicationFailure
+    data class AcknowledgeReplaced(
+        val result: TerminalReceiptAcknowledgeResult.ReceiptReplaced,
+    ) : TerminalReceiptApplicationFailure
+    data class AcknowledgeCorrupt(
+        val result: TerminalReceiptAcknowledgeResult.Corrupt,
+    ) : TerminalReceiptApplicationFailure
     data class CleanupUnresolved(
         val evidence: TerminalReceiptCleanupEvidence,
     ) : TerminalReceiptApplicationFailure
@@ -172,7 +186,10 @@ internal sealed interface TerminalReceiptClaimResult {
         val current: TerminalReceiptLease,
     ) : TerminalReceiptClaimResult
 
-    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptClaimResult
+    data class ReceiptMissing(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptRef,
+    ) : TerminalReceiptClaimResult
     data class ReceiptReplaced(
         override val journal: DeliveryJournal,
         val requested: TerminalReceiptRef,
@@ -195,7 +212,10 @@ internal sealed interface TerminalReceiptClaimResult {
 internal sealed interface TerminalReceiptAcknowledgeResult {
     val journal: DeliveryJournal
 
-    data class Acknowledged(override val journal: DeliveryJournal, val receipt: TerminalReceipt) : TerminalReceiptAcknowledgeResult
+    data class Acknowledged(
+        override val journal: DeliveryJournal,
+        val receipt: TerminalReceipt,
+    ) : TerminalReceiptAcknowledgeResult
     data class AlreadyAcknowledged(
         override val journal: DeliveryJournal,
         val receipt: TerminalReceipt,
@@ -206,18 +226,35 @@ internal sealed interface TerminalReceiptAcknowledgeResult {
         val requested: TerminalReceiptLease,
         val current: TerminalReceiptClaimState.Claimed?,
     ) : TerminalReceiptAcknowledgeResult
-    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptAcknowledgeResult
-    data class ReceiptReplaced(override val journal: DeliveryJournal, val requested: TerminalReceiptRef, val actual: TerminalReceiptRef) : TerminalReceiptAcknowledgeResult
-    data class Corrupt(override val journal: DeliveryJournal, val ref: TerminalReceiptRef, val reason: TerminalReceiptCorruption) : TerminalReceiptAcknowledgeResult
+    data class ReceiptMissing(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptRef,
+    ) : TerminalReceiptAcknowledgeResult
+    data class ReceiptReplaced(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptRef,
+        val actual: TerminalReceiptRef,
+    ) : TerminalReceiptAcknowledgeResult
+    data class Corrupt(
+        override val journal: DeliveryJournal,
+        val ref: TerminalReceiptRef,
+        val reason: TerminalReceiptCorruption,
+    ) : TerminalReceiptAcknowledgeResult
 }
 
 internal sealed interface TerminalReceiptReleaseResult {
     val journal: DeliveryJournal
 
-    data class Released(override val journal: DeliveryJournal, val lease: TerminalReceiptLease) : TerminalReceiptReleaseResult
+    data class Released(
+        override val journal: DeliveryJournal,
+        val lease: TerminalReceiptLease,
+    ) : TerminalReceiptReleaseResult
 
     /** The exact receipt is already pending and unclaimed after a prior release commit. */
-    data class AlreadyReleased(override val journal: DeliveryJournal, val receipt: TerminalReceipt) : TerminalReceiptReleaseResult
+    data class AlreadyReleased(
+        override val journal: DeliveryJournal,
+        val receipt: TerminalReceipt,
+    ) : TerminalReceiptReleaseResult
     data class AlreadyAcknowledged(
         override val journal: DeliveryJournal,
         val receipt: TerminalReceipt,
@@ -228,9 +265,20 @@ internal sealed interface TerminalReceiptReleaseResult {
         val requested: TerminalReceiptLease,
         val current: TerminalReceiptClaimState.Claimed?,
     ) : TerminalReceiptReleaseResult
-    data class ReceiptMissing(override val journal: DeliveryJournal, val requested: TerminalReceiptRef) : TerminalReceiptReleaseResult
-    data class ReceiptReplaced(override val journal: DeliveryJournal, val requested: TerminalReceiptRef, val actual: TerminalReceiptRef) : TerminalReceiptReleaseResult
-    data class Corrupt(override val journal: DeliveryJournal, val ref: TerminalReceiptRef, val reason: TerminalReceiptCorruption) : TerminalReceiptReleaseResult
+    data class ReceiptMissing(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptRef,
+    ) : TerminalReceiptReleaseResult
+    data class ReceiptReplaced(
+        override val journal: DeliveryJournal,
+        val requested: TerminalReceiptRef,
+        val actual: TerminalReceiptRef,
+    ) : TerminalReceiptReleaseResult
+    data class Corrupt(
+        override val journal: DeliveryJournal,
+        val ref: TerminalReceiptRef,
+        val reason: TerminalReceiptCorruption,
+    ) : TerminalReceiptReleaseResult
 }
 
 internal fun DeliveryJournal.discoverTerminalReceipt(owner: DeliveryOwnerBareJid): TerminalReceiptDiscovery {
@@ -299,7 +347,11 @@ internal fun DeliveryJournal.acknowledgeTerminalReceipt(
     return when (resolved) {
         is ExactLeaseResolution.Pending -> {
             if (resolved.pending.claim != lease.claim) {
-                TerminalReceiptAcknowledgeResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
+                TerminalReceiptAcknowledgeResult.LeaseMismatch(
+                    this,
+                    lease,
+                    resolved.pending.claim as? TerminalReceiptClaimState.Claimed,
+                )
             } else {
                 val receipt = resolved.receipt.copy(state = TerminalReceiptState.Acknowledged(lease.claim))
                 TerminalReceiptAcknowledgeResult.Acknowledged(
@@ -315,7 +367,8 @@ internal fun DeliveryJournal.acknowledgeTerminalReceipt(
         }
         is ExactLeaseResolution.PreAcknowledged -> TerminalReceiptAcknowledgeResult.LeaseMismatch(this, lease, null)
         is ExactLeaseResolution.Missing -> TerminalReceiptAcknowledgeResult.ReceiptMissing(this, lease.ref)
-        is ExactLeaseResolution.Replaced -> TerminalReceiptAcknowledgeResult.ReceiptReplaced(this, lease.ref, resolved.actual)
+        is ExactLeaseResolution.Replaced ->
+            TerminalReceiptAcknowledgeResult.ReceiptReplaced(this, lease.ref, resolved.actual)
         is ExactLeaseResolution.Corrupt -> TerminalReceiptAcknowledgeResult.Corrupt(this, lease.ref, resolved.reason)
     }
 }
@@ -331,7 +384,11 @@ internal fun DeliveryJournal.releaseTerminalReceipt(
             ) {
                 TerminalReceiptReleaseResult.AlreadyReleased(this, resolved.receipt)
             } else if (resolved.pending.claim != lease.claim) {
-                TerminalReceiptReleaseResult.LeaseMismatch(this, lease, resolved.pending.claim as? TerminalReceiptClaimState.Claimed)
+                TerminalReceiptReleaseResult.LeaseMismatch(
+                    this,
+                    lease,
+                    resolved.pending.claim as? TerminalReceiptClaimState.Claimed,
+                )
             } else {
                 val receipt = resolved.receipt.copy(
                     state = resolved.pending.copy(
@@ -352,14 +409,22 @@ internal fun DeliveryJournal.releaseTerminalReceipt(
         }
         is ExactLeaseResolution.PreAcknowledged -> TerminalReceiptReleaseResult.LeaseMismatch(this, lease, null)
         is ExactLeaseResolution.Missing -> TerminalReceiptReleaseResult.ReceiptMissing(this, lease.ref)
-        is ExactLeaseResolution.Replaced -> TerminalReceiptReleaseResult.ReceiptReplaced(this, lease.ref, resolved.actual)
+        is ExactLeaseResolution.Replaced ->
+            TerminalReceiptReleaseResult.ReceiptReplaced(this, lease.ref, resolved.actual)
         is ExactLeaseResolution.Corrupt -> TerminalReceiptReleaseResult.Corrupt(this, lease.ref, resolved.reason)
     }
 }
 
 private sealed interface ExactLeaseResolution {
-    data class Pending(val bucket: DeliveryOwnerJournal, val receipt: TerminalReceipt, val pending: TerminalReceiptState.Pending) : ExactLeaseResolution
-    data class Acknowledged(val receipt: TerminalReceipt, val claim: TerminalReceiptClaimState.Claimed) : ExactLeaseResolution
+    data class Pending(
+        val bucket: DeliveryOwnerJournal,
+        val receipt: TerminalReceipt,
+        val pending: TerminalReceiptState.Pending,
+    ) : ExactLeaseResolution
+    data class Acknowledged(
+        val receipt: TerminalReceipt,
+        val claim: TerminalReceiptClaimState.Claimed,
+    ) : ExactLeaseResolution
     data object PreAcknowledged : ExactLeaseResolution
     data object Missing : ExactLeaseResolution
     data class Replaced(val actual: TerminalReceiptRef) : ExactLeaseResolution

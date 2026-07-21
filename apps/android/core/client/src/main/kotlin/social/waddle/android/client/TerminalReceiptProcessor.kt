@@ -35,12 +35,25 @@ internal class TerminalReceiptProcessor(
             }
             ) {
                 is TerminalReceiptDiscovery.Pending -> claimAndApply(owner, discovery)
-                is TerminalReceiptDiscovery.Corrupt -> fail(TerminalReceiptApplicationFailure.DiscoveryCorrupt(owner, discovery.reason))
-                is TerminalReceiptDiscovery.OwnerFenced -> fail(TerminalReceiptApplicationFailure.DiscoveryOwnerFenced(discovery.requested, discovery.actual))
+                is TerminalReceiptDiscovery.Corrupt ->
+                    fail(TerminalReceiptApplicationFailure.DiscoveryCorrupt(owner, discovery.reason))
+                is TerminalReceiptDiscovery.OwnerFenced ->
+                    fail(
+                        TerminalReceiptApplicationFailure.DiscoveryOwnerFenced(
+                            discovery.requested,
+                            discovery.actual,
+                        ),
+                    )
                 TerminalReceiptDiscovery.None, is TerminalReceiptDiscovery.AlreadyAcknowledged -> Unit
             }
         } catch (failure: DeliveryJournalDecodeException) {
-            fail(TerminalReceiptApplicationFailure.DiscoveryCorrupt(owner, TerminalReceiptCorruption.PERSISTED_DECODE_FAILURE), failure)
+            fail(
+                TerminalReceiptApplicationFailure.DiscoveryCorrupt(
+                    owner,
+                    TerminalReceiptCorruption.PERSISTED_DECODE_FAILURE,
+                ),
+                failure,
+            )
         }
     }
 
@@ -51,20 +64,28 @@ internal class TerminalReceiptProcessor(
                 unresolvedCleanup = null
                 TerminalReceiptRecoveryCleanupResult.Released
             }
-            is TerminalReceiptCleanupResult.Unresolved -> TerminalReceiptRecoveryCleanupResult.Unresolved(recovered.evidence)
+            is TerminalReceiptCleanupResult.Unresolved ->
+                TerminalReceiptRecoveryCleanupResult.Unresolved(recovered.evidence)
         }
     }
 
     fun failureOf(failure: Throwable): TerminalReceiptFailureExtraction {
-        (failure as? TerminalReceiptApplicationException)?.let { return TerminalReceiptFailureExtraction.Found(it.failure) }
-        val cleanup = failure.suppressed.filterIsInstance<TerminalReceiptCleanupException>().lastOrNull()
+        (failure as? TerminalReceiptApplicationException)?.let {
+            return TerminalReceiptFailureExtraction.Found(it.failure)
+        }
+        val cleanup = failure.suppressed
+            .filterIsInstance<TerminalReceiptCleanupException>()
+            .lastOrNull()
         return cleanup?.let {
             TerminalReceiptFailureExtraction.Found(TerminalReceiptApplicationFailure.CleanupUnresolved(it.evidence))
         }
             ?: TerminalReceiptFailureExtraction.None
     }
 
-    private suspend fun claimAndApply(owner: DeliveryOwnerBareJid, discovery: TerminalReceiptDiscovery.Pending) {
+    private suspend fun claimAndApply(
+        owner: DeliveryOwnerBareJid,
+        discovery: TerminalReceiptDiscovery.Pending,
+    ) {
         val claim = TerminalReceiptClaimState.Claimed(
             TerminalClaimId.random(), ownership.claimant(), processEpoch,
         )
@@ -76,10 +97,14 @@ internal class TerminalReceiptProcessor(
             is TerminalReceiptClaimResult.Claimed -> apply(claimed)
             is TerminalReceiptClaimResult.AlreadyAcknowledged -> Unit
             is TerminalReceiptClaimResult.Busy -> fail(TerminalReceiptApplicationFailure.ClaimBusy(claimed))
-            is TerminalReceiptClaimResult.ReceiptMissing -> fail(TerminalReceiptApplicationFailure.ClaimMissing(claimed))
-            is TerminalReceiptClaimResult.ReceiptReplaced -> fail(TerminalReceiptApplicationFailure.ClaimReplaced(claimed))
-            is TerminalReceiptClaimResult.OwnerFenced -> fail(TerminalReceiptApplicationFailure.ClaimOwnerFenced(claimed))
-            is TerminalReceiptClaimResult.Corrupt -> fail(TerminalReceiptApplicationFailure.ClaimCorrupt(claimed))
+            is TerminalReceiptClaimResult.ReceiptMissing ->
+                fail(TerminalReceiptApplicationFailure.ClaimMissing(claimed))
+            is TerminalReceiptClaimResult.ReceiptReplaced ->
+                fail(TerminalReceiptApplicationFailure.ClaimReplaced(claimed))
+            is TerminalReceiptClaimResult.OwnerFenced ->
+                fail(TerminalReceiptApplicationFailure.ClaimOwnerFenced(claimed))
+            is TerminalReceiptClaimResult.Corrupt ->
+                fail(TerminalReceiptApplicationFailure.ClaimCorrupt(claimed))
         }
     }
 
@@ -92,11 +117,17 @@ internal class TerminalReceiptProcessor(
                 journal.acknowledgeTerminalReceipt(claimed.lease)
             }
             ) {
-                is TerminalReceiptAcknowledgeResult.Acknowledged, is TerminalReceiptAcknowledgeResult.AlreadyAcknowledged -> Unit
-                is TerminalReceiptAcknowledgeResult.LeaseMismatch -> fail(TerminalReceiptApplicationFailure.AcknowledgeLeaseMismatch(result))
-                is TerminalReceiptAcknowledgeResult.ReceiptMissing -> fail(TerminalReceiptApplicationFailure.AcknowledgeMissing(result))
-                is TerminalReceiptAcknowledgeResult.ReceiptReplaced -> fail(TerminalReceiptApplicationFailure.AcknowledgeReplaced(result))
-                is TerminalReceiptAcknowledgeResult.Corrupt -> fail(TerminalReceiptApplicationFailure.AcknowledgeCorrupt(result))
+                is TerminalReceiptAcknowledgeResult.Acknowledged,
+                is TerminalReceiptAcknowledgeResult.AlreadyAcknowledged,
+                -> Unit
+                is TerminalReceiptAcknowledgeResult.LeaseMismatch ->
+                    fail(TerminalReceiptApplicationFailure.AcknowledgeLeaseMismatch(result))
+                is TerminalReceiptAcknowledgeResult.ReceiptMissing ->
+                    fail(TerminalReceiptApplicationFailure.AcknowledgeMissing(result))
+                is TerminalReceiptAcknowledgeResult.ReceiptReplaced ->
+                    fail(TerminalReceiptApplicationFailure.AcknowledgeReplaced(result))
+                is TerminalReceiptAcknowledgeResult.Corrupt ->
+                    fail(TerminalReceiptApplicationFailure.AcknowledgeCorrupt(result))
             }
         } catch (failure: Throwable) {
             preserve(failure, claimed.lease)
@@ -119,23 +150,49 @@ internal class TerminalReceiptProcessor(
         }
     }
 
-    private suspend fun release(lease: TerminalReceiptLease): TerminalReceiptCleanupResult = withContext(NonCancellable) {
+    private suspend fun release(
+        lease: TerminalReceiptLease,
+    ): TerminalReceiptCleanupResult = withContext(NonCancellable) {
         var attempts = 0
         while (true) {
             try {
                 attempts += 1
                 return@withContext when (val result = journal.releaseTerminalReceipt(lease)) {
-                    is TerminalReceiptReleaseResult.Released, is TerminalReceiptReleaseResult.AlreadyReleased, is TerminalReceiptReleaseResult.AlreadyAcknowledged -> TerminalReceiptCleanupResult.Released
-                    is TerminalReceiptReleaseResult.LeaseMismatch -> unresolved(lease, TerminalReceiptCleanupReason.LeaseMismatch(result.current), attempts)
-                    is TerminalReceiptReleaseResult.ReceiptMissing -> unresolved(lease, TerminalReceiptCleanupReason.ReceiptMissing, attempts)
-                    is TerminalReceiptReleaseResult.ReceiptReplaced -> unresolved(lease, TerminalReceiptCleanupReason.ReceiptReplaced(result.actual), attempts)
-                    is TerminalReceiptReleaseResult.Corrupt -> unresolved(lease, TerminalReceiptCleanupReason.Corrupt(result.reason), attempts)
+                    is TerminalReceiptReleaseResult.Released,
+                    is TerminalReceiptReleaseResult.AlreadyReleased,
+                    is TerminalReceiptReleaseResult.AlreadyAcknowledged,
+                    -> TerminalReceiptCleanupResult.Released
+                    is TerminalReceiptReleaseResult.LeaseMismatch ->
+                        unresolved(
+                            lease,
+                            TerminalReceiptCleanupReason.LeaseMismatch(result.current),
+                            attempts,
+                        )
+                    is TerminalReceiptReleaseResult.ReceiptMissing ->
+                        unresolved(lease, TerminalReceiptCleanupReason.ReceiptMissing, attempts)
+                    is TerminalReceiptReleaseResult.ReceiptReplaced ->
+                        unresolved(
+                            lease,
+                            TerminalReceiptCleanupReason.ReceiptReplaced(result.actual),
+                            attempts,
+                        )
+                    is TerminalReceiptReleaseResult.Corrupt ->
+                        unresolved(
+                            lease,
+                            TerminalReceiptCleanupReason.Corrupt(result.reason),
+                            attempts,
+                        )
                 }
             } catch (failure: Throwable) {
                 if (attempts == MAX_ATTEMPTS) {
                     throw TerminalReceiptCleanupException(
-                    TerminalReceiptCleanupEvidence(lease, attempts, TerminalReceiptCleanupReason.Persistence(category(failure))), failure,
-                )
+                        TerminalReceiptCleanupEvidence(
+                            lease,
+                            attempts,
+                            TerminalReceiptCleanupReason.Persistence(category(failure)),
+                        ),
+                        failure,
+                    )
                 }
                 delay(RETRY_DELAYS[attempts - 1])
             }
@@ -143,20 +200,37 @@ internal class TerminalReceiptProcessor(
         error("unreachable receipt cleanup retry exit")
     }
 
-    private suspend fun <T> retry(operation: TerminalReceiptPersistenceOperation, owner: DeliveryOwnerBareJid, receipt: TerminalReceiptRef?, block: suspend () -> T): T {
+    private suspend fun <T> retry(
+        operation: TerminalReceiptPersistenceOperation,
+        owner: DeliveryOwnerBareJid,
+        receipt: TerminalReceiptRef?,
+        block: suspend () -> T,
+    ): T {
         var attempts = 0
         while (true) try {
             attempts += 1
             return block()
         } catch (failure: IOException) {
-            if (attempts == MAX_ATTEMPTS) fail(TerminalReceiptApplicationFailure.PersistenceExhausted(operation, owner, receipt, attempts), failure)
+            if (attempts == MAX_ATTEMPTS) {
+                fail(
+                    TerminalReceiptApplicationFailure.PersistenceExhausted(
+                        operation,
+                        owner,
+                        receipt,
+                        attempts,
+                    ),
+                    failure,
+                )
+            }
             delay(RETRY_DELAYS[attempts - 1])
         }
     }
 
     private fun dispatch(effect: TerminalReceiptEffect) = when (effect) {
-        is TerminalReceiptEffect.Acknowledged -> dispatchEvent(XmppEvent.DeliveryAcked(DeliveryOutcomeRef(effect.row.identity, effect.row.source)))
-        is TerminalReceiptEffect.Failed -> dispatchEvent(XmppEvent.DeliveryFailed(DeliveryOutcomeRef(effect.row.identity, effect.row.source)))
+        is TerminalReceiptEffect.Acknowledged ->
+            dispatchEvent(XmppEvent.DeliveryAcked(DeliveryOutcomeRef(effect.row.identity, effect.row.source)))
+        is TerminalReceiptEffect.Failed ->
+            dispatchEvent(XmppEvent.DeliveryFailed(DeliveryOutcomeRef(effect.row.identity, effect.row.source)))
     }
 
     private fun unresolved(lease: TerminalReceiptLease, reason: TerminalReceiptCleanupReason, attempts: Int) =
@@ -172,8 +246,15 @@ internal class TerminalReceiptProcessor(
         failure is IllegalStateException -> TerminalReceiptCleanupFailureCategory.INVARIANT_FAILURE
         else -> TerminalReceiptCleanupFailureCategory.RUNTIME_FAILURE
     }
-    private fun fail(failure: TerminalReceiptApplicationFailure, cause: Throwable? = null): Nothing = throw TerminalReceiptApplicationException(failure, cause)
-    private fun WorkerOwnership.claimant() = TerminalReceiptClaimant.Worker(LifecycleGeneration(lifecycle.id.value.toString()), TerminalReceiptWorkerKind.DELIVERY_TERMINAL, ReceiptWorkerGeneration(generation.value.toString()))
+    private fun fail(
+        failure: TerminalReceiptApplicationFailure,
+        cause: Throwable? = null,
+    ): Nothing = throw TerminalReceiptApplicationException(failure, cause)
+    private fun WorkerOwnership.claimant() = TerminalReceiptClaimant.Worker(
+        LifecycleGeneration(lifecycle.id.value.toString()),
+        TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
+        ReceiptWorkerGeneration(generation.value.toString()),
+    )
     private companion object { val RETRY_DELAYS = longArrayOf(250, 500, 1_000, 2_000, 5_000)
     const val MAX_ATTEMPTS = 6 }
 }
