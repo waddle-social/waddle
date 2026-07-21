@@ -18,19 +18,25 @@ internal fun DeliveryOwnerJournal.validateReceiptApplication(
     if (activeAttempt != null) return TerminalReceiptCorruption.ACTIVE_ATTEMPT_REMAINS
     if (terminalIntents.isNotEmpty()) return TerminalReceiptCorruption.TERMINAL_INTENTS_REMAIN
     if (outboundRows.map { it.identity }.toSet().size != outboundRows.size) return TerminalReceiptCorruption.DUPLICATE_ROW
-    if (outboundRows.any {
-        it.identity.ownerBareJid != requestedOwner.value
-    }) {
+    if (
+        outboundRows.any {
+            it.identity.ownerBareJid != requestedOwner.value
+        }
+    ) {
         return TerminalReceiptCorruption.ROW_OWNER_MISMATCH
     }
-    if (outboundRows.any {
-        it.ownership is OutboundOwnership.Terminal
-    }) {
+    if (
+        outboundRows.any {
+            it.ownership is OutboundOwnership.Terminal
+        }
+    ) {
         return TerminalReceiptCorruption.TERMINAL_ROW_REMAINS
     }
-    if (outboundRows.any {
-        it.ownership is OutboundOwnership.NativeOwned
-    }) {
+    if (
+        outboundRows.any {
+            it.ownership is OutboundOwnership.NativeOwned
+        }
+    ) {
         return TerminalReceiptCorruption.NATIVE_OWNED_ROW_REMAINS
     }
     val pending = receipt.state as? TerminalReceiptState.Pending ?: return null

@@ -109,7 +109,7 @@ internal class TerminalReceiptProcessor(
             val cleanup = release(lease) as? TerminalReceiptCleanupResult.Unresolved
             if (cleanup != null) {
                 TerminalReceiptCleanupException(cleanup.evidence).also {
-                    unresolvedCleanup = it;
+                    unresolvedCleanup = it
                 primary.addSuppressed(it)
                 }
             }
@@ -174,6 +174,6 @@ internal class TerminalReceiptProcessor(
     }
     private fun fail(failure: TerminalReceiptApplicationFailure, cause: Throwable? = null): Nothing = throw TerminalReceiptApplicationException(failure, cause)
     private fun WorkerOwnership.claimant() = TerminalReceiptClaimant.Worker(LifecycleGeneration(lifecycle.id.value.toString()), TerminalReceiptWorkerKind.DELIVERY_TERMINAL, ReceiptWorkerGeneration(generation.value.toString()))
-    private companion object { val RETRY_DELAYS = longArrayOf(250, 500, 1_000, 2_000, 5_000);
+    private companion object { val RETRY_DELAYS = longArrayOf(250, 500, 1_000, 2_000, 5_000)
     const val MAX_ATTEMPTS = 6 }
 }

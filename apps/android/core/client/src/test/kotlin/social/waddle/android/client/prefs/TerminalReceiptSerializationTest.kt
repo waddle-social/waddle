@@ -9,8 +9,8 @@ import java.util.UUID
 
 class TerminalReceiptSerializationTest {
     private val json = Json {
-        encodeDefaults = true;
-    ignoreUnknownKeys = true
+        encodeDefaults = true
+        ignoreUnknownKeys = true
     }
 
     @Test

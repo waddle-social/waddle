@@ -205,10 +205,12 @@ class XmppSessionRuntimeWorkerRecoveryTest {
     }
 
     private suspend fun awaitCheckpoint(name: String, deferred: CompletableDeferred<Unit>) {
-        check(withTimeoutOrNull(5_000) {
+        check(
+            withTimeoutOrNull(5_000) {
             deferred.await()
         true
-        } == true) {
+        } == true
+        ) {
             "timed out waiting for $name"
         }
     }
