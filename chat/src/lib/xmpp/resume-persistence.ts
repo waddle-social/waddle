@@ -36,6 +36,7 @@ import type {
   PagehideHandoffResult,
 } from "@/lib/xmpp-runtime/durable-contract";
 import { IndexedDbDurableOutboundStore } from "@/lib/xmpp-runtime/indexeddb-durable-store";
+import { secureRandomUuid } from "./secure-random";
 
 const CATCHUP_PREFIX = "waddle.chat.resume-cursors";
 const SM_PREFIX = "waddle.chat.sm-resume";
@@ -514,7 +515,7 @@ function reportSmOwnerFailure(operation: string, cause: unknown): void {
 }
 
 function randomClaimId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  return secureRandomUuid();
 }
 
 function smEnvelopeExpired(envelope: DurableSmEnvelope): boolean {

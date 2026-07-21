@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { WaddleSession } from "../src/lib/server-auth";
 import { BrowserXmppClient as BrowserXmppClientBase, type SessionLifecycleEvent } from "../src/lib/xmpp-client";
-import { __createFallbackXmppResourceForTesting } from "../src/lib/xmpp/client";
+import { __formatUuidV4ForTesting } from "../src/lib/xmpp/secure-random";
 import {
   __clearSensitiveUrlsForTesting,
   __scrubMissingFetchSpanUrlForTesting,
@@ -535,7 +535,7 @@ describe("telemetry module no-op behaviour", () => {
     const stub = createFaroStub();
     __setFaroForTesting(stub as never);
 
-    const resource = __createFallbackXmppResourceForTesting(new Uint8Array(16));
+    const resource = `web-${__formatUuidV4ForTesting(new Uint8Array(16))}`;
     setXmppResourceForTelemetry(resource);
 
     expect(resource).toBe("web-00000000-0000-4000-8000-000000000000");
