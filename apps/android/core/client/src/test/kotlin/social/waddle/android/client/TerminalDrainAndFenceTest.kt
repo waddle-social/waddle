@@ -317,20 +317,21 @@ class TerminalDrainAndFenceTest {
         row: QueuedOutboundMessage,
         valid: DeliveryTerminalIntent,
     ) {
+        assertIntentAndIndexCorruption(active, id, row, valid)
+        assertOwnershipAndAttemptCorruption(active, id, row, valid)
+    }
+
+    private fun assertIntentAndIndexCorruption(
+        active: DeliveryAttemptRef,
+        id: DeliveryTerminalIntentId,
+        row: QueuedOutboundMessage,
+        valid: DeliveryTerminalIntent,
+    ) {
         val duplicateId = intent(id, row("two", 2, id), active, DeliveryTerminalKind.ACK)
         val duplicateIntentRow = intent(intentId("second"), row, active, DeliveryTerminalKind.ACK)
         val duplicateRow = row.copy(sequence = 2)
         val wrongIntentId = row.copy(ownership = OutboundOwnership.Terminal(intentId("other")))
-        val wrongAttempt = intent(id, row, attempt("other"), DeliveryTerminalKind.ACK)
-        val foreignRow = row.copy(ownerBareJid = OTHER_OWNER)
-        val wrongOwner = intent(
-            id,
-            foreignRow,
-            active,
-            DeliveryTerminalKind.ACK,
-        )
         val missing = intent(id, row("missing", 1, id), active, DeliveryTerminalKind.ACK)
-        val orphan = row("orphan", 1, id)
 
         assertCorrupt(
             journal(active, emptyList(), listOf(missing)),
@@ -357,6 +358,24 @@ class TerminalDrainAndFenceTest {
             active,
             TerminalDrainAndFenceFailureReason.TERMINAL_INTENT_ID_MISMATCH,
         )
+    }
+
+    private fun assertOwnershipAndAttemptCorruption(
+        active: DeliveryAttemptRef,
+        id: DeliveryTerminalIntentId,
+        row: QueuedOutboundMessage,
+        valid: DeliveryTerminalIntent,
+    ) {
+        val wrongAttempt = intent(id, row, attempt("other"), DeliveryTerminalKind.ACK)
+        val foreignRow = row.copy(ownerBareJid = OTHER_OWNER)
+        val wrongOwner = intent(
+            id,
+            foreignRow,
+            active,
+            DeliveryTerminalKind.ACK,
+        )
+        val orphan = row("orphan", 1, id)
+
         assertCorrupt(
             journal(active, listOf(row), listOf(wrongAttempt)),
             active,
