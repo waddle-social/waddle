@@ -5398,6 +5398,7 @@ async fn reinsert_for_retry_keeps_queue_when_session_was_never_persisted() {
 struct FailingSnapshotPersistence {
     inner: super::super::persistence::InMemorySmPersistence,
     fail_snapshots: std::sync::atomic::AtomicBool,
+    fail_reads: std::sync::atomic::AtomicBool,
 }
 
 impl FailingSnapshotPersistence {
@@ -5405,6 +5406,7 @@ impl FailingSnapshotPersistence {
         Self {
             inner: super::super::persistence::InMemorySmPersistence::new(),
             fail_snapshots: std::sync::atomic::AtomicBool::new(false),
+            fail_reads: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -5484,6 +5486,11 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         Vec<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "simulated session-list failure".into(),
+            ));
+        }
         self.inner.list_all_sessions().await
     }
 
@@ -6612,4 +6619,20 @@ async fn any_resumable_session_probe_covers_durable_rows_and_fails_closed() {
         .await
         .expect("upsert row");
     assert!(!registry.any_resumable_session_for_full_jid(&other).await);
+}
+
+#[tokio::test]
+async fn typed_resumable_session_probe_surfaces_durable_read_failure() {
+    let storage = std::sync::Arc::new(FailingSnapshotPersistence::new());
+    storage
+        .fail_reads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let jid: FullJid = "roamer@example.com/laptop".parse().expect("jid");
+
+    assert_eq!(
+        registry.probe_resumable_session_for_full_jid(&jid).await,
+        super::ResumableSessionProbe::Failed
+    );
+    assert!(registry.any_resumable_session_for_full_jid(&jid).await);
 }

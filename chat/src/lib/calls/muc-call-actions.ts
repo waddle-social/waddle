@@ -9,6 +9,11 @@ import {
   readMucCallSession,
 } from "./muc-call-session-cache";
 import type { CallMedia, LiveKitJoin } from "./types";
+import {
+  resumeCallAttempt,
+  markCallAttemptAccepted,
+  reportFailedCallAttempt,
+} from "./call-lifecycle-telemetry";
 
 type MucCallStartActionOptions = {
   roomJid: string;
@@ -55,8 +60,12 @@ export async function startMucCallAction({
   tryResumeFirst = false,
 }: MucCallStartActionOptions): Promise<boolean> {
   if (isBusy()) return false;
+  const lifecycleAttemptId = crypto.randomUUID();
   const sender = getSender();
-  if (!sender) return false;
+  if (!sender) {
+    reportFailedCallAttempt(lifecycleAttemptId, "muc");
+    return false;
+  }
   setStarting(true);
   try {
     await ensureJoined?.();
@@ -76,9 +85,11 @@ export async function startMucCallAction({
       getSelfNick(),
       getExpectedMixerJid?.(),
       getSelfFullJid?.(),
+      lifecycleAttemptId,
     );
     return true;
   } catch (err) {
+    reportFailedCallAttempt(lifecycleAttemptId, "muc");
     reportCallError(err);
     return false;
   } finally {
@@ -252,6 +263,8 @@ export async function resumeMucCallActivity({
     selfNick,
     selfFullJid,
   });
+  resumeCallAttempt(session.sid, "muc");
+  markCallAttemptAccepted(session.sid);
 
   // Best-effort republish of Muji active presence under the current
   // resource. Non-fatal — the LK→Muji webhook bridge will reconcile

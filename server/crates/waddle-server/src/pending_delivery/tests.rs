@@ -2600,7 +2600,7 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
 // queued offline mail.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage, MamStorageError};
+use waddle_xmpp::mam::storage::{InMemoryMamStorage, MamStorage, MamStorageError, StoreOutcome};
 use waddle_xmpp_core::mam::ArchivedMessage;
 
 /// MAM storage wrapper that fails `get_message_by_archive_or_stanza_id`
@@ -2642,7 +2642,7 @@ impl MamStorage for LookupOutageMamStorage {
         &self,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
-    ) -> Result<String, MamStorageError> {
+    ) -> Result<StoreOutcome, MamStorageError> {
         self.inner.store_message(archive_jid, message).await
     }
     async fn query_messages(
@@ -2668,6 +2668,15 @@ impl MamStorage for LookupOutageMamStorage {
     ) -> Result<bool, MamStorageError> {
         self.inner
             .replace_with_tombstone(archive_id, tombstone)
+            .await
+    }
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<waddle_xmpp::mam::TerminalTombstoneOutcome, MamStorageError> {
+        self.inner
+            .replace_with_terminal_tombstone(archive_id, tombstone)
             .await
     }
     async fn get_message_by_stanza_id(

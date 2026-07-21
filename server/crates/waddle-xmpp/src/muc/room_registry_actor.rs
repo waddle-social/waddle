@@ -1,8 +1,8 @@
 //! MUC Room Registry Actor
 //!
-//! Kameo actor that manages all MUC room actors. Replaces the DashMap-based
-//! `MucRoomRegistry` with a single-writer actor that owns the room map and
-//! spawns per-room `RoomActor` instances on demand.
+//! Kameo actor that manages all MUC room actors. Replaced the DashMap-based
+//! legacy registry (deleted in #1136) with a single-writer actor that owns
+//! the room map and spawns per-room `RoomActor` instances on demand.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -558,8 +558,18 @@ impl RoomRegistryActor {
         }
     }
 
+    /// Publish the current room count to the pod-wide rooms gauge.
+    /// Called after every `self.rooms` mutation; the actor serializes
+    /// those, so the published value is exact (#1415 review — the gauge
+    /// was previously wired only into the test-only legacy registry and
+    /// never emitted in production).
+    fn publish_room_count(&self) {
+        crate::metrics::publish_muc_rooms_active(self.rooms.len() as i64);
+    }
+
     async fn evict_ownership_lost_room(&mut self, room_jid: &BareJid, entry: RoomEntry) {
         self.rooms.remove(room_jid);
+        self.publish_room_count();
         self.poisoned_rooms.remove(room_jid);
         self.retire_ownership_lost_entry(room_jid, entry).await;
     }
@@ -1743,6 +1753,7 @@ impl RoomRegistryActor {
                 claim_fence: claim_fence.clone(),
             },
         );
+        self.publish_room_count();
         // The cache is a legacy room-JID fan-out fence. Make it visible only
         // after its matching ready actor and immutable fence are in the
         // registry, so a predecessor cannot borrow the successor generation.
@@ -1796,6 +1807,7 @@ impl RoomRegistryActor {
                 }
             }
             self.rooms.remove(room_jid);
+            self.publish_room_count();
             self.poisoned_rooms.insert(room_jid.clone());
             warn!(
                 room = %room_jid,
@@ -2005,6 +2017,7 @@ impl RoomRegistryActor {
                         .is_some_and(|entry| entry.claim_fence == claim_fence);
                     if matching_entry {
                         self.rooms.remove(&room_jid);
+                        self.publish_room_count();
                     }
                     actor_ref.kill();
                     self.transfer_exact_responsibility_to_pending_release(
@@ -3060,6 +3073,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             {
                 if let Some(entry) = self.rooms.remove(&msg.room_jid) {
                     entry.actor_ref.kill();
+                    self.publish_room_count();
                 }
             }
             self.remember_pending_reclaimed_room(msg.room_jid, claim_fence, msg.previous_owner);
@@ -3095,6 +3109,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
             {
                 if let Some(entry) = self.rooms.remove(&msg.room_jid) {
                     entry.actor_ref.kill();
+                    self.publish_room_count();
                 }
             }
             if let Some(store) = &self.durable_store {
@@ -3119,6 +3134,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                 entry.actor_ref.kill();
             }
             self.rooms.remove(&msg.room_jid);
+            self.publish_room_count();
             if let Some(store) = &self.durable_store {
                 store.forget_claim_fence(&msg.room_jid, &entry.claim_fence);
             }

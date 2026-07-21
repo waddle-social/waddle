@@ -1,0 +1,27 @@
+# Notification policy for the Waddle alert rules (spec #1323).
+#
+# This is the REVIEWED, VERSIONED source of truth for how alerts
+# route: severity=critical pages, severity=warning lands in a digest.
+# It is applied by the operator (see ../rules/README.md), NOT synced
+# automatically — the referenced receivers ("waddle-pager",
+# "waddle-digest") are contact points configured once in Grafana
+# Cloud with their webhook/email secrets, which deliberately stay out
+# of this repository. Grafana Cloud holds one Alertmanager
+# configuration object; blindly syncing this file would clobber the
+# operator-managed receivers, so changes here are applied through the
+# Grafana Cloud alerting UI (or `mimirtool alertmanager load` merged
+# with the live receivers) as a reviewed manual step.
+route:
+  receiver: waddle-digest
+  group_by: ["alertname", "team"]
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: waddle-pager
+      group_wait: 30s
+      repeat_interval: 2h
+    - matchers:
+        - severity = "warning"
+      receiver: waddle-digest
+      group_wait: 5m
+      repeat_interval: 24h

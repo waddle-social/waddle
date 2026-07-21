@@ -12,7 +12,6 @@ use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
 use tracing::{debug, info, instrument};
 
-use crate::prometheus;
 use crate::Stanza;
 
 mod connections;

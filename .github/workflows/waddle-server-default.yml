@@ -40,6 +40,8 @@ on:
     - infrastructure/waddle.cloud/gitops/waddle-server-source.yaml/**
     - infrastructure/waddle.cloud/gitops/waddle-server/**
     - server/**/env.cue
+    - server/.config/nextest.toml
+    - server/.config/nextest.toml/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
@@ -82,6 +84,7 @@ jobs:
     - fmt
     - clippy
     - test
+    - doctest
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -367,6 +370,52 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+  doctest:
+    name: doctest
+    runs-on: namespace-profile-linux-x86
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    - name: Cache /nix on Namespace volume
+      uses: namespacelabs/nscloud-cache-action@v1
+      with:
+        cache: nix
+    - name: Hand /nix to the runner user
+      run: sudo chown -R runner /nix
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: accept-flake-config = true
+    - name: Setup cuenv (release)
+      run: |-
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) cuenv_asset="cuenv-linux-x64" ;;
+          aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
+          *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+        esac
+        cuenv_version="0.54.0"
+        if [ -z "$cuenv_version" ]; then
+          cuenv_version="latest"
+        fi
+        if [ "$cuenv_version" = "latest" ]; then
+          cuenv_url="https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}"
+        else
+          cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
+        fi
+        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: doctest
+      run: cuenv task doctest --skip-dependencies
+      working-directory: server
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
   fmt:
     name: fmt
     runs-on: namespace-profile-linux-x86
@@ -420,6 +469,7 @@ jobs:
     - fmt
     - clippy
     - test
+    - doctest
     - renderDeployment
     - buildExtensionModules
     steps:

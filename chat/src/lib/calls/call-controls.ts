@@ -183,7 +183,10 @@ export function suspendCallForPageHide(): void {
   } | null)?.persistResumeStateForPageHide?.();
   const current = $callState.get();
   if (current.phase === "idle" || current.phase === "ended") return;
-  clearCallState();
+  // This page's media connection is ending even when a refreshed page later
+  // rediscovers the protocol call. A rediscovery is a distinct connection
+  // attempt and owns its own lifecycle event.
+  clearCallState({ endReason: "error" });
   void useCallEngine().engine.disconnect();
 }
 

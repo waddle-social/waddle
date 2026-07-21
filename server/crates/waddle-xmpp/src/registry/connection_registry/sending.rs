@@ -15,7 +15,15 @@ impl ConnectionRegistry {
     /// stale connections and removed from the registry; if a concurrent
     /// `register` installed a fresh sender on the same JID between our lookup and
     /// a failed send, the stanza is retried on the replacement rather than lost.
-    #[instrument(skip(self, stanza), fields(to = %jid))]
+    #[instrument(
+        skip(self, stanza),
+        fields(
+            to = %jid,
+            message_id = %crate::telemetry::messages::fanout_span_message_id(
+                stanza_message_id(&stanza)
+            )
+        )
+    )]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
@@ -189,22 +197,26 @@ impl ConnectionRegistry {
         let sender = match self.connections.get(jid) {
             Some(entry) => entry.value().sender.clone(),
             None => {
-                prometheus::increment_broadcast_not_connected();
+                crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }
         };
 
+        let delivered_kind = crate::telemetry::messages::delivered_message_kind(&stanza);
         match sender.try_send(OutboundStanza::new(stanza)) {
             Ok(()) => {
-                prometheus::increment_broadcast_delivered();
+                crate::telemetry::reliability::increment_broadcast_delivered();
+                if let Some(kind) = delivered_kind {
+                    crate::telemetry::messages::record_delivered_message(kind);
+                }
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                prometheus::increment_broadcast_dropped_full();
+                crate::telemetry::reliability::increment_broadcast_dropped_full();
                 // Keep per-recipient detail at debug only — the
                 // aggregated broadcast log at the call site already
                 // reports a per-send `dropped_full` total, and
-                // `waddle_broadcast_dropped_full_total` is always on.
+                // `xmpp.broadcast.dropped_full (alias waddle_broadcast_dropped_full_total)` is always on.
                 // A `warn!` here would turn into a log storm under
                 // sustained fan-out backpressure (125+/s) and drown
                 // out every other signal on the pod.
@@ -215,7 +227,7 @@ impl ConnectionRegistry {
                 BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                prometheus::increment_broadcast_dropped_closed();
+                crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
                 BroadcastOutcome::DroppedClosed
             }
@@ -241,22 +253,30 @@ impl ConnectionRegistry {
                 entry.value().sender.clone()
             }
             _ => {
-                prometheus::increment_broadcast_not_connected();
+                crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
             }
         };
 
+        // Deliberately NOT counted in `waddle.messages.delivered`: the only
+        // production caller is the clustered route bridge on the socket
+        // node, and cross-node deliveries are counted exactly once on the
+        // UserActor-owner node — pump-relayed frames at relay-channel
+        // entry (`try_deliver`/`try_send_to`), direct remote-resource
+        // frames on the socket node's Delivered acknowledgment in
+        // `deliver_registered_remote_resource_with_registration`.
+        // Counting here would double every cross-node delivery.
         match sender.try_send(outbound) {
             Ok(()) => {
-                prometheus::increment_broadcast_delivered();
+                crate::telemetry::reliability::increment_broadcast_delivered();
                 BroadcastOutcome::Delivered
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                prometheus::increment_broadcast_dropped_full();
+                crate::telemetry::reliability::increment_broadcast_dropped_full();
                 BroadcastOutcome::DroppedFull
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                prometheus::increment_broadcast_dropped_closed();
+                crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed_owner(jid, &sender);
                 BroadcastOutcome::DroppedClosed
             }
@@ -276,7 +296,7 @@ impl ConnectionRegistry {
             .connections
             .remove_if(jid, |_, entry| entry.sender.is_closed());
         if removed.is_some() {
-            prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
@@ -297,9 +317,16 @@ impl ConnectionRegistry {
             entry.sender.is_closed() && entry.sender.same_channel(sender)
         });
         if removed.is_some() {
-            prometheus::decrement_connected_users();
+            crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }
+    }
+}
+
+fn stanza_message_id(stanza: &Stanza) -> &str {
+    match stanza {
+        Stanza::Message(message) => message.id.as_ref().map_or("", |id| id.0.as_str()),
+        Stanza::Iq(_) | Stanza::Presence(_) => "",
     }
 }

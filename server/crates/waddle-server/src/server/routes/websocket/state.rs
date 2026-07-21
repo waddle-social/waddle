@@ -238,7 +238,8 @@ impl ResolverAffiliationSyncScheduler {
             return ResolverAffiliationSyncSchedule::Stale;
         }
         if state.workers.len() >= state.max_workers {
-            waddle_xmpp::prometheus::increment_resolver_affiliation_sync_capacity_drop();
+            waddle_xmpp::telemetry::reliability::increment_resolver_affiliation_sync_capacity_drop(
+            );
             return ResolverAffiliationSyncSchedule::AtCapacity;
         }
         let effective_admission_revision =
@@ -710,8 +711,7 @@ mod resolver_affiliation_sync_scheduler_tests {
 
     #[tokio::test]
     async fn scheduler_capacity_drop_is_exported_as_a_counter() {
-        let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        let before = waddle_xmpp::prometheus::resolver_affiliation_sync_capacity_drop_count();
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let scheduler = Arc::new(ResolverAffiliationSyncScheduler::with_capacity(1));
         let room: BareJid = "room@muc.example.com".parse().expect("room JID");
         let alice: BareJid = "alice@example.com".parse().expect("member JID");
@@ -732,12 +732,11 @@ mod resolver_affiliation_sync_scheduler_tests {
             ResolverAffiliationSyncSchedule::AtCapacity
         ));
 
-        assert!(
-            waddle_xmpp::prometheus::resolver_affiliation_sync_capacity_drop_count() > before,
+        assert_eq!(
+            metrics.counter_sum("xmpp.resolver.affiliation_sync_capacity_drop", &[]),
+            Some(1),
             "capacity rejection must increment the exported counter"
         );
-        assert!(waddle_xmpp::prometheus::render_metrics()
-            .contains("waddle_resolver_affiliation_sync_capacity_drop_total "));
     }
 }
 

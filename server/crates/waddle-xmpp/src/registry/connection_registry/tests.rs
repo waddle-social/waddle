@@ -55,6 +55,24 @@ fn test_register_connection() {
     assert_eq!(registry.connection_count(), 1);
 }
 
+#[tokio::test]
+async fn register_and_unregister_publish_connection_gauge() {
+    let guard = crate::telemetry::test_support::acquire().await;
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("user1");
+    let (tx, _rx) = mpsc::channel(16);
+
+    registry.register(jid.clone(), tx);
+    registry.unregister(&jid);
+
+    assert!(
+        guard
+            .metric_names()
+            .contains(&"xmpp.connections.active".to_string()),
+        "register/unregister must publish the active-connections gauge",
+    );
+}
+
 #[test]
 fn test_register_replaces_existing() {
     let registry = ConnectionRegistry::new();

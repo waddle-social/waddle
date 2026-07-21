@@ -52,7 +52,9 @@ pub use muc::{
 pub(crate) use muc_update::try_handle_muc_presence_update;
 use probe::handle_presence_probe;
 use regular::handle_regular_presence_update;
-pub use subscription::broadcast_unavailable_for_terminated_session;
+pub use subscription::{
+    broadcast_unavailable_for_terminated_session, TerminatedPresenceBroadcastOutcome,
+};
 use subscription::{
     handle_directed_presence, handle_subscription_presence, try_handle_remote_subscription_presence,
 };

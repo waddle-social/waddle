@@ -57,8 +57,16 @@ impl NotificationOutboxStore {
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
-                        waddle_xmpp::prometheus::increment_push_suppressed(
-                            SuppressedReason::Xep0191Blocked.as_db_value(),
+                        tracing::info!(
+                            recipient = %candidate.recipient_bare_jid(),
+                            conversation = %candidate.conversation_jid(),
+                            notification_class = candidate.class().as_db_value(),
+                            push_stage = "suppressed",
+                            suppression_reason = SuppressedReason::Xep0191Blocked.as_db_value(),
+                            "push pipeline transition"
+                        );
+                        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                            SuppressedReason::Xep0191Blocked.telemetry_reason(),
                         );
                         processed += 1;
                     }
@@ -142,21 +150,24 @@ impl NotificationOutboxStore {
             };
             let rich = match outcome {
                 T1PushDispatchOutcome::Suppressed { reason } => {
-                    tracing::info!(
-                        recipient = %candidate.recipient_bare_jid(),
-                        conversation = %candidate.conversation_jid(),
-                        sender = %candidate.sender_jid(),
-                        class = ?candidate.class(),
-                        %reason,
-                        "T1 push gate suppressed XEP-0357 notification candidate"
-                    );
                     let now_ms = crate::time::now_ms();
                     let mut tx = self.db.begin().await?;
                     record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
                     tx.commit().await?;
                     if claimed > 0 {
-                        waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+                        tracing::info!(
+                            recipient = %candidate.recipient_bare_jid(),
+                            conversation = %candidate.conversation_jid(),
+                            sender = %candidate.sender_jid(),
+                            notification_class = candidate.class().as_db_value(),
+                            push_stage = "suppressed",
+                            suppression_reason = reason.as_db_value(),
+                            "T1 push gate suppressed XEP-0357 notification candidate"
+                        );
+                        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                            reason.telemetry_reason(),
+                        );
                         processed += 1;
                     }
                     continue;
@@ -195,6 +206,29 @@ impl NotificationOutboxStore {
                 .get(&recipient_key)
                 .expect("target cache populated")
                 .clone();
+            if targets.is_empty() {
+                let reason = SuppressedReason::Xep0357NoRegistration;
+                let now_ms = crate::time::now_ms();
+                let mut tx = self.db.begin().await?;
+                record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
+                let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                tx.commit().await?;
+                if claimed > 0 {
+                    tracing::info!(
+                        recipient = %candidate.recipient_bare_jid(),
+                        conversation = %candidate.conversation_jid(),
+                        notification_class = candidate.class().as_db_value(),
+                        push_stage = "suppressed",
+                        suppression_reason = reason.as_db_value(),
+                        "push pipeline transition"
+                    );
+                    waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                        reason.telemetry_reason(),
+                    );
+                    processed += 1;
+                }
+                continue;
+            }
             let context = build_waddle_context(&candidate);
             let now_ms = crate::time::now_ms();
             let mut tx = self.db.begin().await?;
@@ -250,7 +284,17 @@ impl NotificationOutboxStore {
             let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
             tx.commit().await?;
             if claimed > 0 {
-                waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+                tracing::info!(
+                    recipient = %candidate.recipient_bare_jid(),
+                    conversation = %candidate.conversation_jid(),
+                    notification_class = candidate.class().as_db_value(),
+                    push_stage = "suppressed",
+                    suppression_reason = reason.as_db_value(),
+                    "push pipeline transition"
+                );
+                waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                    reason.telemetry_reason(),
+                );
             }
             return Ok(claimed > 0);
         }

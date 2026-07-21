@@ -79,6 +79,9 @@ pub(super) async fn apply_retraction_tombstone(
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
+        // 1:1 tombstones never enter the groupchat tombstone-retry
+        // match; there is no occupant identity to retain.
+        sender_scope: None,
     };
     match mam_storage
         .replace_with_tombstone(&original.id, tombstone)

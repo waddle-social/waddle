@@ -642,6 +642,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     reply: None,
                     references: Vec::new(),
                     mentions: Vec::new(),
+                    subjects: Default::default(),
                     // Room-authored moderation event row: no occupant
                     // sender to identify.
                     occupant_id: None,
@@ -694,6 +695,13 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                             stamp: Some(stamp_time),
                             reason: request.reason.as_deref().and_then(RichText::new),
                         }),
+                        // Internal tombstone-retry identity only; the
+                        // MAM response builders never read this field.
+                        sender_scope: original
+                            .rich
+                            .as_ref()
+                            .and_then(|rich| rich.muc_sender.as_ref())
+                            .map(|sender| sender.jid.to_bare()),
                     };
                     match state
                         .deps

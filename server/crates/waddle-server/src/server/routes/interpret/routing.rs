@@ -105,6 +105,9 @@ pub(super) async fn run_headless_recipient_pass(
         // effects; discarding matches the frames/feedback semantics.
         keepalive_probes: _,
         timer_commands: _,
+        // Retry suppression belongs to this discarded transient batch and
+        // must not escape into the caller's unrelated recipient work.
+        retry_suppression: _,
         // Headless pass emits no wire copy, so there is nothing to
         // rewrite.
         archive_id_rewrites: _,
@@ -283,6 +286,9 @@ pub(super) async fn run_fanout_recipient_pass(
         feedback,
         keepalive_probes: _,
         timer_commands: _,
+        // The fanout recipient pass discards its transient outcome; its
+        // batch-local retry marker is not meaningful to the outer batch.
+        retry_suppression: _,
         archive_id_rewrites,
     } = nested;
     debug!(
@@ -487,6 +493,7 @@ async fn deliver_one_via_actor(
     stanza: &Stanza,
     kind: ActorSendKind,
 ) -> FullJidDeliveryOutcome {
+    let message_id = stanza_message_id(stanza);
     // FUTURE CLEANUP (ADR-0017; Greptile review on PR #1177, tracked in #1195):
     // for a bare-JID DM this is the SECOND `GetUser` for the same bare JID —
     // `select_bare_jid_live_targets` already resolved the `UserActor` during
@@ -513,7 +520,7 @@ async fn deliver_one_via_actor(
                 .into();
         }
         Err(error) => {
-            warn!(jid = %target, %error, "actor delivery: GetUser failed; routing to detached");
+            warn!(jid = %target, message_id, %error, "actor delivery: GetUser failed; routing to detached");
             return detached_after_routing_failure(
                 deliver_to_detached(sm_session_registry, target, stanza).await,
             );
@@ -570,7 +577,7 @@ async fn deliver_one_via_actor(
 
     match outcome {
         Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
-            debug!(jid = %target, "actor delivery: queued for recipient");
+            debug!(jid = %target, message_id, "actor delivery: queued for recipient");
             FullJidDeliveryOutcome::Delivered
         }
         // Still full after every retry — surface the loss instead of the
@@ -579,9 +586,10 @@ async fn deliver_one_via_actor(
         // backstop / closed-channel eviction, not by a transient full
         // window.
         Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
-            waddle_xmpp::prometheus::increment_delivery_retry_exhausted_drop();
+            waddle_xmpp::telemetry::reliability::increment_delivery_retry_exhausted_drop();
             warn!(
                 jid = %target,
+                message_id,
                 retries = DROPPED_FULL_RETRY_DELAYS.len(),
                 "actor delivery: recipient channel still full after bounded retries; dropped"
             );
@@ -598,6 +606,7 @@ async fn deliver_one_via_actor(
         Err((ActorSendFailure::NeverEnqueued, error)) => {
             warn!(
                 jid = %target,
+                message_id,
                 %error,
                 "actor delivery: TrySend ask failed before enqueue; routing to detached"
             );
@@ -611,9 +620,10 @@ async fn deliver_one_via_actor(
         // the other broadcast drop reasons (the one drop path `try_deliver`
         // does not itself account for).
         Err((ActorSendFailure::MaybeEnqueued, error)) => {
-            waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+            waddle_xmpp::telemetry::reliability::increment_delivery_terminal_error_drop();
             warn!(
                 jid = %target,
+                message_id,
                 %error,
                 "actor delivery: TrySend ask failed terminally (possibly enqueued); \
                  dropping to avoid double-delivery"
@@ -712,6 +722,7 @@ pub(super) async fn deliver_peer_to_live_only(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> FullJidDeliveryOutcome {
+    let message_id = stanza_message_id(stanza);
     let Some(user_registry) = user_registry else {
         return FullJidDeliveryOutcome::Unavailable;
     };
@@ -728,6 +739,7 @@ pub(super) async fn deliver_peer_to_live_only(
         Err(error) => {
             warn!(
                 jid = %target,
+                message_id,
                 %error,
                 "live-only delivery: GetUser failed; treating as unavailable \
                  so the detached/bare fallback runs"
@@ -745,11 +757,11 @@ pub(super) async fn deliver_peer_to_live_only(
         .await
     {
         Ok(waddle_xmpp::registry::BroadcastOutcome::Delivered) => {
-            debug!(jid = %target, "live-only delivery: queued for recipient");
+            debug!(jid = %target, message_id, "live-only delivery: queued for recipient");
             FullJidDeliveryOutcome::Delivered
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedFull) => {
-            debug!(jid = %target, "live-only delivery: recipient channel full; dropped");
+            debug!(jid = %target, message_id, "live-only delivery: recipient channel full; dropped");
             FullJidDeliveryOutcome::Dropped
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
@@ -760,6 +772,7 @@ pub(super) async fn deliver_peer_to_live_only(
             ActorSendFailure::NeverEnqueued => {
                 warn!(
                     jid = %target,
+                    message_id,
                     error = %error,
                     "live-only delivery: TrySendPeer failed before enqueue; \
                      treating as unavailable so the detached/bare fallback runs"
@@ -767,9 +780,10 @@ pub(super) async fn deliver_peer_to_live_only(
                 FullJidDeliveryOutcome::Unavailable
             }
             ActorSendFailure::MaybeEnqueued => {
-                waddle_xmpp::prometheus::increment_delivery_terminal_error_drop();
+                waddle_xmpp::telemetry::reliability::increment_delivery_terminal_error_drop();
                 warn!(
                     jid = %target,
+                    message_id,
                     error = %error,
                     "live-only delivery: TrySendPeer failed terminally (possibly \
                      enqueued); dropping to avoid double-delivery"
@@ -802,8 +816,9 @@ pub(super) async fn deliver_to_detached(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> DetachedDeliveryOutcome {
+    let message_id = stanza_message_id(stanza);
     let Some(sm) = sm_session_registry else {
-        debug!(jid = %target, "RouteToConnection: target offline, dropping");
+        debug!(jid = %target, message_id, "RouteToConnection: target offline, dropping");
         return DetachedDeliveryOutcome::Unavailable;
     };
     match sm
@@ -813,6 +828,7 @@ pub(super) async fn deliver_to_detached(
         Ok(true) => {
             debug!(
                 jid = %target,
+                message_id,
                 "RouteToConnection: recipient detached, queued for XEP-0198 replay"
             );
             DetachedDeliveryOutcome::Queued
@@ -820,6 +836,7 @@ pub(super) async fn deliver_to_detached(
         Ok(false) => {
             debug!(
                 jid = %target,
+                message_id,
                 "RouteToConnection: target offline and no detached session, dropping"
             );
             DetachedDeliveryOutcome::Unavailable
@@ -827,11 +844,19 @@ pub(super) async fn deliver_to_detached(
         Err(error) => {
             warn!(
                 jid = %target,
+                message_id,
                 %error,
                 "RouteToConnection: failed to record stanza for detached resource"
             );
             DetachedDeliveryOutcome::Failed
         }
+    }
+}
+
+fn stanza_message_id(stanza: &Stanza) -> &str {
+    match stanza {
+        Stanza::Message(message) => message.id.as_ref().map_or("", |id| id.0.as_str()),
+        Stanza::Iq(_) | Stanza::Presence(_) => "",
     }
 }
 

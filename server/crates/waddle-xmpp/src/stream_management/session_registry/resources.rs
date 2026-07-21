@@ -7,6 +7,14 @@ use super::session::DetachedSession;
 use super::SmRegistryError;
 use crate::Stanza;
 
+/// Outcome of probing whether a full JID still owns resumable XEP-0198 state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumableSessionProbe {
+    Present,
+    Absent,
+    Failed,
+}
+
 /// Last broadcast rich presence of a detached available resource.
 ///
 /// `payloads` are the resource's own presence extension elements
@@ -267,6 +275,18 @@ impl InMemorySmSessionRegistry {
     /// evicted. Fail-closed: a durable read error reports `true` so the
     /// caller skips the eviction.
     pub async fn any_resumable_session_for_full_jid(&self, jid: &FullJid) -> bool {
+        matches!(
+            self.probe_resumable_session_for_full_jid(jid).await,
+            ResumableSessionProbe::Present | ResumableSessionProbe::Failed
+        )
+    }
+
+    /// Typed variant of [`Self::any_resumable_session_for_full_jid`] for
+    /// sweep callers that must distinguish fail-closed reads from live state.
+    pub async fn probe_resumable_session_for_full_jid(
+        &self,
+        jid: &FullJid,
+    ) -> ResumableSessionProbe {
         let in_memory = {
             let matches_memory =
                 |sessions: &std::collections::HashMap<String, super::super::DetachedSession>| {
@@ -281,23 +301,27 @@ impl InMemorySmSessionRegistry {
                     matches_memory(&sessions) || matches_memory(&claimed)
                 }
                 // Poisoned lock: fail closed.
-                _ => return true,
+                _ => return ResumableSessionProbe::Failed,
             }
         };
         if in_memory {
-            return true;
+            return ResumableSessionProbe::Present;
         }
         let Some(persistence) = self.persistence.as_ref() else {
-            return false;
+            return ResumableSessionProbe::Absent;
         };
         match persistence.list_all_sessions().await {
             Ok(rows) => {
                 let now = chrono::Utc::now();
-                rows.iter().any(|row| {
+                if rows.iter().any(|row| {
                     row.jid == *jid
                         && now.signed_duration_since(row.detached_at).to_std().ok()
                             <= Some(row.max_resume_duration)
-                })
+                }) {
+                    ResumableSessionProbe::Present
+                } else {
+                    ResumableSessionProbe::Absent
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -305,7 +329,7 @@ impl InMemorySmSessionRegistry {
                     %error,
                     "any_resumable_session_for_full_jid: durable read failed; failing closed"
                 );
-                true
+                ResumableSessionProbe::Failed
             }
         }
     }

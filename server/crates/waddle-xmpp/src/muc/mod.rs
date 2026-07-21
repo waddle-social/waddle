@@ -20,7 +20,6 @@ mod room;
 pub mod room_actor;
 mod room_affiliations;
 mod room_broadcast;
-pub mod room_registry;
 pub mod room_registry_actor;
 pub mod room_registry_handle;
 pub mod roominfo;
@@ -51,8 +50,7 @@ pub use presence::{
     MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, OutboundMucPresence,
 };
 pub use room::{is_remote_jid, AllowPm, MucRoom, Occupant, RoomConfig};
-pub use room_actor::RoomActorError;
-pub use room_registry::{MucRoomRegistry, RoomHandle, RoomInfo, RoomMessage};
+pub use room_actor::{RoomActorError, RoomInfo};
 pub use room_registry_actor::RoomRegistryError;
 pub use room_registry_handle::{
     RoomRegistry, ROOM_REGISTRY_MAILBOX_CAPACITY, ROOM_REGISTRY_MAILBOX_TIMEOUT,

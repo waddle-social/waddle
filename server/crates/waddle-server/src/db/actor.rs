@@ -8,6 +8,13 @@ use sqlx::query;
 
 use super::{Database, DatabaseError};
 
+fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
+    if result.is_err() {
+        crate::telemetry::mark_span_error("database actor operation failed");
+    }
+    result
+}
+
 #[derive(Actor)]
 pub struct DbActor {
     db: Database,
@@ -56,8 +63,12 @@ impl kameo::message::Message<DbExecute> for DbActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.touch();
-        let conn = self.db.guard().await?;
-        conn.execute(&msg.sql, msg.params).await
+        let result = async {
+            let conn = self.db.guard().await?;
+            conn.execute(&msg.sql, msg.params).await
+        }
+        .await;
+        mark_actor_result(result)
     }
 }
 
@@ -201,20 +212,24 @@ impl kameo::message::Message<DbQueryOne> for DbActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.touch();
-        let conn = self.db.guard().await?;
-        let mut rows = conn.query(&msg.sql, msg.params).await?;
-        let col_count = rows.column_count();
+        let result = async {
+            let conn = self.db.guard().await?;
+            let mut rows = conn.query(&msg.sql, msg.params).await?;
+            let col_count = rows.column_count();
 
-        match rows.next().await? {
-            Some(row) => {
-                let mut values = Vec::with_capacity(col_count);
-                for i in 0..col_count {
-                    values.push(row.get_value(i)?);
+            match rows.next().await? {
+                Some(row) => {
+                    let mut values = Vec::with_capacity(col_count);
+                    for i in 0..col_count {
+                        values.push(row.get_value(i)?);
+                    }
+                    Ok(Some(values))
                 }
-                Ok(Some(values))
+                None => Ok(None),
             }
-            None => Ok(None),
         }
+        .await;
+        mark_actor_result(result)
     }
 }
 
@@ -229,7 +244,11 @@ impl kameo::message::Message<DbHealthCheck> for DbActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.touch();
-        self.db.health_check().await
+        let result = mark_actor_result(self.db.health_check().await);
+        if matches!(result, Ok(false)) {
+            crate::telemetry::mark_span_error("database health check returned unhealthy");
+        }
+        result
     }
 }
 

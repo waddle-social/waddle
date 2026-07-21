@@ -53,7 +53,7 @@ pub(super) async fn queue_offline_delivery(
             }
         }
         Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded) => {
-            waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
+            waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
             // XEP-0160 §3 step 3 + RFC 6120 §8.3 — return a
             // typed `<service-unavailable/>` bounce that
             // echoes the original payload (RFC 6120 §8.3.4
@@ -440,13 +440,17 @@ async fn enqueue_xep0357_notification_candidate_for_message(
         crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
         crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
-                recipient = %recipient,
+                recipient = %candidate.recipient_bare_jid(),
+                conversation = %candidate.conversation_jid(),
                 sender = %sender,
-                is_mention,
-                %reason,
+                notification_class = candidate.class().as_db_value(),
+                push_stage = "suppressed",
+                suppression_reason = reason.as_db_value(),
                 "T0 push gate suppressed XEP-0357 DM candidate; no candidate row persisted"
             );
-            waddle_xmpp::prometheus::increment_push_suppressed(reason.as_db_value());
+            waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+                reason.telemetry_reason(),
+            );
             return NotificationCandidateQueueOutcome::Completed;
         }
         crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
@@ -604,21 +608,35 @@ async fn mark_pending_notification_outboxed(
     storage: &dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage,
     row_id: &waddle_xmpp::pending_delivery::PendingRowId,
     recipient: &BareJid,
-) {
-    if let Err(error) = storage.mark_notification_outboxed(row_id).await {
-        warn!(
-            recipient = %recipient,
-            row_id = %row_id,
-            error = %error,
-            "pending_delivery notification outbox marker write failed; janitor will retry"
-        );
+) -> bool {
+    match storage.mark_notification_outboxed(row_id).await {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(
+                recipient = %recipient,
+                row_id = %row_id,
+                error = %error,
+                "pending_delivery notification outbox marker write failed; janitor will retry"
+            );
+            false
+        }
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn reconcile_xep0357_notification_candidates(
     state: &WebSocketState,
     batch_size: usize,
 ) -> usize {
+    reconcile_xep0357_notification_candidates_for_sweep(state, batch_size)
+        .await
+        .completed
+}
+
+pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
+    state: &WebSocketState,
+    batch_size: usize,
+) -> super::NotificationRecoverySweepOutcome {
     let batch_size = batch_size.clamp(1, 1_000);
     let pending_storage = state.deps.protocol.pending_delivery_storage.as_ref();
     let rows = match pending_storage.list_unoutboxed_archived(batch_size).await {
@@ -628,10 +646,14 @@ pub(crate) async fn reconcile_xep0357_notification_candidates(
                 error = %error,
                 "XEP-0357 notification candidate recovery could not read pending_delivery rows"
             );
-            return 0;
+            return super::NotificationRecoverySweepOutcome {
+                completed: 0,
+                had_failure: true,
+            };
         }
     };
     let mut completed = 0usize;
+    let mut had_failure = false;
     for row in rows {
         let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id) =
             &row.payload
@@ -644,12 +666,22 @@ pub(crate) async fn reconcile_xep0357_notification_candidates(
             archive_stanza_id,
         )
         .await;
-        if outcome == NotificationCandidateQueueOutcome::Completed {
-            mark_pending_notification_outboxed(pending_storage, &row.id, &row.recipient).await;
-            completed += 1;
+        match outcome {
+            NotificationCandidateQueueOutcome::Completed => {
+                if !mark_pending_notification_outboxed(pending_storage, &row.id, &row.recipient)
+                    .await
+                {
+                    had_failure = true;
+                }
+                completed += 1;
+            }
+            NotificationCandidateQueueOutcome::RetryLater => had_failure = true,
         }
     }
-    completed
+    super::NotificationRecoverySweepOutcome {
+        completed,
+        had_failure,
+    }
 }
 
 #[cfg(test)]

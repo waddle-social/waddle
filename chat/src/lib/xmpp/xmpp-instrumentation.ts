@@ -25,6 +25,7 @@ import {
   reportSendEnqueued,
   reportSessionLifecycle,
   reportStatusChange,
+  setXmppResourceForTelemetry,
 } from "@/lib/telemetry";
 
 const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
@@ -36,6 +37,7 @@ const ERROR_KIND_MAP: Record<XmppErrorKind, ErrorKind> = {
   "muc-join": "xmpp.stream",
 };
 export function installInstrumentation(client: BrowserXmppClient): void {
+  setXmppResourceForTelemetry(client.xmppResource);
   client.onMessageAcked((id, meta) => {
     reportMessageAcked({ id, kind: meta.kind, latencyMs: meta.latencyMs });
   });
@@ -74,7 +76,10 @@ export function installInstrumentation(client: BrowserXmppClient): void {
       detail,
       ...(condition ? { condition } : {}),
       ...(event.errorType ? { errorType: event.errorType } : {}),
-      ...(event.errorText ? { errorText: event.errorText } : {}),
+      ...(event.kind !== "muc-join" && event.errorText ? { errorText: event.errorText } : {}),
+      ...(event.kind === "muc-join" && event.roomLocalpart
+        ? { roomLocalpart: event.roomLocalpart }
+        : {}),
       ...(errorSource ? { errorSource } : {}),
       ...(streamDetail ? { streamDetail } : {}),
       ...(smCounts ?? {}),

@@ -212,9 +212,10 @@ schema.#Project & {
 		// cached configuration.
 		gmdCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache :app:atdApi34DebugAndroidTest"]
+			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC' :app:atdApi34DebugAndroidTest"]
 			dependsOn: [setupSdk, buildRustJni]
-			inputs: _gradleInputs
+			// Include this definition so GMD-only changes are selected by affectedness.
+			inputs: list.Concat([_gradleInputs, ["env.cue"]])
 		}
 
 		// Install-in-place artifact: every merge to main rebuilds the

@@ -1,6 +1,7 @@
 //! OAuth device flow routes.
 
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
+use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::localpart_to_jid;
 use axum::{
     extract::{Form, Query, State},
@@ -13,6 +14,7 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
+use waddle_xmpp::telemetry::attributes::AuthStage;
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
@@ -137,12 +139,13 @@ fn generate_user_code() -> String {
     format!("{}-{}", letters, numbers)
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_start_handler(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<DeviceStartRequest>,
 ) -> impl IntoResponse {
     if state.providers.get(&request.provider).is_none() {
+        record_auth_failure("unknown", None, AuthFailure::DeviceInvalidClient);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -175,6 +178,11 @@ pub async fn device_start_handler(
             }
             Ok(false) => continue,
             Err(err) => {
+                record_auth_failure(
+                    &request.provider,
+                    None,
+                    AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                );
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -185,7 +193,7 @@ pub async fn device_start_handler(
     }
 
     let Some(auth) = auth else {
-        warn!("Device flow could not allocate a unique user_code after retries");
+        record_auth_failure(&request.provider, None, AuthFailure::DeviceOther);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(
@@ -216,7 +224,7 @@ pub async fn device_start_handler(
         .into_response()
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_poll_handler(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<DevicePollRequest>,
@@ -224,6 +232,7 @@ pub async fn device_poll_handler(
     let auth = match state.auth_handshake.get_device(&request.device_code).await {
         Ok(Some(v)) => v,
         Ok(None) => {
+            record_auth_failure("unknown", None, AuthFailure::DeviceInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -234,6 +243,11 @@ pub async fn device_poll_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "unknown",
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -250,6 +264,7 @@ pub async fn device_poll_handler(
         {
             warn!(error = %err, "Failed to remove expired device authorization");
         }
+        record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceExpired);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -274,6 +289,7 @@ pub async fn device_poll_handler(
         }
         DeviceAuthStatus::Approved => {
             let Some(session_id) = auth.session_id.clone() else {
+                record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new(
@@ -307,25 +323,35 @@ pub async fn device_poll_handler(
                     )
                         .into_response()
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "invalid_grant",
-                        "Session no longer exists",
-                    )),
-                )
-                    .into_response(),
-                Err(err) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("server_error", &err.to_string())),
-                )
-                    .into_response(),
+                Ok(None) => {
+                    record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::new(
+                            "invalid_grant",
+                            "Session no longer exists",
+                        )),
+                    )
+                        .into_response()
+                }
+                Err(err) => {
+                    record_auth_failure(
+                        &auth.provider_id,
+                        None,
+                        AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+                    );
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("server_error", &err.to_string())),
+                    )
+                        .into_response()
+                }
             }
         }
     }
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, query))]
 pub async fn device_verify_page_handler(
     State(state): State<Arc<AuthState>>,
     Query(query): Query<VerifyQuery>,
@@ -337,7 +363,7 @@ pub async fn device_verify_page_handler(
     Html(html)
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn device_verify_submit_handler(
     State(state): State<Arc<AuthState>>,
     Form(request): Form<VerifySubmitRequest>,
@@ -351,6 +377,7 @@ pub async fn device_verify_submit_handler(
     {
         Ok(Some(v)) => v,
         Ok(None) => {
+            record_auth_failure("unknown", None, AuthFailure::DeviceInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new("invalid_user_code", "Invalid user code")),
@@ -358,6 +385,11 @@ pub async fn device_verify_submit_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "unknown",
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -367,6 +399,7 @@ pub async fn device_verify_submit_handler(
     };
 
     if auth.is_expired() {
+        record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceExpired);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -381,6 +414,7 @@ pub async fn device_verify_submit_handler(
     match state.auth_handshake.update_device(&auth).await {
         Ok(true) => {}
         Ok(false) => {
+            record_auth_failure(&auth.provider_id, None, AuthFailure::DeviceInvalidGrant);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -391,6 +425,11 @@ pub async fn device_verify_submit_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                &auth.provider_id,
+                None,
+                AuthFailure::from_error(AuthStage::DeviceFlow, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -405,7 +444,7 @@ pub async fn device_verify_submit_handler(
     let provider = match state.providers.get(&provider_id) {
         Some(v) => v,
         None => {
-            warn!(provider_id = %provider_id, "Provider no longer configured during device flow");
+            record_auth_failure(&provider_id, None, AuthFailure::DeviceInvalidClient);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -422,20 +461,123 @@ pub async fn device_verify_submit_handler(
         .await
     {
         Ok(url) => {
+            record_auth_success(AuthStage::OidcAuthorization);
             info!(provider = %provider.id, "Device flow continuing via provider authorization");
-            axum::response::Redirect::temporary(&url).into_response()
+            // 303 See Other: this handler answers a POSTed form, so the
+            // redirect must switch the browser to GET — a 307 would replay
+            // the POST against the IdP's GET-only authorize endpoint.
+            axum::response::Redirect::to(&url).into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new("authorization_failed", &err.to_string())),
-        )
-            .into_response(),
+        Err(err) => {
+            record_auth_failure(
+                &provider.id,
+                None,
+                AuthFailure::from_error(AuthStage::OidcAuthorization, &err),
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new("authorization_failed", &err.to_string())),
+            )
+                .into_response()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::render_device_verify_html;
+    use super::router;
+    use crate::auth::{AuthProviderConfig, AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
+    use crate::config::ServerConfig;
+    use crate::server::routes::auth::tests::create_test_auth_state;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_oauth2_provider() -> AuthProviderConfig {
+        AuthProviderConfig {
+            id: "test-idp".to_string(),
+            display_name: "Test IdP".to_string(),
+            kind: AuthProviderKind::OAuth2,
+            dynamic_client_registration: false,
+            client_id: "test-client".to_string(),
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: false,
+            scopes: vec!["profile".to_string()],
+            issuer: Some("https://idp.example.com".to_string()),
+            authorization_endpoint: Some("https://idp.example.com/authorize".to_string()),
+            token_endpoint: Some("https://idp.example.com/token".to_string()),
+            userinfo_endpoint: Some("https://idp.example.com/userinfo".to_string()),
+            jwks_uri: None,
+            subject_claim: "sub".to_string(),
+            username_claim: None,
+            email_claim: None,
+        }
+    }
+
+    /// The verify form is a POST; the redirect to the IdP's GET-only
+    /// authorize endpoint must be 303 See Other so the browser switches
+    /// to GET instead of replaying the POST (which 307 would).
+    #[tokio::test]
+    async fn verify_submit_redirects_to_idp_with_303_see_other() {
+        // The happy path emits waddle.auth.success; hold the global
+        // telemetry guard so guarded export assertions elsewhere don't
+        // race this emission.
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let mut server_config = ServerConfig::test_homeserver();
+        server_config.auth.providers = vec![test_oauth2_provider()];
+        let (auth_state, _actor) = create_test_auth_state(&server_config).await;
+        let app = router(auth_state);
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/device/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"provider":"test-idp"}"#))
+                    .expect("start request"),
+            )
+            .await
+            .expect("start response");
+        assert_eq!(start_response.status(), StatusCode::OK);
+        let start_body = start_response
+            .into_body()
+            .collect()
+            .await
+            .expect("start body")
+            .to_bytes();
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("start json");
+        let user_code = start_json["user_code"].as_str().expect("user_code");
+
+        let verify_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/device/verify")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("user_code={user_code}")))
+                    .expect("verify request"),
+            )
+            .await
+            .expect("verify response");
+
+        assert_eq!(verify_response.status(), StatusCode::SEE_OTHER);
+        let location = verify_response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header")
+            .to_str()
+            .expect("location utf-8");
+        assert!(
+            location.starts_with("https://idp.example.com/authorize?"),
+            "redirect must target the IdP authorize endpoint, got {location}"
+        );
+    }
 
     #[test]
     fn device_verify_html_uses_valid_unescaped_attributes() {

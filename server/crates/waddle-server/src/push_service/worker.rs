@@ -8,6 +8,7 @@ use jid::BareJid;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
+use waddle_xmpp::telemetry::attributes::MetricAttribute;
 use waddle_xmpp::XmppError;
 
 use super::devices::{
@@ -148,30 +149,74 @@ fn web_push_outcome_diagnostic(outcome: &waddle_xmpp::push::types::WebPushOutcom
 /// `push_delivery_attempts.status` wire format. Free function (not a
 /// method) so the per-device future is `Send + 'static`-compatible
 /// inside the `buffer_unordered` fan-out in `dispatch_devices`.
+struct WebPushDispatchProvider<'a> {
+    signer: &'a Arc<dyn VapidSigner>,
+    sender: &'a Arc<dyn WebPushSender>,
+    sub: &'a VapidSub,
+    secrets: &'a PushSecretCipher,
+}
+
 async fn dispatch_web_device_owned(
     device: &dispatch::SealedActiveDevice,
+    recipient: &BareJid,
     parsed: &dispatch::ParsedPushPayload,
     item_id: &str,
-    signer: &Arc<dyn VapidSigner>,
-    sender: &Arc<dyn WebPushSender>,
-    sub: &VapidSub,
-    secrets: &PushSecretCipher,
+    provider: WebPushDispatchProvider<'_>,
 ) -> DispatchedAttempt {
-    let target = match dispatch::WebPushTarget::try_from_sealed(device, secrets) {
+    let target = match dispatch::WebPushTarget::try_from_sealed(device, provider.secrets) {
         Ok(target) => target,
         Err(reason) => {
+            let status = dispatch::skip_reason_to_attempt_status(reason);
+            tracing::warn!(
+                recipient = %recipient,
+                conversation = %parsed.conversation,
+                notification_class = parsed.class.as_db_value(),
+                provider = "web_push",
+                push_stage = "provider_dispatch_skipped",
+                provider_outcome = status,
+                "push provider transition"
+            );
             return DispatchedAttempt {
                 device_id: device.device_id.clone(),
                 platform: device.platform,
-                status: dispatch::skip_reason_to_attempt_status(reason),
+                status,
                 last_error: None,
                 retry_after: None,
             };
         }
     };
-    match dispatch::dispatch_one_web_push(&target, parsed, item_id, signer, sub, sender).await {
+    match dispatch::dispatch_one_web_push(
+        &target,
+        parsed,
+        item_id,
+        provider.signer,
+        provider.sub,
+        provider.sender,
+    )
+    .await
+    {
         Ok(outcome) => {
             let status = dispatch::outcome_to_attempt_status(&outcome);
+            match waddle_xmpp::telemetry::push_pipeline::record_web_push_outcome(&outcome) {
+                Some(stage) => tracing::info!(
+                    recipient = %recipient,
+                    conversation = %parsed.conversation,
+                    notification_class = parsed.class.as_db_value(),
+                    provider = "web_push",
+                    push_stage = stage.value(),
+                    provider_outcome = status,
+                    "push provider transition"
+                ),
+                None => tracing::warn!(
+                    recipient = %recipient,
+                    conversation = %parsed.conversation,
+                    notification_class = parsed.class.as_db_value(),
+                    provider = "web_push",
+                    push_stage = "provider_no_response",
+                    provider_outcome = status,
+                    "push provider transition"
+                ),
+            }
             let last_error = if matches!(
                 outcome,
                 waddle_xmpp::push::types::WebPushOutcome::Delivered { .. }
@@ -201,7 +246,7 @@ async fn dispatch_web_device_owned(
                 outcome,
                 waddle_xmpp::push::types::WebPushOutcome::ClockSkew { .. }
             ) {
-                signer.invalidate_cache();
+                provider.signer.invalidate_cache();
             }
             // XEP-0357 §6 forward cleanup runs in
             // `finalize_publish_job` — when the persisted status hits
@@ -231,13 +276,24 @@ async fn dispatch_web_device_owned(
         // retry loop. Recorded as `web-internal-error` so an operator
         // can grep for it and fix the underlying bug; the device stays
         // active (not a per-device problem).
-        Err(error) => DispatchedAttempt {
-            device_id: device.device_id.clone(),
-            platform: device.platform,
-            status: ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
-            last_error: Some(truncate_last_error(&error.to_string())),
-            retry_after: None,
-        },
+        Err(error) => {
+            tracing::error!(
+                recipient = %recipient,
+                conversation = %parsed.conversation,
+                notification_class = parsed.class.as_db_value(),
+                provider = "web_push",
+                push_stage = "provider_dispatch_failed",
+                provider_outcome = ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+                "push provider transition"
+            );
+            DispatchedAttempt {
+                device_id: device.device_id.clone(),
+                platform: device.platform,
+                status: ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+                last_error: Some(truncate_last_error(&error.to_string())),
+                retry_after: None,
+            }
+        }
     }
 }
 
@@ -429,31 +485,38 @@ impl DatabasePushServiceStore {
         // unconditionally would reject test fixtures whose
         // `<notification>` payload omits the `urn:waddle:push:context:0`
         // child the chat publisher attaches in production.
-        let parsed = if self.web_push_provider_ready() {
-            match dispatch::parse_publish_payload(&payload_xml) {
-                Ok(parsed) => Some(parsed),
-                Err(error) => {
-                    // Bad payload is permanent: mark the job failed in a
-                    // tiny dedicated tx and return zero attempts.
-                    self.mark_publish_job_failed_after_phase1(
-                        job.job_id(),
-                        job.owner_bare_jid(),
-                        job.node(),
-                        &format!("XEP-0357 payload parse failed: {error}"),
-                        now_ms,
-                    )
-                    .await?;
-                    return Ok(Some(PushFanoutResult {
-                        item_id: job.item_id().to_string(),
-                        attempted_devices: 0,
-                    }));
-                }
+        let web_push_provider_ready = self.web_push_provider_ready();
+        let parsed = match dispatch::parse_publish_payload(&payload_xml) {
+            Ok(parsed) => Some(parsed),
+            Err(error) if web_push_provider_ready => {
+                // Bad payload is permanent: mark the job failed in a
+                // tiny dedicated tx and return zero attempts.
+                self.mark_publish_job_failed_after_phase1(
+                    job.job_id(),
+                    job.owner_bare_jid(),
+                    job.node(),
+                    &format!("XEP-0357 payload parse failed: {error}"),
+                    now_ms,
+                )
+                .await?;
+                return Ok(Some(PushFanoutResult {
+                    item_id: job.item_id().to_string(),
+                    attempted_devices: 0,
+                }));
             }
-        } else {
-            None
+            // Provider-less tests historically use minimal XEP-0357
+            // fixtures without Waddle context. Keep accepting them;
+            // valid production payloads still parse above and supply
+            // safe structured fields for the degraded-provider log.
+            Err(_) => None,
         };
         let attempts = self
-            .dispatch_devices(&sealed_devices, parsed.as_ref(), job.item_id())
+            .dispatch_devices(
+                &sealed_devices,
+                job.owner_bare_jid(),
+                parsed.as_ref(),
+                job.item_id(),
+            )
             .await;
 
         // ---- Phase 3: tx2 — record attempts and finalize the job.
@@ -685,6 +748,7 @@ impl DatabasePushServiceStore {
     async fn dispatch_devices(
         &self,
         sealed_devices: &[dispatch::SealedActiveDevice],
+        recipient: &BareJid,
         parsed: Option<&dispatch::ParsedPushPayload>,
         item_id: &str,
     ) -> Vec<DispatchedAttempt> {
@@ -710,16 +774,31 @@ impl DatabasePushServiceStore {
             _ => None,
         };
         let item_id_arc: Arc<str> = Arc::from(item_id);
+        let recipient = recipient.clone();
+        // `Arc` so the per-device fan-out clones a refcount, not the
+        // parsed payload, for the web-arm log context.
+        let log_context = Arc::new(parsed.cloned());
 
         stream::iter(sealed_devices.iter().cloned())
             .map(move |device| {
                 let item_id = Arc::clone(&item_id_arc);
                 let web_provider = web_provider.clone();
+                let recipient = recipient.clone();
+                let log_context = Arc::clone(&log_context);
                 async move {
                     match (&web_provider, device.platform) {
                         (Some((signer, sender, sub, parsed, secrets)), PushDevicePlatform::Web) => {
                             dispatch_web_device_owned(
-                                &device, parsed, &item_id, signer, sender, sub, secrets,
+                                &device,
+                                &recipient,
+                                parsed,
+                                &item_id,
+                                WebPushDispatchProvider {
+                                    signer,
+                                    sender,
+                                    sub,
+                                    secrets,
+                                },
                             )
                             .await
                         }
@@ -729,13 +808,26 @@ impl DatabasePushServiceStore {
                         // operator fixes the boot config); APNS/FCM
                         // devices retain the legacy `fake-sent` marker
                         // (their senders ship in #529 / #530).
-                        (None, PushDevicePlatform::Web) => DispatchedAttempt {
-                            device_id: device.device_id.clone(),
-                            platform: device.platform,
-                            status: ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
-                            last_error: Some("Web Push provider not configured".to_string()),
-                            retry_after: None,
-                        },
+                        (None, PushDevicePlatform::Web) => {
+                            if let Some(parsed) = log_context.as_ref() {
+                                tracing::warn!(
+                                    recipient = %recipient,
+                                    conversation = %parsed.conversation,
+                                    notification_class = parsed.class.as_db_value(),
+                                    provider = "web_push",
+                                    push_stage = "provider_not_configured",
+                                    provider_outcome = ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+                                    "push provider transition"
+                                );
+                            }
+                            DispatchedAttempt {
+                                device_id: device.device_id.clone(),
+                                platform: device.platform,
+                                status: ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+                                last_error: Some("Web Push provider not configured".to_string()),
+                                retry_after: None,
+                            }
+                        }
                         (_, PushDevicePlatform::Apns | PushDevicePlatform::Fcm) => {
                             // APNS/FCM are stubbed until #529/#530 land
                             // their real senders. Keep the historical

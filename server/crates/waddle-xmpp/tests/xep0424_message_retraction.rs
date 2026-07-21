@@ -29,6 +29,134 @@ use waddle_xmpp::xep::xep0424::{
     NS_MESSAGE_RETRACT,
 };
 
+async fn assert_author_retry_cannot_downgrade_moderation_tombstone<S>(storage: S)
+where
+    S: waddle_xmpp::mam::MamStorage + Clone,
+{
+    use jid::{BareJid, Jid};
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedModeration, ArchivedRichPayload, ArchivedTombstone, RichMessageId,
+        RichText, StoreOutcome, TerminalTombstoneOutcome,
+    };
+    use xmpp_parsers::message::MessageType;
+
+    let room = "terminal-tombstone@conference.example.com"
+        .parse::<BareJid>()
+        .expect("room JID");
+    let archive_id = "terminal-tombstone-target";
+    let original = ArchivedMessage {
+        id: archive_id.to_string(),
+        body: Some("moderated content".to_string()),
+        message_type: MessageType::Groupchat,
+        ..ArchivedMessage::for_test(
+            "terminal-tombstone@conference.example.com/alice"
+                .parse::<Jid>()
+                .expect("occupant JID"),
+            Jid::from(room.clone()),
+        )
+    };
+    assert_eq!(
+        storage
+            .store_message(&room, &original)
+            .await
+            .expect("store original"),
+        StoreOutcome::Stored(archive_id.to_string())
+    );
+
+    let moderation = ArchivedTombstone {
+        retraction_id: None,
+        stamp: chrono::Utc::now(),
+        moderation: Some(ArchivedModeration {
+            target_id: RichMessageId::new(archive_id).expect("target id"),
+            moderated_by: "owner@example.com".parse::<Jid>().expect("moderator JID"),
+            stamp: Some(chrono::Utc::now()),
+            reason: RichText::new("room policy"),
+        }),
+        sender_scope: None,
+    };
+    assert!(storage
+        .replace_with_tombstone(archive_id, moderation.clone())
+        .await
+        .expect("install moderation tombstone"));
+
+    let author_retry = ArchivedTombstone {
+        retraction_id: RichMessageId::new("author-retraction-retry"),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+        sender_scope: None,
+    };
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(archive_id, author_retry)
+            .await
+            .expect("apply terminal author retry"),
+        TerminalTombstoneOutcome::AlreadyTombstoned
+    );
+
+    let retained = storage
+        .get_message(archive_id)
+        .await
+        .expect("lookup retained row")
+        .expect("retained row");
+    assert_eq!(
+        retained.rich.and_then(|rich| rich.payload),
+        Some(ArchivedRichPayload::Tombstone(moderation)),
+        "an XEP-0424 author retry must not downgrade XEP-0425 attribution or reason"
+    );
+
+    let live_id = "terminal-tombstone-live-target";
+    let mut live = original;
+    live.id = live_id.to_string();
+    assert_eq!(
+        storage
+            .store_message(&room, &live)
+            .await
+            .expect("store live terminal-replacement target"),
+        StoreOutcome::Stored(live_id.to_string())
+    );
+    let author_tombstone = ArchivedTombstone {
+        retraction_id: RichMessageId::new("live-author-retraction"),
+        stamp: chrono::Utc::now(),
+        moderation: None,
+        sender_scope: None,
+    };
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(live_id, author_tombstone.clone())
+            .await
+            .expect("replace live row terminally"),
+        TerminalTombstoneOutcome::Replaced
+    );
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone(live_id, author_tombstone.clone())
+            .await
+            .expect("repeat terminal replacement"),
+        TerminalTombstoneOutcome::AlreadyTombstoned
+    );
+    assert_eq!(
+        storage
+            .replace_with_terminal_tombstone("missing-terminal-target", author_tombstone)
+            .await
+            .expect("missing terminal replacement"),
+        TerminalTombstoneOutcome::NotFound
+    );
+}
+
+#[tokio::test]
+async fn xep0424_author_retry_preserves_terminal_moderation_tombstone_in_all_backends() {
+    assert_author_retry_cannot_downgrade_moderation_tombstone(
+        waddle_xmpp::mam::InMemoryMamStorage::new(),
+    )
+    .await;
+    assert_author_retry_cannot_downgrade_moderation_tombstone(
+        waddle_xmpp::mam::SqlxMamStorage::open_in_memory()
+            .await
+            .expect("SQLite MAM storage"),
+    )
+    .await;
+}
+
 // ── §3 namespace ─────────────────────────────────────────────────────
 
 #[test]
@@ -271,4 +399,93 @@ fn xep0424_extract_returns_none_for_payloads_with_empty_id() {
         extract_retraction_from_message(&msg).is_none(),
         "empty-id retraction/retracted payloads MUST be ignored"
     );
+}
+
+#[tokio::test]
+async fn xep0424_groupchat_retransmit_after_retraction_hits_tombstone() {
+    use jid::{BareJid, Jid};
+    use waddle_xmpp::mam::{
+        ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+        InMemoryMamStorage, MamStorage, StoreOutcome,
+    };
+    use waddle_xmpp_core::mam::ArchivedMucSender;
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use waddle_xmpp_core::xep0359::OriginId;
+    use xmpp_parsers::message::MessageType;
+
+    fn archived(id: &str, real_jid: &str, generation: u64) -> ArchivedMessage {
+        ArchivedMessage {
+            id: id.to_string(),
+            body: Some("retract me".to_string()),
+            origin_id: Some(OriginId::new("retracted-origin")),
+            message_type: MessageType::Groupchat,
+            nickname_generation: Some(generation),
+            rich: Some(ArchivedRichMessage {
+                muc_sender: Some(ArchivedMucSender {
+                    jid: real_jid.parse::<Jid>().expect("real sender JID"),
+                    affiliation: Affiliation::Member,
+                    role: Role::Participant,
+                }),
+                ..ArchivedRichMessage::default()
+            }),
+            ..ArchivedMessage::for_test(
+                "room@conference.example.com/alice"
+                    .parse::<Jid>()
+                    .expect("occupant JID"),
+                "room@conference.example.com"
+                    .parse::<Jid>()
+                    .expect("room JID"),
+            )
+        }
+    }
+
+    // XEP-0424 §Business Rules says a MUC service SHOULD prevent further
+    // distribution of a retracted message; the retained tombstone must win
+    // over a later retry carrying the original stable origin-id.
+    let storage = InMemoryMamStorage::new();
+    let room = "room@conference.example.com"
+        .parse::<BareJid>()
+        .expect("room bare JID");
+    let original_id = "retracted-archive-id";
+    let original = archived(original_id, "alice@example.com/session-a", 7);
+    assert_eq!(
+        storage
+            .store_message(&room, &original)
+            .await
+            .expect("store original"),
+        StoreOutcome::Stored(original_id.to_string())
+    );
+    assert!(storage
+        .replace_with_tombstone(
+            original_id,
+            ArchivedTombstone {
+                retraction_id: None,
+                stamp: chrono::Utc::now(),
+                moderation: None,
+                sender_scope: None,
+            },
+        )
+        .await
+        .expect("replace with tombstone"));
+
+    let retry = archived("retry-archive-id", "alice@example.com/session-b", 8);
+    assert_eq!(
+        storage
+            .store_message(&room, &retry)
+            .await
+            .expect("store retry"),
+        StoreOutcome::TombstoneHit(original_id.to_string()),
+        "XEP-0424 tombstone retry must not create a new live archive row"
+    );
+    assert_eq!(storage.count_messages(&room).await.expect("count"), 1);
+    let retained = storage
+        .get_message_by_archive_or_stanza_id(&room, original_id)
+        .await
+        .expect("lookup tombstone")
+        .expect("tombstone retained");
+    assert!(retained.body.is_none());
+    assert!(matches!(
+        retained.rich.and_then(|rich| rich.payload),
+        Some(ArchivedRichPayload::Tombstone(_))
+    ));
 }

@@ -530,7 +530,6 @@ async fn join_burst_does_not_drop_at_capacity_256() {
     // counters; serialize against metric-asserting tests so it cannot perturb
     // their reads (Copilot review on PR #1177).
     let _guard = crate::prometheus::metrics_test_lock().lock().await;
-    crate::prometheus::reset_metrics_for_test();
 
     let actor = spawn_actor("alice").await;
     let jid = full("alice", "phone");
@@ -563,7 +562,6 @@ async fn join_burst_drops_at_default_capacity_64() {
     const OCCUPANTS: usize = 200;
     // Serialize against metric-asserting tests (Copilot review on PR #1177).
     let _guard = crate::prometheus::metrics_test_lock().lock().await;
-    crate::prometheus::reset_metrics_for_test();
 
     let actor = spawn_actor("alice").await;
     let jid = full("alice", "phone");

@@ -73,10 +73,24 @@ impl NotificationOutboxStore {
             // dedup semantics, the SQL needs an explicit chained
             // `ON CONFLICT (cols) DO NOTHING` for each path
             // (Greptile review on PR #758).
-            waddle_xmpp::prometheus::increment_push_candidate_coalesced();
+            waddle_xmpp::telemetry::reliability::increment_push_candidate_coalesced();
+            tracing::info!(
+                recipient = %candidate.recipient_bare_jid(),
+                conversation = %candidate.conversation_jid(),
+                notification_class = candidate.class().as_db_value(),
+                push_stage = "coalesced",
+                "push pipeline transition"
+            );
             return Ok(NotificationCandidateInsertOutcome::Duplicate);
         }
-        waddle_xmpp::prometheus::increment_push_candidate_created();
+        waddle_xmpp::telemetry::reliability::increment_push_candidate_created();
+        tracing::info!(
+            recipient = %candidate.recipient_bare_jid(),
+            conversation = %candidate.conversation_jid(),
+            notification_class = candidate.class().as_db_value(),
+            push_stage = "candidate_created",
+            "push pipeline transition"
+        );
         Ok(NotificationCandidateInsertOutcome::Inserted)
     }
 

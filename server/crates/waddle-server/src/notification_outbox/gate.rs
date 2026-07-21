@@ -798,8 +798,7 @@ mod tests {
     /// typed metric counter MUST tick once for the suppression audit.
     #[tokio::test]
     async fn xep0492_never_suppression_preserves_pending_delivery_and_audit_via_metric() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let store = store().await;
         let projection = settings_projection().await;
         let room_policy = NoopRoomPolicy;
@@ -866,8 +865,8 @@ mod tests {
         );
         // Mirror the T0 emission contract: tick the metric, do NOT
         // persist a candidate row.
-        waddle_xmpp::prometheus::increment_push_suppressed(
-            SuppressedReason::Xep0492Never.as_db_value(),
+        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+            SuppressedReason::Xep0492Never.telemetry_reason(),
         );
 
         // Push surface invariants: no candidate row, no outbox job.
@@ -884,10 +883,10 @@ mod tests {
         // Upstream-storage invariant: the inbox witness survives.
         assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
 
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_never\"} 1"),
-            "T0 suppression metric must tick exactly once; rendered={rendered}",
+        assert_eq!(
+            metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0492_never")]),
+            Some(1),
+            "T0 suppression metric must tick exactly once",
         );
     }
 
@@ -896,8 +895,7 @@ mod tests {
     /// as `<never/>`: no candidate row, inbox witness intact.
     #[tokio::test]
     async fn xep0492_on_mention_miss_preserves_pending_delivery_for_non_mention_dm() {
-        let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-        waddle_xmpp::prometheus::reset_metrics_for_test();
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let store = store().await;
         let projection = settings_projection().await;
         let room_policy = NoopRoomPolicy;
@@ -960,8 +958,8 @@ mod tests {
             ),
             "T0 MUST suppress <on-mention/> miss with typed Xep0492OnMentionMiss; got {outcome:?}"
         );
-        waddle_xmpp::prometheus::increment_push_suppressed(
-            SuppressedReason::Xep0492OnMentionMiss.as_db_value(),
+        waddle_xmpp::telemetry::reliability::increment_push_suppressed(
+            SuppressedReason::Xep0492OnMentionMiss.telemetry_reason(),
         );
 
         assert_eq!(
@@ -975,10 +973,13 @@ mod tests {
         );
         assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
 
-        let rendered = waddle_xmpp::prometheus::render_metrics();
-        assert!(
-            rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_on_mention_miss\"} 1"),
-            "metric counter for xep0492_on_mention_miss must increment; rendered={rendered}",
+        assert_eq!(
+            metrics.counter_sum(
+                "xmpp.push.suppressed",
+                &[("reason", "xep0492_on_mention_miss")]
+            ),
+            Some(1),
+            "metric counter for xep0492_on_mention_miss must increment",
         );
     }
 

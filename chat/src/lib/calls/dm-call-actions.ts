@@ -18,6 +18,12 @@ import {
 } from "./outbound";
 import type { CallMedia } from "./types";
 import { barePeerJid } from "../xmpp/jid";
+import {
+  resumeCallAttempt,
+  finishCallAttempt,
+  markCallAttemptAccepted,
+  reportFailedCallAttempt,
+} from "./call-lifecycle-telemetry";
 
 export async function startDmCallAction(options: {
   peerBareJid: string;
@@ -28,10 +34,13 @@ export async function startDmCallAction(options: {
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") return;
 
-  const sender = options.getSender();
-  if (!sender) return;
-
   const sid = newCallSid();
+  const sender = options.getSender();
+  if (!sender) {
+    reportFailedCallAttempt(sid, "dm");
+    return;
+  }
+
   beginOutgoingCall(
     options.peerBareJid,
     sid,
@@ -45,6 +54,7 @@ export async function startDmCallAction(options: {
   } catch (err) {
     const next = $callState.get();
     if (next.phase === "outgoing" && next.sid === sid) {
+      finishCallAttempt(sid, { setupOutcome: "failed", endReason: "error" });
       $callState.set({ phase: "idle" });
     }
     clearDmCallActivity(options.peerBareJid, sid);
@@ -104,6 +114,7 @@ export async function answerIncomingDmCallActivity(options: {
   } catch (err) {
     const next = $callState.get();
     if (needsHydratedIncoming && next.phase === "incoming" && next.sid === options.sid) {
+      finishCallAttempt(options.sid, { setupOutcome: "failed", endReason: "error" });
       $callState.set({ phase: "idle" });
     } else if (canUseCurrentIncoming && next.phase === "incoming" && next.sid === options.sid) {
       $callState.set({ ...next, accepting: false });
@@ -138,6 +149,8 @@ export function resumeDmCallActivity(options: {
     join: activity.join,
     initiator: selfFullJid,
   });
+  resumeCallAttempt(activity.sid, "dm");
+  markCallAttemptAccepted(activity.sid);
   return true;
 }
 

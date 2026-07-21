@@ -1,5 +1,45 @@
 use super::*;
 use crate::permissions::CheckPermission;
+use std::io;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Default)]
+struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture buffer lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn captured_logs(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
+    String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+        .expect("captured logs are valid UTF-8")
+}
+
+fn captured_admission_denial_log(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
+    let logs = captured_logs(buffer);
+    logs.lines()
+        .find(|line| line.contains("managed-channel admission denied"))
+        .unwrap_or_else(|| panic!("managed-channel admission denial log not found in:\n{logs}"))
+        .to_string()
+}
 
 fn expected_local_room_fence(
     room_jid: &BareJid,
@@ -1039,6 +1079,349 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
             .is_some_and(|frame| frame.contains("affiliation='member'")
                 || frame.contains(r#"affiliation="member""#)),
         "explicit channel member affiliation must admit the members-only join: {admitted:?}"
+    );
+}
+
+/// #1315: a managed members-only join by an unaffiliated user is
+/// rejected with `<registration-required/>`, and that denial must now
+/// be visible — the `waddle.muc.admission.denied` counter records it,
+/// keyed by the stanza error condition, through the metric-reader seam.
+#[tokio::test]
+async fn managed_registration_required_denial_increments_admission_counter() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let session = crate::auth::Session::new("alice@example.com", "alice", "alice");
+    let room_jid: BareJid = "locked-space@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "locked-space".to_string(),
+            name: "Locked Space".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("registration-required"),
+        "unaffiliated managed members-only join must be registration-required: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "registration-required")]
+        ),
+        Some(1),
+        "the registration-required admission denial must increment the counter exactly once"
+    );
+    assert!(
+        get_room_actor(state.as_ref(), &room_jid).await.is_none(),
+        "denied members-only join must not create the room actor"
+    );
+}
+
+/// #1315: an unauthenticated managed-channel join is rejected with
+/// `<not-authorized/>`; the denial must be counted and logged at INFO
+/// without exposing the joining resource in the denial event's user field.
+#[tokio::test(flavor = "current_thread")]
+async fn managed_not_authorized_denial_emits_admission_telemetry() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CaptureWriter(buffer.clone()))
+            .finish(),
+    );
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "private-space@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "private-space".to_string(),
+            name: "Private Space".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &None,
+    )
+    .await;
+
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("not-authorized"),
+        "unauthenticated managed-channel join must be not-authorized: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "not-authorized")]
+        ),
+        Some(1),
+        "the not-authorized admission denial must increment the counter exactly once"
+    );
+    assert_eq!(
+        metrics.metric_unit("waddle.muc.admission.denied"),
+        Some("1".to_string()),
+        "the admission denial counter must use the dimensionless unit"
+    );
+
+    let denial_log = captured_admission_denial_log(&buffer);
+    assert!(denial_log.contains("\"level\":\"INFO\""), "{denial_log}");
+    assert!(
+        denial_log.contains("\"room\":\"private-space@muc.example.com\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"user\":\"alice@example.com\""),
+        "{denial_log}"
+    );
+    let all_logs = captured_logs(&buffer);
+    assert!(!all_logs.contains("alice@example.com/web"), "{all_logs}");
+    assert!(
+        denial_log.contains("\"condition\":\"not-authorized\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"resolver_outcome\":\"session-missing\""),
+        "{denial_log}"
+    );
+}
+
+/// #1315: malformed authenticated-session identity is an internal
+/// managed-channel admission failure. It must emit the same condition-only
+/// counter and bare-JID INFO fields as policy denials.
+#[tokio::test(flavor = "current_thread")]
+async fn managed_internal_server_error_denial_emits_admission_telemetry() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CaptureWriter(buffer.clone()))
+            .finish(),
+    );
+    let state = create_test_websocket_state().await;
+    let malformed_session = crate::auth::Session::new("not a jid", "alice", "alice");
+    let room_jid: BareJid = "resolver-failure@muc.example.com"
+        .parse()
+        .expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "resolver-failure".to_string(),
+            name: "Resolver Failure".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: true,
+            public_room: false,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &Some(malformed_session),
+    )
+    .await;
+
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("internal-server-error"),
+        "malformed managed-channel identity must fail closed: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[("condition", "internal-server-error")]
+        ),
+        Some(1),
+        "the internal-server-error admission denial must increment the counter exactly once"
+    );
+
+    let denial_log = captured_admission_denial_log(&buffer);
+    assert!(denial_log.contains("\"level\":\"INFO\""), "{denial_log}");
+    assert!(
+        denial_log.contains("\"room\":\"resolver-failure@muc.example.com\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"user\":\"alice@example.com\""),
+        "{denial_log}"
+    );
+    let all_logs = captured_logs(&buffer);
+    assert!(!all_logs.contains("alice@example.com/web"), "{all_logs}");
+    assert!(
+        denial_log.contains("\"condition\":\"internal-server-error\""),
+        "{denial_log}"
+    );
+    assert!(
+        denial_log.contains("\"resolver_outcome\":\"session-jid-malformed\""),
+        "{denial_log}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_channel_lookup_failure_is_logged_but_not_counted_as_a_denial() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CaptureWriter(buffer.clone()))
+            .finish(),
+    );
+    let state = create_test_websocket_state().await;
+    let room_jid: BareJid = "lookup-failure@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+
+    state.deps.app_state.db_pool.global_actor().kill();
+    tokio::task::yield_now().await;
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "alice",
+        None,
+        &None,
+    )
+    .await;
+
+    assert_eq!(denied.len(), 1);
+    assert!(denied[0].contains("internal-server-error"), "{denied:?}");
+    assert_eq!(
+        metrics
+            .counter_sum("waddle.muc.admission.denied", &[])
+            .unwrap_or(0),
+        0,
+        "an unresolved managed status must not count as a managed-channel denial"
+    );
+
+    let denial_log = captured_admission_denial_log(&buffer);
+    assert!(
+        denial_log.contains("\"resolver_outcome\":\"managed-channel-lookup-error\""),
+        "{denial_log}"
+    );
+}
+
+/// #1315: a channel-banned (outcast) joiner is rejected with
+/// `<forbidden/>` per XEP-0045 §7.2.8, even in an open room. The
+/// denial must be counted under the `forbidden` condition through the
+/// metric-reader seam.
+#[tokio::test]
+async fn managed_forbidden_ban_denial_increments_admission_counter() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_websocket_state().await;
+    let session = crate::auth::Session::new("mallory@example.com", "mallory", "mallory");
+    let room_jid: BareJid = "guarded-space@muc.example.com".parse().expect("room jid");
+    let sender_jid: FullJid = "mallory@example.com/web".parse().expect("sender jid");
+
+    crate::server::xmpp_state::upsert_xmpp_channel(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        &crate::server::xmpp_state::XmppChannelUpsert {
+            id: "guarded-space".to_string(),
+            name: "Guarded Space".to_string(),
+            description: None,
+            channel_type: "channel".to_string(),
+            position: 0,
+            is_default: false,
+            pin_permission: waddle_xmpp::muc::PinPermission::Anyone,
+            members_only: false,
+            public_room: true,
+        },
+    )
+    .await
+    .expect("channel upsert");
+
+    // An explicit channel-level ban makes the resolver report Outcast,
+    // which XEP-0045 §7.2.8 maps to <forbidden/> even in an open room.
+    state
+        .deps
+        .app_state
+        .permission_actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(
+                Object::new(ObjectType::Channel, "guarded-space"),
+                Relation::new("outcast"),
+                Subject::user(&session.user_jid),
+            ),
+        })
+        .await
+        .expect("channel outcast tuple");
+
+    let denied = handle_muc_join(
+        state.as_ref(),
+        "example.com",
+        &room_jid,
+        &sender_jid,
+        "mallory",
+        None,
+        &Some(session),
+    )
+    .await;
+    assert_eq!(denied.len(), 1);
+    assert!(
+        denied[0].contains("forbidden"),
+        "a channel-banned managed joiner must be forbidden: {denied:?}"
+    );
+    assert_eq!(
+        metrics.counter_sum("waddle.muc.admission.denied", &[("condition", "forbidden")]),
+        Some(1),
+        "the forbidden (ban) admission denial must increment the counter exactly once"
     );
 }
 

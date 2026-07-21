@@ -20,12 +20,21 @@ import { clearLiveCallParticipants } from "./muc-call-live-participants";
 import { selfRaisedHandFor, setSelfRaisedHand } from "./call-raised-hand";
 import { mediaErrorMessage } from "./call-media-issues";
 import {
+  beginCallAttempt,
+  finishCallAttempt,
+  markCallAttemptAccepted,
+  reportFailedCallAttempt,
+  type CallEndReason,
+  type CallSetupOutcome,
+} from "./call-lifecycle-telemetry";
+import {
   dmCallStartedAnchorFromTransition,
   publishDmCallOutcomeAnchor,
   publishDmCallStartedAnchor,
 } from "./dm-call-anchor";
 import { barePeerJid } from "../xmpp/jid";
 import type { IncomingCallAlertController } from "@/shell/audio-alerts";
+import { reportError as reportTelemetryError } from "../telemetry";
 
 /**
  * XEP-0272 §Joining MUST: a client emitting a preparing presence
@@ -322,7 +331,11 @@ export function reduceCallState(current: CallState, event: CallEvent): CallState
  */
 export function applyCallEvent(
   event: CallEvent,
-  options: { sender?: CallWireSender | null } = {},
+  options: {
+    sender?: CallWireSender | null;
+    selfOriginated?: boolean;
+    selfFullJid?: string;
+  } = {},
 ): void {
   // Route inbound Muji session-accept stanzas to the pending
   // `beginMucCall` Promise BEFORE the 1:1 reducer sees them. A
@@ -335,6 +348,47 @@ export function applyCallEvent(
   }
   const before = $callState.get();
   const next = reduceCallState(before, event);
+  if (
+    next.phase === "incoming"
+    && (before.phase !== "incoming" || before.sid !== next.sid)
+  ) {
+    beginCallAttempt(next.sid, "dm");
+  }
+  if (next.phase === "active" && (before.phase !== "active" || before.sid !== next.sid)) {
+    markCallAttemptAccepted(next.sid);
+  }
+  if (next.phase === "ended" && (before.phase !== "ended" || before.sid !== next.sid)) {
+    if (event.kind === "reject") {
+      finishCallAttempt(next.sid, {
+        setupOutcome: "declined",
+        endReason: signaledCallEndReason(options.selfOriginated),
+      });
+    } else if (event.kind === "retract") {
+      finishCallAttempt(next.sid, {
+        setupOutcome: "proposed",
+        endReason: signaledCallEndReason(options.selfOriginated),
+      });
+    } else {
+      finishCallAttempt(
+        next.sid,
+        callLifecycleTerminalForSignaledEnd(before, event, next.reason, options.selfOriginated),
+      );
+    }
+  }
+  if (
+    before.phase === "incoming"
+    && next.phase === "idle"
+    && event.kind === "proceed"
+    && event.sid === before.sid
+    // A proceed echoed from THIS resource is the local accept — the
+    // attempt continues into session-initiate, so it must not be
+    // finalized here. `selfOriginated` is bare-JID scoped and would
+    // also match a sibling resource's "accepted elsewhere" proceed,
+    // which DOES end this tab's attempt — hence the full-JID check.
+    && event.from !== options.selfFullJid
+  ) {
+    finishCallAttempt(before.sid, { setupOutcome: "proposed", endReason: "hangup" });
+  }
   if (next !== before) {
     $lastCallError.set(null);
     // Any transition out of outgoing cancels the auto-retract timer.
@@ -356,6 +410,51 @@ export function applyCallEvent(
   // archived `<proceed/>` row, which never reaches the live timeline).
   const dmCallAnchor = dmCallStartedAnchorFromTransition(before, next, new Date().toISOString());
   if (dmCallAnchor) publishDmCallStartedAnchor(dmCallAnchor);
+}
+
+const CALL_ERROR_REASONS = new Set([
+  "connectivity-error",
+  "failed-application",
+  "failed-transport",
+  "general-error",
+  "incompatible-parameters",
+  "media-error",
+  "security-error",
+  "unsupported-applications",
+  "unsupported-transports",
+  "error",
+]);
+
+export function callLifecycleTerminalForSignaledEnd(
+  before: CallState,
+  _event: CallEvent,
+  reason: string | null,
+  selfOriginated: boolean = false,
+): { setupOutcome?: CallSetupOutcome; endReason: CallEndReason } {
+  const isFailure = reason !== null && CALL_ERROR_REASONS.has(reason);
+  if (before.phase === "active") {
+    return {
+      endReason: isFailure || reason === "timeout"
+        ? "error"
+        : signaledCallEndReason(selfOriginated),
+    };
+  }
+  if (reason === "timeout") return { setupOutcome: "timeout", endReason: "error" };
+  if (reason === "decline") {
+    return {
+      setupOutcome: "declined",
+      endReason: signaledCallEndReason(selfOriginated),
+    };
+  }
+  if (isFailure) return { setupOutcome: "failed", endReason: "error" };
+  return {
+    setupOutcome: "proposed",
+    endReason: signaledCallEndReason(selfOriginated),
+  };
+}
+
+function signaledCallEndReason(selfOriginated: boolean | undefined): CallEndReason {
+  return selfOriginated ? "hangup" : "peer-left";
 }
 
 function applyIncomingCallAlerts(before: CallState, next: CallState): void {
@@ -389,12 +488,22 @@ function emitRingingOnIncomingPropose(
  * Mark the local call slot as idle. Called when the UI dismisses
  * the `ended` state (the toast closes, the user clicks dismiss).
  */
-export function clearCallState(): void {
+export function clearCallState(terminal: {
+  setupOutcome?: CallSetupOutcome;
+  endReason?: CallEndReason;
+} = {}): void {
   cancelCallTimers();
   rejectAllPendingMujiAccepts(
     new Error("Muji session-accept wait cancelled while clearing call state"),
   );
   const current = $callState.get();
+  if (current.phase !== "idle" && current.phase !== "ended") {
+    const derivedTerminal = callLifecycleTerminalForTeardown(current.phase, "clear");
+    finishCallAttempt(current.sid, {
+      setupOutcome: terminal.setupOutcome ?? derivedTerminal.setupOutcome,
+      endReason: terminal.endReason ?? derivedTerminal.endReason,
+    });
+  }
   if (current.phase === "incoming") {
     incomingCallAlerts?.stop(current.sid);
   } else {
@@ -416,6 +525,7 @@ export function clearCallState(): void {
 
 export function failCallState(err: unknown, sid: string): void {
   cancelCallTimers();
+  finishCallAttempt(sid, { setupOutcome: "failed", endReason: "error" });
   $callState.set({ phase: "ended", sid, reason: "error" });
   reportCallError(err);
 }
@@ -424,12 +534,20 @@ export function acceptIncomingTieBreakPropose(
   event: Extract<CallEvent, { kind: "propose" }>,
 ): void {
   cancelCallTimers();
+  const replaced = $callState.get();
+  if (replaced.phase === "active" && replaced.sid !== event.sid) {
+    finishCallAttempt(replaced.sid, {
+      setupOutcome: "accepted",
+      endReason: "peer-left",
+    });
+  }
   $callState.set({
     phase: "incoming",
     from: event.from,
     sid: event.sid,
     media: event.media,
   });
+  beginCallAttempt(event.sid, "dm");
   incomingCallAlerts?.start({
     peerJid: barePeerJid(event.from) || event.from,
     sid: event.sid,
@@ -456,6 +574,7 @@ export function beginOutgoingCall(
       ? { phase: "outgoing", to, sid, media, initiator }
       : { phase: "outgoing", to, sid, media },
   );
+  beginCallAttempt(sid, "dm");
   applyDmCallEvent({
     event: {
       kind: "propose",
@@ -522,6 +641,7 @@ export function scheduleOutgoingTimeout(
       .catch((err) => reportCallError(err));
     publishNoAnswerOutcome(s.to, sid, s.media, s.initiator);
     clearDmCallActivity(s.to, sid);
+    finishCallAttempt(sid, { setupOutcome: "timeout", endReason: "error" });
     $callState.set({
       phase: "ended",
       sid,
@@ -554,6 +674,7 @@ export function scheduleSessionAcceptTimeout(
       .catch((err) => reportCallError(err));
     publishNoAnswerOutcome(peerFullJid, sid, s.media, s.initiator);
     clearDmCallActivity(peerFullJid, sid);
+    finishCallAttempt(sid, { setupOutcome: "timeout", endReason: "error" });
     $callState.set({
       phase: "ended",
       sid,
@@ -607,6 +728,10 @@ export function reportCallError(err: unknown): void {
   // path (e.g. a mid-call device switch in the settings dialog).
   const message =
     mediaErrorMessage(err) ?? (err instanceof Error ? err.message : String(err));
+  reportTelemetryError("call.operation", err, {
+    recoverable: true,
+    detail: "call-operation",
+  });
   $lastCallError.set(message);
   if (clearTimer) clearTimeout(clearTimer);
   clearTimer = setTimeout(() => $lastCallError.set(null), AUTO_CLEAR_MS);
@@ -636,12 +761,49 @@ export function clearLastCallError(): void {
  * unreachable-side teardown ("gone", per XEP-0166 §7.4) so the peer
  * UI can label the ended state correctly.
  */
+/**
+ * Setup outcome for a call attempt that is being torn down / cleared
+ * from a given phase. Shared by `clearCallState` and
+ * `tearDownActiveCall` so the two teardown paths cannot drift: a
+ * `muc-pending` group-call setup that gets torn down is a *failed*
+ * attempt (its Muji accept/preparation waiters are cancelled), never
+ * a merely "proposed" one.
+ */
+export function teardownSetupOutcome(phase: CallState["phase"]): CallSetupOutcome {
+  switch (phase) {
+    case "active":
+      return "accepted";
+    case "incoming":
+      return "declined";
+    case "muc-pending":
+      return "failed";
+    default:
+      return "proposed";
+  }
+}
+
+export function callLifecycleTerminalForTeardown(
+  phase: CallState["phase"],
+  disposition: "clear" | "success" | "gone",
+): { setupOutcome: CallSetupOutcome; endReason: CallEndReason } {
+  const failedSetup = phase === "muc-pending";
+  const terminalFailure = disposition === "gone" || failedSetup
+    || (disposition === "clear" && phase === "active");
+  return {
+    setupOutcome: teardownSetupOutcome(phase),
+    endReason: terminalFailure ? "error" : "hangup",
+  };
+}
+
 export async function tearDownActiveCall(
   sender: CallWireSender | null,
   reason: "success" | "gone",
 ): Promise<void> {
   cancelCallTimers();
   const s = $callState.get();
+  if (s.phase !== "idle" && s.phase !== "ended") {
+    finishCallAttempt(s.sid, callLifecycleTerminalForTeardown(s.phase, reason));
+  }
   if (sender) {
     try {
       switch (s.phase) {
@@ -970,27 +1132,32 @@ export async function beginMucCall(
   selfNick?: string,
   expectedMixerJid?: string | null,
   selfFullJid?: string | null,
+  lifecycleAttemptId: string = crypto.randomUUID(),
 ): Promise<void> {
+  const attemptId = lifecycleAttemptId;
   const normalizedRoomJid = normalizeMucCallRoomJid(roomJid);
   if (!normalizedRoomJid) {
+    reportFailedCallAttempt(attemptId, "muc");
     throw new Error("Cannot start a group call without a room JID");
   }
   // Fresh call: a hand left raised from a prior session in this room must
   // not silently re-raise on the new active presence (#1029).
   setSelfRaisedHand(normalizedRoomJid, false);
   if (!selfNick) {
+    reportFailedCallAttempt(attemptId, "muc");
     throw new Error("Cannot start a group call before MUC presence has a nick");
   }
   if (!sender.update_muji_presence) {
+    reportFailedCallAttempt(attemptId, "muc");
     throw new Error(
       "wasm client does not expose update_muji_presence; rebuild the wasm bundle",
     );
   }
   const current = $callState.get();
   if (current.phase !== "idle" && current.phase !== "ended") {
+    reportFailedCallAttempt(attemptId, "muc");
     throw new Error("Cannot start a group call while another call is active or starting");
   }
-  const attemptId = crypto.randomUUID();
 
   $callState.set({
     phase: "muc-pending",
@@ -1002,6 +1169,7 @@ export async function beginMucCall(
     selfFullJid,
     attemptId,
   });
+  beginCallAttempt(attemptId, "muc");
   $lastCallError.set(null);
 
   // Step 1 — preparing presence (XEP-0272 §Joining two-phase flow).
@@ -1070,7 +1238,6 @@ export async function beginMucCall(
       attemptId,
       activePresencePublished: true,
     });
-
     // Step 3 — session-initiate. The SFU mixer's session-accept
     // arrives after the active Muji presence is already room-visible.
     const join = await sendMujiSessionInitiate(
@@ -1092,6 +1259,7 @@ export async function beginMucCall(
       selfNick,
       selfFullJid,
     });
+    markCallAttemptAccepted(attemptId);
     rememberMucCallSession({
       roomJid: normalizedRoomJid,
       sid: attemptId,
@@ -1117,6 +1285,7 @@ export async function beginMucCall(
         activePresencePublished,
         attemptId,
       );
+      finishCallAttempt(attemptId, { setupOutcome: "failed", endReason: "error" });
       $callState.set({ phase: "idle" });
     }
     throw err;

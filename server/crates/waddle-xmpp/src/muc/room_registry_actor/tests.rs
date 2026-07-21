@@ -3143,12 +3143,15 @@ mod ownership_claims_tests {
             })
             .await
             .expect("repeat existing exact reclaimed reservation"));
+        // Compare depth only: `oldest_age_ms` is wall-clock at ask-time, so
+        // two asks straddling a millisecond boundary differ spuriously (#1416).
         assert_eq!(
             registry
                 .ask(GetPendingReclaimedRoomBacklog)
                 .await
-                .expect("reclaimed backlog after duplicate"),
-            backlog_before,
+                .expect("reclaimed backlog after duplicate")
+                .depth,
+            backlog_before.depth,
             "an exact reclaimed responsibility must not gain a redundant bare-JID reservation",
         );
         assert!(!registry

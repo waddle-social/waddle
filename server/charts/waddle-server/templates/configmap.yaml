@@ -69,6 +69,17 @@ data:
   {{- if .Values.telemetry.serviceVersion }}
   OTEL_SERVICE_VERSION: {{ .Values.telemetry.serviceVersion | quote }}
   {{- end }}
+  {{- if .Values.telemetry.deploymentEnvironment }}
+  OTEL_RESOURCE_ATTRIBUTES: {{ printf "deployment.environment=%s" .Values.telemetry.deploymentEnvironment | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.tracesSampler }}
+  OTEL_TRACES_SAMPLER: {{ .Values.telemetry.tracesSampler | quote }}
+  {{- end }}
+  {{- /* toString-compare: a numeric 0 ratio is falsy in `if` but is a
+       valid "sample nothing" argument and must still render. */}}
+  {{- if ne (.Values.telemetry.tracesSamplerArg | toString) "" }}
+  OTEL_TRACES_SAMPLER_ARG: {{ .Values.telemetry.tracesSamplerArg | toString | quote }}
+  {{- end }}
   {{- if .Values.config.s3Endpoint }}
   WADDLE_S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
   {{- end }}

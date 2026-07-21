@@ -1,13 +1,16 @@
 // Direct unit tests for useDmLiveMerge: per-XEP apply* helpers, the
 // handleIncomingMessage dispatcher, and self-echo reconciliation for 1:1.
 
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import { useDmLiveMerge } from "../src/dms/live-merge";
 import { buildDmCallStartedAnchor, dmCallAnchorId } from "../src/lib/calls/dm-call-anchor";
 import type { LiveDmMessage } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { TimelineMessage } from "../src/lib/chat-ui";
+import { __setFaroForTesting } from "../src/lib/telemetry";
+
+afterEach(() => __setFaroForTesting(null));
 
 const session: WaddleSession = {
   username: "alice",
@@ -58,6 +61,32 @@ describe("applyDisplayed (XEP-0333)", () => {
     h.liveMerge.applyDisplayed("m1", "bob");
     h.liveMerge.applyDisplayed("m1", "bob");
     expect(h.messages.value[0]?.readBy).toEqual(["bob"]);
+  });
+
+  test("reports a receive merge failure but not an unloaded target", () => {
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({ api: { pushEvent: (name: string, attributes?: Record<string, string>) => {
+      events.push({ name, attributes });
+    } } } as never);
+    const h = harness();
+    h.liveMerge.applyDisplayed("outside-loaded-window", "bob");
+    expect(events).toEqual([]);
+
+    h.messages.value = [{
+      id: "m1",
+      createdAt: "2020-01-01T00:00:00Z",
+      body: "",
+      nick: "alice",
+      get readBy(): string[] { throw new Error("broken row"); },
+    } as TimelineMessage];
+    h.liveMerge.applyDisplayed("m1", "bob");
+
+    expect(events[0]?.attributes).toEqual({
+      direction: "receive",
+      kind: "dm",
+      reason: "receive-processing-failed",
+      round_trip_latency_band: "over-5s",
+    });
   });
 });
 

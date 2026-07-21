@@ -283,16 +283,25 @@ async fn send_presence_stanza_to_jid(
 /// session expiry/invalidation and the unclean disconnect of a non-SM
 /// session (issue #1105). Callers gate on the session having actually
 /// been presence-available.
-pub async fn broadcast_unavailable_for_terminated_session(state: &WebSocketState, from: &FullJid) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminatedPresenceBroadcastOutcome {
+    Completed,
+    Failed,
+}
+
+pub async fn broadcast_unavailable_for_terminated_session(
+    state: &WebSocketState,
+    from: &FullJid,
+) -> TerminatedPresenceBroadcastOutcome {
     let Some(storage) = roster_storage(state).await else {
-        return;
+        return TerminatedPresenceBroadcastOutcome::Failed;
     };
     let from_bare = from.to_bare();
     let subscribers = match storage.get_presence_subscribers(&from_bare).await {
         Ok(subscribers) => subscribers,
         Err(error) => {
             warn!(error = %error, from = %from, "Failed to load presence subscribers for expired detached session");
-            return;
+            return TerminatedPresenceBroadcastOutcome::Failed;
         }
     };
 
@@ -325,6 +334,7 @@ pub async fn broadcast_unavailable_for_terminated_session(state: &WebSocketState
         None,
     )
     .await;
+    TerminatedPresenceBroadcastOutcome::Completed
 }
 
 async fn available_live_and_detached_resources_for_user(

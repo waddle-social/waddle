@@ -1,0 +1,190 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "End-to-end delivery health across stream management, pending delivery, push, broadcast, and resume paths.",
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Stream-management evictions and pauses",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(waddle_sm_unacked_evicted_total[5m])) or vector(0)",
+          "legendFormat": "unacked evicted",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(waddle_sm_detached_unacked_evicted_total[5m])) or vector(0)",
+          "legendFormat": "detached unacked evicted",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(waddle_sm_send_window_pauses_total[5m])) or vector(0)",
+          "legendFormat": "send-window pauses",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(increase(waddle_sm_send_window_pause_timeouts_total[5m])) or vector(0)",
+          "legendFormat": "pause timeouts",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pending-delivery flush and claims",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(waddle_pending_flush_batches_total[5m])) or vector(0)",
+          "legendFormat": "flush batches",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(waddle_pending_flush_rows_pushed_total[5m])) or vector(0)",
+          "legendFormat": "rows pushed",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(waddle_pending_delivery_orphan_claims_released_total[5m])) or vector(0)",
+          "legendFormat": "orphan claims released",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(increase(waddle_pending_delivery_quota_exceeded_total[5m])) or vector(0)",
+          "legendFormat": "quota exceeded",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(increase(waddle_pending_delivery_aged_out_total[5m])) or vector(0)",
+          "legendFormat": "aged out",
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Push delivery funnel",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(waddle_push_candidate_created_total[5m])) or vector(0)",
+          "legendFormat": "created",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(waddle_push_candidate_coalesced_total[5m])) or vector(0)",
+          "legendFormat": "coalesced",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(waddle_push_outbox_published_total[5m])) or vector(0)",
+          "legendFormat": "published",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (reason) (increase(waddle_push_outbox_retry_scheduled_total[5m]))",
+          "legendFormat": "retry: {{reason}}",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(increase(waddle_push_outbox_dead_lettered_total[5m])) or vector(0)",
+          "legendFormat": "dead-lettered",
+          "refId": "E"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Broadcast outcomes",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(increase(waddle_broadcast_delivered_total[5m])) or vector(0)",
+          "legendFormat": "delivered",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(waddle_broadcast_not_connected_total[5m])) or vector(0)",
+          "legendFormat": "not connected",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(waddle_broadcast_dropped_full_total[5m])) or vector(0)",
+          "legendFormat": "dropped: full",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(increase(waddle_broadcast_dropped_closed_total[5m])) or vector(0)",
+          "legendFormat": "dropped: closed",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "SM resume success vs missing cached session",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"waddle-server\"} |= \"SM resumed\" != \"without cached detached Session\" [5m])) or vector(0)",
+          "legendFormat": "resumed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(count_over_time({service_name=\"waddle-server\"} |= \"SM resumed without cached detached Session\" [5m])) or vector(0)",
+          "legendFormat": "missing cached session",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["waddle", "delivery"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "regex": "/-prom$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-prom", "value": "grafanacloud-prom" }
+      },
+      {
+        "name": "DS_LOKI",
+        "type": "datasource",
+        "query": "loki",
+        "regex": "/-logs$/",
+        "current": { "selected": true, "text": "grafanacloud-waddlesocial-logs", "value": "grafanacloud-logs" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Waddle delivery reliability",
+  "uid": "waddle-delivery-reliability",
+  "version": 1
+}

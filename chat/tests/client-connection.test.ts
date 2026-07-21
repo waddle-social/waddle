@@ -162,7 +162,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("ack removes the persisted copy and reports queue depth + latency", async () => {
     const { queue, events } = createQueue();
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     const acked: Array<{ id: string; kind: "room" | "dm" }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
     events.on("messageAcked", (id, meta) => acked.push({ id, kind: meta.kind }));
@@ -173,7 +173,10 @@ describe("OfflineSendQueue drain ordering", () => {
 
     expect(listQueuedMessages(SCOPE)).toHaveLength(0);
     expect(acked).toEqual([{ id: "dm-1", kind: "dm" }]);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(depths.slice(-2)).toEqual([
+      { kind: "dm", persisted: 0, inflight: 0 },
+      { kind: "room", persisted: 0, inflight: 0 },
+    ]);
   });
 
   test("non-retryable send failures are discarded instead of retried forever", async () => {
@@ -244,7 +247,7 @@ describe("OfflineSendQueue drain ordering", () => {
 
   test("seedFromResumeState tracks XEP-0198 replayed stanza ids so acks clear the store", () => {
     const { queue, events } = createQueue();
-    const depths: Array<{ persisted: number; inflight: number }> = [];
+    const depths: Array<{ kind: "room" | "dm"; persisted: number; inflight: number }> = [];
     events.on("queueDepthChange", (depth) => depths.push(depth));
 
     queue.queueDirectMessage("bob@example.com", "native replay", { id: "dm-native" });
@@ -258,7 +261,10 @@ describe("OfflineSendQueue drain ordering", () => {
     queue.handleAck("dm-native");
 
     expect(listQueuedMessages(SCOPE)).toHaveLength(0);
-    expect(depths.at(-1)).toEqual({ persisted: 0, inflight: 0 });
+    expect(depths.slice(-2)).toEqual([
+      { kind: "dm", persisted: 0, inflight: 0 },
+      { kind: "room", persisted: 0, inflight: 0 },
+    ]);
   });
 });
 

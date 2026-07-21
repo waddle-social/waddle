@@ -1,12 +1,15 @@
 // Direct unit tests for useChannelLiveMerge covering the per-XEP apply*
 // helpers and the typed-dispatch path through handleRoomMessage.
 
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { ref } from "vue";
 import { useChannelLiveMerge } from "../src/channels/live-merge";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { TimelineMessage } from "../src/lib/chat-ui";
+import { __setFaroForTesting } from "../src/lib/telemetry";
+
+afterEach(() => __setFaroForTesting(null));
 
 const session: WaddleSession = {
   username: "alice",
@@ -63,6 +66,35 @@ describe("applyDisplayed (XEP-0333)", () => {
     ];
     h.liveMerge.applyDisplayed("m1", "bob");
     expect(h.messages.value[0]?.readBy).toEqual(["bob"]);
+  });
+
+  test("ignores unloaded targets and reports only real receive-processing failures", () => {
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({ api: { pushEvent: (name: string, attributes?: Record<string, string>) => {
+      events.push({ name, attributes });
+    } } } as never);
+    const h = harness();
+    h.liveMerge.applyDisplayed("outside-loaded-window", "bob");
+    expect(events).toEqual([]);
+
+    h.messages.value = [{
+      id: "m1",
+      createdAt: "2020-01-01T00:00:00Z",
+      body: "",
+      nick: "alice",
+      get readBy(): string[] { throw new Error("broken row"); },
+    } as TimelineMessage];
+    h.liveMerge.applyDisplayed("m1", "bob");
+
+    expect(events[0]).toEqual({
+      name: "chat.xmpp.displayed_marker.failed",
+      attributes: {
+        direction: "receive",
+        kind: "room",
+        reason: "receive-processing-failed",
+        round_trip_latency_band: "over-5s",
+      },
+    });
   });
 });
 

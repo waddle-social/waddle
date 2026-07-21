@@ -182,6 +182,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             })
             .collect();
 
+        let occupant_count_before = self.room.occupant_count();
         let new_occupant = self.room.add_occupant_with_affiliation(
             msg.sender_jid,
             msg.nick.clone(),
@@ -190,6 +191,14 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let new_occupant_affiliation = new_occupant.affiliation;
         let new_occupant_role = new_occupant.role;
         let occupant_count = self.room.occupant_count();
+        // Observability (#1320): every accepted join is a MUC presence
+        // event; the pod-wide occupant gauge advances only when the
+        // occupant set actually grew (multi-session joins / rejoins add a
+        // session, not an occupant, so the diff is 0).
+        crate::metrics::record_muc_presence("join");
+        crate::metrics::adjust_muc_occupant_total(
+            occupant_count as i64 - occupant_count_before as i64,
+        );
         let room_jid = self.room.room_jid.clone();
         if matches!(msg.affiliation_grant, JoinAffiliationGrant::Resolver(_))
             && !resolver_join_advanced_admission_revision
@@ -278,6 +287,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .muji_state
             .get(&nick)
             .is_some_and(|entries| entries.contains_key(&msg.sender_jid));
+        let occupant_count_before = self.room.occupant_count();
         let removed_last_session = self
             .room
             .remove_occupant_session(&nick, &msg.sender_jid)
@@ -308,6 +318,13 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 .map(|occupant| occupant.real_jid.clone())
         };
         let occupant_count = self.room.occupant_count();
+        // Observability (#1320): a processed leave is a MUC presence
+        // event; the occupant gauge decreases only when this leave
+        // removed the occupant's final session.
+        crate::metrics::record_muc_presence("leave");
+        crate::metrics::adjust_muc_occupant_total(
+            occupant_count as i64 - occupant_count_before as i64,
+        );
         let is_persistent = self.room.config.persistent;
         let occupancy_revision = self.occupancy_revision;
         Ok(Some(LeaveOutcome {
