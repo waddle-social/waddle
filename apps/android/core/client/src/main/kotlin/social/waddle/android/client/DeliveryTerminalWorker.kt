@@ -43,20 +43,38 @@ internal class DeliveryTerminalWorker(
         check(ownership.kind == WorkerKind.DELIVERY_TERMINAL) {
             "delivery terminal worker requires a terminal ownership"
         }
-        return Run(journal, dispatchEvent, processEpoch, commandCapacity, ownership, onReady, onExit, evidence, scope)
+        return Run(
+            RunDependencies(journal, dispatchEvent, processEpoch, evidence),
+            RunCallbacks(onReady, onExit),
+            commandCapacity,
+            ownership,
+            scope,
+        )
     }
 
+    internal data class RunDependencies(
+        val journal: DeliveryJournalStore,
+        val dispatchEvent: (XmppEvent) -> Unit,
+        val processEpoch: ProcessEpoch,
+        val evidence: WorkerExitEvidence,
+    )
+
+    internal data class RunCallbacks(
+        val onReady: suspend (WorkerOwnership) -> Unit,
+        val onExit: suspend (WorkerExit) -> Unit,
+    )
+
     internal class Run internal constructor(
-        private val journal: DeliveryJournalStore,
-        private val dispatchEvent: (XmppEvent) -> Unit,
-        private val processEpoch: ProcessEpoch,
+        private val dependencies: RunDependencies,
+        private val callbacks: RunCallbacks,
         commandCapacity: Int,
         val ownership: WorkerOwnership,
-        private val onReady: suspend (WorkerOwnership) -> Unit,
-        private val onExit: suspend (WorkerExit) -> Unit,
-        private val evidence: WorkerExitEvidence,
         scope: CoroutineScope,
     ) {
+        private val journal get() = dependencies.journal
+        private val dispatchEvent get() = dependencies.dispatchEvent
+        private val processEpoch get() = dependencies.processEpoch
+        private val evidence get() = dependencies.evidence
         private val commands = Channel<TerminalSignal>(commandCapacity)
         private val ready = CompletableDeferred<Unit>()
         private val startupDrain = CompletableDeferred<Unit>()
@@ -116,83 +134,92 @@ internal class DeliveryTerminalWorker(
             var reason: WorkerExitReason? = null
             var activeSignal: TerminalSignal? = null
             try {
-                yield()
-                withContext(NonCancellable) { onReady(ownership) }
-                ready.complete(Unit)
-                receipts.drain()
-                drainPersisted()
-                startupDrain.complete(Unit)
+                startWorker()
                 for (signal in commands) {
                     activeSignal = signal
-                    record(signal)
-                    drainPersisted()
-                    signal.committed.complete(TerminalCommandOutcome.Committed)
-                    pendingCommands.decrementAndGet()
+                    processSignal(signal)
                     activeSignal = null
                 }
             } catch (cancellation: CancellationException) {
-                ready.cancel(cancellation)
-                startupDrain.cancel(cancellation)
-                activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
-                if (activeSignal != null) pendingCommands.decrementAndGet()
-                activeSignal = null
-                reason = if (stopRequested) {
+                reason = cancellationReason(cancellation, activeSignal)
+            } catch (failure: Throwable) {
+                reason = unexpectedFailureReason(failure, activeSignal)
+            } finally {
+                finishWorker(reason)
+            }
+        }
+
+        private suspend fun startWorker() {
+            yield()
+            withContext(NonCancellable) { callbacks.onReady(ownership) }
+            ready.complete(Unit)
+            receipts.drain()
+            drainPersisted()
+            startupDrain.complete(Unit)
+        }
+
+        private suspend fun processSignal(signal: TerminalSignal) {
+            record(signal)
+            drainPersisted()
+            signal.committed.complete(TerminalCommandOutcome.Committed)
+            pendingCommands.decrementAndGet()
+        }
+
+        private fun cancellationReason(
+            cancellation: CancellationException,
+            activeSignal: TerminalSignal?,
+        ): WorkerExitReason {
+            ready.cancel(cancellation)
+            startupDrain.cancel(cancellation)
+            activeSignal?.committed?.complete(TerminalCommandOutcome.WorkerUnavailable)
+            if (activeSignal != null) pendingCommands.decrementAndGet()
+            if (stopRequested) return WorkerExitReason.RequestedStop
+            evidence.record(ownership, cancellation)
+            return when (val receiptFailure = terminalReceiptFailure(cancellation)) {
+                is TerminalReceiptFailureExtraction.Found ->
+                    WorkerExitReason.UnexpectedFailure(
+                        WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure),
+                    )
+                TerminalReceiptFailureExtraction.None -> WorkerExitReason.OwnerScopeCancelled
+            }
+        }
+
+        private fun unexpectedFailureReason(
+            failure: Throwable,
+            activeSignal: TerminalSignal?,
+        ): WorkerExitReason {
+            ready.completeExceptionally(failure)
+            startupDrain.completeExceptionally(failure)
+            evidence.record(ownership, failure)
+            val cause = when (val receiptFailure = terminalReceiptFailure(failure)) {
+                is TerminalReceiptFailureExtraction.Found ->
+                    WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure)
+                TerminalReceiptFailureExtraction.None -> WorkerFailureKind.DEPENDENCY_FAILURE
+            }
+            activeSignal?.committed?.complete(TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)))
+            if (activeSignal != null) pendingCommands.decrementAndGet()
+            LOGGER.log(Level.SEVERE, "delivery terminal worker stopped", failure)
+            return WorkerExitReason.UnexpectedFailure(cause)
+        }
+
+        private suspend fun finishWorker(reason: WorkerExitReason?) {
+            unavailable.set(true)
+            commands.close()
+            rejectQueuedCommands()
+            val exactExit = WorkerExit(
+                lifecycle = ownership.lifecycle,
+                generation = ownership.generation,
+                kind = ownership.kind,
+                reason = reason ?: if (stopRequested) {
                     WorkerExitReason.RequestedStop
                 } else {
-                    evidence.record(ownership, cancellation)
-                    when (val receiptFailure = terminalReceiptFailure(cancellation)) {
-                        is TerminalReceiptFailureExtraction.Found ->
-                            WorkerExitReason.UnexpectedFailure(
-                                WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure),
-                            )
-                        TerminalReceiptFailureExtraction.None ->
-                        WorkerExitReason.OwnerScopeCancelled
-                    }
-                }
-            } catch (failure: Throwable) {
-                ready.completeExceptionally(failure)
-                startupDrain.completeExceptionally(failure)
-                evidence.record(ownership, failure)
-                val cause = when (val receiptFailure = terminalReceiptFailure(failure)) {
-                    is TerminalReceiptFailureExtraction.Found ->
-                        WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION(receiptFailure.failure)
-                    TerminalReceiptFailureExtraction.None -> WorkerFailureKind.DEPENDENCY_FAILURE
-                }
-                activeSignal?.committed?.complete(
-                    TerminalCommandOutcome.Failed(TerminalWorkerFailure(cause)),
-                )
-                if (activeSignal != null) pendingCommands.decrementAndGet()
-                activeSignal = null
-                reason = WorkerExitReason.UnexpectedFailure(cause)
-                LOGGER.log(Level.SEVERE, "delivery terminal worker stopped", failure)
-            } finally {
-                // Closing admission precedes callback fencing: a capability
-                // retained before the callback can never wait on a dead run.
-                unavailable.set(true)
-                commands.close()
-                rejectQueuedCommands()
-                val exactExit = WorkerExit(
-                    lifecycle = ownership.lifecycle,
-                    generation = ownership.generation,
-                    kind = ownership.kind,
-                    reason = reason ?: if (stopRequested) {
-                        WorkerExitReason.RequestedStop
-                    } else {
-                        WorkerExitReason.UnexpectedReturn
-                    },
-                )
-                val exitCallbackFailure = try {
-                    withContext(NonCancellable) { onExit(exactExit) }
-                    null
-                } catch (failure: Throwable) {
-                    failure
-                }
-                if (exitCallbackFailure == null) {
-                    exit.complete(exactExit)
-                } else {
-                    exit.completeExceptionally(exitCallbackFailure)
-                }
-            }
+                    WorkerExitReason.UnexpectedReturn
+                },
+            )
+            val callbackFailure = runCatching {
+                withContext(NonCancellable) { callbacks.onExit(exactExit) }
+            }.exceptionOrNull()
+            if (callbackFailure == null) exit.complete(exactExit) else exit.completeExceptionally(callbackFailure)
         }
 
         private fun rejectQueuedCommands() {

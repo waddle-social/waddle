@@ -83,7 +83,6 @@ internal class OutboundMessenger(
     suspend fun finishSupersededConstruction(claim: TransportConstructionClaim) {
         lifecycle.finishSupersededConstruction(claim)
     }
-
     suspend fun markTransportClosed(
         handle: ConnectionAttemptHandle,
         closed: Boolean,
@@ -150,10 +149,8 @@ internal class OutboundMessenger(
             )
         ) {
             is OutboundAdmissionResult.Granted -> admission.lease
-            OutboundAdmissionResult.OwnerMismatch ->
-                return SendResult(WaddleSendMessageOutcome.Error)
-            OutboundAdmissionResult.LifecycleUnavailable ->
-                return SendResult(WaddleSendMessageOutcome.NotConnected)
+            OutboundAdmissionResult.OwnerMismatch -> return SendResult(WaddleSendMessageOutcome.Error)
+            OutboundAdmissionResult.LifecycleUnavailable -> return SendResult(WaddleSendMessageOutcome.NotConnected)
         }
         var primary: Throwable? = null
         try {
@@ -162,55 +159,7 @@ internal class OutboundMessenger(
                 content = queuedContent(body, extras),
                 source = source,
             )
-            return when (lease) {
-                is OutboundAdmissionLease.OfflineOutbound -> when (
-                    val disposition = sendService.send(
-                        request,
-                        OutboundSendAdmission.Offline(DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid)),
-                    )
-                ) {
-                    is OutboundSendDisposition.Completed -> disposition.result
-                    is OutboundSendDisposition.Queued,
-                    is OutboundSendDisposition.TerminalRequired,
-                    -> error("offline admission cannot produce $disposition")
-                }
-                is OutboundAdmissionLease.LiveOutbound -> when (
-                    val disposition = sendService.send(
-                        request,
-                        OutboundSendAdmission.Live(
-                            owner = DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid),
-                            attempt = lease.attempt,
-                            client = lease.client,
-                        ),
-                    )
-                ) {
-                    is OutboundSendDisposition.Completed -> disposition.result
-                    is OutboundSendDisposition.Queued -> {
-                        lifecycle.signalDrain(lease.attempt)
-                        disposition.result
-                    }
-                    is OutboundSendDisposition.TerminalRequired -> {
-                        requireTerminalCommitted(
-                            lifecycle.submitTerminal(
-                                disposition.row.ownerBareJid,
-                                disposition.row.clientStanzaId,
-                                disposition.ownership.attempt,
-                                DeliveryTerminalKind.NONRETRYABLE_DELETE,
-                            ),
-                        )
-                        drainDeliveryJournal()
-                        SendResult(
-                            if (disposition.wireOutcome is WaddleSendMessageOutcome.Sent) {
-                                WaddleSendMessageOutcome.Error
-                            } else {
-                                disposition.wireOutcome
-                            },
-                        )
-                    }
-                }
-                is OutboundAdmissionLease.Terminal ->
-                    error("terminal lease cannot admit outbound messages")
-            }
+            return sendForLease(request, lease)
         } catch (failure: Throwable) {
             primary = failure
             throw failure
@@ -218,11 +167,7 @@ internal class OutboundMessenger(
             requireLifecycleRelease(
                 admissionReleaseOperations.release(lifecycle, lease),
                 lease.capability,
-                when (lease) {
-                    is OutboundAdmissionLease.OfflineOutbound -> LifecycleReleaseSite.OFFLINE_OUTBOUND
-                    is OutboundAdmissionLease.LiveOutbound -> LifecycleReleaseSite.LIVE_OUTBOUND
-                    is OutboundAdmissionLease.Terminal -> LifecycleReleaseSite.TERMINAL_COMMAND
-                },
+                releaseSite(lease),
                 primary = primary,
             )
         }
@@ -246,6 +191,74 @@ internal class OutboundMessenger(
             mentions = extras?.mentions.orEmpty(),
         )
 
+    private suspend fun sendForLease(
+        request: OutboundSendRequest,
+        lease: OutboundAdmissionLease,
+    ): SendResult = when (lease) {
+        is OutboundAdmissionLease.OfflineOutbound -> sendOffline(request, lease)
+        is OutboundAdmissionLease.LiveOutbound -> sendLive(request, lease)
+        is OutboundAdmissionLease.Terminal -> error("terminal lease cannot admit outbound messages")
+    }
+
+    private suspend fun sendOffline(
+        request: OutboundSendRequest,
+        lease: OutboundAdmissionLease.OfflineOutbound,
+    ): SendResult =
+        when (
+            val disposition = sendService.send(
+                request,
+                OutboundSendAdmission.Offline(DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid)),
+            )
+        ) {
+            is OutboundSendDisposition.Completed -> disposition.result
+            is OutboundSendDisposition.Queued,
+            is OutboundSendDisposition.TerminalRequired,
+            -> error("offline admission cannot produce $disposition")
+        }
+
+    private suspend fun sendLive(request: OutboundSendRequest, lease: OutboundAdmissionLease.LiveOutbound): SendResult =
+        when (
+            val disposition = sendService.send(
+                request,
+                OutboundSendAdmission.Live(
+                    DeliveryOwnerBareJid(lease.lifecycle.ownerBareJid),
+                    lease.attempt,
+                    lease.client,
+                ),
+            )
+        ) {
+            is OutboundSendDisposition.Completed -> disposition.result
+            is OutboundSendDisposition.Queued -> {
+                lifecycle.signalDrain(lease.attempt)
+                disposition.result
+            }
+            is OutboundSendDisposition.TerminalRequired -> terminalRequiredResult(disposition)
+        }
+
+    private suspend fun terminalRequiredResult(disposition: OutboundSendDisposition.TerminalRequired): SendResult {
+        requireTerminalCommitted(
+            lifecycle.submitTerminal(
+                disposition.row.ownerBareJid,
+                disposition.row.clientStanzaId,
+                disposition.ownership.attempt,
+                DeliveryTerminalKind.NONRETRYABLE_DELETE,
+            ),
+        )
+        drainDeliveryJournal()
+        val outcome = if (disposition.wireOutcome is WaddleSendMessageOutcome.Sent) {
+            WaddleSendMessageOutcome.Error
+        } else {
+            disposition.wireOutcome
+        }
+        return SendResult(outcome)
+    }
+
+    private fun releaseSite(lease: OutboundAdmissionLease): LifecycleReleaseSite = when (lease) {
+        is OutboundAdmissionLease.OfflineOutbound -> LifecycleReleaseSite.OFFLINE_OUTBOUND
+        is OutboundAdmissionLease.LiveOutbound -> LifecycleReleaseSite.LIVE_OUTBOUND
+        is OutboundAdmissionLease.Terminal -> LifecycleReleaseSite.TERMINAL_COMMAND
+    }
+
     /**
      * Replay owner Ready rows after the startup terminal barrier. Rows already
      * native-owned or terminal are never selected.
@@ -267,34 +280,7 @@ internal class OutboundMessenger(
         try {
             val critical = lifecycle.acquireDrainCriticalSection()
             try {
-                if (!lifecycle.matches(handle, expectedAttempt)) return
-                awaitStartupTerminalDrain(sessionLifecycle.ownerBareJid)
-                while (lifecycle.matches(handle, expectedAttempt)) {
-                    when (
-                        val disposition = drainService.drainOne(
-                            OutboundDrainOperation(
-                                owner = DeliveryOwnerBareJid(sessionLifecycle.ownerBareJid),
-                                attempt = expectedAttempt,
-                                client = lease.client,
-                            ),
-                        )
-                    ) {
-                        OutboundDrainDisposition.NoReady,
-                        OutboundDrainDisposition.AwaitingNativeAck,
-                        OutboundDrainDisposition.RetryableReleased,
-                        -> return
-                        is OutboundDrainDisposition.TerminalRequired -> {
-                            requireTerminalCommitted(
-                                lifecycle.submitTerminal(
-                                    disposition.row.ownerBareJid,
-                                    disposition.row.clientStanzaId,
-                                    disposition.ownership.attempt,
-                                    DeliveryTerminalKind.NONRETRYABLE_DELETE,
-                                ),
-                            )
-                        }
-                    }
-                }
+                drainUnderCritical(sessionLifecycle, handle, expectedAttempt, lease.client)
             } finally {
                 lifecycle.releaseDrainCriticalSection(critical)
             }
@@ -308,6 +294,40 @@ internal class OutboundMessenger(
                 LifecycleReleaseSite.OUTBOUND_DRAIN,
                 primary = primary,
             )
+        }
+    }
+
+    private suspend fun drainUnderCritical(
+        sessionLifecycle: SessionLifecycleRef,
+        handle: ConnectionAttemptHandle,
+        expectedAttempt: DeliveryAttemptRef,
+        client: WaddleClientInterface,
+    ) {
+        if (!lifecycle.matches(handle, expectedAttempt)) return
+        awaitStartupTerminalDrain(sessionLifecycle.ownerBareJid)
+        while (lifecycle.matches(handle, expectedAttempt)) {
+            when (
+                val disposition = drainService.drainOne(
+                    OutboundDrainOperation(
+                        owner = DeliveryOwnerBareJid(sessionLifecycle.ownerBareJid),
+                        attempt = expectedAttempt,
+                        client = client,
+                    ),
+                )
+            ) {
+                OutboundDrainDisposition.NoReady,
+                OutboundDrainDisposition.AwaitingNativeAck,
+                OutboundDrainDisposition.RetryableReleased,
+                -> return
+                is OutboundDrainDisposition.TerminalRequired -> requireTerminalCommitted(
+                    lifecycle.submitTerminal(
+                        disposition.row.ownerBareJid,
+                        disposition.row.clientStanzaId,
+                        disposition.ownership.attempt,
+                        DeliveryTerminalKind.NONRETRYABLE_DELETE,
+                    ),
+                )
+            }
         }
     }
 
