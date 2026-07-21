@@ -118,11 +118,14 @@ class CallForegroundService : Service() {
             is CallState.Outgoing -> state.to
             is CallState.Active -> state.peer
             is CallState.Incoming -> state.from
-            else -> null
+            // A start command can race call death (fast propose
+            // failure, remote conclusion): the mandatory promote then
+            // shows a neutral wrap-up body for the stop grace instead
+            // of a bogus ongoing call with a dead hang-up action.
+            CallState.Idle, is CallState.Ended -> return buildEndedNotification()
         }
-        val peerName = peerJid?.let { localpartOf(bareJidOf(it)) }
-            ?: getString(R.string.call_unknown_peer)
-        val person = Person.Builder().setName(peerName).setKey(peerJid ?: peerName).build()
+        val peerName = localpartOf(bareJidOf(peerJid)).ifEmpty { getString(R.string.call_unknown_peer) }
+        val person = Person.Builder().setName(peerName).setKey(peerJid).build()
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -149,6 +152,24 @@ class CallForegroundService : Service() {
                 ),
             )
             .setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangUpIntent))
+            .setOngoing(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setContentIntent(contentIntent)
+            .build()
+    }
+
+    /** Neutral body for the stop grace when no call is live. */
+    private fun buildEndedNotification(): Notification {
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(this, NotificationChannels.ONGOING_CALLS)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(getString(R.string.call_ended))
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
