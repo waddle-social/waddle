@@ -24,6 +24,11 @@ class CallSessionController(
     val media: CallMediaController,
     private val scope: CoroutineScope,
 ) {
+    // Written by the state collector, read by the media-connection
+    // collector — separate coroutines on a multithreaded dispatcher,
+    // so publication needs @Volatile (same pattern as
+    // LiveKitCallMediaController.room).
+    @Volatile
     private var connectedSid: String? = null
 
     fun start() {
@@ -78,9 +83,13 @@ class CallSessionController(
         val sid = connectedSid ?: return
         val current = sessionManager.callStore.state.value
         if (current is CallState.Active && current.sid == sid) {
-            // <gone/> like the web's identical media-failure path
-            // (CallOverlay.vue tearDownActiveCall(sender, "gone")).
-            sessionManager.callStore.hangUp(WaddleJingleReason.GONE)
+            // Deliberate divergence from the web, which keeps the slot
+            // up on mid-call transport death (use-call-engine.ts
+            // records telemetry only): on Android an Active slot pins a
+            // foreground service and mic capture, so a dead Room must
+            // end the call. XEP-0166 §7.4: connectivity problems →
+            // <connectivity-error/>.
+            sessionManager.callStore.hangUp(WaddleJingleReason.CONNECTIVITY_ERROR)
         }
     }
 
@@ -103,13 +112,19 @@ class CallSessionController(
             // The Jingle session exists but media can never flow —
             // tear the call down so the peer isn't left on a dead
             // session. XEP-0166 §7.4 <gone/>, matching the web's
-            // media-failure teardown reason exactly (CallOverlay.vue);
-            // the defect itself is visible via media.connection ==
-            // Failed. Disconnect defensively: a half-open Room must
-            // never survive its call slot.
+            // join-failure teardown reason exactly (CallOverlay.vue
+            // tearDownActiveCall(sender, "gone")); the defect itself is
+            // visible via media.connection == Failed. Disconnect
+            // defensively: a half-open Room must never survive its
+            // call slot.
             disconnectMediaIfConnected()
             if (sessionManager.callStore.state.value == state) {
-                sessionManager.callStore.hangUp(WaddleJingleReason.GONE)
+                // Launched on the controller scope, NOT run inline:
+                // hangUp flips the slot to Idle, and that emission
+                // cancels the collectLatest block this catch runs in —
+                // an inline hangUp would cancel its own terminate/
+                // finish sends mid-IQ and ghost the peer.
+                scope.launch { sessionManager.callStore.hangUp(WaddleJingleReason.GONE) }
             }
         }
     }

@@ -441,10 +441,148 @@ class CallStoreTest {
         assertTrue(
             RecordedCallVerb.SessionTerminate(peerFull, "c-old", WaddleJingleReason.EXPIRED) in kinds,
         )
+        // accepting = true: the <proceed/> is already out, so the
+        // migrated ring must not re-notify or offer a duplicate Accept.
         assertEquals(
-            CallState.Incoming(from = peerFull, sid = "c-new", media = audio),
+            CallState.Incoming(from = peerFull, sid = "c-new", media = audio, accepting = true),
             f.store.state.value,
         )
+    }
+
+    @Test
+    fun `accepted ring times out when the caller never session-initiates`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(peerFull, "c1"))
+        runCurrent()
+        assertTrue(f.store.acceptIncoming())
+        f.client.callVerbs.clear()
+
+        advanceTimeBy(CallStore.SESSION_ACCEPT_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        // Our <proceed/> went out but the caller died before the Jingle
+        // session-initiate: the accepting slot (which pins a foreground
+        // service on Android) must be bounded, and the caller's other
+        // devices told.
+        assertEquals(CallState.Ended("c1", CallEndReason.Timeout), f.store.state.value)
+        assertTrue(RecordedCallVerb.Reject(peerFull, "c1") in f.client.callVerbs)
+    }
+
+    @Test
+    fun `session-initiate retires the responder's accept timer`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(peerFull, "c1"))
+        runCurrent()
+        assertTrue(f.store.acceptIncoming())
+        f.store.onCallEvent(sessionInitiate(peerFull, "c1"))
+        runCurrent()
+        f.client.callVerbs.clear()
+
+        advanceTimeBy(CallStore.SESSION_ACCEPT_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        val state = f.store.state.value
+        assertTrue(state is CallState.Active && state.sid == "c1")
+        assertTrue(f.client.callVerbs.isEmpty())
+    }
+
+    @Test
+    fun `migrated ring times out when the caller never session-initiates`() = runTest {
+        val f = Fixture(sid = { "c-old" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+        f.store.onCallEvent(proceed(peerFull, "c-old"))
+        f.store.onCallEvent(sessionAccept(peerFull, "c-old"))
+        runCurrent()
+        f.store.onCallEvent(propose(peerFull, "c-new"))
+        runCurrent()
+        f.client.callVerbs.clear()
+
+        advanceTimeBy(CallStore.SESSION_ACCEPT_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        // We formally accepted c-new with the migration <proceed/>; a
+        // caller that dies before session-initiate must not pin the
+        // accepting slot (and its foreground service) forever.
+        assertEquals(CallState.Ended("c-new", CallEndReason.Timeout), f.store.state.value)
+        assertTrue(RecordedCallVerb.Reject(peerFull, "c-new") in f.client.callVerbs)
+    }
+
+    @Test
+    fun `tie-break effect racing a local hang-up still declines the peer's propose`() = runTest {
+        val f = Fixture(sid = { "c-zz" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+
+        // The winning (lower-sid) propose is queued behind the effect
+        // channel; the user hangs up before it runs.
+        f.store.onCallEvent(propose(peerFull, "c-aa"))
+        f.store.hangUp()
+        runCurrent()
+
+        // Our sid was retracted by the hang-up; the peer's propose must
+        // still get an answer instead of ringing to their timeout —
+        // and the dead tie-break must not resurrect a ring.
+        assertTrue(RecordedCallVerb.Retract(peerBare, "c-zz") in f.client.callVerbs)
+        assertTrue(RecordedCallVerb.Reject(peerFull, "c-aa") in f.client.callVerbs)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.RetractTieBreak })
+        assertEquals(CallState.Idle, f.store.state.value)
+    }
+
+    @Test
+    fun `stale proceed effect cannot touch a newer call`() = runTest {
+        var callIndex = 0
+        val f = Fixture(sid = { if (callIndex++ == 0) "c-first" else "c-second" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+
+        // Peer proceed for c-first is queued; before it runs the user
+        // hangs up and dials again — the slot now belongs to c-second.
+        f.store.onCallEvent(proceed(peerFull, "c-first"))
+        f.store.hangUp()
+        f.store.startCall(peerBare, audio)
+        runCurrent()
+
+        // No session-initiate may go out for the retracted c-first, and
+        // the stale effect must not clobber the live c-second slot.
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.SessionInitiate })
+        val state = f.store.state.value
+        assertTrue(state is CallState.Outgoing && state.sid == "c-second")
+    }
+
+    @Test
+    fun `tie-break without a bound resource retracts the losing sid and declines the survivor`() = runTest {
+        val f = Fixture(sid = { "c-zz" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+        f.activeSession.ownFullJid = null
+
+        // "c-aa" < "c-zz": the incoming propose wins the tie-break, so
+        // OUR sid must be retracted (XEP-0353 tie-break-1) even without
+        // a bound resource; theirs is declined since we cannot host.
+        f.store.onCallEvent(propose(peerFull, "c-aa"))
+        runCurrent()
+
+        assertTrue(RecordedCallVerb.RetractTieBreak(peerFull, "c-zz") in f.client.callVerbs)
+        assertTrue(RecordedCallVerb.Reject(peerFull, "c-aa") in f.client.callVerbs)
+        // The retracted sid must not keep ringing locally.
+        assertEquals(CallState.Ended("c-zz", CallEndReason.Expired), f.store.state.value)
+    }
+
+    @Test
+    fun `tie-break without a bound resource still rejects the losing incoming sid`() = runTest {
+        val f = Fixture(sid = { "c-aa" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+        f.activeSession.ownFullJid = null
+
+        f.store.onCallEvent(propose(peerFull, "c-zz"))
+        runCurrent()
+
+        assertTrue(RecordedCallVerb.RejectTieBreak(peerFull, "c-zz") in f.client.callVerbs)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.RetractTieBreak })
     }
 
     // ── Termination ──────────────────────────────────────────────────────────

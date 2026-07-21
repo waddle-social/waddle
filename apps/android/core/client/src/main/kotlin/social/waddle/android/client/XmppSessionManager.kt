@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +14,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.calls.CallStore
@@ -142,9 +144,20 @@ class XmppSessionManager(
         // Best-effort call teardown BEFORE the stream closes (web
         // client.ts disconnect parity): the peer must get the
         // retract/reject/terminate + XEP-0353 <finish/> bookend instead
-        // of ringing into a dead session until their timeout.
+        // of ringing into a dead session until their timeout. Bounded:
+        // on a silently-dead network the terminate IQ only fails after
+        // the FFI's full 30 s timeout, and sign-out must not hold
+        // [lifecycleMutex] that long. Cancellation must propagate —
+        // swallowing it would run the teardown below inside an
+        // already-cancelled coroutine and abort it halfway.
         if (callStore.state.value != CallState.Idle) {
-            runCatching { callStore.hangUp() }
+            try {
+                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) { callStore.hangUp() }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Best-effort: sign-out proceeds even if teardown fails.
+            }
         }
         cancelSessionScope()
         activeSession.ownBareJid = null
@@ -357,5 +370,8 @@ class XmppSessionManager(
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = SessionCatchup.CATCHUP_DM_LIMIT
+
+        /** Sign-out budget for the pre-disconnect call hang-up. */
+        const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
     }
 }

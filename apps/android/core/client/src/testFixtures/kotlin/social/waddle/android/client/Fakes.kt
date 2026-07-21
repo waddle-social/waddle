@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -228,6 +229,13 @@ class FakeWaddleClient : WaddleClientInterface {
     var callTerminateOutcome: WaddleCallSessionTerminateOutcome =
         WaddleCallSessionTerminateOutcome.OK
 
+    /**
+     * Virtual-time stall before [sendCallSessionTerminateWithOutcome]
+     * answers — models the FFI's IQ timeout on a dead network.
+     */
+    @Volatile
+    var callTerminateDelayMillis = 0L
+
     /** Canned XEP-0215 services served by [fetchExternalServices]. */
     @Volatile
     var externalServices: List<WaddleExternalService> = emptyList()
@@ -322,6 +330,7 @@ class FakeWaddleClient : WaddleClientInterface {
         sid: String,
         reason: WaddleJingleReason?,
     ): WaddleCallSessionTerminateOutcome {
+        if (callTerminateDelayMillis > 0) delay(callTerminateDelayMillis)
         callVerbs += RecordedCallVerb.SessionTerminateWithOutcome(peerFullJid, sid, reason)
         return callTerminateOutcome
     }
