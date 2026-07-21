@@ -64,7 +64,6 @@ describe("root sync guard launcher", () => {
 		const workspace = directory();
 		const bin = join(workspace, "bin");
 		write(join(bin, "cuenv"), "#!/usr/bin/env bash\necho cuenv-child-failed >&2\nexit 7\n", 0o755);
-		write(join(bin, "bun"), "#!/usr/bin/env bash\nexit 0\n", 0o755);
 		const result = run(workspace, `${bin}:/usr/bin:/bin`);
 		expect(result.status).toBe(7);
 		expect(result.stderr).toContain("cuenv-child-failed");
@@ -82,7 +81,17 @@ describe("root sync guard launcher", () => {
 		);
 		write(
 			join(bin, "bun"),
-			`#!/usr/bin/env bash\nif [ "$1" = test ] && [ "$2" = ci/root-sync/run-root-sync-guard.test.ts ]; then echo launcher-test >> ${JSON.stringify(order)}; elif [ "$1" = test ]; then echo server-contract >> ${JSON.stringify(order)}; else echo actual-guard >> ${JSON.stringify(order)}; fi\n`,
+			[
+				"#!/usr/bin/env bash",
+				'if [ "$1" = test ] && [[ "$2" == */ci/root-sync/run-root-sync-guard.test.ts ]]; then',
+					`echo launcher-test >> ${JSON.stringify(order)}`,
+				'elif [ "$1" = test ]; then',
+					`echo server-contract >> ${JSON.stringify(order)}`,
+				"else",
+					`echo actual-guard >> ${JSON.stringify(order)}`,
+				"fi",
+				"",
+			].join("\n"),
 			0o755,
 		);
 		mkdirSync(join(workspace, "ci", "root-sync"), { recursive: true });
@@ -129,24 +138,69 @@ describe("root sync guard launcher", () => {
 		expect(existsSync(marker(workspace))).toBe(false);
 	});
 
-	test("keeps one job, setup pair, direct guard, and anchor per generated workflow", () => {
-		for (const [name, trigger] of [["waddle-root-sync-default.yml", "push:"], ["waddle-root-sync-pullrequest.yml", "pull_request:"]] as const) {
+	test("keeps exact topology and least-privilege permissions per generated workflow", () => {
+		for (const [name, expectedTrigger, forbiddenTrigger] of [
+			["waddle-root-sync-default.yml", "push:", "pull_request:"],
+			["waddle-root-sync-pullrequest.yml", "pull_request:", "push:"],
+		] as const) {
 			const workflow = readFileSync(join(repositoryRoot, ".github/workflows", name), "utf8");
-			expect(workflow).toContain(trigger);
-			expect(workflow.match(/^  requireGuardMarker:/gmu)).toHaveLength(1);
+			const triggerBlock = workflow.slice(
+				workflow.indexOf("on:\n"),
+				workflow.indexOf("\nconcurrency:"),
+			);
+			const jobs = workflow.slice(workflow.indexOf("\njobs:\n"));
+			const permissions = workflow.slice(
+				workflow.indexOf("\npermissions:\n"),
+				workflow.indexOf("\njobs:\n"),
+			);
+			const jobKeys = [...jobs.matchAll(/^  ([^\s:]+):$/gmu)].map(
+				(match) => match[1],
+			);
+
+			expect(jobKeys).toEqual(["requireGuardMarker"]);
+			expect(triggerBlock).toContain(expectedTrigger);
+			expect(triggerBlock).not.toContain(forbiddenTrigger);
+			if (name.includes("default")) {
+				expect(triggerBlock).toContain("workflow_dispatch:");
+			} else {
+				expect(triggerBlock).not.toContain("workflow_dispatch:");
+			}
 			expect(workflow.match(/Run root sync guard/gu)).toHaveLength(1);
 			expect(workflow.match(/- name: requireGuardMarker/gu)).toHaveLength(1);
 			expect(workflow.match(/Setup cuenv \(release\)/gu)).toHaveLength(1);
 			expect(workflow.match(/DeterminateSystems\/determinate-nix-action/gu)).toHaveLength(1);
-			expect(workflow).toContain("contents: read");
-			expect(workflow).toContain("checks: none");
-			expect(workflow).toContain("pull-requests: none");
+			expect(permissions).toBe(
+				"\npermissions:\n  contents: read\n  checks: none\n  pull-requests: none",
+			);
+			const order = [
+				"- name: Checkout",
+				"DeterminateSystems/determinate-nix-action",
+				"Setup cuenv (release)",
+				"Run root sync guard",
+				"- name: requireGuardMarker",
+			].map((step) => workflow.indexOf(step));
+			expect(order.every((index) => index >= 0)).toBe(true);
+			expect(order).toEqual([...order].sort((left, right) => left - right));
+		}
+
+		for (const name of [
+			"waddle-server-default.yml",
+			"waddle-server-pullrequest.yml",
+		]) {
+			const workflow = readFileSync(
+				join(repositoryRoot, ".github/workflows", name),
+				"utf8",
+			);
+			expect(workflow).not.toContain("checkRootSyncDrift");
 		}
 	});
 
-	test("runs launcher coverage before the server contract and guard", () => {
+	test("runs launcher coverage inside cuenv before the server contract and guard", () => {
 		const script = readFileSync(join(repositoryRoot, "ci", "root-sync", "run-root-sync-guard.sh"), "utf8");
-		expect(script.indexOf("bun test ci/root-sync/run-root-sync-guard.test.ts")).toBeLessThan(
+		expect(script.indexOf("bun test \"$2\"")).toBeGreaterThan(
+			script.indexOf('"${cuenv_bin}" exec'),
+		);
+		expect(script.indexOf("bun test \"$2\"")).toBeLessThan(
 			script.indexOf("bun test scripts/check-root-sync-drift.test.ts"),
 		);
 		expect(script.indexOf("bun test scripts/check-root-sync-drift.test.ts")).toBeLessThan(

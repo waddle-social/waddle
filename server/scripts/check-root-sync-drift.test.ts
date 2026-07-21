@@ -101,9 +101,11 @@ function withoutChatRuntime(contents: string): string {
 function commandHarness({
 	onLockSync,
 	onRootSync,
+	workflowStatus = { stdout: "", stderr: "" },
 }: {
 	onLockSync?: (attempt: number, repository: string) => void;
 	onRootSync?: (repository: string) => void;
+	workflowStatus?: { stdout: string; stderr: string };
 } = {}) {
 	const calls = { lockSync: 0, rootSync: 0 };
 	return {
@@ -114,6 +116,13 @@ function commandHarness({
 			}
 			if (command === "git" && args.join(" ") === "show HEAD:.gitignore") {
 				return { stdout: canonicalGitignore, stderr: "" };
+			}
+			if (
+				command === "git" &&
+				args.join(" ") ===
+					"status --porcelain=v1 --untracked-files=all -- .github/workflows"
+			) {
+				return workflowStatus;
 			}
 			if (command === cuenvBinary && args.join(" ") === "sync lock -A") {
 				calls.lockSync += 1;
@@ -155,7 +164,8 @@ describe("root sync fail-closed contract", () => {
 		expect(result).toEqual({
 			exitCode: 0,
 			stdout:
-				"Root sync guard verified 7 runtimes, 7 projects, 18 workflows, and two byte-stable workspace lock synchronizations.\n",
+				"Root sync guard verified 7 runtimes, 7 projects, 18 workflows, " +
+				"and two byte-stable workspace lock synchronizations.\n",
 			stderr: "",
 		});
 		expect(harness.calls).toEqual({ lockSync: 2, rootSync: 1 });
@@ -178,6 +188,50 @@ describe("root sync fail-closed contract", () => {
 		expect(result.stderr).toContain(
 			"actual: apps/android, colony, infrastructure/waddle.cloud, server, website",
 		);
+		expect(harness.calls).toEqual({ lockSync: 0, rootSync: 0 });
+	});
+
+	test.each([
+		["modified", " M .github/workflows/waddle-root-sync-default.yml"],
+		["missing", " D .github/workflows/waddle-root-sync-pullrequest.yml"],
+		["untracked", "?? .github/workflows/waddle-root-sync-untracked.yml"],
+	])(
+	"fails closed when setup leaves a %s generated workflow",
+	(_state, status) => {
+		const repository = createRepository();
+		const harness = commandHarness({
+			workflowStatus: { stdout: `${status}\n`, stderr: "" },
+		});
+
+		const result = checkRootSyncDrift({
+			repoRoot: repository,
+			commandRunner: harness.commandRunner,
+			cuenvBinary,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"generated workflows must match committed state before root synchronization",
+		);
+		expect(result.stderr).toContain(status.slice(3));
+		expect(harness.calls).toEqual({ lockSync: 0, rootSync: 0 });
+	},
+	);
+
+	test("fails closed when workflow status emits stderr", () => {
+		const repository = createRepository();
+		const harness = commandHarness({
+			workflowStatus: { stdout: "", stderr: "workflow status failed" },
+		});
+
+		const result = checkRootSyncDrift({
+			repoRoot: repository,
+			commandRunner: harness.commandRunner,
+			cuenvBinary,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("workflow status failed");
 		expect(harness.calls).toEqual({ lockSync: 0, rootSync: 0 });
 	});
 

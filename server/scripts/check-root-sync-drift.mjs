@@ -259,6 +259,40 @@ function requireCuenvBinary(candidate) {
 	return candidate;
 }
 
+function assertCommittedWorkflowState(commandRunner, repoRoot) {
+	const status = commandRunner(
+		"git",
+		[
+			"status",
+			"--porcelain=v1",
+			"--untracked-files=all",
+			"--",
+			".github/workflows",
+		],
+		repoRoot,
+	);
+	if (status.stderr.trim().length > 0) {
+		throw new Error(
+			"git status for .github/workflows wrote stderr before root synchronization:\n" +
+				status.stderr.trim(),
+		);
+	}
+	const dirty = status.stdout
+		.split(/\r?\n/u)
+		.filter((line) => line.length > 0);
+	if (dirty.length > 0) {
+		const paths = dirty.map((line) => {
+			const state = line.slice(0, 2).trim() || "?";
+			const path = line.slice(3);
+			return `- ${path} (${state})`;
+		});
+		throw new Error(
+			"generated workflows must match committed state before root synchronization:\n" +
+				paths.join("\n"),
+		);
+	}
+}
+
 export function checkRootSyncDrift({
 	repoRoot = resolve(import.meta.dir, "..", ".."),
 	commandRunner = runCommand,
@@ -282,6 +316,7 @@ export function checkRootSyncDrift({
 			repoRoot,
 		).stdout;
 
+		assertCommittedWorkflowState(commandRunner, repoRoot);
 		assertLockContract(canonicalLock);
 		assertProjectWorkflowContract(repoRoot);
 		const workingLock = readFileSync(lockPath, "utf8");
