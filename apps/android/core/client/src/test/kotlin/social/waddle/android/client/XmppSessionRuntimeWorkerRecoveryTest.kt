@@ -236,12 +236,6 @@ class XmppSessionRuntimeWorkerRecoveryTest {
         preferences[DELIVERY_JOURNAL_KEY]
             ?.let { TEST_JSON.decodeFromString<DeliveryJournal>(it) }
 
-    private fun updatesLastSeen(before: Preferences, after: Preferences, peer: String): Boolean {
-        val old = before[LAST_SEEN_KEY]?.let { TEST_JSON.decodeFromString<Map<String, String>>(it) }.orEmpty()
-        val next = after[LAST_SEEN_KEY]?.let { TEST_JSON.decodeFromString<Map<String, String>>(it) }.orEmpty()
-        return next[peer] != null && next[peer] != old[peer]
-    }
-
     private fun addsActiveTerminalIntent(before: Preferences, after: Preferences): Boolean {
         val old = committedJournal(before)?.owners?.get(OWNER) ?: return false
         val next = committedJournal(after)?.owners?.get(OWNER) ?: return false
@@ -259,7 +253,6 @@ class XmppSessionRuntimeWorkerRecoveryTest {
     private companion object {
         const val OWNER = "icepuma@waddle.test"
         val DELIVERY_JOURNAL_KEY = stringPreferencesKey("delivery_journal_v1")
-        val LAST_SEEN_KEY = stringPreferencesKey("last_seen")
         val TEST_JSON = Json { ignoreUnknownKeys = true }
     }
 
