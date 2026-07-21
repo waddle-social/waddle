@@ -16,6 +16,7 @@ class ConversationRowsTest {
         thread: String? = null,
         from: String? = "$ROOM_JID/alice",
         body: String = "hello",
+        isMine: Boolean = false,
         callSid: String? = null,
         tombstone: MessageTombstone? = null,
     ): TimelineItem {
@@ -44,7 +45,7 @@ class ConversationRowsTest {
             from = from,
             body = body,
             timestamp = null,
-            isMine = false,
+            isMine = isMine,
             source = TimelineSource.Live(message),
             tombstone = tombstone,
         )
@@ -119,6 +120,27 @@ class ConversationRowsTest {
         assertEquals(2, rows.size)
         assertTrue(rows[0] is ConversationRow.Stored)
         assertEquals(1L, (rows[1] as ConversationRow.Unconfirmed).message.localId)
+    }
+
+    @Test
+    fun `own direct echo replaces its matching pending row`() {
+        val clientStanzaId = "client-origin-id"
+        val echo = item(
+            stanzaId = clientStanzaId,
+            from = "icepuma@waddle.test",
+            body = "sent directly",
+            isMine = true,
+        )
+
+        val rows = visibleRows(
+            items = listOf(echo),
+            pending = listOf(pending(localId = 0, stanzaId = clientStanzaId)),
+            threadId = null,
+        )
+
+        assertEquals(1, rows.size)
+        assertTrue(rows.single() is ConversationRow.Stored)
+        assertTrue(rows.none { it is ConversationRow.Unconfirmed })
     }
 
     @Test

@@ -13,6 +13,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -88,16 +89,28 @@ class ConversationScreenTest {
     }
 
     @Test
-    fun sendShowsTheOptimisticPendingRow() {
+    fun sendShowsTheSynthesizedOwnDmEcho() {
         composeRule.onNode(hasSetTextAction()).performTextInput("hi there penguin")
         composeRule.onNodeWithContentDescription("Send").performClick()
-        // The fake outcome id never matches the local echo's identity,
-        // so the pending row stays visible with its sending status.
-        waitForText("hi there penguin")
-        waitForText("Sending…")
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            harness.activeFakeClient().sendCalls.contains(PEER_JID to "hi there penguin")
+            val fake = harness.activeFakeClient()
+            fake.sendCalls.count { it == PEER_JID to "hi there penguin" } == 1 &&
+                fake.sendOptions.size == 1
         }
+        val options = checkNotNull(harness.activeFakeClient().sendOptions.single())
+        val clientStanzaId = options.stanzaId
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            val timeline = harness.graph.sessionRuntime.timelineStore.timeline(PEER_JID).value
+            timeline.size == 1 &&
+                timeline.single().body == "hi there penguin" &&
+                clientStanzaId in timeline.single().identityIds
+        }
+        val timeline = harness.graph.sessionRuntime.timelineStore.timeline(PEER_JID).value
+        assertEquals(1, timeline.size)
+        assertEquals("hi there penguin", timeline.single().body)
+        assertTrue(clientStanzaId in timeline.single().identityIds)
+        waitForText("hi there penguin")
+        assertTrue(composeRule.onAllNodesWithText("Sending…").fetchSemanticsNodes().isEmpty())
     }
 
     @Test
