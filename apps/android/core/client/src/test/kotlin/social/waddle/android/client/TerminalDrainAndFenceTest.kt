@@ -280,9 +280,9 @@ class TerminalDrainAndFenceTest {
         val foreign = DeliveryOwnerJournal(activeAttempt = foreignAttempt)
         val before = journal(attempt).copy(owners = journal(attempt).owners + (OTHER_OWNER to foreign))
 
-        val prepared =
-            before.prepareTerminalDrainAndFence(request(attempt, "receipt")) as
-                TerminalDrainAndFenceResult.Prepared
+        val prepared = before.prepareTerminalDrainAndFence(
+            request(attempt, "receipt"),
+        ) as TerminalDrainAndFenceResult.Prepared
         assertEquals(foreign, prepared.journal.owners[OTHER_OWNER])
     }
 

@@ -33,18 +33,18 @@ class OutboundLifecycleStateStoreRecoveryTest {
     @Test
     fun `B cancellation before workers are ready retains lifecycle and starts replacement store`() =
         runTest {
-        val ownerJob = Job()
-        val ownerScope = CoroutineScope(coroutineContext + ownerJob)
-        val fixture = stateStoreFixture(scope = ownerScope)
-        val startup = async { fixture.messenger.start(ownerScope, STATE_STORE_OWNER) }
+            val ownerJob = Job()
+            val ownerScope = CoroutineScope(coroutineContext + ownerJob)
+            val fixture = stateStoreFixture(scope = ownerScope)
+            val startup = async { fixture.messenger.start(ownerScope, STATE_STORE_OWNER) }
 
-        ownerJob.cancel()
-        runCurrent()
+            ownerJob.cancel()
+            runCurrent()
 
-        assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
-        val replacement = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
-        fixture.stop(replacement)
-    }
+            assertTrue(runCatching { startup.await() }.exceptionOrNull() is CancellationException)
+            val replacement = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
+            fixture.stop(replacement)
+        }
 
     @Test
     fun `B cancellation after first exact worker ready compensates before replacement state store starts`() = runTest {
@@ -276,32 +276,32 @@ class OutboundLifecycleStateStoreRecoveryTest {
     @Test
     fun `B unexpected terminal stop before install is retained as bootstrap failure and no pair is installed`() =
         runTest {
-        val terminalExited = CompletableDeferred<Unit>()
-        val fixture = stateStoreFixture(
-            workerStartHooks = object : WorkerStartHooks {
-                private var stopped = false
+            val terminalExited = CompletableDeferred<Unit>()
+            val fixture = stateStoreFixture(
+                workerStartHooks = object : WorkerStartHooks {
+                    private var stopped = false
 
-                override suspend fun beforeTerminal() = Unit
+                    override suspend fun beforeTerminal() = Unit
 
-                override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
-                    if (!stopped) {
-                        stopped = true
-                        terminal.requestStop()
-                        terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
-                        terminalExited.complete(Unit)
+                    override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
+                        if (!stopped) {
+                            stopped = true
+                            terminal.requestStop()
+                            terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)
+                            terminalExited.complete(Unit)
+                        }
                     }
-                }
 
-                override suspend fun afterInstall(workers: OwnerWorkers) = Unit
-            },
-        )
+                    override suspend fun afterInstall(workers: OwnerWorkers) = Unit
+                },
+            )
 
-        val failed = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
+            val failed = fixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
 
-        terminalExited.await()
-        assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
-        fixture.stop(fixture.start())
-    }
+            terminalExited.await()
+            assertEquals(LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED, failed.cause)
+            fixture.stop(fixture.start())
+        }
 
     @Test
     fun `B explicit partial teardown requested stop remains record-only`() = runTest {
