@@ -23,7 +23,10 @@ export const EXPECTED_PROJECT_WORKFLOWS = Object.freeze({
 		"waddle-chat-publishwasm.yml",
 		"waddle-chat-pullrequest.yml",
 	]),
-	"waddle-cloud": Object.freeze(["waddle-cloud-default.yml"]),
+	"waddle-cloud": Object.freeze([
+		"waddle-cloud-default.yml",
+		"waddle-cloud-pullrequest.yml",
+	]),
 	"waddle-colony": Object.freeze([
 		"waddle-colony-default.yml",
 		"waddle-colony-pullrequest.yml",

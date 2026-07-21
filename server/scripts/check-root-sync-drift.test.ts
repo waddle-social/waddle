@@ -136,7 +136,7 @@ afterEach(() => {
 });
 
 describe("root sync fail-closed contract", () => {
-	test("accepts exactly six runtimes, six projects, fifteen workflows, and two stable lock syncs", () => {
+	test("accepts exactly six runtimes, six projects, sixteen workflows, and two stable lock syncs", () => {
 		const repository = createRepository();
 		const harness = commandHarness();
 
@@ -148,7 +148,7 @@ describe("root sync fail-closed contract", () => {
 		expect(result).toEqual({
 			exitCode: 0,
 			stdout:
-				"Root sync guard verified 6 runtimes, 6 projects, 15 workflows, and two byte-stable workspace lock synchronizations.\n",
+					"Root sync guard verified 6 runtimes, 6 projects, 16 workflows, and two byte-stable workspace lock synchronizations.\n",
 			stderr: "",
 		});
 		expect(harness.calls).toEqual({ lockSync: 2, rootSync: 1 });
@@ -247,6 +247,33 @@ describe("root sync fail-closed contract", () => {
 			commandRunner: commandHarness().commandRunner,
 		});
 		expect(extra.stderr).toContain("extra: waddle-chat-unexpected.yml");
+	});
+
+	test("fails loudly for missing and extra cloud workflows", () => {
+		const missingRepository = createRepository();
+		unlinkSync(
+			join(missingRepository, ".github/workflows/waddle-cloud-pullrequest.yml"),
+		);
+		const missing = checkRootSyncDrift({
+			repoRoot: missingRepository,
+			commandRunner: commandHarness().commandRunner,
+		});
+		expect(missing.stderr).toContain(
+			"generated workflows for waddle-cloud mismatch",
+		);
+		expect(missing.stderr).toContain("missing: waddle-cloud-pullrequest.yml");
+
+		const extraRepository = createRepository();
+		write(
+			extraRepository,
+			".github/workflows/waddle-cloud-unexpected.yml",
+			"name: unexpected\n",
+		);
+		const extra = checkRootSyncDrift({
+			repoRoot: extraRepository,
+			commandRunner: commandHarness().commandRunner,
+		});
+		expect(extra.stderr).toContain("extra: waddle-cloud-unexpected.yml");
 	});
 
 	test("rejects a partial first sync and restores committed lock bytes", () => {
