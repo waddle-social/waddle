@@ -304,13 +304,7 @@ class CallStore internal constructor(
         val next = reduceCallState(before, event)
         if (next != before) {
             _lastError.value = null
-            // Any transition out of outgoing cancels the auto-retract
-            // timer; leaving incoming likewise retires the responder's
-            // session-initiate timer (Active arrival, remote retract,
-            // sibling-device proceed).
-            if ((before is CallState.Outgoing && next !is CallState.Outgoing) ||
-                (before is CallState.Incoming && next !is CallState.Incoming)
-            ) {
+            if (leftTimerOwningPhase(before, next)) {
                 cancelCallTimersLocked()
             }
         }
@@ -428,24 +422,38 @@ class CallStore internal constructor(
             return
         }
         if (incomingProposeWinsTieBreak(event.sid, prev.sid, event.from, ourJid)) {
-            // XEP-0353 tie-break-1: the receiver of the LOWER-sid propose
-            // retracts its own higher sid with <tie-break/> + <expired/>,
-            // then treats the incoming propose normally. If a concurrent
-            // hang-up claimed the slot between the retract and the swap,
-            // the propose was retracted-but-never-answered — decline it.
-            if (signaling.retractTieBreak(event.from, prev.sid)) {
-                if (!acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev)) {
-                    if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
-                }
-            } else {
-                reportError("call tie-break retract failed")
-            }
+            takeOverWonTieBreak(event, kind, prev)
         } else {
             // The receiver of the HIGHER-sid propose rejects it with
             // <tie-break/> + <expired/>; our own outgoing ring continues.
             if (!signaling.rejectTieBreak(event.from, event.sid)) {
                 reportError("call tie-break reject failed")
             }
+        }
+    }
+
+    /**
+     * XEP-0353 tie-break-1, incoming propose wins: retract our own
+     * higher sid with `<tie-break/>` + `<expired/>`, then treat the
+     * incoming propose normally. If the swap is refused, our sid is
+     * retracted on the wire either way: end the local ring if it still
+     * holds it, then answer the propose — decline it after a
+     * concurrent hang-up, nothing after the peer's own abort (already
+     * concluded).
+     */
+    private suspend fun takeOverWonTieBreak(
+        event: WaddleCallEvent,
+        kind: WaddleCallEventKind.Propose,
+        prev: CallState.Outgoing,
+    ) {
+        if (!signaling.retractTieBreak(event.from, prev.sid)) {
+            reportError("call tie-break retract failed")
+            return
+        }
+        if (acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev)) return
+        endRetractedOutgoing(prev)
+        if (!isRecentlyAborted(event.sid) && !signaling.reject(event.from, event.sid)) {
+            reportError("call reject failed")
         }
     }
 
@@ -458,29 +466,38 @@ class CallStore internal constructor(
      * (local hang-up/dismiss, a newer call) means we walked away:
      * decline theirs like the busy path.
      */
+    private enum class SlotMovedAnswer { RING_WINNER, DECLINE, ALREADY_CONCLUDED }
+
     private suspend fun answerProposeAfterTieBreakSlotMoved(
         event: WaddleCallEvent,
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
-        val lostTieBreakOnTheWire = synchronized(stateLock) {
+        val answer = synchronized(stateLock) {
             val current = _state.value
-            if (current is CallState.Ended &&
-                current.sid == prev.sid &&
-                current.reason == CallEndReason.Expired
-            ) {
-                cancelCallTimersLocked()
-                _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
-                _lastError.value = null
-                true
-            } else {
-                false
+            when {
+                // The abort for this propose raced in after the entry
+                // guard: concluded on the wire, nothing to answer. The
+                // dead-sid set is written under this same lock, so the
+                // check is race-free here.
+                recentlyAbortedSids.containsKey(event.sid) -> SlotMovedAnswer.ALREADY_CONCLUDED
+                current is CallState.Ended &&
+                    current.sid == prev.sid &&
+                    current.reason == CallEndReason.Expired -> {
+                    cancelCallTimersLocked()
+                    _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
+                    _lastError.value = null
+                    SlotMovedAnswer.RING_WINNER
+                }
+                else -> SlotMovedAnswer.DECLINE
             }
         }
-        if (lostTieBreakOnTheWire) {
-            if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
-        } else if (!signaling.reject(event.from, event.sid)) {
-            reportError("call reject failed")
+        when (answer) {
+            SlotMovedAnswer.RING_WINNER ->
+                if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+            SlotMovedAnswer.DECLINE ->
+                if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            SlotMovedAnswer.ALREADY_CONCLUDED -> Unit
         }
     }
 
@@ -507,8 +524,14 @@ class CallStore internal constructor(
             reportError("call tie-break retract failed")
         }
         if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
-        // Our sid is retracted on the wire; the local ring must die
-        // with it instead of ringing on a corpse.
+        endRetractedOutgoing(prev)
+    }
+
+    /**
+     * Our sid was retracted on the wire; the local ring must die with
+     * it instead of ringing on a corpse. No-op once the slot moved on.
+     */
+    private fun endRetractedOutgoing(prev: CallState.Outgoing) {
         synchronized(stateLock) {
             if (slotStillMatches(prev)) {
                 cancelCallTimersLocked()
@@ -659,6 +682,11 @@ class CallStore internal constructor(
         synchronized(stateLock) {
             // Reentrant monitor: check-and-replace is one atomic step.
             if (!slotStillMatches(expectedSlot)) return false
+            // An abort for this sid that reduced while the effect was
+            // suspended in a wire send is consumed and never re-applies
+            // — installing the ring anyway would resurrect it. Recorded
+            // under this same lock, so the check is race-free.
+            if (recentlyAbortedSids.containsKey(event.sid)) return false
             cancelCallTimersLocked()
             _state.value = CallState.Incoming(
                 from = event.from,
@@ -777,6 +805,18 @@ class CallStore internal constructor(
         }
     }
 
+    /**
+     * Whether a transition left the phase whose timer is armed: out of
+     * Outgoing (auto-retract / session-accept) or out of Incoming (the
+     * responder's session-initiate timer — Active arrival, remote
+     * retract, sibling-device proceed).
+     */
+    private fun leftTimerOwningPhase(before: CallState, next: CallState): Boolean {
+        val leftOutgoing = before is CallState.Outgoing && next !is CallState.Outgoing
+        val leftIncoming = before is CallState.Incoming && next !is CallState.Incoming
+        return leftOutgoing || leftIncoming
+    }
+
     private fun cancelOutgoingTimeoutLocked() {
         outgoingTimer?.cancel()
         outgoingTimer = null
@@ -809,8 +849,13 @@ class CallStore internal constructor(
         /** Session-accept gap timeout (web `SESSION_ACCEPT_TIMEOUT_MS`). */
         const val SESSION_ACCEPT_TIMEOUT_MILLIS = 45_000L
 
-        /** LRU bound for [recentlyAbortedSids]; a burst never holds more. */
-        private const val ABORTED_SID_CAPACITY = 16
+        /**
+         * LRU bound for [recentlyAbortedSids]. The reducer can run
+         * arbitrarily far ahead of the effects consumer, so the bound
+         * must comfortably exceed any plausible reducer→effect lag in
+         * abort events; memory cost is negligible.
+         */
+        private const val ABORTED_SID_CAPACITY = 256
     }
 }
 

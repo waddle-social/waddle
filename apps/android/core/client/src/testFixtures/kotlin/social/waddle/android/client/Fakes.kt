@@ -249,6 +249,13 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var callProceedDelayMillis = 0L
 
+    /**
+     * Virtual-time stall before [sendCallRetractTieBreak] answers —
+     * lets tests land an inbound event mid-tie-break.
+     */
+    @Volatile
+    var callRetractTieBreakDelayMillis = 0L
+
     /** Canned XEP-0215 services served by [fetchExternalServices]. */
     @Volatile
     var externalServices: List<WaddleExternalService> = emptyList()
@@ -308,6 +315,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean {
+        if (callRetractTieBreakDelayMillis > 0) delay(callRetractTieBreakDelayMillis)
         callVerbs += RecordedCallVerb.RetractTieBreak(peerFullJid, sid)
         return callVerbResult
     }
