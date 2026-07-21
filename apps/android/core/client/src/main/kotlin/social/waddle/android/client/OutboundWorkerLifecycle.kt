@@ -39,7 +39,12 @@ internal sealed interface WorkerExitGateDecision { data object Ignore : WorkerEx
 data object RecordOnly : WorkerExitGateDecision
 data class Fence(val cause: LifecycleFenceCause.WorkerExited) : WorkerExitGateDecision }
 
-internal fun decideWorkerExitGate(state: OutboundLifecycleState, exactOwner: Boolean, firstExactExit: Boolean, exit: WorkerExit): WorkerExitGateDecision {
+internal fun decideWorkerExitGate(
+    state: OutboundLifecycleState,
+    exactOwner: Boolean,
+    firstExactExit: Boolean,
+    exit: WorkerExit,
+): WorkerExitGateDecision {
     if (!exactOwner || !firstExactExit) return WorkerExitGateDecision.Ignore
     val exited = LifecycleFenceCause.WorkerExited(WorkerFence(exit))
     val fenced = state as? OutboundLifecycleState.Fenced
@@ -47,9 +52,21 @@ internal fun decideWorkerExitGate(state: OutboundLifecycleState, exactOwner: Boo
         val cause = fenced.cause
         if (cause is LifecycleFenceCause.WorkerExited) return WorkerExitGateDecision.Ignore
         val awaiting = cause as LifecycleFenceCause.AwaitingRequestedWorkerExit
-        return if (exit.ownership() == awaiting.ownership || exit.reason !is WorkerExitReason.RequestedStop) WorkerExitGateDecision.Fence(exited) else WorkerExitGateDecision.RecordOnly
+        return if (
+            exit.ownership() == awaiting.ownership || exit.reason !is WorkerExitReason.RequestedStop
+        ) {
+            WorkerExitGateDecision.Fence(exited)
+        } else {
+            WorkerExitGateDecision.RecordOnly
+        }
     }
-    return if (state is OutboundLifecycleState.Closing && exit.reason is WorkerExitReason.RequestedStop) WorkerExitGateDecision.RecordOnly else WorkerExitGateDecision.Fence(exited)
+    return if (
+        state is OutboundLifecycleState.Closing && exit.reason is WorkerExitReason.RequestedStop
+    ) {
+        WorkerExitGateDecision.RecordOnly
+    } else {
+        WorkerExitGateDecision.Fence(exited)
+    }
 }
 
 internal sealed interface WorkerAwaitOutcome { data class Exited(val exit: WorkerExit) : WorkerAwaitOutcome
@@ -69,7 +86,14 @@ internal fun requireTerminalCommitted(outcome: TerminalCommandOutcome) {
     is TerminalCommandOutcome.Failed -> throw TerminalWorkerCommandFailedException(outcome.failure) }
 }
 
-@JvmInline internal value class WorkerRecoveryToken private constructor(val value: UUID) { companion object { fun random() = WorkerRecoveryToken(UUID.randomUUID()) } }
+@JvmInline
+internal value class WorkerRecoveryToken private constructor(
+    val value: UUID,
+) {
+    companion object {
+        fun random() = WorkerRecoveryToken(UUID.randomUUID())
+    }
+}
 internal data class WorkerRecoveryClaim(
     val lifecycle: SessionLifecycleRef,
     val fence: WorkerFence,
@@ -89,7 +113,10 @@ internal sealed interface WorkerRecoveryOutcome {
         val claim: WorkerRecoveryClaim,
         val count: Int,
     ) : WorkerRecoveryOutcome
-    data class WorkerExitPending(val lifecycle: SessionLifecycleRef, val ownership: WorkerOwnership) : WorkerRecoveryOutcome
+    data class WorkerExitPending(
+        val lifecycle: SessionLifecycleRef,
+        val ownership: WorkerOwnership,
+    ) : WorkerRecoveryOutcome
     data class DurableCleanupPending(
         val lifecycle: SessionLifecycleRef,
         val claim: WorkerRecoveryClaim,
@@ -115,12 +142,28 @@ internal sealed interface WorkerRecoveryOutcome {
         val cleanup: TerminalReceiptCleanupEvidence,
     ) : WorkerRecoveryOutcome
 }
-internal class WorkerRecoveryException(val outcome: WorkerRecoveryOutcome, cause: Throwable?) : IllegalStateException("worker recovery failed: $outcome", cause)
-internal sealed interface WorkerRecoveryClaimDecision { data class Granted(val claim: WorkerRecoveryClaim, val workers: OwnerWorkers) : WorkerRecoveryClaimDecision
-data object NotFenced : WorkerRecoveryClaimDecision
-data class OwnershipMismatch(val lifecycle: SessionLifecycleRef) : WorkerRecoveryClaimDecision
-data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryClaimDecision
-data class AwaitingExit(val lifecycle: SessionLifecycleRef, val ownership: WorkerOwnership) : WorkerRecoveryClaimDecision }
+internal class WorkerRecoveryException(
+    val outcome: WorkerRecoveryOutcome,
+    cause: Throwable?,
+) : IllegalStateException("worker recovery failed: $outcome", cause)
+
+internal sealed interface WorkerRecoveryClaimDecision {
+    data class Granted(
+        val claim: WorkerRecoveryClaim,
+        val workers: OwnerWorkers,
+    ) : WorkerRecoveryClaimDecision
+
+    data object NotFenced : WorkerRecoveryClaimDecision
+
+    data class OwnershipMismatch(val lifecycle: SessionLifecycleRef) : WorkerRecoveryClaimDecision
+
+    data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryClaimDecision
+
+    data class AwaitingExit(
+        val lifecycle: SessionLifecycleRef,
+        val ownership: WorkerOwnership,
+    ) : WorkerRecoveryClaimDecision
+}
 
 internal class OwnerWorkers(val lifecycle: SessionLifecycleRef) {
     val terminalOwnership = WorkerOwnership(lifecycle, WorkerKind.DELIVERY_TERMINAL, WorkerGeneration.random())
@@ -150,19 +193,21 @@ internal class OwnerWorkers(val lifecycle: SessionLifecycleRef) {
     drainOwnership -> !drainReady.also { drainReady = true }
     else -> false }
     fun bothReady() = terminalReady && drainReady
-    fun recordExactExit(exit: WorkerExit): Boolean = when (exit.ownership()) { terminalOwnership -> if (terminalExit == null) {
-        terminalExit = exit
-        true
-    } else {
-        false
+    fun recordExactExit(exit: WorkerExit): Boolean = when (exit.ownership()) {
+        terminalOwnership -> if (terminalExit == null) {
+            terminalExit = exit
+            true
+        } else {
+            false
+        }
+        drainOwnership -> if (drainExit == null) {
+            drainExit = exit
+            true
+        } else {
+            false
+        }
+        else -> false
     }
-    drainOwnership -> if (drainExit == null) {
-        drainExit = exit
-    true
-    } else {
-        false
-    }
-    else -> false }
     fun exitFor(ownership: WorkerOwnership) = when (ownership) { terminalOwnership -> terminalExit
     drainOwnership -> drainExit
     else -> null }

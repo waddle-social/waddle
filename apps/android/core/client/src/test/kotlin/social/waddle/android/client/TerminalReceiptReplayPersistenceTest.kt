@@ -99,11 +99,18 @@ class TerminalReceiptReplayPersistenceTest {
             )
 
             val firstExit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
-            assertEquals(WorkerFailureKind.DEPENDENCY_FAILURE, (firstExit.reason as WorkerExitReason.UnexpectedFailure).kind)
+            assertEquals(
+                WorkerFailureKind.DEPENDENCY_FAILURE,
+                (firstExit.reason as WorkerExitReason.UnexpectedFailure).kind,
+            )
             assertEquals(canonical.take(prefix), firstEvents)
             val released = receiptState(prefs) as TerminalReceiptState.Pending
             assertEquals(TerminalReceiptClaimState.Unclaimed, released.claim)
-            assertEquals("prefix $prefix must durably retain its exact claim", claimedAtCommit.await(), released.releasedClaim)
+            assertEquals(
+                "prefix $prefix must durably retain its exact claim",
+                claimedAtCommit.await(),
+                released.releasedClaim,
+            )
 
             val replayed = mutableListOf<XmppEvent>()
             val replacementEpoch = ProcessEpoch(uuid("replay-replacement-$prefix"))
@@ -131,7 +138,9 @@ class TerminalReceiptReplayPersistenceTest {
         val prefs = SessionPrefs(store)
         val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "replacement")
         seed(prefs, receipt)
-        val stale = prefs.claimTerminalReceipt(request(receipt, "stale-claim", "stale-epoch")) as TerminalReceiptClaimResult.Claimed
+        val stale = prefs.claimTerminalReceipt(
+            request(receipt, "stale-claim", "stale-epoch"),
+        ) as TerminalReceiptClaimResult.Claimed
         val replacement = prefs.claimTerminalReceipt(request(receipt, "replacement-claim", "replacement-epoch"))
             as TerminalReceiptClaimResult.Claimed
         val beforeStaleMutation = snapshot(store, prefs)
@@ -149,7 +158,7 @@ class TerminalReceiptReplayPersistenceTest {
     }
 
     @Test
-    fun `acknowledgement postcommit uncertainty retries only acknowledgement and restart dispatches nothing`() = runTest {
+    fun `acknowledgement uncertainty retries without restart dispatch`() = runTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "ack-postcommit")
@@ -222,7 +231,10 @@ class TerminalReceiptReplayPersistenceTest {
                     DeliveryOwnerBareJid(TERMINAL_WORKER_OWNER),
                     TerminalReceiptCorruption.PERSISTED_DECODE_FAILURE,
                 ),
-                ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure,
+                (
+                    (exit.reason as WorkerExitReason.UnexpectedFailure).kind as
+                        WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+                ).failure,
             )
             assertTrue("$corruption must not dispatch callbacks", events.isEmpty())
             assertEquals("$corruption must retain raw persistence", malformed, store.data.first()[DELIVERY_JOURNAL_KEY])
@@ -234,7 +246,9 @@ class TerminalReceiptReplayPersistenceTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )

@@ -82,7 +82,7 @@ class TerminalReceiptCleanupExecutorTest {
                 dispatchEvent = {
                     events += it
                     store.failAllUpdatesWith = IOException("cleanup exhausted")
-                    throw IllegalStateException("primary")
+                    error("primary")
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("repair-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -112,7 +112,7 @@ class TerminalReceiptCleanupExecutorTest {
                 DeliveryJournalStore(prefs),
                 dispatchEvent = {
                     store.failAllUpdatesWith = IOException("schedule failure")
-                    throw IllegalStateException("primary")
+                    error("primary")
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("schedule-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -149,7 +149,9 @@ class TerminalReceiptCleanupExecutorTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
