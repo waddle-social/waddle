@@ -319,12 +319,16 @@ class TerminalReceiptLeasePersistenceTest {
         },
     )
 
-    private fun generationLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
+    private fun generationLeaseMismatchCases(): List<LeaseMismatchCase> =
+        workerGenerationLeaseMismatchCases() + finalizerGenerationLeaseMismatchCases()
+
+    private fun workerGenerationLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
         LeaseMismatchCase(
             "worker lifecycle generation",
             workerClaimant("worker-lifecycle"),
             LeaseDenial.LEASE_MISMATCH,
-        ) { lease -> val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
+        ) { lease ->
+            val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
             lease.copy(
                 claim = lease.claim.copy(
                     claimant = claimant.copy(
@@ -337,7 +341,8 @@ class TerminalReceiptLeasePersistenceTest {
             "worker generation",
             workerClaimant("worker-generation"),
             LeaseDenial.LEASE_MISMATCH,
-        ) { lease -> val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
+        ) { lease ->
+            val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
             lease.copy(
                 claim = lease.claim.copy(
                     claimant = claimant.copy(
@@ -346,6 +351,9 @@ class TerminalReceiptLeasePersistenceTest {
                 )
             )
         },
+    )
+
+    private fun finalizerGenerationLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
         LeaseMismatchCase(
             "finalizer lifecycle generation",
             finalizerClaimant("finalizer-lifecycle"),
