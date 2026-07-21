@@ -3,6 +3,7 @@ package social.waddle.android.feature.call
 import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import social.waddle.android.client.XmppSessionManager
@@ -73,6 +74,13 @@ class CallSessionController(
             }
             CallState.Idle, is CallState.Ended -> {
                 disconnectMediaIfConnected()
+                // Grace before stopping the FGS: a migration takeover
+                // publishes Ended(old) moments before the accepting
+                // ring for the new sid, and Android 12+ forbids
+                // re-raising a dropped FGS from the background —
+                // collectLatest cancels this delay when a newer state
+                // lands inside the grace.
+                delay(CallForegroundService.STOP_GRACE_MILLIS)
                 stopCallService()
             }
         }
@@ -136,7 +144,10 @@ class CallSessionController(
             context.startForegroundService(CallForegroundService.intent(context))
         } catch (_: ForegroundServiceStartNotAllowedException) {
             // Outgoing/accept flows run foregrounded (UI tap or
-            // notification action), so this only fires on OEM policy
+            // notification action); the background-reachable
+            // migration-takeover transition is covered by the FGS stop
+            // grace, which keeps the already-running service alive
+            // instead of re-raising it. Residual throws are OEM policy
             // edge cases; the call still works, just without the
             // priority bump.
         }

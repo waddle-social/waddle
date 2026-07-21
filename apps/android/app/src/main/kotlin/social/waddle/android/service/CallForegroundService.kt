@@ -17,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import social.waddle.android.MainActivity
 import social.waddle.android.R
@@ -43,7 +45,7 @@ class CallForegroundService : Service() {
         promoteToForeground(graph.sessionManager.callStore.state.value)
         if (stateJob == null) {
             stateJob = scope.launch {
-                graph.sessionManager.callStore.state.collect { state ->
+                graph.sessionManager.callStore.state.collectLatest { state ->
                     when {
                         state is CallState.Outgoing || state is CallState.Active ->
                             promoteToForeground(state)
@@ -53,7 +55,16 @@ class CallForegroundService : Service() {
                             promoteToForeground(state)
                         // The controller also stopService()s; stopping
                         // here too covers a service that outlives it.
-                        else -> stopSelf()
+                        // Grace before stopping: a migration takeover
+                        // can pass through Ended on its way to the
+                        // accepting ring, and Android 12+ forbids
+                        // re-raising a dropped FGS from the background
+                        // — collectLatest cancels the stop when a newer
+                        // state lands inside the grace.
+                        else -> {
+                            delay(STOP_GRACE_MILLIS)
+                            stopSelf()
+                        }
                     }
                 }
             }
@@ -148,6 +159,16 @@ class CallForegroundService : Service() {
     companion object {
         /** Distinct from the connection (1) and message (2) ids. */
         private const val NOTIFICATION_ID = 3
+
+        /**
+         * Grace before the phone-call FGS stops on a non-call state: a
+         * migration takeover can pass through Ended on its way to the
+         * accepting ring, and Android 12+ forbids re-raising a dropped
+         * FGS from the background. Long enough for the in-flight
+         * migration sends, short enough that the ongoing-call
+         * notification doesn't linger noticeably after a real hang-up.
+         */
+        const val STOP_GRACE_MILLIS = 5_000L
 
         fun intent(context: Context): Intent =
             Intent(context, CallForegroundService::class.java)

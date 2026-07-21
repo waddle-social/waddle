@@ -271,9 +271,16 @@ class CallStore internal constructor(
         terminateActive(current, reason)
     }
 
-    /** Dismiss the `Ended` slot (or abandon any local state) → `Idle`. */
+    /**
+     * Dismiss the `Ended` banner → `Idle`. Phase-guarded: a Close tap
+     * racing a state transition (e.g. the migration takeover swapping
+     * `Ended` for an accepting ring whose `<proceed/>` is already on
+     * the wire) must not silently kill a live call — live phases end
+     * only through the wire-answering actions.
+     */
     fun dismiss() {
         synchronized(stateLock) {
+            if (_state.value !is CallState.Ended) return
             cancelCallTimersLocked()
             _state.value = CallState.Idle
             _lastError.value = null

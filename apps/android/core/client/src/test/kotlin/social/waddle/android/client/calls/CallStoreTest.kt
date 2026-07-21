@@ -430,6 +430,22 @@ class CallStoreTest {
     }
 
     @Test
+    fun `dismiss is a no-op outside the ended phase`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(PEER_FULL, "c1"))
+        runCurrent()
+        assertTrue(f.store.acceptIncoming())
+
+        // A Close tap on a just-replaced Ended banner must not silently
+        // kill a ring whose <proceed/> is already on the wire.
+        f.store.dismiss()
+
+        val state = f.store.state.value
+        assertTrue(state is CallState.Incoming && state.accepting)
+    }
+
+    @Test
     fun `a new propose is accepted after the previous call ended`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)
