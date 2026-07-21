@@ -48,6 +48,12 @@ class TerminalReceiptSerializationTest {
 
     @Test
     fun `terminal receipt domain rejects invalid typed identities and bindings`() {
+        assertInvalidTypedIdentities()
+        assertInvalidPendingEffects()
+        assertInvalidReceiptBindings()
+    }
+
+    private fun assertInvalidTypedIdentities() {
         assertInvalid { DeliveryOwnerBareJid(" ") }
         assertInvalid { TerminalReceiptId("not-a-uuid") }
         assertInvalid { TerminalClaimId("not-a-uuid") }
@@ -59,6 +65,9 @@ class TerminalReceiptSerializationTest {
         assertInvalid {
             TerminalReceiptState.Pending(TerminalReceiptClaimState.Unclaimed, emptyList())
         }
+    }
+
+    private fun assertInvalidPendingEffects() {
         val duplicate = effect()
         assertInvalid {
             TerminalReceiptState.Pending(
@@ -78,6 +87,9 @@ class TerminalReceiptSerializationTest {
                 ),
             )
         }
+    }
+
+    private fun assertInvalidReceiptBindings() {
         assertInvalid {
             TerminalReceipt(
                 owner = DeliveryOwnerBareJid(OTHER_OWNER),
