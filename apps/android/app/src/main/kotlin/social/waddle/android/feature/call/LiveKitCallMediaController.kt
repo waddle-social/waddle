@@ -57,7 +57,12 @@ class LiveKitCallMediaController(
     private val _localVideo = MutableStateFlow<VideoTrackHandle?>(null)
     override val localVideo: StateFlow<VideoTrackHandle?> = _localVideo.asStateFlow()
 
+    // Written on the app-scope dispatcher, read from main-thread UI
+    // actions — @Volatile for cross-thread visibility.
+    @Volatile
     private var room: Room? = null
+
+    @Volatile
     private var eventsJob: Job? = null
 
     override suspend fun connect(
@@ -103,10 +108,10 @@ class LiveKitCallMediaController(
         // missing device or denied permission must not eject the user —
         // they stay a receive-only participant (web parity).
         if (media.audio) {
-            runCatching { freshRoom.localParticipant.setMicrophoneEnabled(true) }
+            bestEffortCapture { freshRoom.localParticipant.setMicrophoneEnabled(true) }
         }
         if (media.video) {
-            runCatching { freshRoom.localParticipant.setCameraEnabled(true) }
+            bestEffortCapture { freshRoom.localParticipant.setCameraEnabled(true) }
         }
         refreshLocalTrackStates()
         // Video calls route to the loudspeaker by default; audio calls
@@ -123,14 +128,29 @@ class LiveKitCallMediaController(
 
     override suspend fun setMicEnabled(enabled: Boolean) {
         val current = room ?: return
-        runCatching { current.localParticipant.setMicrophoneEnabled(enabled) }
+        bestEffortCapture { current.localParticipant.setMicrophoneEnabled(enabled) }
         refreshLocalTrackStates()
     }
 
     override suspend fun setCameraEnabled(enabled: Boolean) {
         val current = room ?: return
-        runCatching { current.localParticipant.setCameraEnabled(enabled) }
+        bestEffortCapture { current.localParticipant.setCameraEnabled(enabled) }
         refreshLocalTrackStates()
+    }
+
+    /**
+     * Best-effort capture toggle: device/permission failures degrade
+     * to receive-only, but cancellation must propagate — swallowing it
+     * would detach this coroutine from structured concurrency.
+     */
+    private suspend fun bestEffortCapture(op: suspend () -> Unit) {
+        try {
+            op()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Missing device / denied permission: stay receive-only.
+        }
     }
 
     override suspend fun flipCamera() {

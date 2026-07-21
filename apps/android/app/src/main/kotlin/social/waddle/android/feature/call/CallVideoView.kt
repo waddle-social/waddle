@@ -28,13 +28,17 @@ fun CallVideoView(handle: VideoTrackHandle, modifier: Modifier = Modifier) {
             update = { renderer ->
                 val previous = renderer.tag as? VideoTrack
                 if (previous !== handle.track) {
-                    previous?.removeRenderer(renderer)
-                    handle.track.addRenderer(renderer)
+                    // runCatching: teardown disposes the native track on
+                    // the app scope while Compose detaches on the NEXT
+                    // frame — attach/detach on a just-disposed track
+                    // throws from libwebrtc and must not crash hang-up.
+                    runCatching { previous?.removeRenderer(renderer) }
+                    runCatching { handle.track.addRenderer(renderer) }
                     renderer.tag = handle.track
                 }
             },
             onRelease = { renderer ->
-                (renderer.tag as? VideoTrack)?.removeRenderer(renderer)
+                runCatching { (renderer.tag as? VideoTrack)?.removeRenderer(renderer) }
                 renderer.tag = null
                 renderer.release()
             },

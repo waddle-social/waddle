@@ -131,6 +131,10 @@ class CallStore internal constructor(
             reportError("call propose failed")
             return false
         }
+        // Arm the auto-retract only if the slot is STILL this ring: a
+        // reject/hang-up that landed while the propose was in flight
+        // already cancelled the timers, and re-arming would leave a
+        // stale 45s job alive.
         scheduleOutgoingTimeout(sid)
         return true
     }
@@ -334,13 +338,27 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Outgoing,
     ) {
-        val ourJid = ownFullJid() ?: return
+        // The effect queue runs after the reducer pass that captured
+        // `prev`; a hang-up/dismiss that landed in between owns the
+        // slot now and already retracted — a stale tie-break must not
+        // resurrect the call.
+        if (!slotStillMatches(prev)) return
+        val ourJid = ownFullJid()
+        if (ourJid == null) {
+            // Without a bound resource we cannot host the would-be
+            // session, but the XEP-0353 tie-break response is a MUST —
+            // reject theirs so the peer stops ringing.
+            if (!signaling.rejectTieBreak(event.from, event.sid)) {
+                reportError("call tie-break reject failed")
+            }
+            return
+        }
         if (incomingProposeWinsTieBreak(event.sid, prev.sid, event.from, ourJid)) {
             // XEP-0353 tie-break-1: the receiver of the LOWER-sid propose
             // retracts its own higher sid with <tie-break/> + <expired/>,
             // then treats the incoming propose normally.
             if (signaling.retractTieBreak(event.from, prev.sid)) {
-                acceptIncomingTieBreakPropose(event, kind.media)
+                acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev)
             } else {
                 reportError("call tie-break retract failed")
             }
@@ -358,13 +376,17 @@ class CallStore internal constructor(
         kind: WaddleCallEventKind.Propose,
         prev: CallState.Active,
     ) {
+        // Same stale-effect guard as the tie-break branch: if the user
+        // hung up while this effect was queued, the teardown already
+        // sent terminate+finish — do not proceed on a dead call.
+        if (!slotStillMatches(prev)) return
         val migrated = signaling.finishMigrated(event.from, prev.sid, event.sid) &&
             signaling.proceed(event.from, event.sid)
         if (!migrated) {
             failCall(prev.sid, "call migration failed")
             return
         }
-        acceptIncomingTieBreakPropose(event, kind.media)
+        acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev)
         // The old Jingle session may already be orphaned on another
         // resource; don't let its IQ round-trip block the XEP-0353
         // migration markers that keep both users' devices in sync.
@@ -372,6 +394,23 @@ class CallStore internal constructor(
             if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
                 reportError("call session terminate failed")
             }
+        }
+    }
+
+    /**
+     * Whether the live slot is still the call this queued effect was
+     * computed against — matched on PHASE + SID, not full structure,
+     * because benign flag flips (e.g. `ringing=true` landing between
+     * the reducer pass and the effect run) must not drop a legitimate
+     * tie-break.
+     */
+    private fun slotStillMatches(expected: CallState): Boolean = synchronized(stateLock) {
+        val current = _state.value
+        when (expected) {
+            is CallState.Outgoing -> current is CallState.Outgoing && current.sid == expected.sid
+            is CallState.Active -> current is CallState.Active && current.sid == expected.sid
+            is CallState.Incoming -> current is CallState.Incoming && current.sid == expected.sid
+            else -> current == expected
         }
     }
 
@@ -410,9 +449,19 @@ class CallStore internal constructor(
         }
     }
 
-    /** Replace the slot with the tie-break winner's incoming ring. */
-    private fun acceptIncomingTieBreakPropose(event: WaddleCallEvent, media: WaddleCallMedia) {
+    /**
+     * Replace the slot with the tie-break winner's incoming ring —
+     * only if the slot is still the state this effect was computed
+     * against; a concurrent hang-up/dismiss owns it otherwise.
+     */
+    private fun acceptIncomingTieBreakPropose(
+        event: WaddleCallEvent,
+        media: WaddleCallMedia,
+        expectedSlot: CallState,
+    ) {
         synchronized(stateLock) {
+            // Reentrant monitor: check-and-replace is one atomic step.
+            if (!slotStillMatches(expectedSlot)) return
             cancelCallTimersLocked()
             _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = media)
             _lastError.value = null
@@ -436,6 +485,8 @@ class CallStore internal constructor(
      */
     private fun scheduleOutgoingTimeout(sid: String) {
         synchronized(stateLock) {
+            val current = _state.value
+            if (current !is CallState.Outgoing || current.sid != sid) return
             outgoingTimer?.cancel()
             outgoingTimer = scope?.launch {
                 delay(outgoingTimeoutMillis)
@@ -465,6 +516,8 @@ class CallStore internal constructor(
      */
     private fun scheduleSessionAcceptTimeout(peerFullJid: String, sid: String) {
         synchronized(stateLock) {
+            val current = _state.value
+            if (current !is CallState.Outgoing || current.sid != sid) return
             sessionAcceptTimer?.cancel()
             sessionAcceptTimer = scope?.launch {
                 delay(sessionAcceptTimeoutMillis)

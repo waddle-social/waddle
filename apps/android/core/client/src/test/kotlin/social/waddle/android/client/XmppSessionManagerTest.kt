@@ -464,6 +464,58 @@ class XmppSessionManagerTest {
     }
 
     @Test
+    fun `logout tears an active call down before the stream closes`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        // Drive the slot to Active: our propose, peer accepts.
+        harness.manager.callStore.startCall(
+            peerJid = "bob@waddle.test",
+            media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+        )
+        runCurrent()
+        val sid = (harness.manager.callStore.state.value as social.waddle.android.client.calls.CallState.Outgoing).sid
+        harness.factory.emit(
+            WaddleClientEvent.Call(
+                social.waddle.client.ffi.WaddleCallEvent(
+                    from = "bob@waddle.test/phone",
+                    to = null,
+                    sid = sid,
+                    kind = social.waddle.client.ffi.WaddleCallEventKind.SessionAccept(
+                        join = social.waddle.client.ffi.WaddleLiveKitJoin(
+                            url = "wss://livekit.waddle.test",
+                            room = "dm-room",
+                            identity = "icepuma@waddle.test/r",
+                            token = "jwt",
+                        ),
+                        media = social.waddle.client.ffi.WaddleCallMedia(audio = true, video = false),
+                    ),
+                ),
+            ),
+        )
+        runCurrent()
+        assertTrue(
+            harness.manager.callStore.state.value is social.waddle.android.client.calls.CallState.Active,
+        )
+
+        harness.manager.logout()
+        runCurrent()
+
+        // Web client.ts disconnect parity: terminate + <finish/> went
+        // out BEFORE the session died, and the slot reset.
+        val client = harness.factory.clients.single()
+        assertTrue(client.callVerbs.any { it is RecordedCallVerb.SessionTerminateWithOutcome })
+        assertTrue(client.callVerbs.any { it is RecordedCallVerb.Finish })
+        assertEquals(
+            social.waddle.android.client.calls.CallState.Idle,
+            harness.manager.callStore.state.value,
+        )
+    }
+
+    @Test
     fun `logout clears state and stores`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())

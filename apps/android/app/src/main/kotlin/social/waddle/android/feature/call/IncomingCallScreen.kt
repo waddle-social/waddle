@@ -1,6 +1,7 @@
 package social.waddle.android.feature.call
 
 import android.Manifest
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +63,10 @@ fun IncomingCallScreen(
             permissionLauncher.launch(permissions)
         }
     }
+
+    // Back must not dismiss the ring into the hidden nav stack — the
+    // user answers or declines explicitly.
+    BackHandler {}
 
     Surface(
         modifier = Modifier

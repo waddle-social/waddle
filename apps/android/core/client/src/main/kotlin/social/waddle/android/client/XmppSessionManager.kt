@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.prefs.SessionPrefs
@@ -138,6 +139,13 @@ class XmppSessionManager(
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // Best-effort call teardown BEFORE the stream closes (web
+        // client.ts disconnect parity): the peer must get the
+        // retract/reject/terminate + XEP-0353 <finish/> bookend instead
+        // of ringing into a dead session until their timeout.
+        if (callStore.state.value != CallState.Idle) {
+            runCatching { callStore.hangUp() }
+        }
         cancelSessionScope()
         activeSession.ownBareJid = null
         activeSession.ownFullJid = null
@@ -283,6 +291,11 @@ class XmppSessionManager(
 
     private suspend fun onTerminalAuthFailure() {
         _appState.value = WaddleAppState.SignedOut
+        // A live call slot must not outlive the session: the shell is
+        // about to render the login screen with no in-app hang-up, and
+        // the app-scoped collectors (FGS, media, ring notification)
+        // tear down off this transition.
+        callStore.clear()
         persistQuietly { sessionPrefs.clear() }
         // Last statement on purpose: cancelling the session scope kills
         // this coroutine too, but also the parked snapshot persister that

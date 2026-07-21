@@ -44,8 +44,13 @@ class CallForegroundService : Service() {
         if (stateJob == null) {
             stateJob = scope.launch {
                 graph.sessionManager.callStore.state.collect { state ->
-                    when (state) {
-                        is CallState.Outgoing, is CallState.Active -> promoteToForeground(state)
+                    when {
+                        state is CallState.Outgoing || state is CallState.Active ->
+                            promoteToForeground(state)
+                        // Accept in flight: keep the service up so the
+                        // mic capture starting on Active is covered.
+                        state is CallState.Incoming && state.accepting ->
+                            promoteToForeground(state)
                         // The controller also stopService()s; stopping
                         // here too covers a service that outlives it.
                         else -> stopSelf()
@@ -85,6 +90,7 @@ class CallForegroundService : Service() {
         val video = when (state) {
             is CallState.Outgoing -> state.media.video
             is CallState.Active -> state.media.video
+            is CallState.Incoming -> state.media.video
             else -> false
         }
         if (video && hasPermission(Manifest.permission.CAMERA)) {
@@ -100,6 +106,7 @@ class CallForegroundService : Service() {
         val peerJid = when (state) {
             is CallState.Outgoing -> state.to
             is CallState.Active -> state.peer
+            is CallState.Incoming -> state.from
             else -> null
         }
         val peerName = peerJid?.let { localpartOf(bareJidOf(it)) }

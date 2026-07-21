@@ -3,6 +3,7 @@ package social.waddle.android.feature.call
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +24,12 @@ import social.waddle.android.viewModelFactoryOf
 class CallViewModel(
     private val sessionManager: XmppSessionManager,
     val media: CallMediaController,
+    /**
+     * Scope for the WIRE-side actions (accept/decline/hang-up): these
+     * must complete even if the activity — and with it viewModelScope —
+     * dies mid-send, or the peer is left hanging until their timeout.
+     */
+    private val actionScope: CoroutineScope,
 ) : ViewModel() {
     val callState: StateFlow<CallState> = sessionManager.callStore.state
     val lastError: StateFlow<String?> = sessionManager.callStore.lastError
@@ -62,15 +69,15 @@ class CallViewModel(
     }
 
     fun accept() {
-        viewModelScope.launch { sessionManager.callStore.acceptIncoming() }
+        actionScope.launch { sessionManager.callStore.acceptIncoming() }
     }
 
     fun decline() {
-        viewModelScope.launch { sessionManager.callStore.declineIncoming() }
+        actionScope.launch { sessionManager.callStore.declineIncoming() }
     }
 
     fun hangUp() {
-        viewModelScope.launch { sessionManager.callStore.hangUp() }
+        actionScope.launch { sessionManager.callStore.hangUp() }
     }
 
     fun dismissEnded() {
@@ -104,6 +111,7 @@ class CallViewModel(
             CallViewModel(
                 sessionManager = graph.sessionManager,
                 media = graph.callSessionController.media,
+                actionScope = graph.applicationScope,
             )
         }
     }

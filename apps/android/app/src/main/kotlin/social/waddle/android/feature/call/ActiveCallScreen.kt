@@ -1,5 +1,6 @@
 package social.waddle.android.feature.call
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.ExpandMore
@@ -21,7 +23,6 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
@@ -56,16 +57,15 @@ fun ActiveCallScreen(
     viewModel: CallViewModel,
     onMinimize: () -> Unit,
 ) {
-    val peerJid = when (state) {
-        is CallState.Outgoing -> state.to
-        is CallState.Active -> state.peer
+    val (peerJid, isVideoCall) = when (state) {
+        is CallState.Outgoing -> state.to to state.media.video
+        is CallState.Active -> state.peer to state.media.video
         else -> return
     }
-    val isVideoCall = when (state) {
-        is CallState.Outgoing -> state.media.video
-        is CallState.Active -> state.media.video
-        else -> false
-    }
+    // System back must not pop the hidden nav stack under the call
+    // surface — collapse to the banner instead.
+    BackHandler(onBack = onMinimize)
+
     val durationSeconds by viewModel.durationSeconds.collectAsStateWithLifecycle()
     val remoteVideo by viewModel.media.remoteVideo.collectAsStateWithLifecycle()
     val localVideo by viewModel.media.localVideo.collectAsStateWithLifecycle()
@@ -208,7 +208,7 @@ private fun CallControls(
             },
         ) {
             Icon(
-                Icons.Filled.VolumeUp,
+                Icons.AutoMirrored.Filled.VolumeUp,
                 contentDescription = stringResource(R.string.call_action_toggle_speaker),
             )
         }

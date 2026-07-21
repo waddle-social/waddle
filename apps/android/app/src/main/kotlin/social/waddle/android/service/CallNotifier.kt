@@ -33,6 +33,12 @@ class CallNotifier(
     private var ringingSid: String? = null
 
     fun start(scope: CoroutineScope) {
+        // A process death mid-ring strands an ongoing (non-swipeable)
+        // ring notification whose actions target a dead slot — retire
+        // it unconditionally before observing the fresh state.
+        runCatching {
+            NotificationManagerCompat.from(context).cancel(INCOMING_CALL_NOTIFICATION_ID)
+        }
         scope.launch {
             callState.collect { state ->
                 // Per-event guard: notify() can throw at runtime; an

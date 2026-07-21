@@ -17,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +50,15 @@ fun CallOverlayHost(
     val state by viewModel.callState.collectAsStateWithLifecycle()
     val minimized by viewModel.minimized.collectAsStateWithLifecycle()
     val autoAnswer by pendingCallAnswer.collectAsStateWithLifecycle()
+
+    // A pending Answer tap whose ring is already gone (retracted,
+    // timed out, answered on another device) MUST be consumed, or the
+    // stale flag would silently auto-answer the NEXT incoming call.
+    LaunchedEffect(autoAnswer, state) {
+        if (autoAnswer && state !is CallState.Incoming) {
+            onCallAnswerConsumed()
+        }
+    }
 
     when (val call = state) {
         is CallState.Incoming -> IncomingCallScreen(
