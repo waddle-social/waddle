@@ -26,18 +26,17 @@ class TerminalReceiptAttemptGateTest {
     fun `pending receipt blocks replacement without changing the journal`() {
         val previous = attempt("previous")
         val journal = journal(
-            previous,
             receipt(
                 previous,
                 TerminalReceiptState.Pending(
-            TerminalReceiptClaimState.Claimed(
-                TerminalClaimId(id("claim")),
-                TerminalReceiptClaimant.BootstrapProcess,
-                ProcessEpoch(id("epoch")),
+                    TerminalReceiptClaimState.Claimed(
+                        TerminalClaimId(id("claim")),
+                        TerminalReceiptClaimant.BootstrapProcess,
+                        ProcessEpoch(id("epoch")),
+                    ),
+                    listOf(effect(previous)),
+                ),
             ),
-            listOf(effect(previous)),
-        )
-            )
         )
 
         val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement"), 1)
@@ -59,7 +58,7 @@ class TerminalReceiptAttemptGateTest {
             TerminalReceiptState.PreAcknowledged,
         ).forEachIndexed { index, state ->
             val previous = attempt("previous-$index")
-            val result = journal(previous, receipt(previous, state)).beginDeliveryAttempt(
+            val result = journal(receipt(previous, state)).beginDeliveryAttempt(
                 OWNER,
                 attempt("replacement-$index"),
                 1,
@@ -105,7 +104,7 @@ class TerminalReceiptAttemptGateTest {
         }
     }
 
-    private fun journal(attempt: DeliveryAttemptRef, receipt: TerminalReceipt): DeliveryJournal = DeliveryJournal(
+    private fun journal(receipt: TerminalReceipt): DeliveryJournal = DeliveryJournal(
         activeOwnerBareJid = OWNER,
         owners = mapOf(OWNER to DeliveryOwnerJournal(activeAttempt = null, terminalReceipt = receipt)),
     )

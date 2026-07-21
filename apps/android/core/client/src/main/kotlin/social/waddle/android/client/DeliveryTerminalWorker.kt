@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -70,7 +69,9 @@ internal class DeliveryTerminalWorker(
         @Volatile
         private var stopRequested = false
 
-        private val job: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
+        init {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
+        }
 
         suspend fun awaitStartupDrain() = startupDrain.await()
 

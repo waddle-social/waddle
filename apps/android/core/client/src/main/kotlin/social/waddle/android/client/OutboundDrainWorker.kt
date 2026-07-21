@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -58,7 +57,9 @@ internal class OutboundDrainWorker(
         @Volatile
         private var stopRequested = false
 
-        private val job: Job = scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
+        init {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) { runWorker() }
+        }
 
         fun bind(handle: ConnectionAttemptHandle, attempt: DeliveryAttemptRef): Boolean = synchronized(runState) {
             if (attempt.ownerBareJid != ownership.lifecycle.ownerBareJid || unavailable) return@synchronized false

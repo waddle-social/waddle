@@ -236,12 +236,6 @@ class XmppSessionRuntimeWorkerRecoveryTest {
         preferences[DELIVERY_JOURNAL_KEY]
             ?.let { TEST_JSON.decodeFromString<DeliveryJournal>(it) }
 
-    private fun updatesScopeSurvivesLastSeen(before: Preferences, after: Preferences): Boolean =
-        updatesLastSeen(before, after, "scope-survives@waddle.test")
-
-    private fun updatesScopeWitnessLastSeen(before: Preferences, after: Preferences): Boolean =
-        updatesLastSeen(before, after, "scope-witness@waddle.test")
-
     private fun updatesLastSeen(before: Preferences, after: Preferences, peer: String): Boolean {
         val old = before[LAST_SEEN_KEY]?.let { TEST_JSON.decodeFromString<Map<String, String>>(it) }.orEmpty()
         val next = after[LAST_SEEN_KEY]?.let { TEST_JSON.decodeFromString<Map<String, String>>(it) }.orEmpty()
