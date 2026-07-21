@@ -49,7 +49,8 @@ class TerminalReceiptLeasePersistenceTest {
     }
 
     @Test
-    fun `persisted acknowledged acknowledgement denies each mismatched lease field without rewriting bytes`() = runTest {
+    fun `persisted acknowledged acknowledgement denies each mismatched lease field without rewriting bytes`() =
+        runTest {
         leaseMismatchCases().forEachIndexed { index, mismatch ->
             val fixture = acknowledgedFixture("acknowledged-ack-$index", mismatch.claimant)
             val before = fixture.snapshot()
@@ -82,7 +83,8 @@ class TerminalReceiptLeasePersistenceTest {
 
             when (operation) {
                 "acknowledge" -> assertTrue(
-                    fixture.prefs.acknowledgeTerminalReceipt(fixture.lease) is TerminalReceiptAcknowledgeResult.Acknowledged,
+                    fixture.prefs.acknowledgeTerminalReceipt(fixture.lease) is
+                        TerminalReceiptAcknowledgeResult.Acknowledged,
                 )
                 "release" -> assertTrue(
                     fixture.prefs.releaseTerminalReceipt(fixture.lease) is TerminalReceiptReleaseResult.Released,
@@ -131,11 +133,18 @@ class TerminalReceiptLeasePersistenceTest {
         claimants.forEach { (name, claimant) ->
             val acknowledged = claimedFixture("success-ack-$name", claimant)
             val acknowledgement = acknowledged.prefs.acknowledgeTerminalReceipt(acknowledged.lease)
-            assertTrue("$name acknowledgement must succeed", acknowledgement is TerminalReceiptAcknowledgeResult.Acknowledged)
+            assertTrue(
+                "$name acknowledgement must succeed",
+                acknowledgement is TerminalReceiptAcknowledgeResult.Acknowledged,
+            )
             val acknowledgedState = requireNotNull(
                 acknowledged.prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt,
             ).state as TerminalReceiptState.Acknowledged
-            assertEquals("$name acknowledgement must persist its exact claim", acknowledged.lease.claim, acknowledgedState.claim)
+            assertEquals(
+                "$name acknowledgement must persist its exact claim",
+                acknowledged.lease.claim,
+                acknowledgedState.claim,
+            )
 
             val released = claimedFixture("success-release-$name", claimant)
             val release = released.prefs.releaseTerminalReceipt(released.lease)
@@ -143,8 +152,16 @@ class TerminalReceiptLeasePersistenceTest {
             val releasedState = requireNotNull(
                 released.prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt,
             ).state as TerminalReceiptState.Pending
-            assertEquals("$name release must clear its durable claim", TerminalReceiptClaimState.Unclaimed, releasedState.claim)
-            assertEquals("$name release must record its exact released claim", released.lease.claim, releasedState.releasedClaim)
+            assertEquals(
+                "$name release must clear its durable claim",
+                TerminalReceiptClaimState.Unclaimed,
+                releasedState.claim,
+            )
+            assertEquals(
+                "$name release must record its exact released claim",
+                released.lease.claim,
+                releasedState.releasedClaim,
+            )
         }
     }
 
@@ -152,15 +169,24 @@ class TerminalReceiptLeasePersistenceTest {
     fun `persisted exact terminal no ops preserve raw bytes for acknowledged and released receipts`() = runTest {
         val acknowledged = acknowledgedFixture("exact-acknowledged", workerClaimant("exact-acknowledged"))
         val acknowledgedBefore = acknowledged.snapshot()
-        assertTrue(acknowledged.prefs.acknowledgeTerminalReceipt(acknowledged.lease) is TerminalReceiptAcknowledgeResult.AlreadyAcknowledged)
+        assertTrue(
+            acknowledged.prefs.acknowledgeTerminalReceipt(acknowledged.lease) is
+                TerminalReceiptAcknowledgeResult.AlreadyAcknowledged,
+        )
         acknowledged.assertUnchanged(acknowledgedBefore)
-        assertTrue(acknowledged.prefs.releaseTerminalReceipt(acknowledged.lease) is TerminalReceiptReleaseResult.AlreadyAcknowledged)
+        assertTrue(
+            acknowledged.prefs.releaseTerminalReceipt(acknowledged.lease) is
+                TerminalReceiptReleaseResult.AlreadyAcknowledged,
+        )
         acknowledged.assertUnchanged(acknowledgedBefore)
 
         val released = claimedFixture("exact-released", workerClaimant("exact-released"))
         assertTrue(released.prefs.releaseTerminalReceipt(released.lease) is TerminalReceiptReleaseResult.Released)
         val releasedBefore = released.snapshot()
-        assertTrue(released.prefs.releaseTerminalReceipt(released.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+        assertTrue(
+            released.prefs.releaseTerminalReceipt(released.lease) is
+                TerminalReceiptReleaseResult.AlreadyReleased,
+        )
         released.assertUnchanged(releasedBefore)
     }
 
@@ -196,10 +222,16 @@ class TerminalReceiptLeasePersistenceTest {
         seed: String,
         claimant: TerminalReceiptClaimant,
     ): PersistedLeaseFixture = claimedFixture(seed, claimant).also { fixture ->
-        assertTrue(fixture.prefs.acknowledgeTerminalReceipt(fixture.lease) is TerminalReceiptAcknowledgeResult.Acknowledged)
+        assertTrue(
+            fixture.prefs.acknowledgeTerminalReceipt(fixture.lease) is
+                TerminalReceiptAcknowledgeResult.Acknowledged,
+        )
     }
 
-    private fun leaseMismatchCases(): List<LeaseMismatchCase> = listOf(
+    private fun leaseMismatchCases(): List<LeaseMismatchCase> =
+        referenceLeaseMismatchCases() + claimantLeaseMismatchCases() + generationLeaseMismatchCases()
+
+    private fun referenceLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
         LeaseMismatchCase("attempt owner", workerClaimant("attempt-owner"), LeaseDenial.MISSING) { lease ->
             lease.copy(
                 ref = lease.ref.copy(
@@ -229,33 +261,70 @@ class TerminalReceiptLeasePersistenceTest {
         LeaseMismatchCase("receipt id", workerClaimant("receipt-id"), LeaseDenial.REPLACED) { lease ->
             lease.copy(ref = lease.ref.copy(id = TerminalReceiptId(uuid("wrong-receipt-id"))))
         },
+    )
+
+    private fun claimantLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
         LeaseMismatchCase("claim id", workerClaimant("claim-id"), LeaseDenial.LEASE_MISMATCH) { lease ->
             lease.copy(claim = lease.claim.copy(id = TerminalClaimId(uuid("wrong-claim-id"))))
         },
-        LeaseMismatchCase("claimant worker to finalizer", workerClaimant("worker-finalizer"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant worker to finalizer",
+            workerClaimant("worker-finalizer"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = finalizerClaimant("wrong-finalizer")))
         },
-        LeaseMismatchCase("claimant worker to bootstrap", workerClaimant("worker-bootstrap"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant worker to bootstrap",
+            workerClaimant("worker-bootstrap"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = TerminalReceiptClaimant.BootstrapProcess))
         },
-        LeaseMismatchCase("claimant finalizer to worker", finalizerClaimant("finalizer-worker"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant finalizer to worker",
+            finalizerClaimant("finalizer-worker"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = workerClaimant("wrong-worker")))
         },
-        LeaseMismatchCase("claimant finalizer to bootstrap", finalizerClaimant("finalizer-bootstrap"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant finalizer to bootstrap",
+            finalizerClaimant("finalizer-bootstrap"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = TerminalReceiptClaimant.BootstrapProcess))
         },
-        LeaseMismatchCase("claimant bootstrap to worker", TerminalReceiptClaimant.BootstrapProcess, LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant bootstrap to worker",
+            TerminalReceiptClaimant.BootstrapProcess,
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = workerClaimant("bootstrap-worker")))
         },
-        LeaseMismatchCase("claimant bootstrap to finalizer", TerminalReceiptClaimant.BootstrapProcess, LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "claimant bootstrap to finalizer",
+            TerminalReceiptClaimant.BootstrapProcess,
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             lease.copy(claim = lease.claim.copy(claimant = finalizerClaimant("bootstrap-finalizer")))
         },
         LeaseMismatchCase("worker kind", workerClaimant("worker-kind"), LeaseDenial.LEASE_MISMATCH) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
-            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(kind = TerminalReceiptWorkerKind.OUTBOUND_DRAIN)))
+            lease.copy(
+                claim = lease.claim.copy(
+                    claimant = claimant.copy(kind = TerminalReceiptWorkerKind.OUTBOUND_DRAIN),
+                ),
+            )
         },
-        LeaseMismatchCase("worker lifecycle generation", workerClaimant("worker-lifecycle"), LeaseDenial.LEASE_MISMATCH) { lease ->
-            val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
+    )
+
+    private fun generationLeaseMismatchCases(): List<LeaseMismatchCase> = listOf(
+        LeaseMismatchCase(
+            "worker lifecycle generation",
+            workerClaimant("worker-lifecycle"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease -> val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
             lease.copy(
                 claim = lease.claim.copy(
                     claimant = claimant.copy(
@@ -264,8 +333,11 @@ class TerminalReceiptLeasePersistenceTest {
                 )
             )
         },
-        LeaseMismatchCase("worker generation", workerClaimant("worker-generation"), LeaseDenial.LEASE_MISMATCH) { lease ->
-            val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
+        LeaseMismatchCase(
+            "worker generation",
+            workerClaimant("worker-generation"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease -> val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
             lease.copy(
                 claim = lease.claim.copy(
                     claimant = claimant.copy(
@@ -274,7 +346,11 @@ class TerminalReceiptLeasePersistenceTest {
                 )
             )
         },
-        LeaseMismatchCase("finalizer lifecycle generation", finalizerClaimant("finalizer-lifecycle"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "finalizer lifecycle generation",
+            finalizerClaimant("finalizer-lifecycle"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Finalizer
             lease.copy(
                 claim = lease.claim.copy(
@@ -284,7 +360,11 @@ class TerminalReceiptLeasePersistenceTest {
                 )
             )
         },
-        LeaseMismatchCase("finalizer generation", finalizerClaimant("finalizer-generation"), LeaseDenial.LEASE_MISMATCH) { lease ->
+        LeaseMismatchCase(
+            "finalizer generation",
+            finalizerClaimant("finalizer-generation"),
+            LeaseDenial.LEASE_MISMATCH,
+        ) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Finalizer
             lease.copy(
                 claim = lease.claim.copy(
@@ -303,18 +383,36 @@ class TerminalReceiptLeasePersistenceTest {
         mismatch: LeaseMismatchCase,
         result: TerminalReceiptAcknowledgeResult,
     ) = when (mismatch.denial) {
-        LeaseDenial.MISSING -> assertTrue("${mismatch.field} must be ReceiptMissing", result is TerminalReceiptAcknowledgeResult.ReceiptMissing)
-        LeaseDenial.REPLACED -> assertTrue("${mismatch.field} must be ReceiptReplaced", result is TerminalReceiptAcknowledgeResult.ReceiptReplaced)
-        LeaseDenial.LEASE_MISMATCH -> assertTrue("${mismatch.field} must be LeaseMismatch", result is TerminalReceiptAcknowledgeResult.LeaseMismatch)
+        LeaseDenial.MISSING -> assertTrue(
+            "${mismatch.field} must be ReceiptMissing",
+            result is TerminalReceiptAcknowledgeResult.ReceiptMissing,
+        )
+        LeaseDenial.REPLACED -> assertTrue(
+            "${mismatch.field} must be ReceiptReplaced",
+            result is TerminalReceiptAcknowledgeResult.ReceiptReplaced,
+        )
+        LeaseDenial.LEASE_MISMATCH -> assertTrue(
+            "${mismatch.field} must be LeaseMismatch",
+            result is TerminalReceiptAcknowledgeResult.LeaseMismatch,
+        )
     }
 
     private fun assertReleaseDenial(
         mismatch: LeaseMismatchCase,
         result: TerminalReceiptReleaseResult,
     ) = when (mismatch.denial) {
-        LeaseDenial.MISSING -> assertTrue("${mismatch.field} must be ReceiptMissing", result is TerminalReceiptReleaseResult.ReceiptMissing)
-        LeaseDenial.REPLACED -> assertTrue("${mismatch.field} must be ReceiptReplaced", result is TerminalReceiptReleaseResult.ReceiptReplaced)
-        LeaseDenial.LEASE_MISMATCH -> assertTrue("${mismatch.field} must be LeaseMismatch", result is TerminalReceiptReleaseResult.LeaseMismatch)
+        LeaseDenial.MISSING -> assertTrue(
+            "${mismatch.field} must be ReceiptMissing",
+            result is TerminalReceiptReleaseResult.ReceiptMissing,
+        )
+        LeaseDenial.REPLACED -> assertTrue(
+            "${mismatch.field} must be ReceiptReplaced",
+            result is TerminalReceiptReleaseResult.ReceiptReplaced,
+        )
+        LeaseDenial.LEASE_MISMATCH -> assertTrue(
+            "${mismatch.field} must be LeaseMismatch",
+            result is TerminalReceiptReleaseResult.LeaseMismatch,
+        )
     }
 
     private fun workerClaimant(seed: String) = TerminalReceiptClaimant.Worker(
