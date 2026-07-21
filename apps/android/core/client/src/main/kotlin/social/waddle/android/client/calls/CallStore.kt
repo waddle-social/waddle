@@ -466,36 +466,71 @@ class CallStore internal constructor(
      * (local hang-up/dismiss, a newer call) means we walked away:
      * decline theirs like the busy path.
      */
+    private enum class RefusedMigration { PROPOSE_DIED, OLD_CONCLUDED_REMOTELY, WALKED_AWAY }
+
     /**
      * The migration swap was refused after `finishMigrated` + `proceed`
-     * went out. Two causes: the peer's own retract of the re-propose
-     * (dead sid, slot still Active) — nothing to send for the new sid,
-     * but `finishMigrated` already retired the OLD one on the wire, so
-     * the old Jingle session must terminate and the slot must end
-     * (Active has no timer; stranding it would pin the FGS and mic
-     * forever). Otherwise a racing local hang-up already sent
-     * terminate+finish for the old sid, and the freshly-PROCEEDED new
-     * one is abandoned with the finish bookend — a reject after our
-     * own proceed would be a contradictory double answer.
+     * went out — the CAUSE decides the follow-up:
+     * - The peer's own retract killed the re-propose (dead sid, slot
+     *   still Active): nothing to send for the new sid, but
+     *   `finishMigrated` already retired the OLD one on the wire, so
+     *   the old Jingle session terminates (launched, not awaited — it
+     *   is likely orphaned and must not stall the effects queue) and
+     *   the slot ends (Active has no timer; stranding it would pin the
+     *   FGS and mic forever).
+     * - The OLD session concluded remotely mid-migration (peer's other
+     *   resource terminated it; slot Ended with the old sid): the
+     *   re-propose is live and already PROCEEDED — take it over as the
+     *   accepting ring instead of killing both calls; nothing further
+     *   is needed for the old sid.
+     * - Otherwise a racing local hang-up (or a newer call) walked away:
+     *   the freshly-proceeded new sid is abandoned with the finish
+     *   bookend — a reject after our own proceed would be a
+     *   contradictory double answer.
      */
-    private suspend fun abandonRefusedMigration(event: WaddleCallEvent, prev: CallState.Active) {
-        val proposeDied = synchronized(stateLock) {
-            if (slotStillMatches(prev) && recentlyAbortedSids.containsKey(event.sid)) {
-                cancelCallTimersLocked()
-                _state.value = CallState.Ended(sid = prev.sid, reason = CallEndReason.Expired)
-                true
-            } else {
-                false
+    private suspend fun abandonRefusedMigration(
+        event: WaddleCallEvent,
+        kind: WaddleCallEventKind.Propose,
+        prev: CallState.Active,
+    ) {
+        val outcome = synchronized(stateLock) {
+            val current = _state.value
+            when {
+                recentlyAbortedSids.containsKey(event.sid) -> {
+                    if (slotStillMatches(prev)) {
+                        cancelCallTimersLocked()
+                        _state.value = CallState.Ended(sid = prev.sid, reason = CallEndReason.Expired)
+                        RefusedMigration.PROPOSE_DIED
+                    } else {
+                        RefusedMigration.WALKED_AWAY
+                    }
+                }
+                current is CallState.Ended && current.sid == prev.sid -> {
+                    cancelCallTimersLocked()
+                    _state.value = CallState.Incoming(
+                        from = event.from,
+                        sid = event.sid,
+                        media = kind.media,
+                        accepting = true,
+                    )
+                    _lastError.value = null
+                    RefusedMigration.OLD_CONCLUDED_REMOTELY
+                }
+                else -> RefusedMigration.WALKED_AWAY
             }
         }
-        if (proposeDied) {
-            if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
-                reportError("call session terminate failed")
+        when (outcome) {
+            RefusedMigration.PROPOSE_DIED -> scope?.launch {
+                if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+                    reportError("call session terminate failed")
+                }
             }
-            return
-        }
-        if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
-            reportError("call finish failed")
+            RefusedMigration.OLD_CONCLUDED_REMOTELY ->
+                scheduleSessionInitiateTimeout(event.from, event.sid)
+            RefusedMigration.WALKED_AWAY ->
+                if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
+                    reportError("call finish failed")
+                }
         }
     }
 
@@ -603,7 +638,7 @@ class CallStore internal constructor(
         // the accepted sid — the same <reject/> hangUp() sends for an
         // accepting incoming — instead of ghosting the peer.
         if (!acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev, accepting = true)) {
-            abandonRefusedMigration(event, prev)
+            abandonRefusedMigration(event, kind, prev)
             return
         }
         scheduleSessionInitiateTimeout(event.from, event.sid)

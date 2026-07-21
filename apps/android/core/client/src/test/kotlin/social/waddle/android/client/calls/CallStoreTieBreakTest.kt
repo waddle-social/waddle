@@ -290,6 +290,38 @@ class CallStoreTieBreakTest {
     }
 
     @Test
+    fun `old session concluded remotely mid-migration keeps the proceeded re-propose`() = runTest {
+        val f = Fixture(sid = { "c-old" })
+        f.store.start(backgroundScope)
+        f.store.startCall(PEER_BARE, audio)
+        f.store.onCallEvent(proceed(PEER_FULL, "c-old"))
+        f.store.onCallEvent(sessionAccept(PEER_FULL, "c-old"))
+        runCurrent()
+
+        // Multi-resource peer: the phone re-proposes c-new while the
+        // desktop's terminate of c-old is still in flight; the
+        // terminate reduces the slot to Ended(c-old) while our
+        // migration markers are on the wire. The already-PROCEEDED
+        // re-propose is live and must be taken over, not killed.
+        f.client.callProceedDelayMillis = 1_000
+        f.store.onCallEvent(propose(PEER_FULL, "c-new"))
+        runCurrent()
+        f.store.onCallEvent(sessionTerminate(PEER_FULL, "c-old", WaddleJingleReason.SUCCESS))
+        f.client.callVerbs.clear()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        val state = f.store.state.value
+        assertTrue(state is CallState.Incoming && state.sid == "c-new" && state.accepting)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.FinishWithReason })
+
+        // And the takeover ring is bounded like any accepted ring.
+        advanceTimeBy(CallStore.SESSION_ACCEPT_TIMEOUT_MILLIS + 1)
+        runCurrent()
+        assertEquals(CallState.Ended("c-new", CallEndReason.Timeout), f.store.state.value)
+    }
+
+    @Test
     fun `a retract landing mid-tie-break does not install the dead ring`() = runTest {
         val f = Fixture(sid = { "c-zz" })
         f.store.start(backgroundScope)
