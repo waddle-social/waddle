@@ -31,7 +31,7 @@ import java.io.IOException
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundLifecycleStateStoreRecoveryTest {
     @Test
-    fun `B cancellation before both workers are ready returns reachable lifecycle and replacement state store starts`() =
+    fun `B cancellation before workers are ready retains lifecycle and starts replacement store`() =
         runTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)

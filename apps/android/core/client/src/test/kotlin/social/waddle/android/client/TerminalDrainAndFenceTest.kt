@@ -128,7 +128,11 @@ class TerminalDrainAndFenceTest {
     private fun assertPendingPostFenceRetries(attempt: DeliveryAttemptRef) {
         val intentId = intentId("pending")
         val terminal = row("pending", 1, intentId)
-        val pending = journal(attempt, listOf(terminal), listOf(intent(intentId, terminal, attempt, DeliveryTerminalKind.NATIVE_FAILURE)))
+        val pending = journal(
+            attempt,
+            listOf(terminal),
+            listOf(intent(intentId, terminal, attempt, DeliveryTerminalKind.NATIVE_FAILURE)),
+        )
             .prepareTerminalDrainAndFence(request(attempt, "pending")) as TerminalDrainAndFenceResult.Prepared
         val foreignReady = checkNotNull(pending.journal.owners[OWNER])
             .outboundRows.single()
@@ -276,7 +280,9 @@ class TerminalDrainAndFenceTest {
         val foreign = DeliveryOwnerJournal(activeAttempt = foreignAttempt)
         val before = journal(attempt).copy(owners = journal(attempt).owners + (OTHER_OWNER to foreign))
 
-        val prepared = before.prepareTerminalDrainAndFence(request(attempt, "receipt")) as TerminalDrainAndFenceResult.Prepared
+        val prepared =
+            before.prepareTerminalDrainAndFence(request(attempt, "receipt")) as
+                TerminalDrainAndFenceResult.Prepared
         assertEquals(foreign, prepared.journal.owners[OTHER_OWNER])
     }
 
@@ -326,14 +332,46 @@ class TerminalDrainAndFenceTest {
         val missing = intent(id, row("missing", 1, id), active, DeliveryTerminalKind.ACK)
         val orphan = row("orphan", 1, id)
 
-        assertCorrupt(journal(active, emptyList(), listOf(missing)), active, TerminalDrainAndFenceFailureReason.MISSING_INTENT_ROW)
-        assertCorrupt(journal(active, listOf(row, duplicateIdRow(id)), listOf(valid, duplicateId)), active, TerminalDrainAndFenceFailureReason.DUPLICATE_INTENT_ID)
-        assertCorrupt(journal(active, listOf(row), listOf(valid, duplicateIntentRow)), active, TerminalDrainAndFenceFailureReason.DUPLICATE_ROW_IDENTITY)
-        assertCorrupt(journal(active, listOf(row, duplicateRow), listOf(valid)), active, TerminalDrainAndFenceFailureReason.DUPLICATE_ROW_IDENTITY)
-        assertCorrupt(journal(active, listOf(wrongIntentId), listOf(valid)), active, TerminalDrainAndFenceFailureReason.TERMINAL_INTENT_ID_MISMATCH)
-        assertCorrupt(journal(active, listOf(row), listOf(wrongAttempt)), active, TerminalDrainAndFenceFailureReason.INTENT_ATTEMPT_MISMATCH)
-        assertCorrupt(journal(active, listOf(foreignRow), listOf(wrongOwner)), active, TerminalDrainAndFenceFailureReason.ROW_OWNER_MISMATCH)
-        assertCorrupt(journal(active, listOf(orphan), emptyList()), active, TerminalDrainAndFenceFailureReason.ORPHAN_TERMINAL_ROW)
+        assertCorrupt(
+            journal(active, emptyList(), listOf(missing)),
+            active,
+            TerminalDrainAndFenceFailureReason.MISSING_INTENT_ROW,
+        )
+        assertCorrupt(
+            journal(active, listOf(row, duplicateIdRow(id)), listOf(valid, duplicateId)),
+            active,
+            TerminalDrainAndFenceFailureReason.DUPLICATE_INTENT_ID,
+        )
+        assertCorrupt(
+            journal(active, listOf(row), listOf(valid, duplicateIntentRow)),
+            active,
+            TerminalDrainAndFenceFailureReason.DUPLICATE_ROW_IDENTITY,
+        )
+        assertCorrupt(
+            journal(active, listOf(row, duplicateRow), listOf(valid)),
+            active,
+            TerminalDrainAndFenceFailureReason.DUPLICATE_ROW_IDENTITY,
+        )
+        assertCorrupt(
+            journal(active, listOf(wrongIntentId), listOf(valid)),
+            active,
+            TerminalDrainAndFenceFailureReason.TERMINAL_INTENT_ID_MISMATCH,
+        )
+        assertCorrupt(
+            journal(active, listOf(row), listOf(wrongAttempt)),
+            active,
+            TerminalDrainAndFenceFailureReason.INTENT_ATTEMPT_MISMATCH,
+        )
+        assertCorrupt(
+            journal(active, listOf(foreignRow), listOf(wrongOwner)),
+            active,
+            TerminalDrainAndFenceFailureReason.ROW_OWNER_MISMATCH,
+        )
+        assertCorrupt(
+            journal(active, listOf(orphan), emptyList()),
+            active,
+            TerminalDrainAndFenceFailureReason.ORPHAN_TERMINAL_ROW,
+        )
         assertCorrupt(
             journal(active, listOf(row.copy(ownership = OutboundOwnership.Ready)), listOf(valid)),
             active,
@@ -460,7 +498,10 @@ class TerminalDrainAndFenceTest {
     ): DeliveryTerminalIntent = DeliveryTerminalIntent(
         id = id,
         row = row.identity,
-        expectedOwnership = OutboundOwnership.NativeOwned(attempt, social.waddle.android.client.prefs.NativeOutboundPhase.FRESH),
+        expectedOwnership = OutboundOwnership.NativeOwned(
+            attempt,
+            social.waddle.android.client.prefs.NativeOutboundPhase.FRESH,
+        ),
         kind = kind,
         createdAtMillis = 1,
     )

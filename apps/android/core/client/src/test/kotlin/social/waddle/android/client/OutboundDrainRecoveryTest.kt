@@ -105,7 +105,7 @@ class OutboundDrainRecoveryTest {
             state.owner.job.cancelAndJoin()
         }
 
-        private companion object {
+        companion object {
             suspend fun create(scope: TestScope): DrainRecoveryFixture {
                 val prefs = SessionPrefs(FailingPreferencesDataStore())
                 prefs.activateSession(OWNER, "drain-fatal")
