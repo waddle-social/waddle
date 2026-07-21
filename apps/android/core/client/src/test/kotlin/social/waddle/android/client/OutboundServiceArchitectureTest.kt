@@ -36,7 +36,14 @@ class OutboundServiceArchitectureTest {
         fields.forEach { field ->
             assertEquals(expected.getValue(field.name), field.type)
             assertTrue(Modifier.isFinal(field.modifiers))
-            assertFalse(field.type.name.matches(Regex(".*(Function|Mutex|Job|Channel|Atomic|Lifecycle|ActiveSession|SessionStores|ResumePersistence|Worker|Evidence).*")))
+            assertFalse(
+                field.type.name.matches(
+                    Regex(
+                        ".*(Function|Mutex|Job|Channel|Atomic|Lifecycle|ActiveSession|SessionStores|" +
+                            "ResumePersistence|Worker|Evidence).*",
+                    ),
+                ),
+            )
         }
     }
 }

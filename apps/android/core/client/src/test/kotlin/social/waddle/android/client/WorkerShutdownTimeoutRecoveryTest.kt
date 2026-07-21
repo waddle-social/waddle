@@ -33,7 +33,7 @@ import kotlin.time.Duration.Companion.seconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class WorkerShutdownTimeoutRecoveryTest {
     @Test
-    fun `M1 terminal timeout exit before shutdown gate re-entry returns exact worker fence`() = runTest(timeout = 5.seconds) {
+    fun `M1 terminal timeout returns exact worker fence`() = runTest(timeout = 5.seconds) {
         val finalizationReturned = CompletableDeferred<Unit>()
         val releaseShutdownReentry = CompletableDeferred<Unit>()
         val harness = TimeoutHarness(
@@ -94,7 +94,7 @@ class WorkerShutdownTimeoutRecoveryTest {
     }
 
     @Test
-    fun `M2 awaiting exact terminal exit advances to worker fence then recovers replacement`() = runTest(timeout = 5.seconds) {
+    fun `M2 awaiting terminal exit recovers replacement`() = runTest(timeout = 5.seconds) {
         val awaitingInstalled = CompletableDeferred<Unit>()
         val releaseAwaitingObserver = CompletableDeferred<Unit>()
         val harness = TimeoutHarness(

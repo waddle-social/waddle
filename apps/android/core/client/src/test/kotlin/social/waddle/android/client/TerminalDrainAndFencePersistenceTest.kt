@@ -178,7 +178,9 @@ class TerminalDrainAndFencePersistenceTest {
         releaseFirstCommit.complete(Unit)
 
         val outcomes = awaitAll(first, second)
-        val prepared = outcomes.single { it is TerminalDrainAndFenceResult.Prepared } as TerminalDrainAndFenceResult.Prepared
+        val prepared = outcomes.single {
+            it is TerminalDrainAndFenceResult.Prepared
+        } as TerminalDrainAndFenceResult.Prepared
         assertEquals(
             listOf(TerminalDrainAndFenceResult.PriorReceiptPending(prepared.journal, prepared.receipt)),
             outcomes.filterIsInstance<TerminalDrainAndFenceResult.PriorReceiptPending>(),
@@ -228,7 +230,9 @@ class TerminalDrainAndFencePersistenceTest {
         val initial = journal(attempt).copy(owners = journal(attempt).owners + (FOREIGN_OWNER to foreign))
         seed(prefs, initial)
 
-        val prepared = prefs.persistTerminalDrainAndFence(request(attempt, "receipt")) as TerminalDrainAndFenceResult.Prepared
+        val prepared = prefs.persistTerminalDrainAndFence(
+            request(attempt, "receipt"),
+        ) as TerminalDrainAndFenceResult.Prepared
         assertEquals(foreign, prepared.journal.owners[FOREIGN_OWNER])
         assertEquals(foreign, prefs.deliveryJournal.first().owners[FOREIGN_OWNER])
     }
@@ -327,7 +331,9 @@ class TerminalDrainAndFencePersistenceTest {
         terminal: QueuedOutboundMessage? = null,
         terminalKind: DeliveryTerminalKind = DeliveryTerminalKind.ACK,
         row: QueuedOutboundMessage? = terminal,
-        intents: List<DeliveryTerminalIntent> = terminal?.let { listOf(intent(it, attempt, terminalKind)) } ?: emptyList(),
+        intents: List<DeliveryTerminalIntent> = terminal?.let {
+            listOf(intent(it, attempt, terminalKind))
+        } ?: emptyList(),
     ): DeliveryJournal = DeliveryJournal(
         activeOwnerBareJid = OWNER,
         owners = mapOf(

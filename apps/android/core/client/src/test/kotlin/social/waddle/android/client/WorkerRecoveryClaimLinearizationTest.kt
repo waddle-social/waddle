@@ -30,7 +30,7 @@ import kotlin.time.Duration.Companion.seconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class WorkerRecoveryClaimLinearizationTest {
     @Test
-    fun `N concurrent recovery claims are linearized and cancellation permits an exact retry`() = runTest(timeout = 5.seconds) {
+    fun `N concurrent recovery claims allow an exact retry`() = runTest(timeout = 5.seconds) {
         val prefs = SessionPrefs(FailingPreferencesDataStore())
         prefs.activateSession(OWNER, "claim-linearization")
         val queue = DeliveryJournalStore(prefs)

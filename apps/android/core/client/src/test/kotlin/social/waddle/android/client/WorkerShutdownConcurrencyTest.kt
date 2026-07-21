@@ -26,7 +26,7 @@ import kotlin.time.Duration.Companion.seconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class WorkerShutdownConcurrencyTest {
     @Test
-    fun `O1 concurrent shutdowns preserve exact worker fence across external finalizer race`() = runTest(timeout = 5.seconds) {
+    fun `O1 concurrent shutdowns preserve exact worker fence`() = runTest(timeout = 5.seconds) {
         val firstFinalizerEntered = CompletableDeferred<Unit>()
         val secondFinalizerEntered = CompletableDeferred<Unit>()
         val releaseFinalizer = CompletableDeferred<Unit>()

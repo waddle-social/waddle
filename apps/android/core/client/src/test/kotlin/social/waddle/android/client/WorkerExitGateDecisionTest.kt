@@ -39,9 +39,18 @@ class WorkerExitGateDecisionTest {
         val oldExit = exit(old, WorkerKind.OUTBOUND_DRAIN, WorkerExitReason.UnexpectedReturn)
         val wrongKind = exit(replacement, WorkerKind.DELIVERY_TERMINAL, WorkerExitReason.UnexpectedReturn)
 
-        assertEquals(WorkerExitGateDecision.Ignore, decideWorkerExitGate(OutboundLifecycleState.Open(replacement), false, true, oldExit))
-        assertEquals(WorkerExitGateDecision.Ignore, decideWorkerExitGate(OutboundLifecycleState.Open(replacement), false, true, wrongKind))
-        assertEquals(WorkerExitGateDecision.Ignore, decideWorkerExitGate(OutboundLifecycleState.Open(replacement), true, false, wrongKind))
+        assertEquals(
+            WorkerExitGateDecision.Ignore,
+            decideWorkerExitGate(OutboundLifecycleState.Open(replacement), false, true, oldExit),
+        )
+        assertEquals(
+            WorkerExitGateDecision.Ignore,
+            decideWorkerExitGate(OutboundLifecycleState.Open(replacement), false, true, wrongKind),
+        )
+        assertEquals(
+            WorkerExitGateDecision.Ignore,
+            decideWorkerExitGate(OutboundLifecycleState.Open(replacement), true, false, wrongKind),
+        )
     }
 
     @Test

@@ -155,7 +155,12 @@ class TerminalReceiptSerializationTest {
             TerminalReceiptState.Pending(TerminalReceiptClaimState.Unclaimed, listOf(effect())),
         )
         val encoded = json.encodeToString(receipt)
-        assertDecodeInvalid(encoded.replaceFirst("\"clientStanzaId\":\"terminal-row\"", "\"clientStanzaId\":\"wrong-row\""))
+        assertDecodeInvalid(
+            encoded.replaceFirst(
+                "\"clientStanzaId\":\"terminal-row\"",
+                "\"clientStanzaId\":\"wrong-row\"",
+            ),
+        )
         val callbackOwnerChanged = encoded.replaceFirst(
             "\"row\":{\"ownerBareJid\":\"$OWNER\"",
             "\"row\":{\"ownerBareJid\":\"$OTHER_OWNER\"",
@@ -250,7 +255,10 @@ class TerminalReceiptSerializationTest {
         )
     }
 
-    private fun row(id: String = "terminal-row", sequence: Long = 1): QueuedOutboundMessage = QueuedOutboundDraft.create(
+    private fun row(
+        id: String = "terminal-row",
+        sequence: Long = 1,
+    ): QueuedOutboundMessage = QueuedOutboundDraft.create(
         ownerBareJid = OWNER,
         clientStanzaId = id,
         enqueuedAtMillis = sequence,
