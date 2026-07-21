@@ -617,10 +617,15 @@ export class OfflineSendQueue {
   }
 
   private emitQueueDepth(): void {
-    this.deps.events.emitSafe("queueDepthChange", {
-      persisted: countQueuedMessages(this.deps.queueScope()),
-      inflight: this.inflightQueuedIds.size,
-    });
+    const entries = listQueuedMessages(this.deps.queueScope());
+    for (const kind of ["dm", "room"] as const) {
+      const kindEntries = entries.filter((entry) => entry.kind === kind);
+      this.deps.events.emitSafe("queueDepthChange", {
+        kind,
+        persisted: kindEntries.length,
+        inflight: kindEntries.filter((entry) => this.inflightQueuedIds.has(entry.id)).length,
+      });
+    }
   }
 
   private noteQueuedMessage(): void {

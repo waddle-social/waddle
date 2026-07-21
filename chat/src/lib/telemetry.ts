@@ -25,10 +25,9 @@
  * connect handshake over WebSocket, outbound message bookkeeping —
  * so we still get client-side timing and failure attribution. The
  * browser WebSocket API does not allow custom headers on the upgrade
- * request, so these manual spans are NOT trace-parented to the
- * server's XMPP session by themselves. Any `fetch` issued inside a
- * `withSpan` callback IS propagated (via the active context set by
- * `context.with`) and will cross-link into backend spans correctly.
+ * request, so `xmpp.connect` propagates its W3C `traceparent` through the
+ * sanctioned WebSocket query parameter. Any `fetch` issued inside a
+ * `withSpan` callback is likewise propagated through normal headers.
  */
 import {
   initializeFaro,
@@ -48,8 +47,13 @@ import {
   callMediaPathEventAttributes,
   type CallMediaPathSnapshot,
 } from "./calls/call-media-path-telemetry";
+import type {
+  CallKind,
+  CallLifecyclePayload,
+} from "./calls/call-lifecycle-telemetry";
 
 type MessageKind = "room" | "dm";
+type DisplayedMarkerLatencyBand = "unknown" | "under-250ms" | "250ms-1s" | "1s-5s" | "over-5s";
 
 /** Errors we classify coarsely so Tempo filters stay useful. */
 export type ErrorKind =
@@ -63,6 +67,8 @@ export type ErrorKind =
   | "storage.write"
   | "http.fetch"
   | "upload"
+  | "call.operation"
+  | "call.media"
   | "window-error"
   | "unhandled-rejection"
   | "vue-render-error";
@@ -128,6 +134,8 @@ const SENSITIVE_ERROR_CONTEXT_KEYS = new Set([
   "key",
   "storagekey",
 ]);
+const TRACEPARENT_PATTERN = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+const XMPP_RESOURCE_PATTERN = /^web-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SpanAttributeValue = string | number;
 type FaroEventPayload = {
@@ -249,6 +257,10 @@ export function initTelemetry(options: InitTelemetryOptions): void {
 // error through the sanitizing `reportError()` path instead.
 
 const GLOBAL_ERROR_DEDUPE_WINDOW_MS = 5_000;
+const BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES = new Set([
+  "ResizeObserver loop completed with undelivered notifications.",
+  "ResizeObserver loop limit exceeded",
+]);
 // Guard is per-window (not a process-lifetime latch) so a swapped
 // `window` — a fresh test stub, an HMR-recreated document — gets its
 // own listeners instead of a silent no-op.
@@ -280,7 +292,15 @@ export function installGlobalErrorTelemetry(): void {
 export function handleWindowErrorEvent(event: { error?: unknown; message?: unknown }): void {
   const error = event.error
     ?? new Error(typeof event.message === "string" && event.message ? event.message : "window-error");
+  if (isBenignResizeObserverError(error)) return;
   reportGlobalError("window-error", error);
+}
+
+function isBenignResizeObserverError(error: unknown): boolean {
+  // Same normalization as reportGlobalError: browsers may surface the
+  // window-error payload as a bare string rather than an Error.
+  const message = error instanceof Error ? error.message : String(error);
+  return BENIGN_RESIZE_OBSERVER_ERROR_MESSAGES.has(message);
 }
 
 /** Exported for tests and for {@link installGlobalErrorTelemetry}. */
@@ -748,14 +768,36 @@ function scrubUrl(value: string | undefined, trustedOrigins: Set<string>): strin
   try {
     const url = new URL(value, currentPageHref());
     if (isSensitiveSpanUrl(url)) return UNKNOWN_FILE_TRANSFER_URL;
-    if (!trustedOrigins.has(url.origin)) return scrubExternalUrl();
+    if (!isTrustedSpanOrigin(url, trustedOrigins)) return scrubExternalUrl();
     url.pathname = scrubUrlPath(url.pathname);
+    const traceparent = sanitizedTraceparent(url.searchParams.get("traceparent"));
     url.search = "";
+    if (traceparent) url.searchParams.set("traceparent", traceparent);
     url.hash = "";
     return url.toString();
   } catch {
     return scrubUrlPath(value.split(/[?#]/, 1)[0] ?? "");
   }
+}
+
+function isTrustedSpanOrigin(url: URL, trustedOrigins: Set<string>): boolean {
+  if (trustedOrigins.has(url.origin)) return true;
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") return false;
+  const httpEquivalent = new URL(url.origin);
+  httpEquivalent.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  return trustedOrigins.has(httpEquivalent.origin);
+}
+
+function sanitizedTraceparent(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.toLowerCase();
+  return isValidTraceparent(normalized) ? normalized : undefined;
+}
+
+function isValidTraceparent(value: string): boolean {
+  if (!TRACEPARENT_PATTERN.test(value)) return false;
+  const [, traceId, spanId] = value.split("-");
+  return !/^0{32}$/.test(traceId ?? "") && !/^0{16}$/.test(spanId ?? "");
 }
 
 function currentPageHref(): string {
@@ -817,6 +859,87 @@ export function __setFaroForTesting(instance: Faro | null): void {
     lastGlobalErrorKey = "";
     lastGlobalErrorAtMs = 0;
   }
+}
+
+/** Attach the privacy-safe XMPP resource to Faro's current browser session. */
+export function setXmppResourceForTelemetry(resource: string): void {
+  if (!faro || !XMPP_RESOURCE_PATTERN.test(resource)) return;
+  const current = faro.api.getSession();
+  faro.api.setSession({
+    ...current,
+    attributes: {
+      ...current?.attributes,
+      xmpp_resource: resource,
+    },
+  });
+}
+
+/**
+ * Append the active Faro/OpenTelemetry span as W3C trace context to a WebSocket
+ * upgrade URL. Browsers cannot set upgrade headers, so the sanctioned query
+ * parameter is the only cross-stack propagation channel available here.
+ */
+export function websocketUrlWithTraceparent(value: string): string {
+  const activeSpanContext = trace.getSpan(context.active())?.spanContext();
+  if (activeSpanContext && validSpanContext(activeSpanContext)) {
+    return websocketUrlWithSpanContext(value, activeSpanContext);
+  }
+  if (typeof globalThis.crypto?.getRandomValues !== "function") return value;
+  const spanContext = randomSpanContext();
+  return websocketUrlWithSpanContext(value, spanContext);
+}
+
+function validSpanContext(spanContext: { traceId: string; spanId: string; traceFlags: number }): boolean {
+  return isValidTraceparent(traceparentFromSpanContext(spanContext));
+}
+
+function randomSpanContext(): { traceId: string; spanId: string; traceFlags: number } {
+  return {
+    traceId: randomNonZeroHex(16),
+    spanId: randomNonZeroHex(8),
+    traceFlags: 0,
+  };
+}
+
+function randomNonZeroHex(byteLength: number): string {
+  let value = "";
+  do {
+    value = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(byteLength)), (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+  } while (/^0+$/.test(value));
+  return value;
+}
+
+function traceparentFromSpanContext(
+  spanContext: { traceId: string; spanId: string; traceFlags: number },
+): string {
+  return `00-${spanContext.traceId}-${spanContext.spanId}-${(spanContext.traceFlags & 0xff)
+    .toString(16)
+    .padStart(2, "0")}`;
+}
+
+function websocketUrlWithSpanContext(
+  value: string,
+  spanContext: { traceId: string; spanId: string; traceFlags: number },
+): string {
+  const traceparent = traceparentFromSpanContext(spanContext);
+  if (!isValidTraceparent(traceparent)) return value;
+  try {
+    const url = new URL(value);
+    url.searchParams.set("traceparent", traceparent);
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+/** For tests only — exercise positive WebSocket trace injection deterministically. */
+export function __websocketUrlWithTraceparentForTesting(
+  value: string,
+  spanContext: { traceId: string; spanId: string; traceFlags: number },
+): string {
+  return websocketUrlWithSpanContext(value, spanContext);
 }
 
 /** For tests only — exercise the final transport guard without calling Grafana. */
@@ -976,6 +1099,28 @@ export function reportMessageAcked(payload: {
   }, { context: { kind: payload.kind } });
 }
 
+function displayedMarkerLatencyBand(latencyMs: number | null): DisplayedMarkerLatencyBand {
+  if (latencyMs === null || !Number.isFinite(latencyMs) || latencyMs < 0) return "unknown";
+  if (latencyMs < 250) return "under-250ms";
+  if (latencyMs < 1_000) return "250ms-1s";
+  if (latencyMs < 5_000) return "1s-5s";
+  return "over-5s";
+}
+
+export function reportDisplayedMarkerFailure(payload: {
+  direction: "send" | "receive";
+  kind: MessageKind;
+  reason: "send-failed" | "receive-processing-failed";
+  roundTripMs: number | null;
+}): void {
+  faro?.api.pushEvent("chat.xmpp.displayed_marker.failed", {
+    direction: payload.direction,
+    kind: payload.kind,
+    reason: payload.reason,
+    round_trip_latency_band: displayedMarkerLatencyBand(payload.roundTripMs),
+  });
+}
+
 export function reportSendEnqueued(payload: {
   kind: MessageKind;
   reason: string;
@@ -987,6 +1132,7 @@ export function reportSendEnqueued(payload: {
 }
 
 export function reportQueueDepthChange(payload: {
+  kind: MessageKind;
   persisted: number;
   inflight: number;
 }): void {
@@ -997,7 +1143,7 @@ export function reportQueueDepthChange(payload: {
       persisted: payload.persisted,
       inflight: payload.inflight,
     },
-  });
+  }, { context: { kind: payload.kind } });
 }
 
 export function reportSessionLifecycle(payload: {
@@ -1016,8 +1162,14 @@ export function reportSessionLifecycle(payload: {
  * effect. De-dup (at most once per call per distinct state) is the caller's job
  * via `createCallAudioProcessingBeacon`.
  */
-export function reportCallAudioProcessing(state: VerifiedCallAudioProcessing): void {
-  faro?.api.pushEvent("chat.call.audio_processing", callAudioProcessingEventAttributes(state));
+export function reportCallAudioProcessing(
+  state: VerifiedCallAudioProcessing,
+  callKind: CallKind,
+): void {
+  faro?.api.pushEvent("chat.call.audio_processing", {
+    ...callAudioProcessingEventAttributes(state),
+    call_kind: callKind,
+  });
 }
 
 /**
@@ -1030,8 +1182,36 @@ export function reportCallAudioProcessing(state: VerifiedCallAudioProcessing): v
  * effect. De-dup (at most once per call per distinct path) is the caller's job
  * via `createCallMediaPathBeacon`.
  */
-export function reportCallMediaPath(snapshot: CallMediaPathSnapshot): void {
-  faro?.api.pushEvent("chat.call.media_path", callMediaPathEventAttributes(snapshot));
+export function reportCallMediaPath(snapshot: CallMediaPathSnapshot, callKind: CallKind): void {
+  faro?.api.pushEvent("chat.call.media_path", {
+    ...callMediaPathEventAttributes(snapshot),
+    call_kind: callKind,
+  });
+}
+
+export function reportCallLifecycle(payload: CallLifecyclePayload): void {
+  faro?.api.pushEvent("chat.call.lifecycle", {
+    setup_outcome: payload.setupOutcome,
+    end_reason: payload.endReason,
+    duration_bucket: payload.durationBucket,
+    call_kind: payload.callKind,
+    rtt_band: payload.rttBand,
+    packet_loss_band: payload.packetLossBand,
+    connection_quality: payload.connectionQuality,
+    reconnect_count: payload.reconnectCount,
+  });
+}
+
+export function reportCallMediaError(
+  mediaKind: "mic" | "cam" | "screen",
+  reason: "denied" | "missing" | "in-use" | "failed",
+): void {
+  reportError("call.media", new Error(`call.media.${mediaKind}.${reason}`), {
+    recoverable: true,
+    detail: "media-capture",
+    media_kind: mediaKind,
+    reason,
+  });
 }
 
 export function reportStatusChange(payload: {
@@ -1160,6 +1340,7 @@ export function reportReconnectScheduled(payload: { attempt: number; delayMs: nu
 export function reportCatchup(payload: {
   conversations: number;
   pages: number;
+  pageFailures: number;
   messages: number;
   durationMs: number;
   processedConversations?: number;
@@ -1172,6 +1353,7 @@ export function reportCatchup(payload: {
       conversations: payload.conversations,
       processed_conversations: payload.processedConversations ?? payload.conversations,
       pages: payload.pages,
+      page_failures: payload.pageFailures,
       messages: payload.messages,
       duration_ms: Math.round(payload.durationMs),
       hidden_ms: metric.hiddenMs,

@@ -7,8 +7,9 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use waddle_xmpp::telemetry::test_support;
 
-async fn create_test_auth_state(
+pub(crate) async fn create_test_auth_state(
     server_config: &ServerConfig,
 ) -> (Arc<AuthState>, kameo::actor::ActorRef<DbActor>) {
     let public_websocket_url =
@@ -202,4 +203,54 @@ async fn secure_cookie_header_tracks_base_url_scheme() {
     assert!(!insecure_state
         .session_cookie_header(Some("token"), 60)
         .contains("Secure"));
+}
+
+#[tokio::test]
+async fn callback_records_state_success_before_subsequent_provider_failure() {
+    let guard = test_support::acquire().await;
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    auth_state
+        .auth_handshake
+        .insert_pending(&PendingAuthorization {
+            state: "validated-state".to_string(),
+            provider_id: "missing-provider".to_string(),
+            nonce: "nonce".to_string(),
+            code_verifier: "verifier".to_string(),
+            redirect_uri: "http://localhost:3000/api/auth/callback".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: false,
+            flow: PendingFlow::Browser {
+                next: Some("/".to_string()),
+                session_transport: BrowserSessionTransport::Cookie,
+            },
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("insert pending authorization");
+
+    let response = router(auth_state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/callback?state=validated-state&code=authorization-code")
+                .body(Body::empty())
+                .expect("callback request"),
+        )
+        .await
+        .expect("callback response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        guard.counter_sum("waddle.auth.success", &[("stage", "state")]),
+        Some(1),
+    );
+    assert_eq!(
+        guard.counter_sum(
+            "waddle.auth.failures",
+            &[("stage", "oidc_callback"), ("error_code", "invalid_client")]
+        ),
+        Some(1),
+    );
 }

@@ -48,6 +48,13 @@ import type { LiveKitJoin } from "../src/lib/calls/types";
 import { Track } from "livekit-client";
 import { renderVueComponent as renderSfcComponent } from "./helpers/render-vue-sfc";
 import { $callUiMode } from "../src/lib/calls/ui-mode";
+import {
+  __resetCallLifecycleTelemetryForTesting,
+  beginCallAttempt,
+  finishCallAttempt,
+  markCallAttemptAccepted,
+} from "../src/lib/calls/call-lifecycle-telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const require = createRequire(import.meta.url);
 
@@ -100,6 +107,8 @@ afterEach(() => {
   // The engine is a process-wide singleton; drop any injected room
   // stub so it doesn't leak into the next test.
   (useCallEngine().engine as unknown as { room: unknown }).room = null;
+  __resetCallLifecycleTelemetryForTesting();
+  __setFaroForTesting(null);
 });
 
 describe("screenshare support detection", () => {
@@ -125,6 +134,35 @@ describe("screenshare support detection", () => {
 });
 
 describe("call page lifecycle controls", () => {
+  test("pagehide finalizes this attempt and rediscovery owns a separate lifecycle event", () => {
+    const events: Array<{ name: string }> = [];
+    __setFaroForTesting({
+      api: { pushEvent: (name: string) => events.push({ name }) },
+    } as never);
+    beginCallAttempt("refresh-sid", "dm");
+    markCallAttemptAccepted("refresh-sid", 1_000);
+    $callState.set({
+      phase: "active",
+      peer: "bob@waddle.test/desktop",
+      sid: "refresh-sid",
+      media: { audio: true, video: true },
+      join,
+      kind: "dm",
+    });
+
+    suspendCallForPageHide();
+    expect(events).toEqual([{ name: "chat.call.lifecycle" }]);
+
+    __resetCallLifecycleTelemetryForTesting();
+    beginCallAttempt("refresh-sid", "dm");
+    markCallAttemptAccepted("refresh-sid", 2_000);
+    finishCallAttempt("refresh-sid", { endReason: "hangup" }, 3_000);
+    expect(events).toEqual([
+      { name: "chat.call.lifecycle" },
+      { name: "chat.call.lifecycle" },
+    ]);
+  });
+
   test("pagehide suspension clears only local media state, preserving rediscoverable DM activity", () => {
     $callState.set({
       phase: "active",

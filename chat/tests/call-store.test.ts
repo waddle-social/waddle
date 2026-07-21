@@ -1,19 +1,28 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   $callState,
   $lastCallError,
   applyCallEvent,
   beginOutgoingCall,
+  callLifecycleTerminalForSignaledEnd,
+  callLifecycleTerminalForTeardown,
   clearCallState,
   clearLastCallError,
   reduceCallState,
   reportCallError,
+  teardownSetupOutcome,
 } from "../src/lib/calls/call-store";
 import {
   clearDmCallActivities,
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
-import type { CallMedia, LiveKitJoin } from "../src/lib/calls/types";
+import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
+import {
+  __resetCallLifecycleTelemetryForTesting,
+  finishCallAttempt,
+  markCallAttemptAccepted,
+} from "../src/lib/calls/call-lifecycle-telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const join: LiveKitJoin = {
@@ -22,6 +31,13 @@ const join: LiveKitJoin = {
   identity: "bob@waddle.test/desktop",
   token: "eyJhbGc.payload.sig",
 };
+
+afterEach(() => {
+  clearCallState();
+  clearDmCallActivities();
+  __resetCallLifecycleTelemetryForTesting();
+  __setFaroForTesting(null);
+});
 
 describe("call-store reducer", () => {
   test("propose transitions idle → incoming", () => {
@@ -171,6 +187,87 @@ describe("call-store reducer", () => {
     });
     clearCallState();
     expect($callState.get()).toEqual({ phase: "idle" });
+  });
+
+  test("sibling proceed finalizes the pending browser attempt exactly once", () => {
+    clearCallState();
+    __resetCallLifecycleTelemetryForTesting();
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+      },
+    } as never);
+
+    applyCallEvent({
+      kind: "propose",
+      from: "alice@waddle.test/desktop",
+      sid: "sibling-accepted",
+      media: audioVideo,
+    });
+    applyCallEvent({
+      kind: "proceed",
+      from: "alice@waddle.test/phone",
+      sid: "sibling-accepted",
+    });
+    clearCallState();
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "proposed",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
+    }]);
+
+  });
+
+  test("local accept proceed does not finalize the attempt (session-initiate follows)", () => {
+    clearCallState();
+    __resetCallLifecycleTelemetryForTesting();
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+      },
+    } as never);
+
+    applyCallEvent({
+      kind: "propose",
+      from: "alice@waddle.test/desktop",
+      sid: "local-accept",
+      media: audioVideo,
+    });
+    // The echo of THIS resource's own <proceed/> (local accept): the
+    // attempt must survive so session-initiate can mark it accepted.
+    applyCallEvent(
+      {
+        kind: "proceed",
+        from: "bob@waddle.test/web",
+        sid: "local-accept",
+      },
+      { selfOriginated: true, selfFullJid: "bob@waddle.test/web" },
+    );
+    expect(events).toEqual([]);
+
+    // The attempt is still alive: a later terminal event emits its
+    // lifecycle beacon (accepted via the media path in the real flow).
+    markCallAttemptAccepted("local-accept");
+    finishCallAttempt("local-accept", { endReason: "hangup" });
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "accepted",
+        end_reason: "hangup",
+        call_kind: "dm",
+      }),
+    }]);
   });
 
   test("beginOutgoingCall transitions to the outgoing phase", () => {
@@ -407,6 +504,85 @@ describe("call-store reducer", () => {
   });
 });
 
+describe("call lifecycle terminal mapping", () => {
+  const incoming: CallState = {
+    phase: "incoming",
+    from: "alice@waddle.test/desktop",
+    sid: "c1",
+    media: audioVideo,
+  };
+  const active: CallState = {
+    phase: "active",
+    peer: "alice@waddle.test/desktop",
+    sid: "c1",
+    media: audioVideo,
+    join,
+    kind: "dm",
+  };
+  const terminate = (reason: string): CallEvent => ({
+    kind: "session-terminate",
+    from: "alice@waddle.test/desktop",
+    sid: "c1",
+    reason,
+  });
+
+  test.each([
+    ["failed-transport", "failed", "error"],
+    ["incompatible-parameters", "failed", "error"],
+    ["timeout", "timeout", "error"],
+    ["decline", "declined", "peer-left"],
+    ["success", "proposed", "peer-left"],
+  ])("maps pre-active %s to setup outcome %s and end reason %s", (
+    reason,
+    setupOutcome,
+    endReason,
+  ) => {
+    expect(callLifecycleTerminalForSignaledEnd(incoming, terminate(reason), reason))
+      .toEqual({ setupOutcome, endReason });
+  });
+
+  test.each([
+    ["active", "accepted"],
+    ["incoming", "declined"],
+    // A torn-down pending group-call setup is a failed attempt, not a
+    // proposed one — greptile P1 on PR #1415.
+    ["muc-pending", "failed"],
+    ["outgoing", "proposed"],
+  ] as const)("teardown from %s reports setup outcome %s", (phase, setupOutcome) => {
+    expect(teardownSetupOutcome(phase)).toBe(setupOutcome);
+  });
+
+  test.each([
+    ["failed-transport", "error"],
+    ["timeout", "error"],
+    ["success", "peer-left"],
+  ])("maps active %s to end reason %s", (reason, endReason) => {
+    expect(callLifecycleTerminalForSignaledEnd(active, terminate(reason), reason))
+      .toEqual({ endReason });
+  });
+
+  test("maps a proposed-then-retracted attempt to a peer departure", () => {
+    expect(callLifecycleTerminalForSignaledEnd(incoming, {
+      kind: "retract",
+      from: "alice@waddle.test/desktop",
+      sid: "c1",
+    }, "retract")).toEqual({ setupOutcome: "proposed", endReason: "peer-left" });
+  });
+
+  test.each([
+    ["incoming", "clear", "declined", "hangup"],
+    ["outgoing", "success", "proposed", "hangup"],
+    ["muc-pending", "clear", "failed", "error"],
+    ["active", "gone", "accepted", "error"],
+  ] as const)(
+    "maps non-active/local %s %s teardown to %s and %s",
+    (phase, disposition, setupOutcome, endReason) => {
+      expect(callLifecycleTerminalForTeardown(phase, disposition))
+        .toEqual({ setupOutcome, endReason });
+    },
+  );
+});
+
 describe("clearLastCallError", () => {
   test("clears the error without touching $callState", () => {
     // Pre-transition rejection scenario: a `beginMucCall` failure
@@ -414,11 +590,24 @@ describe("clearLastCallError", () => {
     // overkill here (it would emit a redundant state set);
     // `clearLastCallError` is the targeted helper.
     clearCallState();
+    const errors: Array<{ type?: string; context?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushError: (_error: Error, options?: { type?: string; context?: Record<string, string> }) => {
+          errors.push(options ?? {});
+        },
+      },
+    } as never);
     reportCallError(new Error("muc-call: transport missing @url"));
     expect($lastCallError.get()).toBe("muc-call: transport missing @url");
     const phaseBefore = $callState.get().phase;
     clearLastCallError();
     expect($lastCallError.get()).toBeNull();
     expect($callState.get().phase).toBe(phaseBefore);
+    expect(errors[0]).toEqual({
+      type: "call.operation",
+      context: expect.objectContaining({ recoverable: "true", detail: "call-operation" }),
+    });
+    __setFaroForTesting(null);
   });
 });

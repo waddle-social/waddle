@@ -83,7 +83,7 @@ use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use waddle_extensions::{
     message_has_framework_envelope, DisplayText, ExtensionEffect, ExtensionEnvelope,
     ExtensionManager, MessageMarkupKind, MessageMarkupSpan, ReplyTarget, RoomJid, StanzaId,
@@ -180,7 +180,9 @@ use groupchat_archive::{
     apply_groupchat_retraction_tombstone, archive_groupchat_message, project_groupchat_inbox,
     resolve_room_claim_fence, ArchiveGroupchatOutcome,
 };
+#[cfg(test)]
 pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
+pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates_for_sweep;
 use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
 use groupchat_validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
@@ -192,7 +194,9 @@ pub use handoff::{
     OrderedRelayHandoffCompletion, OrderedRelayInboundSequence, SmInboundCompletionTracker,
 };
 use offline_delivery::queue_offline_delivery;
+#[cfg(test)]
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
+pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates_for_sweep;
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::{
@@ -205,9 +209,17 @@ use routing::{
     run_headless_recipient_pass, FanoutPassResult,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NotificationRecoverySweepOutcome {
+    pub(crate) completed: usize,
+    pub(crate) had_failure: bool,
+}
+
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
-pub use deps::{Deps, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand};
+pub use deps::{
+    Deps, GroupchatRetrySuppression, InterpretOutcome, OrderedRelayRouteOrigin, TimerCommand,
+};
 pub(crate) use groupchat_archive::push_inbox_update;
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
@@ -322,6 +334,47 @@ fn apply_archive_id_rewrites(event: &mut OutboundEvent, rewrites: &[ArchiveIdRew
     }
 }
 
+enum BatchSuppression {
+    None,
+    All,
+    /// Tombstone-hit swallow: everything is suppressed EXCEPT the
+    /// idempotent, terminal-guarded retraction-tombstone application.
+    /// A retry whose retraction-request row was itself tombstoned may
+    /// still be healing a crash between the request's archive commit
+    /// and the target tombstone apply — the CAS guard makes letting it
+    /// through safe in every other case (Greptile review on PR #1412).
+    /// `All` (ownership loss / subject-persist bounce) must NOT share
+    /// this escape: a deposed node may not touch the archive at all.
+    TombstoneSwallow,
+    NonSender {
+        sender: BareJid,
+    },
+}
+
+impl BatchSuppression {
+    fn allows(&self, event: &OutboundEvent) -> bool {
+        match self {
+            Self::None => true,
+            Self::All => false,
+            Self::TombstoneSwallow => {
+                matches!(
+                    event,
+                    OutboundEvent::ApplyGroupchatRetractionTombstone { .. }
+                )
+            }
+            Self::NonSender { sender } => match event {
+                // A crash can commit the retraction-request archive row before
+                // applying its target tombstone. A deduplicated retry must
+                // finish that idempotent, monotonic second effect.
+                OutboundEvent::ApplyGroupchatRetractionTombstone { .. } => true,
+                OutboundEvent::RouteToConnection { jid, .. } => &jid.to_bare() == sender,
+                OutboundEvent::ProjectGroupchatInbox { owner, .. } => owner == sender,
+                _ => false,
+            },
+        }
+    }
+}
+
 fn rewrite_stanza_archive_ids(stanza: &mut Stanza, rewrites: &[ArchiveIdRewrite]) {
     if let Stanza::Message(message) = stanza {
         rewrite_message_archive_ids(message, rewrites);
@@ -373,15 +426,10 @@ async fn interpret_with_depth(
     let registry = deps.connection_registry;
     let mut outcome = InterpretOutcome::default();
     let mut archive_id_rewrites: Vec<ArchiveIdRewrite> = Vec::new();
-    // Once a write-adjacent room effect rejects this batch, suppress every
-    // later effect from the same frozen chain. `ArchiveGroupchat` retains its
-    // legacy ownership backstop until #1283; subject persistence binds the
-    // exact actor fence in this PR. Both must halt later inbox/fan-out work
-    // after returning a retryable bounce.
-    let mut suppress_remaining_events = false;
+    let mut batch_suppression = BatchSuppression::None;
 
     for mut event in events {
-        if suppress_remaining_events {
+        if !batch_suppression.allows(&event) {
             continue;
         }
         apply_archive_id_rewrites(&mut event, &archive_id_rewrites);
@@ -452,6 +500,10 @@ async fn interpret_with_depth(
                     feedback: nested_feedback,
                     keepalive_probes: nested_probes,
                     timer_commands: nested_timer_commands,
+                    // Retry suppression is local to the nested room batch;
+                    // dispatch_to_room consumes it before returning so it
+                    // cannot suppress unrelated siblings in this outer batch.
+                    retry_suppression: _,
                     archive_id_rewrites: nested_rewrites,
                 } = nested;
                 outcome.frames.extend(nested_frames);
@@ -550,10 +602,26 @@ async fn interpret_with_depth(
                 )
                 .await
                 {
-                    ArchiveGroupchatEventOutcome::Rewrite(Some(rewrite)) => {
+                    ArchiveGroupchatEventOutcome::Stored(Some(rewrite)) => {
                         archive_id_rewrites.push(rewrite);
                     }
-                    ArchiveGroupchatEventOutcome::Rewrite(None) => {}
+                    ArchiveGroupchatEventOutcome::Stored(None)
+                    | ArchiveGroupchatEventOutcome::Skipped => {}
+                    ArchiveGroupchatEventOutcome::Deduplicated { rewrite, sender } => {
+                        if let Some(rewrite) = rewrite {
+                            archive_id_rewrites.push(rewrite);
+                        }
+                        outcome.retry_suppression = Some(GroupchatRetrySuppression::Deduplicated);
+                        batch_suppression = BatchSuppression::NonSender { sender };
+                    }
+                    ArchiveGroupchatEventOutcome::TombstoneHit => {
+                        debug!(
+                            "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"
+                        );
+                        outcome.retry_suppression =
+                            Some(GroupchatRetrySuppression::TombstoneSwallowed);
+                        batch_suppression = BatchSuppression::TombstoneSwallow;
+                    }
                     ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {
                         // FIX 1: not archived, not fanned out — suppress
                         // every remaining event in this batch (the
@@ -570,7 +638,7 @@ async fn interpret_with_depth(
                                 );
                             }
                         }
-                        suppress_remaining_events = true;
+                        batch_suppression = BatchSuppression::All;
                     }
                 }
             }
@@ -656,7 +724,7 @@ async fn interpret_with_depth(
                                 "PersistRoomSubject: failed to serialize retryable bounce reply"
                             ),
                         }
-                        suppress_remaining_events = true;
+                        batch_suppression = BatchSuppression::All;
                     }
                 }
             }
@@ -770,15 +838,26 @@ async fn interpret_with_depth(
 }
 
 async fn enrich_message_event(deps: &Deps<'_>, message: Message) -> Message {
-    if deps.extension_manager.is_none() {
+    // Observability (#1320): time the enrichment pass and count the
+    // embeds it adds as the payload-count delta before/after.
+    let started = std::time::Instant::now();
+    let payloads_before = message.payloads.len();
+    let enriched = if deps.extension_manager.is_none() {
         debug!(
             "RequestEnrichment: no extension_manager in Deps; \
              feeding original message back unchanged"
         );
-        return message;
-    }
-    debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
-    message
+        message
+    } else {
+        debug!("RequestEnrichment: direct messages do not carry a typed Waddle scope; skipping");
+        message
+    };
+    let embeds_added = enriched.payloads.len().saturating_sub(payloads_before) as u64;
+    waddle_xmpp::metrics::record_extension_enrichment(
+        started.elapsed().as_secs_f64() * 1000.0,
+        embeds_added,
+    );
+    enriched
 }
 
 #[cfg(test)]

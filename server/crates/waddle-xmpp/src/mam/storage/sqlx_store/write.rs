@@ -1,42 +1,53 @@
-use std::str::FromStr;
-
-use jid::{BareJid, Jid};
+use jid::BareJid;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Postgres, QueryBuilder, Row, Sqlite, Transaction};
+use sqlx::{Postgres, QueryBuilder, Sqlite, Transaction};
 use tracing::{debug, warn};
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload};
 use xmpp_parsers::message::MessageType;
 
-use crate::mam::storage::MamStorageError;
+use crate::mam::storage::origin_dedup::{
+    groupchat_subject_is_retry_dedup_exempt, origin_id_dedup_match, origin_id_tombstone_match,
+};
+use crate::mam::storage::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
 
-use super::decode::{encode_nickname_generation, encode_rich_payload};
+use super::decode::{
+    decode_postgres_message_row, decode_rich_payload, decode_sqlite_message_row,
+    encode_nickname_generation, encode_rich_payload,
+};
+use super::schema::SELECT_COLUMNS;
 use super::MamDatabaseBackend;
 
 pub(super) async fn store_message(
     backend: &MamDatabaseBackend,
     archive_jid: &BareJid,
     message: &ArchivedMessage,
-) -> Result<String, MamStorageError> {
+) -> Result<StoreOutcome, MamStorageError> {
     let rich_payload = encode_rich_payload(message)?;
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
+        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
+    let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
+    // Typed-payloads boundary: the scope stays a `BareJid` until this
+    // SQL bind site.
+    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
+        .as_ref()
+        .map(jid::BareJid::to_string);
 
-    if let Some(existing_archive_id) = find_existing_origin_id_match(
+    if let Some(outcome) = find_existing_origin_id_match(
         backend,
         archive_jid,
         message,
-        rich_payload.as_deref(),
         origin_dedup_fingerprint.as_deref(),
     )
     .await?
     {
-        return Ok(existing_archive_id);
+        return Ok(outcome);
     }
 
     let archive_id = if message.id.is_empty() {
@@ -63,7 +74,7 @@ pub(super) async fn store_message(
     match backend {
         MamDatabaseBackend::Sqlite(pool) => {
             let mut query = QueryBuilder::<Sqlite>::new(
-                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_fingerprint) ",
+                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
             );
             query.push_values(std::iter::once(()), |mut builder, _| {
                 builder
@@ -89,26 +100,26 @@ pub(super) async fn store_message(
                             .and_then(|t| t.parent.as_ref())
                             .map(|p| p.as_str()),
                     )
+                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
                     .push_bind(origin_dedup_fingerprint.as_deref());
             });
             if let Err(error) = query.build().execute(pool).await {
-                if let Some(existing_archive_id) = find_existing_origin_id_match(
+                if let Some(outcome) = find_existing_origin_id_match(
                     backend,
                     archive_jid,
                     message,
-                    rich_payload.as_deref(),
                     origin_dedup_fingerprint.as_deref(),
                 )
                 .await?
                 {
-                    return Ok(existing_archive_id);
+                    return Ok(outcome);
                 }
                 return Err(error.into());
             }
         }
         MamDatabaseBackend::Postgres(pool) => {
             let mut query = QueryBuilder::<Postgres>::new(
-                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_fingerprint) ",
+                "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
             );
             query.push_values(std::iter::once(()), |mut builder, _| {
                 builder
@@ -134,19 +145,19 @@ pub(super) async fn store_message(
                             .and_then(|t| t.parent.as_ref())
                             .map(|p| p.as_str()),
                     )
+                    .push_bind(origin_dedup_sender_scope_bind.as_deref())
                     .push_bind(origin_dedup_fingerprint.as_deref());
             });
             if let Err(error) = query.build().execute(pool).await {
-                if let Some(existing_archive_id) = find_existing_origin_id_match(
+                if let Some(outcome) = find_existing_origin_id_match(
                     backend,
                     archive_jid,
                     message,
-                    rich_payload.as_deref(),
                     origin_dedup_fingerprint.as_deref(),
                 )
                 .await?
                 {
-                    return Ok(existing_archive_id);
+                    return Ok(outcome);
                 }
                 return Err(error.into());
             }
@@ -154,7 +165,7 @@ pub(super) async fn store_message(
     }
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive");
-    Ok(archive_id)
+    Ok(StoreOutcome::Stored(archive_id))
 }
 
 /// Fenced variant of [`store_message`] (ADR-0017 Phase 3 Slice 7 FIX 1,
@@ -177,7 +188,7 @@ pub(super) async fn store_message_fenced(
     archive_jid: &BareJid,
     message: &ArchivedMessage,
     fence: &RoomClaimFenceContext,
-) -> Result<String, MamStorageError> {
+) -> Result<StoreOutcome, MamStorageError> {
     let MamDatabaseBackend::Postgres(pool) = backend else {
         return store_message(backend, archive_jid, message).await;
     };
@@ -186,7 +197,14 @@ pub(super) async fn store_message_fenced(
     let origin_dedup_fingerprint = message
         .origin_id
         .as_ref()
+        .filter(|_| !groupchat_subject_is_retry_dedup_exempt(message))
         .map(|_| origin_dedup_fingerprint(message));
+    let origin_dedup_sender_scope = origin_dedup_sender_scope(message);
+    // Typed-payloads boundary: the scope stays a `BareJid` until this
+    // SQL bind site.
+    let origin_dedup_sender_scope_bind = origin_dedup_sender_scope
+        .as_ref()
+        .map(jid::BareJid::to_string);
 
     let archive_id = if message.id.is_empty() {
         Uuid::now_v7().to_string()
@@ -222,21 +240,20 @@ pub(super) async fn store_message_fenced(
             entity: fence.entity.clone(),
         });
     }
-    if let Some(existing_archive_id) = find_existing_origin_id_match_postgres_tx(
+    if let Some(outcome) = find_existing_origin_id_match_postgres_tx(
         &mut tx,
         archive_jid,
         message,
-        rich_payload.as_deref(),
         origin_dedup_fingerprint.as_deref(),
     )
     .await?
     {
         tx.commit().await?;
-        return Ok(existing_archive_id);
+        return Ok(outcome);
     }
 
     let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_fingerprint) ",
+        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, origin_dedup_sender_scope, origin_dedup_fingerprint) ",
     );
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
@@ -262,6 +279,7 @@ pub(super) async fn store_message_fenced(
                     .and_then(|t| t.parent.as_ref())
                     .map(|p| p.as_str()),
             )
+            .push_bind(origin_dedup_sender_scope_bind.as_deref())
             .push_bind(origin_dedup_fingerprint.as_deref());
     });
     if let Err(error) = query.build().execute(&mut *tx).await {
@@ -277,24 +295,23 @@ pub(super) async fn store_message_fenced(
                 entity: fence.entity.clone(),
             });
         }
-        let existing_archive_id = find_existing_origin_id_match_postgres_tx(
+        let existing_outcome = find_existing_origin_id_match_postgres_tx(
             &mut dedup_tx,
             archive_jid,
             message,
-            rich_payload.as_deref(),
             origin_dedup_fingerprint.as_deref(),
         )
         .await?;
         dedup_tx.commit().await?;
-        if let Some(existing_archive_id) = existing_archive_id {
-            return Ok(existing_archive_id);
+        if let Some(outcome) = existing_outcome {
+            return Ok(outcome);
         }
         return Err(error.into());
     }
     tx.commit().await?;
 
     debug!(archive_id = %archive_id, "Message stored in MAM archive (fenced)");
-    Ok(archive_id)
+    Ok(StoreOutcome::Stored(archive_id))
 }
 
 async fn claim_fence_is_held(
@@ -322,102 +339,135 @@ async fn find_existing_origin_id_match_postgres_tx(
     tx: &mut Transaction<'_, Postgres>,
     archive_jid: &BareJid,
     message: &ArchivedMessage,
-    incoming_rich_payload: Option<&str>,
     origin_dedup_fingerprint: Option<&str>,
-) -> Result<Option<String>, MamStorageError> {
+) -> Result<Option<StoreOutcome>, MamStorageError> {
     let Some(origin_id) = message.origin_id.as_ref() else {
         return Ok(None);
     };
     let archive_jid_str = archive_jid.to_string();
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT id, from_jid, to_jid, body, thread_id, parent_thread_id, \
-         reply_to_id, reply_to_jid, message_type, rich_payload, nickname_generation \
-         FROM mam_messages WHERE room_jid = ",
-    );
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
+    let from_jid = message.from.to_string();
+    let groupchat_from =
+        matches!(message.message_type, MessageType::Groupchat).then_some(from_jid.as_str());
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
+    builder
+        .push(SELECT_COLUMNS)
+        .push(" FROM mam_messages WHERE room_jid = ");
     push_origin_dedup_filter(
         &mut builder,
         archive_jid_str.as_str(),
         origin_id.as_str(),
+        message_type,
+        groupchat_from,
         origin_dedup_fingerprint,
     );
     let rows: Vec<PgRow> = builder.build().fetch_all(&mut **tx).await?;
-    for row in rows {
-        let Some(existing) = OriginDedupRow::from_postgres(&row) else {
-            continue;
-        };
-        if existing.matches(message, incoming_rich_payload) {
-            return Ok(Some(existing.id));
-        }
-    }
-    Ok(None)
+    let candidates = rows
+        .iter()
+        .filter_map(|row| match decode_postgres_message_row(row) {
+            Ok(candidate) => Some(candidate),
+            Err(error) => {
+                warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(matching_store_outcome(&candidates, message))
 }
 
 async fn find_existing_origin_id_match(
     backend: &MamDatabaseBackend,
     archive_jid: &BareJid,
     message: &ArchivedMessage,
-    incoming_rich_payload: Option<&str>,
     origin_dedup_fingerprint: Option<&str>,
-) -> Result<Option<String>, MamStorageError> {
+) -> Result<Option<StoreOutcome>, MamStorageError> {
     let Some(origin_id) = message.origin_id.as_ref() else {
         return Ok(None);
     };
     let archive_jid_str = archive_jid.to_string();
+    let message_type = waddle_xmpp_core::mam::message_type_wire_str(&message.message_type);
+    let from_jid = message.from.to_string();
+    let groupchat_from =
+        matches!(message.message_type, MessageType::Groupchat).then_some(from_jid.as_str());
 
     match backend {
         MamDatabaseBackend::Sqlite(pool) => {
-            let mut builder = QueryBuilder::<Sqlite>::new(
-                "SELECT id, from_jid, to_jid, body, thread_id, parent_thread_id, \
-                 reply_to_id, reply_to_jid, message_type, rich_payload, nickname_generation \
-                 FROM mam_messages WHERE room_jid = ",
-            );
+            let mut builder = QueryBuilder::<Sqlite>::new("SELECT ");
+            builder
+                .push(SELECT_COLUMNS)
+                .push(" FROM mam_messages WHERE room_jid = ");
             push_origin_dedup_filter(
                 &mut builder,
                 archive_jid_str.as_str(),
                 origin_id.as_str(),
+                message_type,
+                groupchat_from,
                 origin_dedup_fingerprint,
             );
             let rows: Vec<SqliteRow> = builder.build().fetch_all(pool).await?;
-            for row in rows {
-                let Some(existing) = OriginDedupRow::from_sqlite(&row) else {
-                    continue;
-                };
-                if existing.matches(message, incoming_rich_payload) {
-                    return Ok(Some(existing.id));
-                }
-            }
+            let candidates = rows
+                .iter()
+                .filter_map(|row| match decode_sqlite_message_row(row) {
+                    Ok(candidate) => Some(candidate),
+                    Err(error) => {
+                        warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(matching_store_outcome(&candidates, message))
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut builder = QueryBuilder::<Postgres>::new(
-                "SELECT id, from_jid, to_jid, body, thread_id, parent_thread_id, \
-                 reply_to_id, reply_to_jid, message_type, rich_payload, nickname_generation \
-                 FROM mam_messages WHERE room_jid = ",
-            );
+            let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
+            builder
+                .push(SELECT_COLUMNS)
+                .push(" FROM mam_messages WHERE room_jid = ");
             push_origin_dedup_filter(
                 &mut builder,
                 archive_jid_str.as_str(),
                 origin_id.as_str(),
+                message_type,
+                groupchat_from,
                 origin_dedup_fingerprint,
             );
             let rows: Vec<PgRow> = builder.build().fetch_all(pool).await?;
-            for row in rows {
-                let Some(existing) = OriginDedupRow::from_postgres(&row) else {
-                    continue;
-                };
-                if existing.matches(message, incoming_rich_payload) {
-                    return Ok(Some(existing.id));
-                }
-            }
+            let candidates = rows
+                .iter()
+                .filter_map(|row| match decode_postgres_message_row(row) {
+                    Ok(candidate) => Some(candidate),
+                    Err(error) => {
+                        warn!(%error, "MAM origin-id dedup candidate is malformed; skipping");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(matching_store_outcome(&candidates, message))
         }
     }
+}
 
-    Ok(None)
+fn matching_store_outcome(
+    candidates: &[ArchivedMessage],
+    incoming: &ArchivedMessage,
+) -> Option<StoreOutcome> {
+    if let Some(existing) = candidates
+        .iter()
+        .find(|existing| origin_id_dedup_match(existing, incoming))
+    {
+        return Some(StoreOutcome::Deduplicated(existing.id.clone()));
+    }
+    candidates
+        .iter()
+        .find(|existing| origin_id_tombstone_match(existing, incoming))
+        .map(|existing| StoreOutcome::TombstoneHit(existing.id.clone()))
 }
 
 fn push_origin_dedup_filter<'args, DB>(
     builder: &mut QueryBuilder<'args, DB>,
     archive_jid: &'args str,
     origin_id: &'args str,
+    message_type: &'args str,
+    groupchat_from: Option<&'args str>,
     origin_dedup_fingerprint: Option<&'args str>,
 ) where
     DB: sqlx::Database,
@@ -426,7 +476,12 @@ fn push_origin_dedup_filter<'args, DB>(
     builder
         .push_bind(archive_jid)
         .push(" AND origin_id = ")
-        .push_bind(origin_id);
+        .push_bind(origin_id)
+        .push(" AND message_type = ")
+        .push_bind(message_type);
+    if let Some(from_jid) = groupchat_from {
+        builder.push(" AND from_jid = ").push_bind(from_jid);
+    }
     if let Some(fingerprint) = origin_dedup_fingerprint {
         builder
             .push(" AND (origin_dedup_fingerprint = ")
@@ -434,218 +489,6 @@ fn push_origin_dedup_filter<'args, DB>(
             .push(" OR origin_dedup_fingerprint IS NULL)");
     }
     builder.push(" ORDER BY timestamp ASC, id ASC");
-}
-
-struct OriginDedupRow {
-    id: String,
-    from: Jid,
-    to: Jid,
-    body: Option<String>,
-    thread_id: Option<String>,
-    parent_thread_id: Option<String>,
-    reply_to_id: Option<String>,
-    reply_to_jid: Option<Jid>,
-    message_type: MessageType,
-    rich_payload: Option<String>,
-    nickname_generation: Option<u64>,
-}
-
-impl OriginDedupRow {
-    fn from_sqlite(row: &SqliteRow) -> Option<Self> {
-        Self::from_parts(OriginDedupRawRow {
-            id: row.try_get("id"),
-            from_raw: row.try_get("from_jid"),
-            to_raw: row.try_get("to_jid"),
-            body: row.try_get("body"),
-            thread_id: row.try_get("thread_id"),
-            parent_thread_id: row.try_get("parent_thread_id"),
-            reply_to_id: row.try_get("reply_to_id"),
-            reply_to_jid_raw: row.try_get("reply_to_jid"),
-            message_type_raw: row.try_get("message_type"),
-            rich_payload: row.try_get("rich_payload"),
-            nickname_generation_raw: row.try_get::<Option<i64>, _>("nickname_generation"),
-        })
-    }
-
-    fn from_postgres(row: &PgRow) -> Option<Self> {
-        Self::from_parts(OriginDedupRawRow {
-            id: row.try_get("id"),
-            from_raw: row.try_get("from_jid"),
-            to_raw: row.try_get("to_jid"),
-            body: row.try_get("body"),
-            thread_id: row.try_get("thread_id"),
-            parent_thread_id: row.try_get("parent_thread_id"),
-            reply_to_id: row.try_get("reply_to_id"),
-            reply_to_jid_raw: row.try_get("reply_to_jid"),
-            message_type_raw: row.try_get("message_type"),
-            rich_payload: row.try_get("rich_payload"),
-            nickname_generation_raw: row.try_get::<Option<i64>, _>("nickname_generation"),
-        })
-    }
-
-    fn from_parts(raw: OriginDedupRawRow) -> Option<Self> {
-        let id = read_dedup_column("id", raw.id)?;
-        let from_raw = read_dedup_column("from_jid", raw.from_raw)?;
-        let to_raw = read_dedup_column("to_jid", raw.to_raw)?;
-        let body = read_dedup_column("body", raw.body)?;
-        let thread_id = read_dedup_column("thread_id", raw.thread_id)?;
-        let parent_thread_id = read_dedup_column("parent_thread_id", raw.parent_thread_id)?;
-        let reply_to_id = read_dedup_column("reply_to_id", raw.reply_to_id)?;
-        let reply_to_jid_raw = read_dedup_column("reply_to_jid", raw.reply_to_jid_raw)?;
-        let message_type_raw = read_dedup_column("message_type", raw.message_type_raw)?;
-        let rich_payload = read_dedup_column("rich_payload", raw.rich_payload)?;
-        let nickname_generation_raw =
-            read_dedup_column("nickname_generation", raw.nickname_generation_raw)?;
-
-        let from = parse_dedup_jid(&id, "from_jid", &from_raw)?;
-        let to = parse_dedup_jid(&id, "to_jid", &to_raw)?;
-        let reply_to_jid = match reply_to_jid_raw.as_deref() {
-            Some(raw) => Some(parse_dedup_jid(&id, "reply_to_jid", raw)?),
-            None => None,
-        };
-        let message_type = match MessageType::from_str(message_type_raw.as_str()) {
-            Ok(message_type) => message_type,
-            Err(error) => {
-                warn!(
-                    archive_id = %id,
-                    column = "message_type",
-                    %error,
-                    "MAM origin-id dedup candidate is malformed; skipping"
-                );
-                return None;
-            }
-        };
-        let nickname_generation = match nickname_generation_raw.map(u64::try_from).transpose() {
-            Ok(value) => value,
-            Err(error) => {
-                warn!(
-                    archive_id = %id,
-                    column = "nickname_generation",
-                    %error,
-                    "MAM origin-id dedup candidate is malformed; skipping"
-                );
-                return None;
-            }
-        };
-
-        Some(Self {
-            id,
-            from,
-            to,
-            body,
-            thread_id,
-            parent_thread_id,
-            reply_to_id,
-            reply_to_jid,
-            message_type,
-            rich_payload,
-            nickname_generation,
-        })
-    }
-
-    fn matches(&self, incoming: &ArchivedMessage, incoming_rich_payload: Option<&str>) -> bool {
-        self.sender_scope_matches(incoming)
-            && self.body.as_deref() == incoming.body.as_deref()
-            && self.thread_id.as_deref()
-                == incoming.thread.as_ref().map(|thread| thread.id.as_str())
-            && self.parent_thread_id.as_deref()
-                == incoming
-                    .thread
-                    .as_ref()
-                    .and_then(|thread| thread.parent.as_ref())
-                    .map(|parent| parent.as_str())
-            && self.reply_to_id.as_deref() == incoming.reply.as_ref().map(|reply| reply.id.as_str())
-            && self.reply_to_jid.as_ref()
-                == incoming.reply.as_ref().and_then(|reply| reply.to.as_ref())
-            && self.message_type == incoming.message_type
-            && rich_payload_content_matches(self.rich_payload.as_deref(), incoming_rich_payload)
-    }
-
-    fn sender_scope_matches(&self, incoming: &ArchivedMessage) -> bool {
-        match (&self.message_type, &incoming.message_type) {
-            (MessageType::Groupchat, MessageType::Groupchat) => {
-                self.from == incoming.from
-                    && self.nickname_generation == incoming.nickname_generation
-            }
-            (MessageType::Groupchat, _) | (_, MessageType::Groupchat) => false,
-            _ => {
-                self.from.to_bare() == incoming.from.to_bare()
-                    && self.to.to_bare() == incoming.to.to_bare()
-            }
-        }
-    }
-}
-
-struct OriginDedupRawRow {
-    id: Result<String, sqlx::Error>,
-    from_raw: Result<String, sqlx::Error>,
-    to_raw: Result<String, sqlx::Error>,
-    body: Result<Option<String>, sqlx::Error>,
-    thread_id: Result<Option<String>, sqlx::Error>,
-    parent_thread_id: Result<Option<String>, sqlx::Error>,
-    reply_to_id: Result<Option<String>, sqlx::Error>,
-    reply_to_jid_raw: Result<Option<String>, sqlx::Error>,
-    message_type_raw: Result<String, sqlx::Error>,
-    rich_payload: Result<Option<String>, sqlx::Error>,
-    nickname_generation_raw: Result<Option<i64>, sqlx::Error>,
-}
-
-fn read_dedup_column<T>(column: &'static str, result: Result<T, sqlx::Error>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(error) => {
-            warn!(
-                column,
-                %error,
-                "MAM origin-id dedup candidate could not be read; skipping"
-            );
-            None
-        }
-    }
-}
-
-fn parse_dedup_jid(archive_id: &str, column: &'static str, value: &str) -> Option<Jid> {
-    match value.parse::<Jid>() {
-        Ok(jid) => Some(jid),
-        Err(error) => {
-            warn!(
-                archive_id,
-                column,
-                %error,
-                "MAM origin-id dedup candidate is malformed; skipping"
-            );
-            None
-        }
-    }
-}
-
-/// Compare two encoded `rich_payload` JSON blobs for origin-id retry
-/// dedup, ignoring the server-derived MUC identity fields
-/// (`occupant_id`, `muc_sender`) that vary per session. A blob that
-/// fails to decode falls back to raw-string equality (defensive:
-/// corrupt/foreign JSON should never spuriously dedup two rows).
-fn rich_payload_content_matches(existing: Option<&str>, incoming: Option<&str>) -> bool {
-    // `Ok(Some(_))` decoded to a non-empty content projection;
-    // `Ok(None)` is "absent, empty, or identity-only" (all normalize to
-    // no dedup-relevant content); `Err(())` is present-but-undecodable.
-    fn normalized(value: Option<&str>) -> Result<Option<ArchivedRichMessage>, ()> {
-        match value {
-            None => Ok(None),
-            Some(value) if value.trim().is_empty() => Ok(None),
-            Some(value) => match serde_json::from_str::<ArchivedRichMessage>(value) {
-                Ok(rich) => Ok(rich.dedup_content()),
-                Err(_) => Err(()),
-            },
-        }
-    }
-
-    match (normalized(existing), normalized(incoming)) {
-        (Ok(existing), Ok(incoming)) => existing == incoming,
-        // At least one side is present-but-undecodable — fall back to
-        // conservative exact string equality (never spuriously merge
-        // two rows whose payloads we could not parse).
-        _ => existing == incoming,
-    }
 }
 
 fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
@@ -706,6 +549,33 @@ fn origin_dedup_fingerprint(message: &ArchivedMessage) -> String {
     hex
 }
 
+fn origin_dedup_sender_scope(message: &ArchivedMessage) -> Option<jid::BareJid> {
+    if !matches!(message.message_type, MessageType::Groupchat) || message.origin_id.is_none() {
+        return None;
+    }
+    let scope = message
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.muc_sender.as_ref())
+        .map(|sender| sender.jid.to_bare());
+    if scope.is_none() {
+        // A groupchat row with an origin-id but no server-authored
+        // `muc_sender` sits outside BOTH retry-dedup layers (the Rust
+        // predicate fails open by design; the partial unique index
+        // requires a non-NULL scope). Today every archivable groupchat
+        // stanza carries a sender snapshot (the occupancy gate runs
+        // first), so this fires only if a future write path breaks
+        // that invariant — surface it instead of silently losing
+        // dedup coverage.
+        warn!(
+            from = %message.from,
+            "groupchat archive write carries an origin-id but no muc_sender; \
+             origin-id retry-dedup cannot protect this row"
+        );
+    }
+    scope
+}
+
 fn update_hash_part(hasher: &mut Sha256, label: &str, value: Option<&str>) {
     hasher.update(label.as_bytes());
     hasher.update([0]);
@@ -724,19 +594,7 @@ pub(super) async fn replace_with_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let payload = ArchivedRichMessage {
-        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
-        reply: None,
-        references: Vec::new(),
-        mentions: Vec::new(),
-        // XEP-0424 §Tombstones: the occupant-id and real-JID item
-        // identify the original sender and MUST NOT survive the
-        // tombstone replacement.
-        occupant_id: None,
-        muc_sender: None,
-    };
-    let encoded = serde_json::to_string(&payload)
-        .map_err(|error| MamStorageError::Serialization(error.to_string()))?;
+    let encoded = encode_tombstone_payload(tombstone)?;
 
     // XEP-0424 §Tombstones / XEP-0425 §Tombstones: drop the body
     // entirely on tombstone. With wire-fidelity body semantics, SQL NULL
@@ -744,7 +602,7 @@ pub(super) async fn replace_with_tombstone(
     let rows = match backend {
         MamDatabaseBackend::Sqlite(pool) => {
             let mut builder = QueryBuilder::<Sqlite>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
             );
             builder
                 .push_bind(encoded.as_str())
@@ -754,7 +612,7 @@ pub(super) async fn replace_with_tombstone(
         }
         MamDatabaseBackend::Postgres(pool) => {
             let mut builder = QueryBuilder::<Postgres>::new(
-                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
             );
             builder
                 .push_bind(encoded.as_str())
@@ -770,4 +628,104 @@ pub(super) async fn replace_with_tombstone(
         "Replaced archived message with tombstone"
     );
     Ok(rows > 0)
+}
+
+pub(super) async fn replace_with_terminal_tombstone(
+    backend: &MamDatabaseBackend,
+    archive_id: &str,
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+    let encoded = encode_tombstone_payload(tombstone)?;
+
+    loop {
+        let current_rich_payload: Option<Option<String>> = match backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "SELECT rich_payload FROM mam_messages WHERE id = ",
+                );
+                builder.push_bind(archive_id);
+                builder
+                    .build_query_scalar::<Option<String>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "SELECT rich_payload FROM mam_messages WHERE id = ",
+                );
+                builder.push_bind(archive_id);
+                builder
+                    .build_query_scalar::<Option<String>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        let Some(current_rich_payload) = current_rich_payload else {
+            return Ok(TerminalTombstoneOutcome::NotFound);
+        };
+        let current_rich = decode_rich_payload(current_rich_payload.as_deref())?;
+        if current_rich
+            .as_ref()
+            .is_some_and(ArchivedRichMessage::is_tombstoned)
+        {
+            return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
+        }
+
+        // Compare-and-swap the exact raw rich projection observed above. If a
+        // concurrent XEP-0425 moderation wins first, its different tombstone
+        // projection makes this update affect zero rows; the next iteration
+        // decodes that typed terminal state and preserves its metadata.
+        let rows = match backend {
+            MamDatabaseBackend::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id)
+                    .push(" AND rich_payload IS ")
+                    .push_bind(current_rich_payload.as_deref());
+                builder.build().execute(pool).await?.rows_affected()
+            }
+            MamDatabaseBackend::Postgres(pool) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, origin_dedup_sender_scope = NULL, origin_dedup_fingerprint = NULL, rich_payload = ",
+                );
+                builder
+                    .push_bind(encoded.as_str())
+                    .push(" WHERE id = ")
+                    .push_bind(archive_id)
+                    .push(" AND rich_payload IS NOT DISTINCT FROM ")
+                    .push_bind(current_rich_payload.as_deref());
+                builder.build().execute(pool).await?.rows_affected()
+            }
+        };
+        if rows > 0 {
+            debug!(
+                archive_id = %archive_id,
+                "Replaced live archived message with terminal tombstone"
+            );
+            return Ok(TerminalTombstoneOutcome::Replaced);
+        }
+    }
+}
+
+fn encode_tombstone_payload(
+    tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<String, MamStorageError> {
+    let payload = ArchivedRichMessage {
+        payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
+        reply: None,
+        references: Vec::new(),
+        mentions: Vec::new(),
+        subjects: Default::default(),
+        // XEP-0424 §Tombstones: the occupant-id and real-JID item
+        // identify the original sender and MUST NOT survive the
+        // tombstone replacement.
+        occupant_id: None,
+        muc_sender: None,
+    };
+    serde_json::to_string(&payload)
+        .map_err(|error| MamStorageError::Serialization(error.to_string()))
 }

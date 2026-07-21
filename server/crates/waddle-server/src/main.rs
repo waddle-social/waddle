@@ -69,9 +69,9 @@ async fn main() -> Result<()> {
     info!("Database initialized and migrations complete");
 
     // Start the server
-    server::start(db_pool, server_config, inherited).await?;
+    let metrics_flush = server::start(db_pool, server_config, inherited).await?;
 
-    telemetry::shutdown();
+    telemetry::shutdown(metrics_flush);
 
     Ok(())
 }

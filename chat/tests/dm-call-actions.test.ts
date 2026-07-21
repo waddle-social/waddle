@@ -16,6 +16,8 @@ import {
   readDmCallActivity,
 } from "../src/lib/calls/dm-call-activity";
 import type { CallWireSender } from "../src/lib/calls/outbound";
+import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 function jwtWithExp(exp: number): string {
   return [
@@ -32,9 +34,38 @@ function base64Url(value: string): string {
 afterEach(() => {
   clearCallState();
   clearDmCallActivities();
+  __resetCallLifecycleTelemetryForTesting();
+  __setFaroForTesting(null);
 });
 
 describe("startDmCallAction", () => {
+  test("reports a missing XMPP sender as one failed DM preflight", async () => {
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+      },
+    } as never);
+
+    await startDmCallAction({
+      peerBareJid: "bob@waddle.test",
+      media: { audio: true, video: false },
+      getSender: () => null,
+    });
+
+    expect($callState.get()).toEqual({ phase: "idle" });
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "dm",
+      }),
+    }]);
+  });
+
   test("sends a fresh XEP-0353 propose and marks the peer as ringing", async () => {
     const sender: CallWireSender = {
       send_call_propose: mock(async () => undefined),

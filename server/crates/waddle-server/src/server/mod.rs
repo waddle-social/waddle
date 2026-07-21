@@ -68,7 +68,7 @@ pub async fn start(
     db_pool: DatabasePool,
     server_config: ServerConfig,
     inherited: Option<waddle_ecdysis::ListenerSet>,
-) -> Result<()> {
+) -> Result<crate::telemetry::MetricsFlush> {
     let xmpp_config = XmppConfig::from_env()
         .map_err(|error| anyhow::anyhow!("Failed to load XMPP configuration: {}", error))?;
 
@@ -76,12 +76,15 @@ pub async fn start(
 }
 
 /// Start both HTTP and XMPP servers with explicit configuration.
+///
+/// On graceful exit, returns the outcome of the pre-exit metrics flush
+/// so `main` can pass it to `telemetry::shutdown`.
 pub async fn start_with_config(
     db_pool: DatabasePool,
     xmpp_config: XmppConfig,
     server_config: ServerConfig,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
-) -> Result<()> {
+) -> Result<crate::telemetry::MetricsFlush> {
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
@@ -356,6 +359,16 @@ pub async fn start_with_config(
         )
         .await;
 
+    // Issue #1388: both drains just awaited above (SM/Q6 via `http_handle`,
+    // clustering per-entity via `clustering_shutdown`) increment counters and
+    // histograms — including the tail-end-only `xmpp.sm.drain_timeout` and
+    // `waddle.clustering.drain_duration_ms` — right up to the moment they
+    // return. Those increments have no guarantee of a periodic OTLP export
+    // tick before process exit, so force-flush the meter provider here, now
+    // that every end-of-drain increment has already happened and before
+    // anything below can shorten the remaining time budget.
+    let metrics_flush = crate::telemetry::flush_metrics_before_exit().await;
+
     // Tear down the shutdown lifecycle task so we don't dangle.
     // If HTTP exited on its own (error path) before any signal
     // arrived, `shutdown_handle.await` would block on
@@ -363,7 +376,7 @@ pub async fn start_with_config(
     shutdown_handle.abort();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown_handle).await;
     info!("Graceful shutdown complete");
-    result
+    result.map(|()| metrics_flush)
 }
 
 #[cfg(test)]

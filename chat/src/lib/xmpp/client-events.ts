@@ -73,6 +73,7 @@ export type CatchupHookInfo = {
   conversations: number;
   processedConversations: number;
   pages: number;
+  pageFailures: number;
   messages: number;
   durationMs: number;
   outcome: CatchupOutcome;
@@ -125,7 +126,7 @@ export type ClientEvents = {
   sessionLifecycleHook: [event: SessionLifecycleEvent];
   statusHook: [status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }];
   sendEnqueued: [info: { kind: "room" | "dm"; reason: string }];
-  queueDepthChange: [depth: { persisted: number; inflight: number }];
+  queueDepthChange: [depth: { kind: "room" | "dm"; persisted: number; inflight: number }];
   error: [event: XmppErrorEvent];
   reconnectScheduled: [info: { attempt: number; delayMs: number }];
   catchup: [info: CatchupHookInfo];

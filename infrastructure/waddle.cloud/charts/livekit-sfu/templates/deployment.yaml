@@ -81,6 +81,11 @@ spec:
             - name: http
               containerPort: {{ .Values.livekit.port }}
               protocol: TCP
+            {{- if .Values.livekit.prometheus_port }}
+            - name: prometheus
+              containerPort: {{ .Values.livekit.prometheus_port }}
+              protocol: TCP
+            {{- end }}
             {{- if .Values.livekit.rtc.tcp_port }}
             - name: rtc-tcp
               containerPort: {{ .Values.livekit.rtc.tcp_port }}

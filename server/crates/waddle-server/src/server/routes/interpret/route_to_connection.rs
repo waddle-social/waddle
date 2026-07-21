@@ -124,6 +124,7 @@ pub(crate) async fn route_to_connection(
     if recursion_depth >= MAX_RECIPIENT_PASS_DEPTH {
         debug!(
             target_jid = %jid,
+            message_id = stanza_message_id(stanza.as_ref()),
             recursion_depth,
             "RouteToConnection: headless recipient-pass already running; \
              dropping nested route (full or bare) to prevent duplicate \
@@ -350,6 +351,7 @@ async fn route_dm_to_full_jid(
             .unwrap_or_else(|error| {
                 warn!(
                     jid = %full,
+                    message_id = stanza_message_id(stanza.as_ref()),
                     %error,
                     "RouteToConnection: failed to enumerate detached \
                      resources for full-JID DM delivery"
@@ -385,6 +387,7 @@ async fn route_dm_to_full_jid(
                 } else {
                     debug!(
                         jid = %full,
+                        message_id = stanza_message_id(stanza.as_ref()),
                         "RouteToConnection: shared recipient pass produced no \
                          wire copy for detached full-JID DM (blocked or \
                          halted); dropping delivery"
@@ -403,6 +406,7 @@ async fn route_dm_to_full_jid(
                     // headless pass's fail-closed rule.
                     warn!(
                         jid = %full,
+                        message_id = stanza_message_id(stanza.as_ref()),
                         "RouteToConnection: blocklist load failed for detached \
                          full-JID DM; dropping instead of queueing the \
                          unfiltered stanza (XEP-0191 fail-closed)"
@@ -424,6 +428,7 @@ async fn route_dm_to_full_jid(
     // headless pass, or the §8.5.1 nonexistent-account bounce).
     debug!(
         jid = %full,
+        message_id = stanza_message_id(stanza.as_ref()),
         "RouteToConnection: full-JID DM has no matching live or detached \
          resource; falling back to bare-JID delivery per RFC 6121 \
          §8.5.3.2.1"
@@ -486,6 +491,7 @@ async fn route_to_bare_jid(
                 .unwrap_or_else(|error| {
                     warn!(
                         bare_jid = %bare,
+                        message_id = stanza_message_id(stanza.as_ref()),
                         %error,
                         "RouteToConnection: failed to enumerate \
                          detached resources for bare-JID delivery"
@@ -642,6 +648,7 @@ async fn route_to_bare_jid(
                         } else {
                             debug!(
                                 bare_jid = %bare,
+                                message_id = stanza_message_id(stanza.as_ref()),
                                 "RouteToConnection: shared recipient pass \
                                  produced no wire copy (blocked or halted); \
                                  dropping delivery"
@@ -696,6 +703,7 @@ async fn route_to_bare_jid(
             if skip_raw_detached_queueing {
                 debug!(
                     bare_jid = %bare,
+                    message_id = stanza_message_id(stanza.as_ref()),
                     "RouteToConnection: blocklist load failed; skipping raw \
                      detached XEP-0198 queueing (fail-closed) — live \
                      per-resource delivery above keeps its own snapshot"
@@ -746,6 +754,7 @@ async fn route_to_bare_jid(
                             any_landed = true;
                             debug!(
                                 jid = %full,
+                                message_id = stanza_message_id(stanza.as_ref()),
                                 "RouteToConnection: bare-JID stanza queued \
                                  for detached XEP-0198 replay"
                             );
@@ -753,6 +762,7 @@ async fn route_to_bare_jid(
                         Ok(false) => {
                             debug!(
                                 jid = %full,
+                                message_id = stanza_message_id(stanza.as_ref()),
                                 "RouteToConnection: detached session expired \
                                  between enumeration and queue; dropping"
                             );
@@ -760,6 +770,7 @@ async fn route_to_bare_jid(
                         Err(error) => {
                             warn!(
                                 jid = %full,
+                                message_id = stanza_message_id(stanza.as_ref()),
                                 %error,
                                 "RouteToConnection: failed to record bare-JID \
                                  stanza for detached resource"
@@ -787,6 +798,7 @@ async fn route_to_bare_jid(
                 } else {
                     debug!(
                         bare_jid = %bare,
+                        message_id = stanza_message_id(stanza.as_ref()),
                         "RouteToConnection: every selected/detached target \
                          turned out stale (self-healed via DroppedClosed \
                          eviction); running the headless recipient pass so \
@@ -1093,6 +1105,7 @@ async fn queue_processed_for_detached(
             Ok(true) => {
                 debug!(
                     jid = %full,
+                    message_id = stanza_message_id(stanza),
                     "RouteToConnection: processed DM queued for detached \
                      XEP-0198 replay"
                 );
@@ -1100,6 +1113,7 @@ async fn queue_processed_for_detached(
             Ok(false) => {
                 debug!(
                     jid = %full,
+                    message_id = stanza_message_id(stanza),
                     "RouteToConnection: detached session gone between \
                      enumeration and queue (resumed or expired); retrying \
                      as live delivery"
@@ -1109,6 +1123,7 @@ async fn queue_processed_for_detached(
             Err(error) => {
                 warn!(
                     jid = %full,
+                    message_id = stanza_message_id(stanza),
                     %error,
                     "RouteToConnection: failed to record processed DM for \
                      detached resource; retrying as live delivery"
@@ -1134,9 +1149,17 @@ async fn retry_unqueued_detached_as_live(
         let outcome = deliver_direct_to_full_with_registered_remote(deps, &full, processed).await;
         debug!(
             jid = %full,
+            message_id = stanza_message_id(processed),
             ?outcome,
             "RouteToConnection: second-chance live delivery after failed \
              detached queueing"
         );
+    }
+}
+
+fn stanza_message_id(stanza: &Stanza) -> &str {
+    match stanza {
+        Stanza::Message(message) => message.id.as_ref().map_or("", |id| id.0.as_str()),
+        Stanza::Iq(_) | Stanza::Presence(_) => "",
     }
 }

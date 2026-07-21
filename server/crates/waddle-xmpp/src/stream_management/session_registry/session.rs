@@ -232,7 +232,7 @@ impl DetachedSession {
     /// path (it comes from presence relay / Q6 recording, not MAM
     /// catch-up), so this is not coalesced.
     fn note_detached_eviction(&self, evicted_sequence: u32) {
-        crate::prometheus::increment_sm_detached_unacked_evicted();
+        crate::telemetry::reliability::increment_sm_detached_unacked_evicted();
         tracing::warn!(
             stream_id = %self.stream_id,
             evicted_sequence,

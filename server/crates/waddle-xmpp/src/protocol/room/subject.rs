@@ -32,10 +32,11 @@
 //! [`super::archive::MucArchiveHandler`] so an unauthorized subject
 //! change cannot leak into the room archive.
 //!
-//! The interpreter awaits the actor's fenced persistence before draining
-//! later archive and reflector effects from the same dispatch batch. If
-//! persistence cannot prove exact authority or fails before apply, it returns
-//! a retryable error to the sender and suppresses those later effects.
+//! After the chain admits the change, the interpreter drains the archive
+//! effect first so retry/ownership suppression can veto stale subject
+//! mutation, then awaits the actor's fenced persistence before reflector
+//! effects. If persistence cannot prove exact authority or fails before apply,
+//! it returns a retryable error to the sender and suppresses later effects.
 
 use super::super::event::OutboundEvent;
 use super::super::handlers::errors::send_message_error;

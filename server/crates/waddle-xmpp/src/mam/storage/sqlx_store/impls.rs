@@ -4,12 +4,12 @@ use jid::BareJid;
 use sqlx::postgres::PgRow;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Postgres, QueryBuilder, Sqlite};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, Span};
 use waddle_xmpp_core::mam::{ArchivedMessage, MamQuery, MamResult};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::mam::storage::query_semantics::{finalize_result, uses_backward_pagination};
-use crate::mam::storage::{MamStorage, MamStorageError};
+use crate::mam::storage::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 use crate::muc::RoomClaimFenceContext;
 
 use super::decode::{decode_postgres_message_row, decode_sqlite_message_row};
@@ -23,22 +23,40 @@ use super::{MamDatabaseBackend, SqlxMamStorage};
 
 #[async_trait]
 impl MamStorage for SqlxMamStorage {
-    #[instrument(skip(self, message), fields(archive = %archive_jid))]
+    #[instrument(
+        skip(self, message),
+        err,
+        fields(
+            archive = %archive_jid,
+            message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),
+            room = tracing::field::Empty,
+        )
+    )]
     async fn store_message(
         &self,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
-    ) -> Result<String, MamStorageError> {
+    ) -> Result<StoreOutcome, MamStorageError> {
+        record_archive_room(archive_jid, message);
         super::write::store_message(&self.backend, archive_jid, message).await
     }
 
-    #[instrument(skip(self, message, fence), fields(archive = %archive_jid))]
+    #[instrument(
+        skip(self, message, fence),
+        err,
+        fields(
+            archive = %archive_jid,
+            message_id = message.stanza_id.as_ref().map(|id| id.id.as_str()).unwrap_or_default(),
+            room = tracing::field::Empty,
+        )
+    )]
     async fn store_message_fenced(
         &self,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
         fence: &RoomClaimFenceContext,
-    ) -> Result<String, MamStorageError> {
+    ) -> Result<StoreOutcome, MamStorageError> {
+        record_archive_room(archive_jid, message);
         if !self.fencing_enabled {
             return self.store_message(archive_jid, message).await;
         }
@@ -498,5 +516,20 @@ impl MamStorage for SqlxMamStorage {
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError> {
         super::write::replace_with_tombstone(&self.backend, archive_id, tombstone).await
+    }
+
+    #[instrument(skip(self, tombstone))]
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        super::write::replace_with_terminal_tombstone(&self.backend, archive_id, tombstone).await
+    }
+}
+
+fn record_archive_room(archive_jid: &BareJid, message: &ArchivedMessage) {
+    if message.message_type == xmpp_parsers::message::MessageType::Groupchat {
+        Span::current().record("room", tracing::field::display(archive_jid));
     }
 }

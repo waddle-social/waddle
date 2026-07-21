@@ -1,4 +1,5 @@
 import { atom } from "nanostores";
+import { reportCallMediaError } from "../telemetry";
 
 /**
  * Why the local microphone or camera could not be published for the
@@ -139,7 +140,9 @@ export function mediaErrorMessage(error: unknown): string | null {
 
 /** Record a capture failure for `kind`, classifying the error. */
 export function recordMediaIssue(kind: MediaKind, error: unknown): void {
-  $callMediaIssues.set({ ...$callMediaIssues.get(), [kind]: classifyMediaError(error) });
+  const reason = classifyMediaError(error);
+  $callMediaIssues.set({ ...$callMediaIssues.get(), [kind]: reason });
+  reportCallMediaError(kind, reason);
 }
 
 /** Clear the recorded issue for `kind` (e.g. after a successful retry). */

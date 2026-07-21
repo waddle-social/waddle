@@ -67,6 +67,8 @@ export type VideoStatsSummary = {
 type AudioStatsSummary = {
   codec: string | null;
   bitrateKbps: number | null;
+  packetLossPct: number | null;
+  rttMs: number | null;
   iceCandidateType: IceCandidateType | null;
   iceTransport: IceTransport | null;
 };
@@ -317,6 +319,7 @@ export function summarizeAudioStats(
 ): { summary: AudioStatsSummary; sample: CallStatSample | null } {
   const mainType = direction === "send" ? "outbound-rtp" : "inbound-rtp";
   const mains: RtpLike[] = [];
+  const remoteInbounds: RtpLike[] = [];
   const candidatePairs: RtpLike[] = [];
   let selectedPairId: string | undefined;
   const byId = new Map<string, RtpLike>();
@@ -326,6 +329,8 @@ export function summarizeAudioStats(
     if (stat.id !== undefined) byId.set(stat.id, stat);
     if (stat.type === mainType && isAudio(stat)) {
       mains.push(stat);
+    } else if (stat.type === "remote-inbound-rtp" && isAudio(stat)) {
+      remoteInbounds.push(stat);
     } else if (stat.type === "candidate-pair") {
       candidatePairs.push(stat);
     } else if (stat.type === "transport" && stat.selectedCandidatePairId !== undefined) {
@@ -343,7 +348,36 @@ export function summarizeAudioStats(
   const sample = sampleFromRtp(mains, direction === "send" ? "bytesSent" : "bytesReceived");
   const bitrateKbps = bitrateFromSamples(sample, prev);
 
-  return { summary: { codec, bitrateKbps, iceCandidateType, iceTransport }, sample };
+  const packetLossPct = direction === "recv"
+    ? recvPacketLoss(mains)
+    : sendPacketLoss(mains, remoteInbounds);
+  let rttSec: number | undefined;
+  if (direction === "send") {
+    for (const remote of remoteInbounds) {
+      if (remote.roundTripTime !== undefined) {
+        rttSec = rttSec === undefined ? remote.roundTripTime : Math.max(rttSec, remote.roundTripTime);
+      }
+    }
+  }
+  if (rttSec === undefined) {
+    rttSec = candidatePair?.currentRoundTripTime
+      ?? candidatePairs.find(
+        (pair) => pair.state !== "failed" && pair.currentRoundTripTime !== undefined,
+      )?.currentRoundTripTime;
+  }
+  const rttMs = rttSec !== undefined ? Math.round(rttSec * 1000) : null;
+
+  return {
+    summary: {
+      codec,
+      bitrateKbps,
+      packetLossPct,
+      rttMs,
+      iceCandidateType,
+      iceTransport,
+    },
+    sample,
+  };
 }
 
 function clampPercent(value: number): number {

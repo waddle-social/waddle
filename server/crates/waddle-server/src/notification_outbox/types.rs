@@ -72,7 +72,7 @@ pub enum NotificationClass {
 }
 
 impl NotificationClass {
-    pub(super) fn as_db_value(self) -> &'static str {
+    pub(crate) fn as_db_value(self) -> &'static str {
         match self {
             Self::DirectMessage => "dm",
             Self::DirectMessageMention => "dm_mention",
@@ -137,7 +137,8 @@ impl NotificationReason {
 /// push notification. Persisted into `notification_candidates.suppressed_reason`
 /// alongside the existing `class`/`reason` columns whenever the T1
 /// drain decides to mark a candidate outboxed *without* enqueueing a
-/// job. Also labels the `waddle_push_suppressed_total` metric so
+/// job. Also labels the `xmpp.push.suppressed` OTel counter (exported
+/// to Mimir under the `waddle_push_suppressed_total` alias) so
 /// deployments can observe per-rule suppression rates.
 ///
 /// `SuppressedReason` is the **audit shape**, distinct from the
@@ -152,9 +153,8 @@ pub(crate) enum SuppressedReason {
     /// path is structurally a no-row outcome, but the audit shape
     /// exists so race-window state changes can record it.
     Xep0357Self,
-    /// Recipient has no XEP-0357 push registration. Reserved variant;
-    /// emitted by the publish-layer disable transitions
-    /// (XEP-0357 §6) in later slices.
+    /// Recipient has no usable active first-party XEP-0357 push
+    /// registration when the T1 drain resolves delivery targets.
     Xep0357NoRegistration,
     /// Recipient's XEP-0357 push registration was disabled in
     /// response to a stanza-error from the push service
@@ -258,10 +258,35 @@ impl SuppressedReason {
         }
     }
 
+    /// Convert the persisted audit reason into the metric-facing closed set.
+    /// Exhaustive matching keeps the boundary typed and makes new variants a
+    /// compile-time decision for telemetry as well as storage.
+    pub(crate) fn telemetry_reason(self) -> waddle_xmpp::telemetry::attributes::PushSuppressReason {
+        use waddle_xmpp::telemetry::attributes::PushSuppressReason as MetricReason;
+
+        match self {
+            Self::Xep0357Self => MetricReason::Xep0357Self,
+            Self::Xep0357NoRegistration => MetricReason::Xep0357NoRegistration,
+            Self::Xep0357RegistrationDisabled => MetricReason::Xep0357RegistrationDisabled,
+            Self::Xep0492Never => MetricReason::Xep0492Never,
+            Self::Xep0492OnMentionMiss => MetricReason::Xep0492OnMentionMiss,
+            Self::Xep0191Blocked => MetricReason::Xep0191Blocked,
+            Self::Xep0513Noping => MetricReason::Xep0513Noping,
+            Self::Xep0513ActiveMiss => MetricReason::Xep0513ActiveMiss,
+            Self::WaddleDnd => MetricReason::WaddleDnd,
+            Self::ProviderRejected => MetricReason::ProviderRejected,
+            Self::ProviderTokenExpired => MetricReason::ProviderTokenExpired,
+            Self::Xep0357PushServiceDegraded => MetricReason::Xep0357PushServiceDegraded,
+            Self::UnreadZeroAtPublish => MetricReason::UnreadZeroAtPublish,
+            Self::PolicyRetriesExhausted => MetricReason::PolicyRetriesExhausted,
+            Self::Xep0444Reaction => MetricReason::Xep0444Reaction,
+        }
+    }
+
     pub(crate) fn from_db_value(value: &str) -> Result<Self, NotificationOutboxError> {
         // Iterate the closed `ALL` set rather than re-listing the
         // variants in a `match` arm — keeps the audit shape, the
-        // schema CHECK list, and the prometheus label set in
+        // schema CHECK list, and the metric `reason` label set in
         // lockstep without three independently-edited match arms.
         Self::ALL
             .iter()
@@ -537,7 +562,7 @@ mod tests {
     /// MUST round-trip through `as_db_value` / `from_db_value` so a
     /// row written today can be decoded tomorrow without ambiguity.
     /// The closed-set discipline is what keeps the CHECK constraint
-    /// + the labeled prometheus counter in lockstep.
+    /// + the `reason`-labeled suppression counter in lockstep.
     #[test]
     fn suppressed_reason_round_trip_covers_every_variant() {
         // Iterate `SuppressedReason::ALL` (the same closed-set array the
@@ -567,42 +592,28 @@ mod tests {
         ));
     }
 
-    /// Wire-contract lockstep guard: every `SuppressedReason` variant
-    /// MUST have its `as_db_value()` listed in
-    /// `waddle_xmpp::prometheus::push_suppressed_reasons()`. The
-    /// prometheus parallel constant lives upstream of this enum (in
-    /// `waddle-xmpp`) and cannot import the typed enum, so the
-    /// invariant is enforced from this side. Drift here means an
-    /// `increment_push_suppressed(...)` call for the missing variant
-    /// would hit the `waddle_push_suppressed_unknown_reason_total`
-    /// catch-all instead of the typed counter — observable but
-    /// incorrect.
+    /// Cross-crate lockstep guard (successor of the retired
+    /// `push_suppressed_reasons()` parity check): the persisted
+    /// `SuppressedReason` db values and the sealed
+    /// `PushSuppressReason` metric label values must stay the same
+    /// closed set, so a Loki query on the audit column and a PromQL
+    /// filter on the `reason` label always speak the same vocabulary.
     #[test]
-    fn suppressed_reason_wire_contract_matches_prometheus_parallel_constant() {
-        let wire = waddle_xmpp::prometheus::push_suppressed_reasons();
-        for reason in SuppressedReason::ALL.iter().copied() {
-            let db = reason.as_db_value();
-            assert!(
-                wire.contains(&db),
-                "`SuppressedReason::{reason:?}` (db value `{db}`) is missing from \
-                 `waddle_xmpp::prometheus::PUSH_SUPPRESSED_REASONS`; the parallel \
-                 constant has drifted from the typed enum"
-            );
-        }
-        // Reverse direction: any string in the parallel constant that
-        // does NOT round-trip through `SuppressedReason::from_db_value`
-        // is dead weight in the metrics surface.
-        for label in wire.iter().copied() {
-            assert!(
-                SuppressedReason::from_db_value(label).is_ok(),
-                "`PUSH_SUPPRESSED_REASONS` entry `{label}` is not a known \
-                 `SuppressedReason::as_db_value()`; the parallel constant has drifted"
-            );
-        }
+    fn suppressed_reason_db_values_match_metric_label_values() {
+        use waddle_xmpp::telemetry::attributes::{MetricAttribute, PushSuppressReason};
+
+        let db_values: Vec<&'static str> = SuppressedReason::ALL
+            .iter()
+            .copied()
+            .map(SuppressedReason::as_db_value)
+            .collect();
+        let metric_values: Vec<&'static str> = PushSuppressReason::ALL
+            .iter()
+            .map(MetricAttribute::value)
+            .collect();
         assert_eq!(
-            wire.len(),
-            SuppressedReason::ALL.len(),
-            "wire-contract length must match the typed enum cardinality"
+            db_values, metric_values,
+            "audit db values and metric reason labels must stay one closed set",
         );
     }
 }

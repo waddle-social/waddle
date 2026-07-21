@@ -36,6 +36,7 @@ import { useDmChatStates } from "@/dms/chat-states";
 import { useDmReadMarkers } from "@/dms/read-markers";
 import { useDmMessageSearch } from "@/dms/message-search";
 import { useChatWindowVisibility } from "@/shell/window-visibility";
+import { withSpan } from "@/lib/telemetry";
 import {
   $dmCallOutcomeAnchor,
   $dmCallStartedAnchor,
@@ -314,7 +315,11 @@ export function useDirectMessages(
   // clears stale results.
   async function loadMessages(peerJid: string, unreadAtLoad = 0) {
     messageSearch.reset();
-    return paging.loadMessages(peerJid, unreadAtLoad);
+    return withSpan(
+      "xmpp.initial_render",
+      { "conversation.kind": "dm" },
+      () => paging.loadMessages(peerJid, unreadAtLoad),
+    );
   }
 
   /** On a fresh session (SM resume failed), re-fetch MAM to close any gap

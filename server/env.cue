@@ -10,6 +10,7 @@ import (
 let _rustInputs = [
 	"Cargo.toml",
 	"Cargo.lock",
+	".config/nextest.toml",
 	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
@@ -22,11 +23,20 @@ let _nixInputs = [
 	"../flake.lock",
 	"Cargo.toml",
 	"Cargo.lock",
+	".config/nextest.toml",
 	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
 	"wit/**",
 ]
+
+// cargo-nextest task template: xRust.#Test pins args[0] to "test", but the
+// runner subcommand is "nextest run", so nextest tasks use schema.#Task.
+let _nextestTask = schema.#Task & {
+	command: "cargo"
+	dir: from: "caller"
+	inputs: _rustInputs
+}
 
 let _chartInputs = ["charts/waddle-server/**"]
 let _gitopsWaddleServerInputs = [
@@ -150,6 +160,7 @@ schema.#Project & {
 				_t.fmt,
 				_t.clippy,
 				_t.test,
+				_t.doctest,
 				_t.checkXmppClientFfiBindings,
 				_t.renderDeployment,
 				_t.buildExtensionModules,
@@ -185,7 +196,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
+			tasks: [_t.checkRootSyncDrift, _t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.nixFmt, _t.nixClippy, _t.nixTest, _t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment, _t.nixBuildExtensionModules, _t.nixBuildCi]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -333,6 +344,12 @@ schema.#Project & {
 			inputs: _nixInputs
 		}
 
+		nixDoctest: schema.#Task & {
+			command: "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-doctest"]
+			inputs: _nixInputs
+		}
+
 		nixBuildCi: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-ci-build"]
@@ -355,8 +372,13 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
-		test: xRust.#Test & {
-			args: ["test", "--workspace", "--all-targets", "--locked"]
+		test: _nextestTask & {
+			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
+		}
+
+		// nextest cannot run doctests; keep them verified via cargo test --doc.
+		doctest: xRust.#Test & {
+			args: ["test", "--doc", "--workspace", "--all-features", "--locked"]
 			inputs: _rustInputs
 		}
 
@@ -375,14 +397,14 @@ schema.#Project & {
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/ci/waddle-server"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
 		}
 
 		buildRelease: xRust.#Build & {
 			args: ["build", "--release", "--locked", "--package", "waddle-server"]
 			inputs: _rustInputs
 			outputs: ["target/release/waddle-server"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
 		}
 
 		buildExtensionModules: schema.#Task & {
@@ -407,7 +429,7 @@ schema.#Project & {
 				"server/target/wasm32-wasip2/release/github.wasm",
 				"server/target/wasm32-wasip2/release/stargate_quotes.wasm",
 			]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
 		}
 
 		renderDeployment: schema.#Task & {
@@ -782,7 +804,7 @@ schema.#Project & {
 				"""#]
 			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs])
 			outputs: ["target/digests/**"]
-			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.renderDeployment, tasks.buildExtensionModules]
+			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest, tasks.renderDeployment, tasks.buildExtensionModules]
 		}
 
 		flakehubPublished: schema.#Task & {
@@ -838,19 +860,16 @@ schema.#Project & {
 			inputs: _nixInputs
 		}
 
-		xmppUnitTests: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--lib", "--verbose"]
-			inputs: _rustInputs
+		xmppUnitTests: _nextestTask & {
+			args: ["nextest", "run", "--package", "waddle-xmpp", "--lib", "--profile", "ci"]
 		}
 
-		xmppServerTests: xRust.#Test & {
-			args: ["test", "--package", "waddle-server", "--verbose"]
-			inputs: _rustInputs
+		xmppServerTests: _nextestTask & {
+			args: ["nextest", "run", "--package", "waddle-server", "--profile", "ci"]
 		}
 
-		xmppXepIntegration: xRust.#Test & {
-			args: ["test", "--package", "waddle-xmpp", "--tests", "--verbose"]
-			inputs: _rustInputs
+		xmppXepIntegration: _nextestTask & {
+			args: ["nextest", "run", "--package", "waddle-xmpp", "--tests", "--profile", "ci"]
 		}
 
 	}

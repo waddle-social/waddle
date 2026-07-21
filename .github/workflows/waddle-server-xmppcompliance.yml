@@ -13,6 +13,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - server/.config/nextest.toml
+    - server/.config/nextest.toml/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml
@@ -35,6 +37,8 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - server/.config/nextest.toml
+    - server/.config/nextest.toml/**
     - server/Cargo.lock
     - server/Cargo.lock/**
     - server/Cargo.toml

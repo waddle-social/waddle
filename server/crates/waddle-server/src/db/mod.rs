@@ -200,7 +200,7 @@ impl Database {
         .await
     }
 
-    #[instrument(skip_all, fields(name = %name))]
+    #[instrument(skip_all, fields(name = %name), err)]
     pub async fn from_config(name: &str, config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         if config.control_plane_pool.is_some() && config.driver != DatabaseDriver::Postgres {
             return Err(DatabaseError::ControlPlanePoolRequiresPostgres);
@@ -300,12 +300,13 @@ impl Database {
         &self.database_url
     }
 
-    #[instrument(skip_all, fields(name = %self.name))]
+    #[instrument(skip_all, fields(name = %self.name), err)]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
         let conn = self.guard().await?;
         match conn.query("SELECT 1", ()).await {
             Ok(_) => Ok(true),
             Err(e) => {
+                crate::telemetry::mark_span_error("database health check failed");
                 tracing::warn!(error = %e, "Database health check failed");
                 Ok(false)
             }

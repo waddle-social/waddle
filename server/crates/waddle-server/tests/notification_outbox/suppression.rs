@@ -111,8 +111,7 @@ async fn opt_in_rich_payload(
 /// labeled by the typed db value.
 #[tokio::test]
 async fn t1_xep0492_never_records_typed_suppressed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -180,10 +179,10 @@ async fn t1_xep0492_never_records_typed_suppressed_reason() {
         "T1 suppression MUST NOT enqueue a job",
     );
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_never\"} 1"),
-        "metric counter for xep0492_never must increment; rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0492_never")]),
+        Some(1),
+        "metric counter for xep0492_never must increment",
     );
 }
 
@@ -192,8 +191,7 @@ async fn t1_xep0492_never_records_typed_suppressed_reason() {
 /// typed `Xep0492OnMentionMiss` audit reason.
 #[tokio::test]
 async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -250,9 +248,12 @@ async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
     let reason: Option<String> = row.get(0).expect("reason");
     assert_eq!(reason.as_deref(), Some("xep0492_on_mention_miss"));
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"xep0492_on_mention_miss\"} 1"),
+    assert_eq!(
+        metrics.counter_sum(
+            "xmpp.push.suppressed",
+            &[("reason", "xep0492_on_mention_miss")]
+        ),
+        Some(1),
     );
 }
 
@@ -260,8 +261,7 @@ async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
 /// candidate row before marking it outboxed-without-job.
 #[tokio::test]
 async fn t1_xep0191_blocked_records_typed_suppressed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -303,8 +303,10 @@ async fn t1_xep0191_blocked_records_typed_suppressed_reason() {
     let row = rows.next().await.expect("row").expect("row exists");
     let reason: Option<String> = row.get(0).expect("reason");
     assert_eq!(reason.as_deref(), Some("xep0191_blocked"));
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0191_blocked\"} 1"),);
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0191_blocked")]),
+        Some(1),
+    );
 }
 
 /// XEP-0513 `<noping/>` carried on the candidate row MUST suppress
@@ -313,8 +315,7 @@ async fn t1_xep0191_blocked_records_typed_suppressed_reason() {
 /// bit set, persisted, then the drain reads it back and suppresses.
 #[tokio::test]
 async fn t1_noping_records_typed_suppressed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -363,8 +364,10 @@ async fn t1_noping_records_typed_suppressed_reason() {
         Some("xep0513_noping")
     );
     assert_eq!(row.get::<i64>(1).expect("noping"), 1);
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),);
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0513_noping")]),
+        Some(1),
+    );
 }
 
 // #780: a reaction-only message's candidate persists at T0 and is
@@ -372,8 +375,7 @@ async fn t1_noping_records_typed_suppressed_reason() {
 // metric — no outbox job is created.
 #[tokio::test]
 async fn t1_xep0444_reaction_records_typed_suppressed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -430,8 +432,10 @@ async fn t1_xep0444_reaction_records_typed_suppressed_reason() {
             .is_empty(),
         "a reaction-only candidate must not produce an outbox job"
     );
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(rendered.contains("waddle_push_suppressed_total{reason=\"xep0444_reaction\"} 1"),);
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0444_reaction")]),
+        Some(1),
+    );
 }
 
 /// #719: with the rich-payload opt-in set and no XEP-0334 storage
@@ -703,8 +707,7 @@ async fn noop_dnd_reader_reports_inactive() {
 /// in play.
 #[tokio::test]
 async fn t1_active_dnd_suppresses_with_typed_reason() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
 
     struct ActiveDndReader;
     #[async_trait::async_trait]
@@ -753,8 +756,10 @@ async fn t1_active_dnd_suppresses_with_typed_reason() {
         row.get::<Option<String>>(0).expect("reason").as_deref(),
         Some("waddle_dnd"),
     );
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"));
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "waddle_dnd")]),
+        Some(1),
+    );
 }
 
 /// XEP-0191 blocking suppresses at T1: the candidate row IS
@@ -763,8 +768,7 @@ async fn t1_active_dnd_suppresses_with_typed_reason() {
 /// (here: pre-existing inbox row) MUST be intact.
 #[tokio::test]
 async fn xep0191_blocked_t1_suppression_keeps_pending_delivery_intact() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -821,10 +825,10 @@ async fn xep0191_blocked_t1_suppression_keeps_pending_delivery_intact() {
 
     assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"xep0191_blocked\"} 1"),
-        "metric counter for xep0191_blocked must increment; rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0191_blocked")]),
+        Some(1),
+        "metric counter for xep0191_blocked must increment",
     );
 }
 
@@ -834,8 +838,7 @@ async fn xep0191_blocked_t1_suppression_keeps_pending_delivery_intact() {
 /// storage is preserved across this audit-only suppression.
 #[tokio::test]
 async fn xep0513_noping_t1_suppression_persists_candidate_and_keeps_storage() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -903,10 +906,10 @@ async fn xep0513_noping_t1_suppression_persists_candidate_and_keeps_storage() {
 
     assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_noping\"} 1"),
-        "metric counter for xep0513_noping must increment; rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0513_noping")]),
+        Some(1),
+        "metric counter for xep0513_noping must increment",
     );
 }
 
@@ -1060,8 +1063,7 @@ async fn xep0334_no_permanent_store_delivers_minimal_push_and_keeps_storage() {
 /// the DnD-driven audit.
 #[tokio::test]
 async fn waddle_dnd_t1_suppression_persists_audit_and_keeps_storage() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -1114,10 +1116,10 @@ async fn waddle_dnd_t1_suppression_persists_audit_and_keeps_storage() {
 
     assert_inbox_witness_unchanged(&inbox, &recipient, &witness).await;
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"),
-        "metric counter for waddle_dnd must increment; rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "waddle_dnd")]),
+        Some(1),
+        "metric counter for waddle_dnd must increment",
     );
 }
 
@@ -1136,8 +1138,7 @@ async fn waddle_dnd_t1_suppression_persists_audit_and_keeps_storage() {
 /// MUST tick by exactly one (Alice's row only).
 #[tokio::test]
 async fn dnd_integration_with_pep_shaped_reader_suppresses_push_only() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -1257,9 +1258,9 @@ async fn dnd_integration_with_pep_shaped_reader_suppresses_push_only() {
         "the surviving job belongs to Bob",
     );
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"waddle_dnd\"} 1"),
-        "metric for waddle_dnd must increment by exactly 1 (Alice only); rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "waddle_dnd")]),
+        Some(1),
+        "metric for waddle_dnd must increment by exactly 1 (Alice only)",
     );
 }

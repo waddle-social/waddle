@@ -355,10 +355,12 @@ fn spawn_session_recovery_delivery(
                 )
                 .await;
                 if outcome.batches > 0 {
-                    waddle_xmpp::prometheus::add_pending_flush_batches(u64::from(outcome.batches));
+                    waddle_xmpp::telemetry::reliability::add_pending_flush_batches(u64::from(
+                        outcome.batches,
+                    ));
                 }
                 if outcome.pushed > 0 {
-                    waddle_xmpp::prometheus::add_pending_flush_rows_pushed(u64::from(
+                    waddle_xmpp::telemetry::reliability::add_pending_flush_rows_pushed(u64::from(
                         outcome.pushed,
                     ));
                 }

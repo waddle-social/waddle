@@ -11,13 +11,13 @@ use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::xep::matches_fulltext;
 
-use super::origin_dedup::origin_id_dedup_match;
+use super::origin_dedup::{origin_id_dedup_match, origin_id_tombstone_match};
 use super::query_semantics::{
     archive_order_after, archive_order_before, matches_thread_filter, message_matches_with_filter,
     missing_requested_id, uses_backward_pagination,
 };
 use super::tombstone::apply_tombstone;
-use super::{MamStorage, MamStorageError};
+use super::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 
 #[derive(Clone, Default)]
 pub struct InMemoryMamStorage {
@@ -40,13 +40,18 @@ impl MamStorage for InMemoryMamStorage {
         &self,
         archive_jid: &BareJid,
         message: &ArchivedMessage,
-    ) -> Result<String, MamStorageError> {
+    ) -> Result<StoreOutcome, MamStorageError> {
         let mut entries = self.entries.write().await;
         if message.origin_id.is_some() {
             if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
                 jid == archive_jid && origin_id_dedup_match(existing, message)
             }) {
-                return Ok(existing.id.clone());
+                return Ok(StoreOutcome::Deduplicated(existing.id.clone()));
+            }
+            if let Some((_, existing)) = entries.iter().find(|(jid, existing)| {
+                jid == archive_jid && origin_id_tombstone_match(existing, message)
+            }) {
+                return Ok(StoreOutcome::TombstoneHit(existing.id.clone()));
             }
         }
 
@@ -60,7 +65,7 @@ impl MamStorage for InMemoryMamStorage {
         stored.id = archive_id.clone();
 
         entries.push((archive_jid.clone(), stored));
-        Ok(archive_id)
+        Ok(StoreOutcome::Stored(archive_id))
     }
 
     async fn query_messages(
@@ -344,5 +349,28 @@ impl MamStorage for InMemoryMamStorage {
             }
         }
         Ok(false)
+    }
+
+    async fn replace_with_terminal_tombstone(
+        &self,
+        archive_id: &str,
+        tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
+        let mut entries = self.entries.write().await;
+        let Some((_, message)) = entries
+            .iter_mut()
+            .find(|(_, message)| message.id == archive_id)
+        else {
+            return Ok(TerminalTombstoneOutcome::NotFound);
+        };
+        if message
+            .rich
+            .as_ref()
+            .is_some_and(waddle_xmpp_core::mam::ArchivedRichMessage::is_tombstoned)
+        {
+            return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
+        }
+        apply_tombstone(message, tombstone);
+        Ok(TerminalTombstoneOutcome::Replaced)
     }
 }

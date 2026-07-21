@@ -606,8 +606,29 @@ describe("summarizeAudioStats — inbound (recv) audio and ICE path", () => {
     expect(summary).toEqual({
       codec: null,
       bitrateKbps: null,
+      packetLossPct: null,
+      rttMs: null,
       iceCandidateType: null,
       iceTransport: null,
     });
+  });
+
+  test("captures packet loss and RTT for audio-only calls", () => {
+    const inbound = {
+      type: "inbound-rtp",
+      kind: "audio",
+      packetsReceived: 95,
+      packetsLost: 5,
+    };
+    const pair = {
+      type: "candidate-pair",
+      state: "succeeded",
+      currentRoundTripTime: 0.18,
+    };
+
+    const { summary } = summarizeAudioStats(report([inbound, pair]), "recv");
+
+    expect(summary.packetLossPct).toBe(5);
+    expect(summary.rttMs).toBe(180);
   });
 });

@@ -540,6 +540,7 @@ fn xep_0201_typed_replay_emits_thread_parent() {
             reply: None,
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..nested_thread_archived_for_replay(None)
     };
@@ -552,6 +553,50 @@ fn xep_0201_typed_replay_emits_thread_parent() {
     let thread = replay_inner_thread(&msgs[0]);
     assert_eq!(thread.text().trim(), "child-thread");
     assert_eq!(thread.attr("parent"), Some("root-thread"));
+}
+
+#[test]
+fn typed_fallback_replay_emits_default_and_language_keyed_subjects() {
+    for stanza_xml in [None, Some("<malformed".to_string())] {
+        let archived = ArchivedMessage {
+            id: "subject-row".to_string(),
+            body: None,
+            message_type: MessageType::Chat,
+            stanza_xml,
+            rich: Some(ArchivedRichMessage {
+                subjects: [
+                    (String::new(), "Default subject".to_string()),
+                    ("en".to_string(), "English subject".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..ArchivedRichMessage::default()
+            }),
+            ..ArchivedMessage::for_test(jid("alice@example.com/web"), jid("bob@example.com"))
+        };
+
+        let inner = archived_inner_message(&archived);
+        let subjects: Vec<&Element> = inner
+            .children()
+            .filter(|child| child.name() == "subject" && child.ns() == CLIENT_NS)
+            .collect();
+
+        assert_eq!(subjects.len(), 2);
+        let default_subject = subjects
+            .iter()
+            .find(|subject| {
+                subject
+                    .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                    .is_none()
+            })
+            .expect("default-language subject");
+        assert_eq!(default_subject.text(), "Default subject");
+        let english_subject = subjects
+            .iter()
+            .find(|subject| subject.attr_ns(&minidom::rxml::Namespace::XML, "lang") == Some("en"))
+            .expect("English subject");
+        assert_eq!(english_subject.text(), "English subject");
+    }
 }
 
 #[test]
@@ -778,6 +823,7 @@ fn stanza_xml_preferred_over_rich_payload() {
             reply: None,
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..ArchivedMessage::for_test(
             jid("room@conference.example.com/alice"),
@@ -840,6 +886,7 @@ fn stanza_xml_preserves_reply_fallback() {
             }),
             references: vec![],
             mentions: vec![],
+            subjects: Default::default(),
         }),
         ..ArchivedMessage::for_test(
             jid("room@conference.example.com/bob"),

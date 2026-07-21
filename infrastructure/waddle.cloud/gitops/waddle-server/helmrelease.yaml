@@ -87,6 +87,11 @@ spec:
     telemetry:
       otlpEndpoint: "http://grafana-alloy.grafana-alloy.svc.cluster.local:4317"
       serviceName: "waddle-server"
+      deploymentEnvironment: "production"
+      # Explicit spec defaults so trace volume has a visible dial
+      # here; lower the ratio to shed trace volume without a rebuild.
+      tracesSampler: "parentbased_traceidratio"
+      tracesSamplerArg: "1.0"
     containerExtraEnv:
       - name: OTEL_EXPORTER_OTLP_PROTOCOL
         value: "grpc"
