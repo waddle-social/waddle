@@ -76,6 +76,14 @@ class TerminalDrainAndFenceTest {
         val attempt = attempt("active")
         val acknowledged = journal(attempt)
             .prepareTerminalDrainAndFence(request(attempt, "ack")) as TerminalDrainAndFenceResult.Prepared
+        assertAcknowledgedPostFenceRetries(attempt, acknowledged)
+        assertPendingPostFenceRetries(attempt)
+    }
+
+    private fun assertAcknowledgedPostFenceRetries(
+        attempt: DeliveryAttemptRef,
+        acknowledged: TerminalDrainAndFenceResult.Prepared,
+    ) {
         val ready = row("ready", 1, intentId("ready")).copy(ownership = OutboundOwnership.Ready)
         val acknowledgedWithReady = acknowledged.journal.withRows(listOf(ready))
         assertEquals(
@@ -115,7 +123,9 @@ class TerminalDrainAndFenceTest {
             ),
             duplicateRows.prepareTerminalDrainAndFence(request(attempt, "ack")),
         )
+    }
 
+    private fun assertPendingPostFenceRetries(attempt: DeliveryAttemptRef) {
         val intentId = intentId("pending")
         val terminal = row("pending", 1, intentId)
         val pending = journal(attempt, listOf(terminal), listOf(intent(intentId, terminal, attempt, DeliveryTerminalKind.NATIVE_FAILURE)))
@@ -291,6 +301,16 @@ class TerminalDrainAndFenceTest {
         val id = intentId("one")
         val row = row("one", 1, id)
         val valid = intent(id, row, active, DeliveryTerminalKind.ACK)
+        assertCorruptTerminalStateMatrix(active, id, row, valid)
+        assertEffectLimitMatrix(active, row, valid)
+    }
+
+    private fun assertCorruptTerminalStateMatrix(
+        active: DeliveryAttemptRef,
+        id: DeliveryTerminalIntentId,
+        row: QueuedOutboundMessage,
+        valid: DeliveryTerminalIntent,
+    ) {
         val duplicateId = intent(id, row("two", 2, id), active, DeliveryTerminalKind.ACK)
         val duplicateIntentRow = intent(intentId("second"), row, active, DeliveryTerminalKind.ACK)
         val duplicateRow = row.copy(sequence = 2)
@@ -334,7 +354,19 @@ class TerminalDrainAndFenceTest {
             active,
             TerminalDrainAndFenceFailureReason.NATIVE_OWNED_ROW_REMAINS,
         )
-        assertCorrupt(journal(active, listOf(row), listOf(valid)), active, TerminalDrainAndFenceFailureReason.EFFECT_LIMIT_EXCEEDED, maxEffects = 0)
+    }
+
+    private fun assertEffectLimitMatrix(
+        active: DeliveryAttemptRef,
+        row: QueuedOutboundMessage,
+        valid: DeliveryTerminalIntent,
+    ) {
+        assertCorrupt(
+            journal(active, listOf(row), listOf(valid)),
+            active,
+            TerminalDrainAndFenceFailureReason.EFFECT_LIMIT_EXCEEDED,
+            maxEffects = 0,
+        )
 
         val secondId = intentId("bounded-two")
         val secondRow = row("bounded-two", 2, secondId)
