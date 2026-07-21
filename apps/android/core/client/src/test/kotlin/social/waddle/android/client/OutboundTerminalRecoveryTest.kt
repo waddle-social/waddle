@@ -148,6 +148,7 @@ class OutboundTerminalRecoveryTest {
             admission.lease,
         )
         assertSingleWinningFatalRecovery(coordinator, lifecycle, fence, releaseDrain)
+        assertTrue(ownerJob.isActive)
 
         fatalDispatch = false
         assertReplacementTerminalLifecycle(
