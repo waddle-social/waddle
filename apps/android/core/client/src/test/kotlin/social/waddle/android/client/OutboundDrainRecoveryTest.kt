@@ -13,6 +13,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -23,114 +24,158 @@ import java.io.IOException
 class OutboundDrainRecoveryTest {
     @Test
     fun `K fatal drain exit retains exact outbound lease until recovery can proceed`() = runTest {
-        val fixture = DrainRecoveryFixture(this)
+        val fixture = DrainRecoveryFixture.create(this)
         fixture.assertFatalDrainRecovery()
         fixture.assertReplacementDrainRecovery()
     }
 
-    private class DrainRecoveryFixture(
-        private val scope: TestScope,
+    private class DrainRecoveryFixture private constructor(
+        private val state: DrainRecoveryState,
     ) {
-        private val prefs = SessionPrefs(FailingPreferencesDataStore()).also {
-            it.activateSession(OWNER, "drain-fatal")
-        }
-        private val queue = DeliveryJournalStore(prefs)
-        private val resume = ResumePersistence(prefs, queue)
-
-        init {
-            resume.start(scope.backgroundScope)
-        }
-
-        private val ownerJob = Job()
-        private val ownerScope = CoroutineScope(scope.coroutineContext + ownerJob)
-        private val drainEntered = CompletableDeferred<Unit>()
-        private val failDrain = CompletableDeferred<Unit>()
-        private val replacementDrain = CompletableDeferred<Unit>()
-        private val fatalDrain = FatalDrainControl()
-        private val coordinator = OutboundLifecycleStateStore(
-            activeSession = ActiveSession().also { it.ownBareJid = OWNER },
-            journal = queue,
-            resume = resume,
-            dispatchEvent = {},
-            drain = { _, _, _ ->
-                if (fatalDrain.enabled) {
-                    drainEntered.complete(Unit)
-                    failDrain.await()
-                    throw IOException("injected drain dependency failure")
-                }
-                replacementDrain.complete(Unit)
-            },
-            transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
-            workerExitEvidence = WorkerExitExceptionEvidence(),
-        )
-        private val lifecycle =
-            (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
-        private val attempt = coordinator.activate(lifecycle).bootstrap.attempt
-        private val held =
-            (coordinator.acquireOutbound(DeliverySource.Composer) as OutboundAdmissionResult.Granted).lease
-
         suspend fun assertFatalDrainRecovery() {
-            assertEquals(DrainSignalOutcome.Accepted, coordinator.signalDrain(attempt))
-            drainEntered.await()
-            failDrain.complete(Unit)
-            scope.runCurrent()
+            assertEquals(DrainSignalOutcome.Accepted, state.coordinator.signalDrain(state.active.attempt))
+            state.control.signals.entered.await()
+            state.control.signals.failure.complete(Unit)
+            state.scope.runCurrent()
 
-            val fenced = coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
+            val fenced = state.coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(state.active.lifecycle))
                 as LifecycleShutdownOutcome.WorkerFenced
             val cause = fenced.cause as LifecycleFenceCause.WorkerExited
             val exit = cause.fence.exit
-            assertEquals(lifecycle, fenced.lifecycle)
-            assertEquals(lifecycle, exit.lifecycle)
+            assertEquals(state.active.lifecycle, fenced.lifecycle)
+            assertEquals(state.active.lifecycle, exit.lifecycle)
             assertEquals(WorkerKind.OUTBOUND_DRAIN, exit.kind)
             assertEquals(
                 WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
                 exit.reason,
             )
-            assertEquals(DrainSignalOutcome.WorkerUnavailable, coordinator.signalDrain(attempt))
-            assertTrue(coordinator.acquireOutbound(DeliverySource.Composer) is OutboundAdmissionResult.LifecycleUnavailable)
+            assertEquals(DrainSignalOutcome.WorkerUnavailable, state.coordinator.signalDrain(state.active.attempt))
+            assertTrue(
+                state.coordinator.acquireOutbound(DeliverySource.Composer)
+                    is OutboundAdmissionResult.LifecycleUnavailable,
+            )
 
-            val recovery = scope.async { coordinator.recoverFencedWorkers(lifecycle) }
-            scope.runCurrent()
-            val losingRecovery = coordinator.recoverFencedWorkers(lifecycle)
+            val recovery = state.scope.async { state.coordinator.recoverFencedWorkers(state.active.lifecycle) }
+            state.scope.runCurrent()
+            val losingRecovery = state.coordinator.recoverFencedWorkers(state.active.lifecycle)
                 as WorkerRecoveryOutcome.RecoveryInProgress
-            assertEquals(lifecycle, losingRecovery.claim.lifecycle)
+            assertEquals(state.active.lifecycle, losingRecovery.claim.lifecycle)
             assertEquals(cause.fence, losingRecovery.claim.fence)
             assertEquals(exit.ownership(), losingRecovery.claim.fence.exit.ownership())
 
-            scope.advanceTimeBy(TEST_TIMEOUT_MILLIS + 1)
-            scope.runCurrent()
+            state.scope.advanceTimeBy(TEST_TIMEOUT_MILLIS + 1)
+            state.scope.runCurrent()
             val retained = recovery.await() as WorkerRecoveryOutcome.RetainedOperationsPending
-            assertEquals(lifecycle, retained.lifecycle)
+            assertEquals(state.active.lifecycle, retained.lifecycle)
             assertEquals(1, retained.count)
             assertEquals(cause.fence, retained.claim.fence)
             requireLifecycleRelease(
-                coordinator.releaseAdmission(held),
-                held.capability,
+                state.coordinator.releaseAdmission(state.active.held),
+                state.active.held.capability,
                 LifecycleReleaseSite.OFFLINE_OUTBOUND,
             )
         }
 
         suspend fun assertReplacementDrainRecovery() {
-            assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(lifecycle))
-            assertEquals(WorkerRecoveryOutcome.NotFenced, coordinator.recoverFencedWorkers(lifecycle))
-            assertTrue(ownerJob.isActive)
+            assertEquals(
+                WorkerRecoveryOutcome.Recovered,
+                state.coordinator.recoverFencedWorkers(state.active.lifecycle),
+            )
+            assertEquals(
+                WorkerRecoveryOutcome.NotFenced,
+                state.coordinator.recoverFencedWorkers(state.active.lifecycle),
+            )
+            assertTrue(state.owner.job.isActive)
 
-            fatalDrain.enabled = false
-            val replacement = (coordinator.start(ownerScope, OWNER) as LifecycleStartResult.Started).lifecycle
-            assertTrue(replacement != lifecycle)
-            val replacementAttempt = coordinator.activate(replacement).bootstrap.attempt
+            state.control.fatalDrain.enabled = false
+            val replacement =
+                (state.coordinator.start(state.owner.scope, OWNER) as LifecycleStartResult.Started).lifecycle
+            assertTrue(replacement != state.active.lifecycle)
+            val replacementAttempt = state.coordinator.activate(replacement).bootstrap.attempt
             val replacementLease =
-                (coordinator.acquireOutbound(DeliverySource.Composer) as OutboundAdmissionResult.Granted).lease
-            assertEquals(DrainSignalOutcome.Accepted, coordinator.signalDrain(replacementAttempt))
-            replacementDrain.await()
+                (state.coordinator.acquireOutbound(DeliverySource.Composer) as OutboundAdmissionResult.Granted).lease
+            assertEquals(DrainSignalOutcome.Accepted, state.coordinator.signalDrain(replacementAttempt))
+            state.control.signals.replacement.await()
             requireLifecycleRelease(
-                coordinator.releaseAdmission(replacementLease),
+                state.coordinator.releaseAdmission(replacementLease),
                 replacementLease.capability,
                 LifecycleReleaseSite.OFFLINE_OUTBOUND,
             )
-            assertTrue(ownerJob.isActive)
-            ownerJob.cancelAndJoin()
+            assertTrue(state.owner.job.isActive)
+            state.owner.job.cancelAndJoin()
         }
+
+        private companion object {
+            suspend fun create(scope: TestScope): DrainRecoveryFixture {
+                val prefs = SessionPrefs(FailingPreferencesDataStore())
+                prefs.activateSession(OWNER, "drain-fatal")
+                val queue = DeliveryJournalStore(prefs)
+                val resume = ResumePersistence(prefs, queue)
+                resume.start(scope.backgroundScope)
+                val owner = OwnerScope(scope)
+                val control = DrainControl()
+                val coordinator = OutboundLifecycleStateStore(
+                    activeSession = ActiveSession().also { it.ownBareJid = OWNER },
+                    journal = queue,
+                    resume = resume,
+                    dispatchEvent = {},
+                    drain = { _, _, _ ->
+                        if (control.fatalDrain.enabled) {
+                            control.signals.entered.complete(Unit)
+                            control.signals.failure.await()
+                            throw IOException("injected drain dependency failure")
+                        }
+                        control.signals.replacement.complete(Unit)
+                    },
+                    transitionTimeoutMillis = TEST_TIMEOUT_MILLIS,
+                    workerExitEvidence = WorkerExitExceptionEvidence(),
+                )
+                val lifecycle =
+                    (coordinator.start(owner.scope, OWNER) as LifecycleStartResult.Started).lifecycle
+                val attempt = coordinator.activate(lifecycle).bootstrap.attempt
+                val held =
+                    (coordinator.acquireOutbound(DeliverySource.Composer) as OutboundAdmissionResult.Granted).lease
+                return DrainRecoveryFixture(
+                    DrainRecoveryState(
+                        scope = scope,
+                        coordinator = coordinator,
+                        owner = owner,
+                        active = ActiveDrain(lifecycle, attempt, held),
+                        control = control,
+                    ),
+                )
+            }
+        }
+    }
+
+    private class DrainRecoveryState(
+        val scope: TestScope,
+        val coordinator: OutboundLifecycleStateStore,
+        val owner: OwnerScope,
+        val active: ActiveDrain,
+        val control: DrainControl,
+    )
+
+    private class OwnerScope(scope: TestScope) {
+        val job = Job()
+        val scope = CoroutineScope(scope.coroutineContext + job)
+    }
+
+    private class ActiveDrain(
+        val lifecycle: SessionLifecycleRef,
+        val attempt: DeliveryAttemptRef,
+        val held: OutboundAdmissionLease,
+    )
+
+    private class DrainSignals {
+        val entered = CompletableDeferred<Unit>()
+        val failure = CompletableDeferred<Unit>()
+        val replacement = CompletableDeferred<Unit>()
+    }
+
+    private class DrainControl {
+        val fatalDrain = FatalDrainControl()
+        val signals = DrainSignals()
     }
 
     private class FatalDrainControl {
