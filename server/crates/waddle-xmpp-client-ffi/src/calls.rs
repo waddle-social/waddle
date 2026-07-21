@@ -1,9 +1,9 @@
 use minidom::Element;
 use waddle_xmpp_client::messaging::{
-    build_finish, build_finish_migrated, build_proceed, build_propose, build_reject,
-    build_reject_with_options, build_retract, build_retract_with_options, build_ringing,
-    build_session_accept, build_session_initiate, build_session_terminate, CallMedia, JingleReason,
-    SessionId,
+    build_finish, build_finish_migrated, build_finish_with_reason, build_proceed, build_propose,
+    build_reject, build_reject_with_options, build_retract, build_retract_with_options,
+    build_ringing, build_session_accept, build_session_initiate, build_session_terminate,
+    CallMedia, JingleReason, SessionId,
 };
 use waddle_xmpp_client::xep::xep0215::{
     build_extdisco_services_iq, parse_external_services, ExternalService, ExternalServiceTransport,
@@ -227,6 +227,32 @@ impl WaddleClient {
         };
         let stanza = message_with_jmi(&peer.into(), build_finish(&sid));
         self.send_stanza_or_error(stanza, "send_call_finish").await
+    }
+
+    /// Send a `<finish/>` carrying an explicit `<reason/>` — the
+    /// XEP-0353-conformant way for a responder to abandon a session it
+    /// already answered with `<proceed/>` (a `<reject/>` after proceed
+    /// is a contradictory double answer; cf. the tie-break-2 example,
+    /// where an accepted-but-incomplete session finishes with
+    /// `<expired/>`). Addressed to the peer's full JID.
+    pub async fn send_call_finish_with_reason(
+        &self,
+        peer_full_jid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_finish_with_reason") else {
+            return false;
+        };
+        let Some(sid) = self.parse_session_id(sid, "send_call_finish_with_reason") else {
+            return false;
+        };
+        let stanza = message_with_jmi(
+            &peer.into(),
+            build_finish_with_reason(&sid, Some(jingle_reason_from_ffi(reason))),
+        );
+        self.send_stanza_or_error(stanza, "send_call_finish_with_reason")
+            .await
     }
 
     /// Send Waddle's XEP-0353-compatible migration marker:

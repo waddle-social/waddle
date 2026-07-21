@@ -679,6 +679,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(
@@ -811,6 +813,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`oldSid`: RustBuffer.ByValue,`newSid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_proceed(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
@@ -1045,6 +1049,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 16619) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason() != 11546) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 33747) {
@@ -1744,6 +1751,16 @@ public interface WaddleClientInterface {
     suspend fun `sendCallFinishMigrated`(`peerFullJid`: kotlin.String, `oldSid`: kotlin.String, `newSid`: kotlin.String): kotlin.Boolean
 
     /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    suspend fun `sendCallFinishWithReason`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason): kotlin.Boolean
+
+    /**
      * Send a XEP-0353 §5.1.2 `<proceed/>` to the *full* JID of the
      * originator (preserved from the propose `from` per §0.6).
      */
@@ -2268,6 +2285,34 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(
                 uniffiHandle,
                 FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`oldSid`),FfiConverterString.lower(`newSid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sendCallFinishWithReason`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(
+                uniffiHandle,
+                FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`sid`),FfiConverterTypeWaddleJingleReason.lower(`reason`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },

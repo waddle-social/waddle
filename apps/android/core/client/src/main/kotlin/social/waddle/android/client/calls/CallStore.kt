@@ -171,17 +171,28 @@ class CallStore internal constructor(
         return true
     }
 
-    /** Responder action: `<reject/>` the ringing call and clear the slot. */
+    /**
+     * Responder action: decline the ringing call and clear the slot —
+     * `<reject/>` for an unanswered ring; once our `<proceed/>` is out
+     * (accepting), the conformant abandon verb is `<finish/>` with
+     * `<cancel/>` (a late reject would contradict the proceed).
+     */
     suspend fun declineIncoming(): Boolean {
         val target: CallState.Incoming
         synchronized(stateLock) {
             val current = _state.value
             if (current !is CallState.Incoming) return false
+            cancelCallTimersLocked()
             target = current
             _state.value = CallState.Idle
         }
-        if (!signaling.reject(target.from, target.sid)) {
-            reportError("call reject failed")
+        val answered = if (target.accepting) {
+            signaling.finishWithReason(target.from, target.sid, WaddleJingleReason.CANCEL)
+        } else {
+            signaling.reject(target.from, target.sid)
+        }
+        if (!answered) {
+            reportError(if (target.accepting) "call finish failed" else "call reject failed")
             return false
         }
         return true
@@ -206,9 +217,37 @@ class CallStore internal constructor(
             is CallState.Outgoing ->
                 if (!signaling.retract(bareJid(current.to), current.sid)) reportError("call retract failed")
             is CallState.Incoming ->
-                if (!signaling.reject(current.from, current.sid)) reportError("call reject failed")
+                if (current.accepting) {
+                    // Our <proceed/> is already out — abandon with the
+                    // finish bookend (<cancel/>), never a late reject.
+                    if (!signaling.finishWithReason(current.from, current.sid, WaddleJingleReason.CANCEL)) {
+                        reportError("call finish failed")
+                    }
+                } else if (!signaling.reject(current.from, current.sid)) {
+                    reportError("call reject failed")
+                }
             else -> Unit
         }
+    }
+
+    /**
+     * Scoped teardown for NON-user callers (the media controller): acts
+     * only if the slot still holds `sid` as the ACTIVE call — the media
+     * plane can only speak for the session it was connected to, and by
+     * the time its verdict lands the slot may already belong to a
+     * migration ring, an Ended banner, or a fresh call. Plain [hangUp]
+     * stays reserved for explicit user intent.
+     */
+    suspend fun hangUpActiveIf(sid: String, reason: WaddleJingleReason) {
+        val current: CallState.Active
+        synchronized(stateLock) {
+            val state = _state.value
+            if (state !is CallState.Active || state.sid != sid) return
+            cancelCallTimersLocked()
+            current = state
+            _state.value = CallState.Idle
+        }
+        terminateActive(current, reason)
     }
 
     /** Dismiss the `Ended` slot (or abandon any local state) → `Idle`. */
@@ -350,14 +389,34 @@ class CallStore internal constructor(
         prev: CallState.Outgoing,
     ) {
         // The effect queue runs after the reducer pass that captured
-        // `prev`; a hang-up/dismiss that landed in between owns the
-        // slot now and already retracted — a stale tie-break must not
-        // resurrect the call. The peer's propose still demands an
-        // answer, though (XEP-0353 tolerates no silent drop: the
-        // proposer rings until timeout) — the racing hang-up only
-        // retracted OUR sid, so decline theirs like the busy path.
+        // `prev`; the slot may have moved before this effect ran, and
+        // the CAUSE decides the answer (XEP-0353 tolerates no silent
+        // drop — the proposer rings until timeout). If the peer's
+        // tie-break reject already retired our sid (Ended + Expired),
+        // their propose is the tie-break WINNER and must ring — the
+        // web gets this ordering for free by running effects inline.
+        // Anything else (local hang-up/dismiss, a newer call) means we
+        // walked away: decline theirs like the busy path.
         if (!slotStillMatches(prev)) {
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            val lostTieBreakOnTheWire = synchronized(stateLock) {
+                val current = _state.value
+                if (current is CallState.Ended &&
+                    current.sid == prev.sid &&
+                    current.reason == CallEndReason.Expired
+                ) {
+                    cancelCallTimersLocked()
+                    _state.value = CallState.Incoming(from = event.from, sid = event.sid, media = kind.media)
+                    _lastError.value = null
+                    true
+                } else {
+                    false
+                }
+            }
+            if (lostTieBreakOnTheWire) {
+                if (!signaling.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+            } else if (!signaling.reject(event.from, event.sid)) {
+                reportError("call reject failed")
+            }
             return
         }
         val ourJid = ownFullJid()
@@ -425,6 +484,9 @@ class CallStore internal constructor(
         val migrated = signaling.finishMigrated(event.from, prev.sid, event.sid) &&
             signaling.proceed(event.from, event.sid)
         if (!migrated) {
+            // Same no-silent-drop invariant as the guard paths: answer
+            // the re-propose (best effort) before failing the old call.
+            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
             failCall(prev.sid, "call migration failed")
             return
         }
@@ -437,8 +499,12 @@ class CallStore internal constructor(
         // accepting incoming — instead of ghosting the peer.
         if (!acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev, accepting = true)) {
             // The racing hang-up already sent terminate+finish for the
-            // old sid; only the freshly-accepted one needs abandoning.
-            if (!signaling.reject(event.from, event.sid)) reportError("call reject failed")
+            // old sid; the freshly-PROCEEDED one is abandoned with the
+            // finish bookend — a reject after our own proceed would be
+            // a contradictory double answer.
+            if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
+                reportError("call finish failed")
+            }
             return
         }
         scheduleSessionInitiateTimeout(event.from, event.sid)
@@ -651,7 +717,11 @@ class CallStore internal constructor(
             if (current !is CallState.Incoming || current.sid != sid) return
             _state.value = CallState.Ended(sid = sid, reason = CallEndReason.Timeout)
         }
-        if (!signaling.reject(peerFullJid, sid)) reportError("call reject failed")
+        // We answered the propose with <proceed/>, so the abandon verb
+        // is the <finish/> bookend with <timeout/> — not a late reject.
+        if (!signaling.finishWithReason(peerFullJid, sid, WaddleJingleReason.TIMEOUT)) {
+            reportError("call finish failed")
+        }
     }
 
     private fun cancelOutgoingTimeoutLocked() {

@@ -133,6 +133,12 @@ sealed interface RecordedCallVerb {
 
     data class Finish(val peerFullJid: String, val sid: String) : RecordedCallVerb
 
+    data class FinishWithReason(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason,
+    ) : RecordedCallVerb
+
     data class FinishMigrated(
         val peerFullJid: String,
         val oldSid: String,
@@ -242,6 +248,15 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean {
         callVerbs += RecordedCallVerb.Finish(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallFinishWithReason(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ): Boolean {
+        callVerbs += RecordedCallVerb.FinishWithReason(peerFullJid, sid, reason)
         return callVerbResult
     }
 

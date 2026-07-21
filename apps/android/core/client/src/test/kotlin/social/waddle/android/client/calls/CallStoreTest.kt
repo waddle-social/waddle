@@ -463,10 +463,15 @@ class CallStoreTest {
 
         // Our <proceed/> went out but the caller died before the Jingle
         // session-initiate: the accepting slot (which pins a foreground
-        // service on Android) must be bounded, and the caller's other
-        // devices told.
+        // service on Android) must be bounded — and the abandon verb is
+        // the <finish/> bookend (we already answered the propose), not
+        // a contradictory late reject.
         assertEquals(CallState.Ended("c1", CallEndReason.Timeout), f.store.state.value)
-        assertTrue(RecordedCallVerb.Reject(peerFull, "c1") in f.client.callVerbs)
+        assertTrue(
+            RecordedCallVerb.FinishWithReason(peerFull, "c1", WaddleJingleReason.TIMEOUT) in
+                f.client.callVerbs,
+        )
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
     }
 
     @Test
@@ -505,9 +510,56 @@ class CallStoreTest {
 
         // We formally accepted c-new with the migration <proceed/>; a
         // caller that dies before session-initiate must not pin the
-        // accepting slot (and its foreground service) forever.
+        // accepting slot (and its foreground service) forever, and the
+        // abandon verb is the <finish/> bookend.
         assertEquals(CallState.Ended("c-new", CallEndReason.Timeout), f.store.state.value)
-        assertTrue(RecordedCallVerb.Reject(peerFull, "c-new") in f.client.callVerbs)
+        assertTrue(
+            RecordedCallVerb.FinishWithReason(peerFull, "c-new", WaddleJingleReason.TIMEOUT) in
+                f.client.callVerbs,
+        )
+    }
+
+    @Test
+    fun `losing the tie-break on the wire still rings the winning propose`() = runTest {
+        val f = Fixture(sid = { "c-zz" })
+        f.store.start(backgroundScope)
+        f.store.startCall(peerBare, audio)
+
+        // Peer's winning (lower-sid) propose is queued behind the
+        // effect channel; before it runs, the peer's tie-break reject
+        // of OUR sid lands and the reducer retires the slot as
+        // Ended(Expired). The queued effect must then treat the peer's
+        // propose as the tie-break WINNER — ring it — not decline it
+        // (which would kill both calls).
+        f.store.onCallEvent(propose(peerFull, "c-aa"))
+        f.store.onCallEvent(reject(peerFull, "c-zz", tieBreak = true))
+        runCurrent()
+
+        assertEquals(
+            CallState.Incoming(from = peerFull, sid = "c-aa", media = audio),
+            f.store.state.value,
+        )
+        assertTrue(RecordedCallVerb.Ringing(peerBare, "c-aa") in f.client.callVerbs)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
+    }
+
+    @Test
+    fun `declining an accepting ring finishes with cancel instead of a late reject`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(peerFull, "c1"))
+        runCurrent()
+        assertTrue(f.store.acceptIncoming())
+        f.client.callVerbs.clear()
+
+        assertTrue(f.store.declineIncoming())
+
+        assertTrue(
+            RecordedCallVerb.FinishWithReason(peerFull, "c1", WaddleJingleReason.CANCEL) in
+                f.client.callVerbs,
+        )
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
+        assertEquals(CallState.Idle, f.store.state.value)
     }
 
     @Test

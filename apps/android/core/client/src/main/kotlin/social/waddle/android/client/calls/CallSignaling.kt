@@ -24,6 +24,14 @@ internal interface CallSignaling {
     suspend fun retract(peerBareJid: String, sid: String): Boolean
     suspend fun retractTieBreak(peerFullJid: String, sid: String): Boolean
     suspend fun finish(peerFullJid: String, sid: String): Boolean
+
+    /**
+     * `<finish/>` with an explicit reason — the conformant verb for a
+     * responder abandoning a session it already answered with
+     * `<proceed/>` (a late `<reject/>` would be a contradictory double
+     * answer the peer's devices ignore).
+     */
+    suspend fun finishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason): Boolean
     suspend fun finishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean
 
     suspend fun sessionInitiate(
@@ -79,6 +87,12 @@ internal class ClientCallSignaling(
 
     override suspend fun finish(peerFullJid: String, sid: String): Boolean =
         verb { it.sendCallFinish(peerFullJid, sid) }
+
+    override suspend fun finishWithReason(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ): Boolean = verb { it.sendCallFinishWithReason(peerFullJid, sid, reason) }
 
     override suspend fun finishMigrated(peerFullJid: String, oldSid: String, newSid: String): Boolean =
         verb { it.sendCallFinishMigrated(peerFullJid, oldSid, newSid) }

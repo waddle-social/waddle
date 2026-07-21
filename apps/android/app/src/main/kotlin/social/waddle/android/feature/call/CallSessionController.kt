@@ -88,8 +88,10 @@ class CallSessionController(
             // records telemetry only): on Android an Active slot pins a
             // foreground service and mic capture, so a dead Room must
             // end the call. XEP-0166 §7.4: connectivity problems →
-            // <connectivity-error/>.
-            sessionManager.callStore.hangUp(WaddleJingleReason.CONNECTIVITY_ERROR)
+            // <connectivity-error/>. Scoped to the sid this media
+            // session belonged to — by the time we run, the slot may
+            // already be a migration ring or a fresh call.
+            sessionManager.callStore.hangUpActiveIf(sid, WaddleJingleReason.CONNECTIVITY_ERROR)
         }
     }
 
@@ -118,14 +120,14 @@ class CallSessionController(
             // defensively: a half-open Room must never survive its
             // call slot.
             disconnectMediaIfConnected()
-            if (sessionManager.callStore.state.value == state) {
-                // Launched on the controller scope, NOT run inline:
-                // hangUp flips the slot to Idle, and that emission
-                // cancels the collectLatest block this catch runs in —
-                // an inline hangUp would cancel its own terminate/
-                // finish sends mid-IQ and ghost the peer.
-                scope.launch { sessionManager.callStore.hangUp(WaddleJingleReason.GONE) }
-            }
+            // Launched on the controller scope, NOT run inline: the
+            // teardown flips the slot to Idle, and that emission
+            // cancels the collectLatest block this catch runs in — an
+            // inline hang-up would cancel its own terminate/finish
+            // sends mid-IQ and ghost the peer. Sid-scoped so a peer
+            // terminate or fresh call landing before the launched
+            // coroutine runs is left untouched.
+            scope.launch { sessionManager.callStore.hangUpActiveIf(state.sid, WaddleJingleReason.GONE) }
         }
     }
 

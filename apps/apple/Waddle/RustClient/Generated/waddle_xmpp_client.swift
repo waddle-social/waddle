@@ -608,6 +608,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallFinishMigrated(peerFullJid: String, oldSid: String, newSid: String) async  -> Bool
 
     /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    func sendCallFinishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason) async  -> Bool
+
+    /**
      * Send a XEP-0353 §5.1.2 `<proceed/>` to the *full* JID of the
      * originator (preserved from the propose `from` per §0.6).
      */
@@ -1075,6 +1085,32 @@ open func sendCallFinishMigrated(peerFullJid: String, oldSid: String, newSid: St
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(
                     self.uniffiCloneHandle(),
                     FfiConverterString.lower(peerFullJid),FfiConverterString.lower(oldSid),FfiConverterString.lower(newSid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+open func sendCallFinishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid),FfiConverterTypeWaddleJingleReason_lower(reason)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -10030,6 +10066,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 16619) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason() != 11546) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 33747) {

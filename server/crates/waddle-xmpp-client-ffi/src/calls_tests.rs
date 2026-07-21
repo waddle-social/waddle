@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
-use waddle_xmpp_client::messaging::{build_propose, build_ringing, CallMedia, SessionId};
+use waddle_xmpp_client::messaging::{
+    build_finish_with_reason, build_propose, build_ringing, CallMedia, JingleReason, SessionId,
+};
 use waddle_xmpp_client::xep::xep0215::{parse_external_services, NS_EXT_DISCO};
 use waddle_xmpp_client::{ClientError, StanzaError, StanzaErrorType};
 
@@ -135,6 +137,47 @@ mod xep0353 {
             .expect("JMI ringing child present");
         assert_eq!(ringing.attr("id"), Some("c2"));
         assert_eq!(ringing.children().count(), 0);
+    }
+
+    /// A responder that already sent `<proceed/>` abandons the session
+    /// with `<finish/>` + an explicit `<reason/>` (the tie-break-2
+    /// shape) — never a contradictory late `<reject/>`. Pins the wire
+    /// shape behind `send_call_finish_with_reason`.
+    #[test]
+    fn finish_with_reason_carries_the_reason_child() {
+        let stanza = message_with_jmi(
+            &Jid::from(full("caller@waddle.test/phone")),
+            build_finish_with_reason(&sid("c3"), Some(JingleReason::Timeout)),
+        );
+        assert_eq!(stanza.attr("to"), Some("caller@waddle.test/phone"));
+        assert_eq!(stanza.attr("type"), Some("chat"));
+        assert!(stanza.get_child("store", NS_HINTS).is_some());
+        let finish = stanza
+            .get_child("finish", NS_JINGLE_MESSAGE)
+            .expect("JMI finish child present");
+        assert_eq!(finish.attr("id"), Some("c3"));
+        let reason = finish
+            .get_child("reason", NS_JINGLE)
+            .expect("finish carries an explicit reason");
+        assert!(reason.get_child("timeout", NS_JINGLE).is_some());
+    }
+
+    #[tokio::test]
+    async fn send_call_finish_with_reason_returns_false_when_not_connected() {
+        let listener = RecordingListener::default();
+        let client = test_client(listener.clone());
+        let sent = client
+            .send_call_finish_with_reason(
+                "caller@waddle.test/phone".into(),
+                "c3".into(),
+                WaddleJingleReason::Timeout,
+            )
+            .await;
+        assert!(!sent);
+        assert!(listener
+            .errors()
+            .iter()
+            .any(|e| e.contains("Not connected")));
     }
 
     #[tokio::test]
