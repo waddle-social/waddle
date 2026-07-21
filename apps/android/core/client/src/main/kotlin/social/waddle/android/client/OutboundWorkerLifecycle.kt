@@ -5,15 +5,32 @@ import java.util.UUID
 
 internal enum class WorkerKind { OUTBOUND_DRAIN, DELIVERY_TERMINAL }
 
-@JvmInline internal value class WorkerGeneration private constructor(val value: UUID) { companion object { fun random() = WorkerGeneration(UUID.randomUUID()) } }
-internal data class WorkerOwnership(val lifecycle: SessionLifecycleRef, val kind: WorkerKind, val generation: WorkerGeneration)
+@JvmInline
+internal value class WorkerGeneration private constructor(
+    val value: UUID,
+) {
+    companion object {
+        fun random() = WorkerGeneration(UUID.randomUUID())
+    }
+}
+
+internal data class WorkerOwnership(
+    val lifecycle: SessionLifecycleRef,
+    val kind: WorkerKind,
+    val generation: WorkerGeneration,
+)
 internal sealed interface WorkerFailureKind { data object DEPENDENCY_FAILURE : WorkerFailureKind
 data class TERMINAL_RECEIPT_APPLICATION(val failure: TerminalReceiptApplicationFailure) : WorkerFailureKind }
 internal sealed interface WorkerExitReason { data object RequestedStop : WorkerExitReason
 data object OwnerScopeCancelled : WorkerExitReason
 data object UnexpectedReturn : WorkerExitReason
 data class UnexpectedFailure(val kind: WorkerFailureKind) : WorkerExitReason }
-internal data class WorkerExit(val lifecycle: SessionLifecycleRef, val generation: WorkerGeneration, val kind: WorkerKind, val reason: WorkerExitReason)
+internal data class WorkerExit(
+    val lifecycle: SessionLifecycleRef,
+    val generation: WorkerGeneration,
+    val kind: WorkerKind,
+    val reason: WorkerExitReason,
+)
 internal data class BootstrapWorkerExitFailure(val exit: WorkerExit)
 internal data class WorkerFence(val exit: WorkerExit)
 internal sealed interface LifecycleFenceCause { data class WorkerExited(val fence: WorkerFence) : LifecycleFenceCause
@@ -53,18 +70,50 @@ internal fun requireTerminalCommitted(outcome: TerminalCommandOutcome) {
 }
 
 @JvmInline internal value class WorkerRecoveryToken private constructor(val value: UUID) { companion object { fun random() = WorkerRecoveryToken(UUID.randomUUID()) } }
-internal data class WorkerRecoveryClaim(val lifecycle: SessionLifecycleRef, val fence: WorkerFence, val token: WorkerRecoveryToken)
+internal data class WorkerRecoveryClaim(
+    val lifecycle: SessionLifecycleRef,
+    val fence: WorkerFence,
+    val token: WorkerRecoveryToken,
+)
 internal sealed interface WorkerRecoveryOutcome {
     data object Recovered : WorkerRecoveryOutcome
     data object NotFenced : WorkerRecoveryOutcome
-    data class OwnershipMismatch(val requested: SessionLifecycleRef, val actual: SessionLifecycleRef?) : WorkerRecoveryOutcome
+    data class OwnershipMismatch(
+        val requested: SessionLifecycleRef,
+        val actual: SessionLifecycleRef?,
+    ) : WorkerRecoveryOutcome
     data class WorkerFenced(val lifecycle: SessionLifecycleRef, val cause: LifecycleFenceCause) : WorkerRecoveryOutcome
     data class RecoveryInProgress(val claim: WorkerRecoveryClaim) : WorkerRecoveryOutcome
-    data class RetainedOperationsPending(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val count: Int) : WorkerRecoveryOutcome
+    data class RetainedOperationsPending(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val count: Int,
+    ) : WorkerRecoveryOutcome
     data class WorkerExitPending(val lifecycle: SessionLifecycleRef, val ownership: WorkerOwnership) : WorkerRecoveryOutcome
-    data class DurableCleanupPending(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val component: LifecyclePendingComponent, val count: Int, val operation: DurableCleanupOperation, val attempt: DeliveryAttemptRef?) : WorkerRecoveryOutcome
-    data class DurableCleanupFailed(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val component: LifecyclePendingComponent, val count: Int, val operation: DurableCleanupOperation, val cause: DurableCleanupFailureCause, val attempt: DeliveryAttemptRef?) : WorkerRecoveryOutcome
-    data class TerminalReceiptCleanupFailed(val lifecycle: SessionLifecycleRef, val claim: WorkerRecoveryClaim, val cleanup: TerminalReceiptCleanupEvidence) : WorkerRecoveryOutcome
+    data class DurableCleanupPending(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val component: LifecyclePendingComponent,
+        val count: Int,
+        val operation: DurableCleanupOperation,
+        val attempt: DeliveryAttemptRef?,
+    ) : WorkerRecoveryOutcome
+
+    data class DurableCleanupFailed(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val component: LifecyclePendingComponent,
+        val count: Int,
+        val operation: DurableCleanupOperation,
+        val cause: DurableCleanupFailureCause,
+        val attempt: DeliveryAttemptRef?,
+    ) : WorkerRecoveryOutcome
+
+    data class TerminalReceiptCleanupFailed(
+        val lifecycle: SessionLifecycleRef,
+        val claim: WorkerRecoveryClaim,
+        val cleanup: TerminalReceiptCleanupEvidence,
+    ) : WorkerRecoveryOutcome
 }
 internal class WorkerRecoveryException(val outcome: WorkerRecoveryOutcome, cause: Throwable?) : IllegalStateException("worker recovery failed: $outcome", cause)
 internal sealed interface WorkerRecoveryClaimDecision { data class Granted(val claim: WorkerRecoveryClaim, val workers: OwnerWorkers) : WorkerRecoveryClaimDecision
