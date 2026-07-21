@@ -308,19 +308,9 @@ fn sm_promotion_metric_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn prometheus_counter_value(rendered: &str, name: &str) -> u64 {
-    rendered
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix(name)
-                .and_then(|rest| rest.trim().parse::<u64>().ok())
-        })
-        .unwrap_or_else(|| panic!("missing prometheus counter {name}"))
-}
-
 async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     let _guard = sm_promotion_metric_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
 
     let storage: Arc<dyn PendingDeliveryStorage> =
         Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -348,13 +338,10 @@ async fn assert_mam_frame_not_promoted_to_pending_delivery(child_name: &str) {
     assert_eq!(summary.bounced, 0);
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
 
-    let rendered = waddle_xmpp::prometheus::render_metrics();
     assert_eq!(
-        prometheus_counter_value(&rendered, "waddle_sm_promotion_not_promotable_total"),
-        1
+        metrics.counter_sum("xmpp.sm.promotion_not_promotable", &[]),
+        Some(1)
     );
-
-    waddle_xmpp::prometheus::reset_metrics_for_test();
 }
 
 #[tokio::test]
@@ -865,6 +852,75 @@ async fn storage_failure_records_storage_failed_not_dropped() {
     assert!(
         summary.has_storage_failure(),
         "has_storage_failure() must be true so caller skips confirm_drained"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn storage_failure_exports_error_promotion_span() {
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(AlwaysFailingPending);
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let session = detached_session_with_unacked(
+        "stream-span-failure",
+        full("alice@example.com/laptop"),
+        vec![dm_xml(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "transient backend down",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.storage_failed, 1);
+    assert!(matches!(
+        spans.status_of("promote_session_unacked"),
+        Some(opentelemetry::trace::Status::Error { .. })
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_promotion_exports_unset_promotion_span() {
+    let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let session = detached_session_with_unacked(
+        "stream-span-success",
+        full("alice@example.com/laptop"),
+        vec![dm_xml(
+            "bob@elsewhere/x",
+            "alice@example.com",
+            "stored while offline",
+        )],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.queued, 1);
+    assert_eq!(
+        spans.status_of("promote_session_unacked"),
+        Some(opentelemetry::trace::Status::Unset)
     );
 }
 

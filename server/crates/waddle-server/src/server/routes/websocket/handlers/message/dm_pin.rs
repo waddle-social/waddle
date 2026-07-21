@@ -191,13 +191,10 @@ fn canonical_dm_pin_stanza_id(
 }
 
 fn is_tombstoned_archive_row(archived: &waddle_xmpp::mam::ArchivedMessage) -> bool {
-    matches!(
-        archived
-            .rich
-            .as_ref()
-            .and_then(|rich| rich.payload.as_ref()),
-        Some(waddle_xmpp::mam::ArchivedRichPayload::Tombstone(_))
-    )
+    archived
+        .rich
+        .as_ref()
+        .is_some_and(waddle_xmpp::mam::ArchivedRichMessage::is_tombstoned)
 }
 
 fn archived_belongs_to_dm_pair(

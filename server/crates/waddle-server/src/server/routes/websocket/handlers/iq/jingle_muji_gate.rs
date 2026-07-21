@@ -27,13 +27,17 @@
 
 use jid::{BareJid, FullJid};
 use waddle_xmpp::muc::room_actor::GetOccupantByJid;
+use waddle_xmpp::telemetry::attributes::{CallSignalEvent, SfuDenialReason};
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jingle::{Action, Jingle};
 use xmpp_parsers::stanza_error::StanzaError;
 
-use super::super::super::cleanup::get_room_actor;
+use super::super::super::call_signaling_telemetry::{
+    record_call_signal, record_sfu_token_denial, CallSignalTarget,
+};
+use super::super::super::cleanup::get_room_actor_result;
 use super::super::super::WebSocketState;
 use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_error_iq_error};
 
@@ -100,6 +104,20 @@ pub(super) async fn verify_muji_jingle_request(
             return GateOutcome::Deny(Box::new(bad_request_iq_error("malformed <jingle/> stanza")));
         }
     };
+    let user = full_jid.to_bare();
+    match jingle.action {
+        Action::SessionInitiate => record_call_signal(
+            CallSignalEvent::MujiJoin,
+            &user,
+            Some(CallSignalTarget::Room(&room_jid)),
+        ),
+        Action::SessionTerminate => record_call_signal(
+            CallSignalEvent::MujiLeave,
+            &user,
+            Some(CallSignalTarget::Room(&room_jid)),
+        ),
+        _ => {}
+    }
     if !matches!(jingle.action, Action::SessionInitiate) {
         return GateOutcome::Allow;
     }
@@ -137,10 +155,29 @@ async fn verify_room_membership(
     // through the XEP-0045 path. (The room actor is created on
     // first MUC join; absence means "no one has joined this room
     // in this process's lifetime.")
-    let Some(actor) = get_room_actor(state, room_jid).await else {
-        return GateOutcome::Deny(Box::new(forbidden_iq_error(
-            "not an occupant of the requested room — join the MUC first",
-        )));
+    let actor = match get_room_actor_result(state, room_jid).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => {
+            record_sfu_token_denial(room_jid, &full_jid.to_bare(), SfuDenialReason::RoomNotFound);
+            return GateOutcome::Deny(Box::new(forbidden_iq_error(
+                "not an occupant of the requested room — join the MUC first",
+            )));
+        }
+        Err(error) => {
+            tracing::debug!(room = %room_jid, error = %error, "Muji gate room lookup failed");
+            record_sfu_token_denial(
+                room_jid,
+                &full_jid.to_bare(),
+                SfuDenialReason::InternalError,
+            );
+            // Telemetry records the true cause, but the wire error
+            // stays `forbidden` — the exact shape this path produced
+            // before the telemetry work; changing client-visible
+            // retry semantics is out of scope here.
+            return GateOutcome::Deny(Box::new(forbidden_iq_error(
+                "not an occupant of the requested room — join the MUC first",
+            )));
+        }
     };
 
     match actor
@@ -150,10 +187,22 @@ async fn verify_room_membership(
         .await
     {
         Ok(Some(_occupant)) => GateOutcome::Allow,
-        Ok(None) => GateOutcome::Deny(Box::new(forbidden_iq_error(
-            "not an occupant of the requested room — join the MUC first",
-        ))),
+        Ok(None) => {
+            record_sfu_token_denial(
+                room_jid,
+                &full_jid.to_bare(),
+                SfuDenialReason::MembershipDenied,
+            );
+            GateOutcome::Deny(Box::new(forbidden_iq_error(
+                "not an occupant of the requested room — join the MUC first",
+            )))
+        }
         Err(_) => {
+            record_sfu_token_denial(
+                room_jid,
+                &full_jid.to_bare(),
+                SfuDenialReason::InternalError,
+            );
             // Actor ask flaked — this is a transient server-side
             // failure, not an authorization decision. RFC 6120
             // §8.3.3 maps "the server could not process the
@@ -172,6 +221,8 @@ async fn verify_room_membership(
 mod tests {
     use super::*;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use waddle_xmpp::muc::room_actor::Join;
     use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
     use waddle_xmpp::xep::xep0167::MediaKind;
@@ -182,6 +233,31 @@ mod tests {
 
     fn full(s: &str) -> FullJid {
         s.parse().expect("valid full jid")
+    }
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
     }
 
     fn muji_audio() -> Muji {
@@ -283,6 +359,52 @@ mod tests {
             panic!("expected Deny");
         };
         assert_eq!(err.defined_condition, DefinedCondition::Forbidden);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn membership_denial_emits_warn_with_bare_jid_and_counter() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(CaptureWriter(buffer.clone()))
+                .finish(),
+        );
+        let state = create_test_websocket_state().await;
+        let room: BareJid = "general@muc.example.com".parse().unwrap();
+        let alice = full("alice@example.com/web");
+        let mallory = full("mallory@example.com/laptop");
+        create_room_and_join(&state, &room, "alice", &alice).await;
+
+        let outcome = verify_muji_jingle_request(
+            &state,
+            &mallory,
+            &build_jingle_muji_iq(Action::SessionInitiate, "general@muc.example.com"),
+        )
+        .await;
+
+        assert!(matches!(outcome, GateOutcome::Deny(_)));
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.call.sfu_token.denied",
+                &[("reason", "membership_denied")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.metric_unit("waddle.call.sfu_token.denied"),
+            Some("1".to_string())
+        );
+        let logs = String::from_utf8(buffer.lock().expect("capture buffer lock").clone())
+            .expect("captured logs are UTF-8");
+        assert!(logs.contains("general@muc.example.com"), "{logs}");
+        assert!(logs.contains("mallory@example.com"), "{logs}");
+        assert!(logs.contains("membership_denied"), "{logs}");
+        assert!(logs.contains("\"level\":\"WARN\""), "{logs}");
+        assert!(logs.contains("SFU token request denied"), "{logs}");
+        assert!(!logs.contains("mallory@example.com/laptop"), "{logs}");
     }
 
     #[tokio::test]

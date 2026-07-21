@@ -38,6 +38,7 @@ import {
 import { mentionMatchesBareJid } from "@/lib/mentions";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { roomJidForChannelSummary } from "@/lib/channel-room";
+import { withSpan } from "@/lib/telemetry";
 import {
   applyForumContext,
   isFeedTimelineMessage,
@@ -605,7 +606,11 @@ export function useChannelMessages(
     metadataSeed: TimelineMessage[] = [],
   ) {
     messageSearch.reset();
-    return paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed);
+    return withSpan(
+      "xmpp.initial_render",
+      { "conversation.kind": "room" },
+      () => paging.loadMessages(spaceId, channelId, unreadAtLoad, metadataSeed),
+    );
   }
 
   async function selectChannel(channelId: string) {

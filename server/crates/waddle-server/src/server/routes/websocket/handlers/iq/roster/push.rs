@@ -1,5 +1,12 @@
 use super::*;
 
+// Everything in this module runs after the primary roster mutation has
+// succeeded and the client's IQ result is already determined: contact-side
+// updates, detached-resource lookups, and push recording are best-effort
+// fanout. Failures here degrade delivery (the resource catches up at next
+// bind via roster versioning) and log at warn without marking the dispatch
+// span — `status=error` stays reserved for operations whose outcome actually
+// failed (#1428), matching `send_blocking_pushes`.
 pub(super) async fn send_roster_remove_subscription_side_effects(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
@@ -41,8 +48,8 @@ async fn send_roster_remove_subscription_stanza(
     to: &BareJid,
     subscription_type: SubscriptionType,
 ) {
-    if let Ok(Some(row)) = storage.get_roster_item(to, from).await {
-        match roster_row_to_item(row) {
+    match storage.get_roster_item(to, from).await {
+        Ok(Some(row)) => match roster_row_to_item(row) {
             Ok(mut item) => {
                 match subscription_type {
                     SubscriptionType::Unsubscribe => {
@@ -70,6 +77,10 @@ async fn send_roster_remove_subscription_stanza(
             Err(error) => {
                 warn!(error = %error, user = %to, contact = %from, "Failed to convert contact roster item after removal side effect");
             }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            warn!(error = %error, user = %to, contact = %from, "Failed to load contact roster item for removal side effect");
         }
     }
 

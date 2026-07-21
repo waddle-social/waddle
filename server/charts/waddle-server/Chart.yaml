@@ -2,7 +2,7 @@ apiVersion: v2
 name: waddle-server
 description: Helm chart for deploying Waddle Social server to Kubernetes.
 type: application
-version: 0.4.1
+version: 0.4.2
 appVersion: "0.1.0"
 # ADR-0017 Phase 0: the graceful-shutdown preStop hook uses the native Sleep
 # lifecycle action (`lifecycle.preStop.sleep`), which is GA in Kubernetes 1.32

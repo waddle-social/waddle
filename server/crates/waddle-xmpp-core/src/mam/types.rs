@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,18 @@ pub struct ArchivedTombstone {
     /// When set, this tombstone is the result of XEP-0425 moderation
     /// rather than a sender-initiated XEP-0424 retraction.
     pub moderation: Option<ArchivedModeration>,
+    /// Retained real bare JID of the tombstoned message's original
+    /// sender, for the groupchat origin-id tombstone-retry match ONLY.
+    ///
+    /// INTERNAL storage state: XEP-0424 §Tombstones wipes sender
+    /// identity from everything a client can observe, and the MAM
+    /// response builders never read this field — it exists so a
+    /// *different* real user reusing a departed occupant's nick and a
+    /// tombstoned origin-id is not spuriously swallowed by the retry
+    /// match. `None` on rows tombstoned before this field existed (and
+    /// on 1:1 tombstones, which never tombstone-match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_scope: Option<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +184,10 @@ pub struct ArchivedRichMessage {
     pub reply: Option<ArchivedReply>,
     pub references: Vec<ArchivedReference>,
     pub mentions: Vec<ArchivedMention>,
+    /// Client-authored message subjects keyed by their wire `xml:lang`
+    /// value (`""` is the default language).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subjects: BTreeMap<String, String>,
     /// XEP-0421 occupant-id of the sender (groupchat rows only).
     /// `#[serde(default)]` keeps previously-serialized rich payloads
     /// decodable.
@@ -201,14 +219,24 @@ impl ArchivedRichMessage {
         }
     }
 
+    /// True when this payload is an XEP-0424 / XEP-0425 tombstone — the
+    /// terminal state an archive row never leaves.
+    pub fn is_tombstoned(&self) -> bool {
+        matches!(
+            self.payload.as_ref(),
+            Some(ArchivedRichPayload::Tombstone(_))
+        )
+    }
+
     /// True when this payload carries no client-authored content
-    /// (`payload` / `reply` / `references` / `mentions`) and no
+    /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).
     pub fn is_empty(&self) -> bool {
         self.payload.is_none()
             && self.reply.is_none()
             && self.references.is_empty()
             && self.mentions.is_empty()
+            && self.subjects.is_empty()
             && self.occupant_id.is_none()
             && self.muc_sender.is_none()
     }

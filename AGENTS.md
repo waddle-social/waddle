@@ -16,7 +16,9 @@
 - Our job doesn't stop after we push, we always monitor CI and fix it until all checks are green
 - XMPP Native, Never use out of band non-XMPP APIs.
   - Exception: browser observability beacons to the configured Grafana Faro
-    collector, plus W3C trace-context headers to configured backend origins,
+    collector, plus W3C trace-context headers to configured backend origins
+    (carried as a `traceparent` query parameter on the XMPP WebSocket
+    upgrade URL, since the browser WebSocket API cannot set headers),
     are allowed as operational telemetry only. They must not carry XMPP
     control semantics, replace XMPP APIs, or alter XMPP wire behavior.
 - XEP conformance hard rule:

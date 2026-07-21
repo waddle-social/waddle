@@ -1,4 +1,7 @@
-import { withSpan } from "@/lib/telemetry";
+import {
+  websocketUrlWithTraceparent,
+  withSpan,
+} from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
 import type { ThreadsSort, ThreadsStatusFilter } from "@/lib/threads-view-filters";
@@ -372,8 +375,31 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
 let wasmModulePromise: Promise<WasmModule> | null = null;
 
 function createXmppResource() {
-  const randomId = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  const randomId = globalThis.crypto?.randomUUID?.() ?? fallbackUuid();
   return `web-${randomId}`;
+}
+
+function fallbackUuid(randomBytes?: Uint8Array): string {
+  const bytes = randomBytes ? new Uint8Array(randomBytes) : new Uint8Array(16);
+  if (bytes.length !== 16) throw new Error("UUID fallback requires 16 random bytes");
+  if (!randomBytes) {
+    if (globalThis.crypto?.getRandomValues) {
+      globalThis.crypto.getRandomValues(bytes);
+    } else {
+      for (let index = 0; index < bytes.length; index += 1) {
+        bytes[index] = Math.floor(Math.random() * 256);
+      }
+    }
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+/** For tests only — prove the no-randomUUID path remains UUID-shaped. */
+export function __createFallbackXmppResourceForTesting(bytes: Uint8Array): string {
+  return `web-${fallbackUuid(bytes)}`;
 }
 
 async function loadWasmModule(): Promise<WasmModule> {
@@ -632,6 +658,9 @@ export class BrowserXmppClient {
    * call layer when constructing Jingle session-initiate / accept,
    * which must address the peer's full JID and stamp our own. */
   get fullJid(): string { return `${this.session.jid}/${this.resource}`; }
+
+  /** Random resource bound by this browser session; safe telemetry correlation id. */
+  get xmppResource(): string { return this.resource; }
   /** Bare JID for this session. */
   get bareJid(): string { return this.session.jid; }
 
@@ -726,6 +755,7 @@ export class BrowserXmppClient {
       kind: "muc-join",
       recoverable: true,
       detail: `room join rejected — ${room}`,
+      roomLocalpart: jidLocalpart(room),
       ...stanzaErrorContext({
         condition: presence.error_condition,
         errorType: presence.error_type,
@@ -777,7 +807,7 @@ export class BrowserXmppClient {
   onSessionLifecycle(hook: (event: SessionLifecycleEvent) => void) { this.events.on("sessionLifecycleHook", hook); }
   onStatus(hook: (status: XmppStatusSnapshot, meta: { reconnectDurationMs?: number }) => void) { this.events.on("statusHook", hook); }
   onSendEnqueued(hook: (info: { kind: "room" | "dm"; reason: string }) => void) { this.events.on("sendEnqueued", hook); }
-  onQueueDepthChange(hook: (depth: { persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
+  onQueueDepthChange(hook: (depth: { kind: "room" | "dm"; persisted: number; inflight: number }) => void) { this.events.on("queueDepthChange", hook); }
   onError(hook: (event: XmppErrorEvent) => void) { this.events.on("error", hook); }
   onReconnectScheduled(hook: (info: { attempt: number; delayMs: number }) => void) { this.events.on("reconnectScheduled", hook); }
   onCatchup(hook: (info: CatchupHookInfo) => void) { this.events.on("catchup", hook); }
@@ -866,6 +896,7 @@ export class BrowserXmppClient {
 
   private async doConnect(): Promise<void> {
     const epoch = ++this.connectEpoch;
+    const websocketUrl = websocketUrlWithTraceparent(this.session.xmpp_websocket_url);
     const mod = await this.loadModule();
     // Stale continuation: a newer connect attempt started (or the
     // timeout tore this one down) while the module load was pending.
@@ -873,7 +904,7 @@ export class BrowserXmppClient {
     // connection now.
     if (epoch !== this.connectEpoch || this.destroying) return;
     const config = new mod.WaddleConfig(
-      this.session.xmpp_websocket_url,
+      websocketUrl,
       this.session.jid,
       this.session.session_id,
       this.resource,
@@ -1321,7 +1352,11 @@ export class BrowserXmppClient {
     this.currentRoom = nextRoom;
     this.dispatchFocusedRoomHandlers();
     try {
-      await this.ensureJoined(nextRoom);
+      await withSpan(
+        "xmpp.room_switch",
+        { "conversation.kind": "room" },
+        () => this.ensureJoined(nextRoom),
+      );
     } catch (err) {
       if (!this.isCurrentXmpp(xmpp)) return;
       throw err;
@@ -2476,7 +2511,7 @@ export class BrowserXmppClient {
     // pumping bytes until the next call replaced it. Tearing the
     // singleton engine down here is idempotent (no-op when nothing's
     // connected).
-    clearCallState();
+    clearCallState({ endReason: "error" });
     clearMucCallParticipants();
     clearAllRaisedHands();
     clearAllMuted();
@@ -2906,7 +2941,11 @@ export class BrowserXmppClient {
           (event.kind === "finish" && prev.phase === "active" && prev.kind === "dm")
         );
       if (!isSelfOriginated || selfOriginatedEventShouldTouchCurrentCall) {
-        applyCallEvent(event, { sender: xmpp as unknown as CallWireSender });
+        applyCallEvent(event, {
+          sender: xmpp as unknown as CallWireSender,
+          selfOriginated: isSelfOriginated,
+          selfFullJid: this.fullJid,
+        });
       }
       if (!isSelfOriginated) {
         void handleCallEventSideEffect(event, prev, xmpp as unknown as CallWireSender, this.fullJid);

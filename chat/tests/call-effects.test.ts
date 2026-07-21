@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   $callState,
   $lastCallError,
@@ -7,6 +7,8 @@ import {
 import { handleCallEventSideEffect } from "../src/lib/calls/call-effects";
 import type { CallWireSender } from "../src/lib/calls/outbound";
 import type { CallEvent, CallMedia, CallState, LiveKitJoin } from "../src/lib/calls/types";
+import { __resetCallLifecycleTelemetryForTesting } from "../src/lib/calls/call-lifecycle-telemetry";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 const audioVideo: CallMedia = { audio: true, video: true };
 const audioOnly: CallMedia = { audio: true, video: false };
@@ -32,6 +34,12 @@ function mockSender(): CallWireSender {
     send_call_session_terminate: mock(async () => undefined),
   };
 }
+
+afterEach(() => {
+  clearCallState();
+  __resetCallLifecycleTelemetryForTesting();
+  __setFaroForTesting(null);
+});
 
 describe("handleCallEventSideEffect", () => {
   test("proceed side-effect failure ends outgoing UI and preserves a visible error", async () => {
@@ -338,6 +346,86 @@ describe("handleCallEventSideEffect", () => {
       media: audioVideo,
     });
     clearCallState();
+  });
+
+  test("tie-break retract failure reports the inbound proposal as one failed attempt", async () => {
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+        pushError: () => undefined,
+      },
+    } as never);
+    const sender = mockSender();
+    sender.send_call_retract_tie_break = mock(async () => {
+      throw new Error("tie-break retract failed");
+    });
+    const prev: CallState = {
+      phase: "outgoing",
+      to: "dave@waddle.test",
+      sid: "z-outgoing",
+      media: audioVideo,
+    };
+    $callState.set(prev);
+
+    await handleCallEventSideEffect({
+      kind: "propose",
+      from: "dave@waddle.test/phone",
+      sid: "a-incoming",
+      media: audioVideo,
+    }, prev, sender, "alice@waddle.test/web-1");
+
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "dm",
+      }),
+    }]);
+  });
+
+  test("active-call migration failure reports the inbound proposal as one failed attempt", async () => {
+    const events: Array<{ name: string; attributes?: Record<string, string> }> = [];
+    __setFaroForTesting({
+      api: {
+        pushEvent: (name: string, attributes?: Record<string, string>) => {
+          events.push({ name, attributes });
+        },
+        pushError: () => undefined,
+      },
+    } as never);
+    const sender = mockSender();
+    sender.send_call_finish_migrated = mock(async () => {
+      throw new Error("migration finish failed");
+    });
+    const prev: CallState = {
+      phase: "active",
+      peer: "dave@waddle.test/desktop",
+      sid: "old-session",
+      media: audioVideo,
+      join,
+      kind: "dm",
+    };
+    $callState.set(prev);
+
+    await handleCallEventSideEffect({
+      kind: "propose",
+      from: "dave@waddle.test/tablet",
+      sid: "new-session",
+      media: audioVideo,
+    }, prev, sender, "alice@waddle.test/web-1");
+
+    expect(events).toEqual([{
+      name: "chat.call.lifecycle",
+      attributes: expect.objectContaining({
+        setup_outcome: "failed",
+        end_reason: "error",
+        call_kind: "dm",
+      }),
+    }]);
   });
 
   test("tie-break: higher inbound propose is rejected and outgoing state stays intact", async () => {

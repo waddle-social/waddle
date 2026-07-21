@@ -15,5 +15,11 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
+    {{- if .Values.livekit.prometheus_port }}
+    - name: prometheus
+      port: {{ .Values.livekit.prometheus_port }}
+      targetPort: prometheus
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "livekit-sfu.selectorLabels" . | nindent 4 }}

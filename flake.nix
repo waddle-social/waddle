@@ -195,6 +195,7 @@
             fileset = lib.fileset.unions [
               ./server/Cargo.toml
               ./server/Cargo.lock
+              ./server/.config/nextest.toml
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions
@@ -227,14 +228,6 @@
             WADDLE_TEST_FIXED_ACCOUNT_PASSWORD = "cuenv-test-password";
             WADDLE_UPLOAD_DIR = "./uploads";
             RUST_BACKTRACE = "1";
-            # Cap parallel cargo compile units so the test build doesn't
-            # OOM the runner during release-mode linking of the full
-            # workspace + every extension. The waddle-server-test step
-            # was hitting SIGKILL (exit 137) under default parallelism;
-            # 4 codegen-units in flight keeps peak memory bounded on
-            # the namespace-profile-linux-x86 runner without meaningfully
-            # slowing the build (deps are already cached upstream).
-            CARGO_BUILD_JOBS = "4";
           };
           testArgs = baseArgs // testRuntimeEnv;
           serverTestArgs = testArgs // {
@@ -265,18 +258,16 @@
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
             '';
           };
-          workspaceArtifacts = craneLib.buildDepsOnly (
-            baseArgs
-            // {
-              cargoExtraArgs = "--locked --workspace";
-              cargoCheckExtraArgs = "--all-targets";
-              cargoBuildExtraArgs = "--all-targets";
-              cargoTestExtraArgs = "--all-targets --no-run";
-            }
-          );
+          # Lint/test derivations build with the `ci-test` cargo profile
+          # (no LTO, codegen-units = 16, opt-level = 1) instead of the
+          # production `release` profile (fat LTO, codegen-units = 1):
+          # tests don't need production codegen, and LTO linking of the
+          # ~200 test binaries dominated check wall-clock. Shipped builds
+          # (nixBuildCi, the waddle-server package) keep release/ci.
           workspaceAllFeaturesArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci-test";
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -286,6 +277,7 @@
           xmppArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci-test";
               cargoExtraArgs = "--locked --package waddle-xmpp";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -295,6 +287,7 @@
           serverTestArtifacts = craneLib.buildDepsOnly (
             baseArgs
             // {
+              CARGO_PROFILE = "ci-test";
               cargoExtraArgs = "--locked --package waddle-server";
               cargoCheckExtraArgs = "--all-targets";
               cargoBuildExtraArgs = "--all-targets";
@@ -333,17 +326,29 @@
           waddle-server-clippy = craneLib.cargoClippy (
             baseArgs
             // {
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
             }
           );
-          waddle-server-test = craneLib.cargoTest (
+          waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
-              cargoTestExtraArgs = "--lib --tests";
+              cargoNextestExtraArgs = "--profile ci --lib --tests";
+            }
+          );
+          waddle-server-doctest = craneLib.cargoTest (
+            testArgs
+            // {
+              pname = "waddle-server-doctest";
+              CARGO_PROFILE = "ci-test";
+              cargoArtifacts = workspaceAllFeaturesArtifacts;
+              cargoExtraArgs = "--locked --workspace --all-features";
+              cargoTestExtraArgs = "--doc";
             }
           );
           waddle-server-ci-build = craneLib.cargoBuild (
@@ -364,40 +369,44 @@
               cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes";
             }
           );
-          waddle-server-xmpp-unit-tests = craneLib.cargoTest (
+          waddle-server-xmpp-unit-tests = craneLib.cargoNextest (
             testArgs
             // {
               pname = "waddle-server-xmpp-unit-tests";
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
-              cargoTestExtraArgs = "--lib --verbose";
+              cargoNextestExtraArgs = "--profile ci --lib";
             }
           );
-          waddle-server-xmpp-server-tests = craneLib.cargoTest (
+          waddle-server-xmpp-server-tests = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {
               pname = "waddle-server-xmpp-server-tests";
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
-              cargoTestExtraArgs = "--lib --tests --verbose";
+              cargoNextestExtraArgs = "--profile ci --lib --tests";
             }
           );
-          waddle-server-xmpp-cue-e2e = craneLib.cargoTest (
+          waddle-server-xmpp-cue-e2e = craneLib.cargoNextest (
             serverTestArgs
             // {
               pname = "waddle-server-xmpp-cue-e2e";
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = serverTestArtifacts;
               cargoExtraArgs = "--locked --package waddle-server";
-              cargoTestExtraArgs = "--test xmpp_e2e_cue --verbose";
+              cargoNextestExtraArgs = "--profile ci --test xmpp_e2e_cue";
             }
           );
-          waddle-server-xmpp-xep-integration = craneLib.cargoTest (
+          waddle-server-xmpp-xep-integration = craneLib.cargoNextest (
             testArgs
             // {
               pname = "waddle-server-xmpp-xep-integration";
+              CARGO_PROFILE = "ci-test";
               cargoArtifacts = xmppArtifacts;
               cargoExtraArgs = "--locked --package waddle-xmpp --features test-utils";
-              cargoTestExtraArgs = "--tests --verbose";
+              cargoNextestExtraArgs = "--profile ci --tests";
             }
           );
         }
@@ -422,6 +431,7 @@
               pkgs.just
               pkgs.jujutsu
               pkgs.cargo-chef
+              pkgs.cargo-nextest
               pkgs.wasm-pack
               pkgs.teleport
               pkgs.openssl
@@ -430,6 +440,10 @@
               pkgs.oras
               pkgs.fluxcd
               pkgs.yq-go
+              # Alerts-as-code (#1324): rule lint on PRs + ruler sync
+              # on main push need mimirtool and lokitool.
+              pkgs.mimir
+              pkgs.grafana-loki
               # Android app (apps/android): JDK for sdkmanager/Gradle,
               # cargo-ndk for the jniLibs cross-build, gh for the release
               # APK upload task. The Android SDK itself is provisioned by

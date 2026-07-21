@@ -200,6 +200,15 @@ telemetry:
   otlpEndpoint: ""
   serviceName: waddle-server
   serviceVersion: ""
+  # deployment.environment resource attribute (e.g. "production").
+  # Rendered as the standard OTEL_RESOURCE_ATTRIBUTES env var and
+  # merged by the SDK's env resource detector; omitted when empty.
+  deploymentEnvironment: ""
+  # Trace sampler per the OTel spec's OTEL_TRACES_SAMPLER /
+  # OTEL_TRACES_SAMPLER_ARG. The server defaults to
+  # parentbased_traceidratio with ratio 1.0 when unset.
+  tracesSampler: ""
+  tracesSamplerArg: ""
 
 secret:
   create: true

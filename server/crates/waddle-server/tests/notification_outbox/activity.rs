@@ -88,8 +88,7 @@ impl NotificationActivityReader for CountingActivityReader {
 /// and asserts the T1 drain enqueues the push job.
 #[tokio::test]
 async fn t1_active_channel_mention_with_recent_activity_delivers() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let target = target();
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
@@ -156,8 +155,7 @@ async fn t1_active_channel_mention_with_recent_activity_delivers() {
 /// wall clock caught up, even past the TTL.
 #[tokio::test]
 async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let target = target();
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
@@ -226,9 +224,11 @@ async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window()
         "future-stamped activity must clamp to now and deliver as fresh, not produce a negative age",
     );
     // Verify the row passes the gate (no suppression metric ticked).
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        !rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_active_miss\"} 1"),
+    assert_eq!(
+        metrics
+            .counter_sum("xmpp.push.suppressed", &[("reason", "xep0513_active_miss")])
+            .unwrap_or(0),
+        0,
         "future-stamped activity must not suppress with Xep0513ActiveMiss",
     );
 }
@@ -238,8 +238,7 @@ async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window()
 /// asserts the audit column persists and the metric ticks.
 #[tokio::test]
 async fn t1_active_channel_mention_with_stale_activity_suppresses_with_xep0513_active_miss() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -297,10 +296,10 @@ async fn t1_active_channel_mention_with_stale_activity_suppresses_with_xep0513_a
         store.pending_outbox_jobs().await.expect("jobs").is_empty(),
         "T1 XEP-0513 miss MUST NOT enqueue a job",
     );
-    let rendered = waddle_xmpp::prometheus::render_metrics();
-    assert!(
-        rendered.contains("waddle_push_suppressed_total{reason=\"xep0513_active_miss\"} 1"),
-        "metric for xep0513_active_miss must increment; rendered={rendered}",
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.suppressed", &[("reason", "xep0513_active_miss")]),
+        Some(1),
+        "metric for xep0513_active_miss must increment",
     );
 }
 
@@ -310,8 +309,7 @@ async fn t1_active_channel_mention_with_stale_activity_suppresses_with_xep0513_a
 /// same as "stale activity").
 #[tokio::test]
 async fn t1_active_channel_mention_with_no_activity_record_suppresses() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -364,8 +362,7 @@ async fn t1_active_channel_mention_with_no_activity_record_suppresses() {
 /// (inbox, MAM, pending delivery).
 #[tokio::test]
 async fn xep0513_active_miss_t1_suppression_persists_audit_and_keeps_storage() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -451,8 +448,7 @@ async fn xep0513_active_miss_t1_suppression_persists_audit_and_keeps_storage() {
 /// `resolve_cached_activity`.
 #[tokio::test]
 async fn t1_active_channel_mention_cache_collapses_same_recipient_lookups() {
-    let _guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    waddle_xmpp::prometheus::reset_metrics_for_test();
+    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     let push_store = waddle_xmpp::push::InMemoryPushStore::new();
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();

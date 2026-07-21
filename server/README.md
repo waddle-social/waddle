@@ -47,7 +47,10 @@ cargo run --bin waddle-server
 cargo run --bin waddle
 
 # Run tests
-cargo test
+cargo nextest run
+
+# Run doctests (nextest cannot run them)
+cargo test --doc
 ```
 
 ### Local Development

@@ -5,9 +5,11 @@ mod directed;
 mod roster_state;
 mod storage;
 
-pub use delivery::broadcast_unavailable_for_terminated_session;
 pub(super) use delivery::record_stanza_for_detached_available_resources_excluding;
 pub(super) use delivery::try_route_presence_to_bare_remote;
+pub use delivery::{
+    broadcast_unavailable_for_terminated_session, TerminatedPresenceBroadcastOutcome,
+};
 pub(in crate::server::routes::websocket::handlers) use delivery::{
     send_current_presence_from_user_to_jid, send_current_presence_from_user_to_user,
     send_unavailable_presence_from_user_to_jid, send_unavailable_presence_from_user_to_user,

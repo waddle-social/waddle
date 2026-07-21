@@ -161,9 +161,22 @@ pub(crate) async fn broadcast_muc_muji_clear_to_remaining(
 /// Public alias for the MUC-presence cleanup used by the SM expired-session
 /// janitor in `server::mod`. Thin passthrough so the janitor doesn't need
 /// to reimplement the room traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucCleanupOutcome {
+    Completed,
+    Failed,
+}
+
 #[cfg(any(not(feature = "clustering"), test))]
-pub async fn cleanup_muc_presence_for_jid(state: &WebSocketState, jid: &FullJid) {
-    cleanup_muc_presence(state, jid).await
+pub async fn cleanup_muc_presence_for_jid(
+    state: &WebSocketState,
+    jid: &FullJid,
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence(state, jid).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
 }
 
 /// Same cleanup path, but with explicit ordered-relay origin provenance for
@@ -173,8 +186,12 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
     origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
-) {
-    cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence_with_origin(state, jid, Some(&origin)).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
 }
 
 /// #1249: re-drive the MUC cleanup for a session that no longer exists
@@ -199,8 +216,15 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
 /// until that claim is released — the ghost heals when the other
 /// device disconnects or the claim expires, not before.
 #[cfg(feature = "clustering")]
-pub(crate) async fn redrive_remote_muc_cleanup(state: &WebSocketState, jid: &FullJid) {
-    cleanup_muc_presence_with_origin(state, jid, None).await;
+pub(crate) async fn redrive_remote_muc_cleanup(
+    state: &WebSocketState,
+    jid: &FullJid,
+) -> MucCleanupOutcome {
+    if cleanup_muc_presence_with_origin(state, jid, None).await {
+        MucCleanupOutcome::Completed
+    } else {
+        MucCleanupOutcome::Failed
+    }
 }
 
 /// If `outcome` represents the final occupant leaving a
@@ -217,18 +241,17 @@ pub(crate) async fn redrive_remote_muc_cleanup(state: &WebSocketState, jid: &Ful
 /// their actor across this PR; the residual growth they cause is
 /// the next state-inventory-driven follow-up.
 ///
-/// Errors here are logged and swallowed — the leave itself has
-/// already succeeded on the wire; failing the response because the
-/// eviction round-trip flaked would be a worse user-visible
-/// outcome than letting the registry janitor catch this on the
-/// next dead-actor sweep.
+/// Errors here are logged and returned to sweep callers. Interactive leave
+/// paths intentionally ignore the status because the leave itself has already
+/// succeeded on the wire; failing that response would be worse than letting
+/// the registry janitor catch the room on its next dead-actor sweep.
 pub(crate) async fn maybe_evict_empty_room(
     state: &WebSocketState,
     room_jid: &BareJid,
     outcome: &LeaveOutcome,
-) {
+) -> bool {
     if !(outcome.removed_last_session && outcome.occupant_count == 0 && !outcome.is_persistent) {
-        return;
+        return true;
     }
     // #1108: revision-guarded destroy. The registry asks the room actor
     // to seal itself only if it is still empty at the occupancy revision
@@ -246,7 +269,7 @@ pub(crate) async fn maybe_evict_empty_room(
         Ok(destroyed) => destroyed,
         Err(error) => {
             warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
-            false
+            return false;
         }
     };
     if destroyed {
@@ -255,15 +278,15 @@ pub(crate) async fn maybe_evict_empty_room(
             "Evicted empty non-persistent MUC room from registry"
         );
     } else {
-        // Either the room was already absent (race with another leave
-        // path), a new occupant was admitted after this leave, or the
-        // registry ask failed (logged). Either way we don't want to
-        // fail the user's leave on this.
+        // Either the room was already absent (race with another leave path) or
+        // a new occupant was admitted after this leave. Either way we don't
+        // want to fail the user's leave on this.
         debug!(
             room = %room_jid,
-            "Guarded eviction returned false; room re-admitted an occupant, was already cleared, or ask failed (logged)"
+            "Guarded eviction returned false; room re-admitted an occupant or was already cleared"
         );
     }
+    true
 }
 
 /// Whether [`cleanup_connection_shutdown`] actually persisted a detached,
@@ -667,9 +690,9 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
     state: &WebSocketState,
     jid: &FullJid,
     was_presence_available: bool,
-) {
+) -> handlers::presence::TerminatedPresenceBroadcastOutcome {
     if !was_presence_available {
-        return;
+        return handlers::presence::TerminatedPresenceBroadcastOutcome::Completed;
     }
     if state
         .deps
@@ -682,25 +705,42 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
             jid = %jid,
             "Suppressed terminated-session unavailable: an available replacement connection is live"
         );
-        return;
+        return handlers::presence::TerminatedPresenceBroadcastOutcome::Completed;
     }
-    handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await;
+    handlers::presence::broadcast_unavailable_for_terminated_session(state, jid).await
 }
 
-async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) {
-    cleanup_muc_presence_with_origin(state, jid, None).await;
+async fn cleanup_muc_presence(state: &WebSocketState, jid: &FullJid) -> bool {
+    cleanup_muc_presence_with_origin(state, jid, None).await
 }
 
 async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
     origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-) {
-    cleanup_remote_muc_presence(state, jid, origin).await;
+) -> bool {
+    let mut completed = cleanup_remote_muc_presence(state, jid, origin).await;
 
-    for room_jid in list_room_jids(state).await {
-        let Some(room_actor) = get_room_actor(state, &room_jid).await else {
-            continue;
+    let room_jids = match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
+        .list_rooms()
+        .await
+    {
+        Ok(room_jids) => room_jids,
+        Err(error) => {
+            completed = false;
+            warn!(error = %error, "Failed to list room actors");
+            Vec::new()
+        }
+    };
+    for room_jid in room_jids {
+        let room_actor = match get_room_actor_result(state, &room_jid).await {
+            Ok(Some(room_actor)) => room_actor,
+            Ok(None) => continue,
+            Err(error) => {
+                completed = false;
+                warn!(room = %room_jid, error = %error, "Failed to get room actor");
+                continue;
+            }
         };
         let leave_result = room_actor
             .ask(LeaveByRealJid {
@@ -738,10 +778,13 @@ async fn cleanup_muc_presence_with_origin(
                 // session ended.
                 broadcast_muc_leave_to_remaining(state, &room_jid, jid, &outcome).await;
                 broadcast_muc_muji_clear_to_remaining(state, &room_jid, jid, &outcome).await;
-                maybe_evict_empty_room(state, &room_jid, &outcome).await;
+                if !maybe_evict_empty_room(state, &room_jid, &outcome).await {
+                    completed = false;
+                }
             }
             Ok(None) => {}
             Err(error) => {
+                completed = false;
                 warn!(
                     room = %room_jid,
                     jid = %jid,
@@ -751,6 +794,7 @@ async fn cleanup_muc_presence_with_origin(
             }
         }
     }
+    completed
 }
 
 #[cfg(feature = "clustering")]
@@ -758,14 +802,14 @@ async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
     cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-) {
+) -> bool {
     let memberships = state
         .deps
         .protocol
         .remote_muc_memberships
         .take_for_occupant(jid);
     if memberships.is_empty() {
-        return;
+        return true;
     }
     let Some(bridge) = state
         .deps
@@ -781,7 +825,7 @@ async fn cleanup_remote_muc_presence(
                 .remote_muc_memberships
                 .restore_snapshot_if_current(membership);
         }
-        return;
+        return false;
     };
     let acquired_user_actor_origin = cleanup_origin.is_none();
     let origin = match cleanup_origin.cloned() {
@@ -795,11 +839,12 @@ async fn cleanup_remote_muc_presence(
                         .remote_muc_memberships
                         .restore_snapshot_if_current(membership);
                 }
-                return;
+                return false;
             };
             origin
         }
     };
+    let mut completed = true;
     for membership in memberships {
         let room_jid = membership.room().clone();
         let nick = membership.nick().to_string();
@@ -809,6 +854,7 @@ async fn cleanup_remote_muc_presence(
             .ok()
             .map(jid::Jid::from)
         else {
+            completed = false;
             state
                 .deps
                 .protocol
@@ -887,6 +933,7 @@ async fn cleanup_remote_muc_presence(
                     .forget_snapshot_if_current(&membership);
             }
             RemoteMucCleanupDisposition::UncertainCommit => {
+                completed = false;
                 debug!(
                     room = %room_jid,
                     nick = %nick,
@@ -905,6 +952,7 @@ async fn cleanup_remote_muc_presence(
             // node/claim recovers — the cleanup is now convergent instead
             // of one-shot.
             RemoteMucCleanupDisposition::RetryableFailure => {
+                completed = false;
                 // Log-level split (race review P2 on PR #1277):
                 // `OriginUnavailable` is the EXPECTED steady state while
                 // the user's other device holds the `UserActor` claim on
@@ -942,8 +990,9 @@ async fn cleanup_remote_muc_presence(
         }
     }
     if acquired_user_actor_origin {
-        reap_remote_muc_cleanup_origin_if_empty(state, jid).await;
+        completed &= reap_remote_muc_cleanup_origin_if_empty(state, jid).await;
     }
+    completed
 }
 
 /// How the disconnect-cleanup pass converges one remote MUC membership
@@ -1093,20 +1142,24 @@ async fn acquire_remote_muc_cleanup_origin(
 }
 
 #[cfg(feature = "clustering")]
-async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &FullJid) {
+async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &FullJid) -> bool {
     let bare_jid = jid.to_bare();
-    if let Err(error) = state
+    match state
         .deps
         .protocol
         .user_registry
         .ask(waddle_xmpp::registry::ReapUserIfEmpty { bare_jid })
         .await
     {
-        warn!(
-            jid = %jid,
-            error = ?error,
-            "failed to reap empty UserActor after remote MUC cleanup"
-        );
+        Ok(_) => true,
+        Err(error) => {
+            warn!(
+                jid = %jid,
+                error = ?error,
+                "failed to reap empty UserActor after remote MUC cleanup"
+            );
+            false
+        }
     }
 }
 
@@ -1115,7 +1168,8 @@ async fn cleanup_remote_muc_presence(
     _state: &WebSocketState,
     _jid: &FullJid,
     _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-) {
+) -> bool {
+    true
 }
 
 pub(super) async fn cleanup_invalidated_detached_session(
@@ -1276,19 +1330,6 @@ pub(crate) async fn get_or_create_room_actor(
                 warn!(room = %room_jid, %error, "Failed to get or create room actor");
             }
         })
-}
-
-pub(crate) async fn list_room_jids(state: &WebSocketState) -> Vec<BareJid> {
-    match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
-        .list_rooms()
-        .await
-    {
-        Ok(rooms) => rooms,
-        Err(error) => {
-            warn!(error = %error, "Failed to list room actors");
-            Vec::new()
-        }
-    }
 }
 
 pub(crate) async fn is_muc_room_jid(state: &WebSocketState, room_jid: &BareJid) -> bool {

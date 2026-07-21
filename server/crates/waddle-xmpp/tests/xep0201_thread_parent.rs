@@ -20,7 +20,7 @@
 use chrono::Utc;
 use jid::{BareJid, Jid};
 use minidom::Element;
-use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind, MamQuery, MamStorage};
+use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, StoreOutcome};
 use waddle_xmpp::mam::{InMemoryMamStorage, SqlxMamStorage};
 use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0201::{
@@ -91,7 +91,7 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
         "child-thread",
         Some("root-thread"),
     );
-    let archive_id = storage
+    let store_outcome = storage
         .store_message(&room_bare(), &row)
         .await
         .expect("store row");
@@ -141,7 +141,7 @@ async fn xep_0201_nested_thread_round_trips_through_mam() {
 
     // Sanity: assert the same archive id was assigned (groupchat
     // canonical-id invariant).
-    assert_eq!(retrieved.id, archive_id);
+    assert_eq!(store_outcome, StoreOutcome::Stored(retrieved.id.clone()));
 }
 
 #[test]

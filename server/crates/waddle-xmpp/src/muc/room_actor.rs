@@ -13,7 +13,6 @@ use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
 use super::pin::{PinStateChange, PinnedEntry};
-use super::room_registry::RoomInfo;
 use super::{MucRoom, RoomConfig, RoomSubjectTexts, SubjectState};
 use crate::types::{Affiliation, Role};
 
@@ -573,6 +572,21 @@ pub enum RoomActorError {
     /// rather than admitting into an uncertain incarnation.
     #[error("room ownership could not be confirmed; retry")]
     OwnershipUnavailable,
+}
+
+impl Drop for RoomActor {
+    fn drop(&mut self) {
+        // Compensate the pod-wide `xmpp.muc.occupants` gauge for any
+        // occupants still present when this actor tears down — owner
+        // destroy, dormancy/seal eviction, and supervision replacement
+        // all bypass `LeaveByRealJid`, so join/leave deltas alone would
+        // inflate the process-lifetime total forever. `Drop` is the one
+        // seam every teardown path shares.
+        let remaining = self.room.occupants.len();
+        if remaining > 0 {
+            crate::metrics::adjust_muc_occupant_total(-(remaining as i64));
+        }
+    }
 }
 
 impl RoomActor {
@@ -1395,6 +1409,17 @@ impl kameo::message::Message<GetOccupantByNick> for RoomActor {
             .get_occupant(&msg.nick)
             .map(OccupantInfo::from_occupant)
     }
+}
+
+/// Basic room information — the [`GetInfo`] reply.
+#[derive(Debug, Clone)]
+pub struct RoomInfo {
+    /// Room JID
+    pub room_jid: BareJid,
+    /// Number of occupants
+    pub occupant_count: usize,
+    /// Room name
+    pub name: String,
 }
 
 /// Get basic room information.

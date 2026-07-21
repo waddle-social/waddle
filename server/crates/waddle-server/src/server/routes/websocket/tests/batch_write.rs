@@ -163,8 +163,7 @@ async fn write_response_batch_requests_ack_every_threshold_not_once_per_batch() 
 /// drains after EVERY `<r/>`, not just once at the end.
 #[tokio::test]
 async fn write_response_batch_drains_acks_between_chunks_so_nothing_evicts() {
-    let _metrics_guard = waddle_xmpp::prometheus::metrics_test_lock().lock().await;
-    let evicted_before = sm_evicted_total();
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
 
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
@@ -197,7 +196,9 @@ async fn write_response_batch_drains_acks_between_chunks_so_nothing_evicts() {
 
     assert!(matches!(outcome, BatchWriteOutcome::Continue));
     assert_eq!(
-        sm_evicted_total() - evicted_before,
+        metrics
+            .counter_sum("xmpp.sm.unacked_evicted", &[])
+            .unwrap_or(0),
         0,
         "healthy acking client must not evict anything from the replay window"
     );
@@ -614,15 +615,6 @@ async fn wrap_behind_stale_ack_drained_mid_batch_is_ignored_and_batch_continues(
         12,
         "the stale ack must not purge a single replayable frame"
     );
-}
-
-fn sm_evicted_total() -> u64 {
-    waddle_xmpp::prometheus::render_metrics()
-        .lines()
-        .find(|line| line.starts_with("waddle_sm_unacked_evicted_total "))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 // ── XEP-0198 send-window pacing (issue #1219) ───────────────────────────

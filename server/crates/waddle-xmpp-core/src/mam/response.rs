@@ -234,6 +234,20 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
     if let Some(sid) = archived.stanza_id.as_ref() {
         builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.id.as_str());
     }
+    // RFC 6121 §5.2.4: preserve every persisted subject language
+    // variant. The empty map key represents the default-language
+    // `<subject/>` and therefore carries no `xml:lang` attribute.
+    for (lang, text) in &rich.subjects {
+        let mut subject = Element::builder("subject", CLIENT_NS);
+        if !lang.is_empty() {
+            subject = subject.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang,
+            );
+        }
+        builder = builder.append(subject.append(text.as_str()).build());
+    }
     // RFC 6121 §5.2.3 / XEP-0313 §3: emit `<body/>` exactly when the
     // archived row recorded one on the wire. `Some("")` is a real
     // empty `<body></body>` element and MUST round-trip as such;

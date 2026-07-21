@@ -14,7 +14,7 @@ use super::{CallbackId, CarbonKind, GroupchatThreadProjection, MessageRef, Timer
 /// Every effect the state machine can cause.
 ///
 /// The interpreter resolves these against real-world resources (sockets,
-/// `ConnectionRegistry`, `MucRoomRegistry`, `MamStorage`, `SfuServiceActor`,
+/// `ConnectionRegistry`, `RoomRegistryActor`, `MamStorage`, `SfuServiceActor`,
 /// etc.).
 ///
 /// Each variant is a **typed** expression of intent — no `format!()` XML,
@@ -190,7 +190,8 @@ pub enum OutboundEvent {
     /// **Failure mode.** If exact room authority is unavailable, lost, or the
     /// actor transport cannot confirm handling, the interpreter uses the
     /// captured sender/message to emit a retryable error and suppresses every
-    /// later archive, inbox, and fan-out event in the same dispatch batch.
+    /// later inbox and fan-out event in the same dispatch batch. The
+    /// interpreter evaluates archive retry/ownership suppression first.
     PersistRoomSubject {
         /// Room whose state is being mutated.
         room: BareJid,

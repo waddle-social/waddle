@@ -1,6 +1,7 @@
 //! XMPP OAuth routes (XEP-0493) backed by the auth broker.
 
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
+use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -12,7 +13,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
+use waddle_xmpp::telemetry::attributes::AuthStage;
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
@@ -72,12 +74,13 @@ fn default_response_type() -> String {
     "code".to_string()
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, params))]
 pub async fn xmpp_authorize_handler(
     State(state): State<Arc<AuthState>>,
     Query(params): Query<XmppAuthorizeQuery>,
 ) -> impl IntoResponse {
     if params.response_type != "code" {
+        record_auth_failure("unknown", None, AuthFailure::AuthorizationMalformed);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -90,6 +93,7 @@ pub async fn xmpp_authorize_handler(
 
     if let Some(method) = params.code_challenge_method.as_deref() {
         if method != "S256" {
+            record_auth_failure("unknown", None, AuthFailure::AuthorizationMalformed);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -108,6 +112,7 @@ pub async fn xmpp_authorize_handler(
             if let Some(default) = list.first() {
                 default.id.clone()
             } else {
+                record_auth_failure("unknown", None, AuthFailure::AuthorizationInvalidClient);
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse::new(
@@ -123,6 +128,7 @@ pub async fn xmpp_authorize_handler(
     let provider = match state.providers.get(&provider_id) {
         Some(v) => v,
         None => {
+            record_auth_failure("unknown", None, AuthFailure::AuthorizationInvalidClient);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new("invalid_provider", "Unknown provider")),
@@ -142,12 +148,22 @@ pub async fn xmpp_authorize_handler(
         )
         .await
     {
-        Ok(url) => Redirect::temporary(&url).into_response(),
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new("authorization_failed", &err.to_string())),
-        )
-            .into_response(),
+        Ok(url) => {
+            record_auth_success(AuthStage::OidcAuthorization);
+            Redirect::temporary(&url).into_response()
+        }
+        Err(err) => {
+            record_auth_failure(
+                &provider.id,
+                None,
+                AuthFailure::from_error(AuthStage::OidcAuthorization, &err),
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new("authorization_failed", &err.to_string())),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -173,12 +189,13 @@ fn pkce_s256(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, request))]
 pub async fn xmpp_token_handler(
     State(state): State<Arc<AuthState>>,
     Form(request): Form<XmppTokenRequest>,
 ) -> impl IntoResponse {
     if request.grant_type != "authorization_code" {
+        record_auth_failure("waddle", None, AuthFailure::TokenMalformed);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -192,6 +209,7 @@ pub async fn xmpp_token_handler(
     let code = match state.auth_handshake.take_xmpp_code(&request.code).await {
         Ok(Some(code)) => code,
         Ok(None) => {
+            record_auth_failure("waddle", None, AuthFailure::TokenInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -202,6 +220,11 @@ pub async fn xmpp_token_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "waddle",
+                None,
+                AuthFailure::from_error(AuthStage::TokenExchange, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -211,6 +234,7 @@ pub async fn xmpp_token_handler(
     };
 
     if code.is_expired() {
+        record_auth_failure("waddle", None, AuthFailure::TokenExpired);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
@@ -222,6 +246,7 @@ pub async fn xmpp_token_handler(
     }
 
     if code.redirect_uri != request.redirect_uri {
+        record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("invalid_grant", "redirect_uri mismatch")),
@@ -231,6 +256,7 @@ pub async fn xmpp_token_handler(
 
     if let Some(challenge) = code.code_challenge.as_deref() {
         let Some(verifier) = request.code_verifier.as_deref() else {
+            record_auth_failure("waddle", None, AuthFailure::TokenMalformed);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -242,7 +268,7 @@ pub async fn xmpp_token_handler(
         };
 
         if pkce_s256(verifier) != challenge {
-            warn!("XMPP token exchange failed PKCE verification");
+            record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -257,6 +283,7 @@ pub async fn xmpp_token_handler(
     let session = match state.session_manager.get_session(&code.session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
+            record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new("invalid_grant", "Session not found")),
@@ -264,6 +291,11 @@ pub async fn xmpp_token_handler(
                 .into_response();
         }
         Err(err) => {
+            record_auth_failure(
+                "waddle",
+                None,
+                AuthFailure::from_error(AuthStage::TokenExchange, &err),
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("server_error", &err.to_string())),
@@ -277,6 +309,7 @@ pub async fn xmpp_token_handler(
         username = %session.username,
         "Issued XMPP OAuth bearer token"
     );
+    record_auth_success(AuthStage::TokenExchange);
 
     (
         StatusCode::OK,

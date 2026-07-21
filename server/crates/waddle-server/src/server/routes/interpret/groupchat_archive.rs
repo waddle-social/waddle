@@ -1,6 +1,8 @@
 use super::*;
-use waddle_xmpp::mam::MamStorageError;
+use waddle_xmpp::mam::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
+#[cfg(feature = "clustering")]
 use waddle_xmpp::muc::RoomClaimFenceContext;
+#[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 
 /// Archive fencing authority resolved for one room write. `Guarded` owns
@@ -9,10 +11,12 @@ use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
 /// fence from a genuinely unclustered `Unfenced` deployment.
 pub(super) enum RoomArchiveFence {
     Unfenced,
+    #[cfg(feature = "clustering")]
     Guarded {
         context: RoomClaimFenceContext,
         _identity_guard: CurrentNodeIdentityGuard,
     },
+    #[cfg(feature = "clustering")]
     OwnershipLost,
 }
 
@@ -24,6 +28,8 @@ pub(super) enum RoomArchiveFence {
 /// actual write.
 pub(super) enum ArchiveGroupchatOutcome {
     Stored(ArchiveStoreResult),
+    Deduplicated(ArchiveStoreResult),
+    TombstoneHit,
     /// Not an error: a chain-bug guard or a non-fencing storage failure
     /// declined the write. The reflection still goes out (today's
     /// pre-existing behavior, unchanged).
@@ -65,6 +71,7 @@ pub(super) async fn resolve_room_claim_fence(deps: &Deps<'_>, room: &BareJid) ->
     }
 }
 
+#[cfg(feature = "clustering")]
 async fn guard_clustered_room_claim_fence(
     fence: Option<RoomClaimFenceContext>,
     node_identity: Option<&SharedNodeIdentity>,
@@ -89,6 +96,7 @@ pub(super) async fn archive_groupchat_message(
     fence: &RoomArchiveFence,
     sender_item: Option<&waddle_xmpp_core::mam::ArchivedMucSender>,
 ) -> ArchiveGroupchatOutcome {
+    #[cfg(feature = "clustering")]
     if matches!(fence, RoomArchiveFence::OwnershipLost) {
         return ArchiveGroupchatOutcome::OwnershipLost;
     }
@@ -225,23 +233,45 @@ pub(super) async fn finish_archive_groupchat_message(
     // running the `SELECT ... FOR SHARE` INSIDE the same transaction as
     // this insert.
     let store_result = match fence {
+        #[cfg(feature = "clustering")]
         RoomArchiveFence::Guarded { context, .. } => {
             mam_storage
                 .store_message_fenced(room, &archived, context)
                 .await
         }
         RoomArchiveFence::Unfenced => mam_storage.store_message(room, &archived).await,
+        #[cfg(feature = "clustering")]
         RoomArchiveFence::OwnershipLost => return ArchiveGroupchatOutcome::OwnershipLost,
     };
     match store_result {
-        Ok(stored_id) => ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
-            rewrite: ArchiveIdRewrite::from_store_result(
-                jid::Jid::from(room.clone()),
-                archive_id,
-                stored_id.clone(),
-            ),
-            stored_id,
-        }),
+        Ok(StoreOutcome::Stored(stored_id)) => {
+            ArchiveGroupchatOutcome::Stored(ArchiveStoreResult {
+                rewrite: ArchiveIdRewrite::from_store_result(
+                    jid::Jid::from(room.clone()),
+                    archive_id,
+                    stored_id.clone(),
+                ),
+                stored_id,
+            })
+        }
+        Ok(StoreOutcome::Deduplicated(stored_id)) => {
+            ArchiveGroupchatOutcome::Deduplicated(ArchiveStoreResult {
+                rewrite: ArchiveIdRewrite::from_store_result(
+                    jid::Jid::from(room.clone()),
+                    archive_id,
+                    stored_id.clone(),
+                ),
+                stored_id,
+            })
+        }
+        Ok(StoreOutcome::TombstoneHit(existing_id)) => {
+            debug!(
+                room = %room,
+                archive_id = %existing_id,
+                "ArchiveGroupchat: origin-id retry matched a tombstone"
+            );
+            ArchiveGroupchatOutcome::TombstoneHit
+        }
         Err(MamStorageError::NotOwner { entity }) => {
             warn!(
                 room = %room,
@@ -371,6 +401,32 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
             return false;
         }
     };
+    // Tombstones are terminal. A heal-retry of an XEP-0424 author
+    // retraction must never downgrade the attribution or reason on an
+    // existing XEP-0425 moderation tombstone.
+    if original
+        .rich
+        .as_ref()
+        .is_some_and(ArchivedRichMessage::is_tombstoned)
+    {
+        debug!(
+            archive = %room,
+            original_id = %original.id,
+            "ApplyGroupchatRetractionTombstone: target is already tombstoned; preserving terminal tombstone"
+        );
+        // A crash between the tombstone persist and the scrub leaves
+        // pre-tombstone reflections replayable from SM queues /
+        // pending_delivery. The scrub is idempotent, so re-running it
+        // on the heal path closes that window (Qodo review on PR #1412).
+        scrub_unacked_for_tombstone(
+            sm_session_registry,
+            pending_storage,
+            &scrub_target,
+            "ApplyGroupchatRetractionTombstone",
+        )
+        .await;
+        return true;
+    }
     let Some(retraction_id) = retraction_message
         .id
         .as_ref()
@@ -388,19 +444,44 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
+        // Retain the original sender's identity for the internal
+        // tombstone-retry match only; never emitted to the wire.
+        sender_scope: original
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.muc_sender.as_ref())
+            .map(|sender| sender.jid.to_bare()),
     };
     match mam_storage
-        .replace_with_tombstone(&original.id, tombstone)
+        .replace_with_terminal_tombstone(&original.id, tombstone)
         .await
     {
-        Ok(true) => {
+        Ok(TerminalTombstoneOutcome::Replaced) => {
             debug!(
                 archive = %room,
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: replaced with tombstone"
             );
         }
-        Ok(false) => {
+        Ok(TerminalTombstoneOutcome::AlreadyTombstoned) => {
+            debug!(
+                archive = %room,
+                original_id = %original.id,
+                "ApplyGroupchatRetractionTombstone: concurrent tombstone won; preserving terminal tombstone"
+            );
+            // Same crash-window heal as the pre-check exit: the winner
+            // may not have completed its scrub yet (Qodo review on
+            // PR #1412).
+            scrub_unacked_for_tombstone(
+                sm_session_registry,
+                pending_storage,
+                &scrub_target,
+                "ApplyGroupchatRetractionTombstone",
+            )
+            .await;
+            return true;
+        }
+        Ok(TerminalTombstoneOutcome::NotFound) => {
             warn!(
                 archive = %room,
                 original_id = %original.id,
@@ -420,7 +501,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone(
                 archive = %room,
                 original_id = %original.id,
                 %error,
-                "ApplyGroupchatRetractionTombstone: replace_with_tombstone failed"
+                "ApplyGroupchatRetractionTombstone: terminal tombstone replacement failed"
             );
             scrub_unacked_for_tombstone(
                 sm_session_registry,
@@ -799,6 +880,11 @@ pub(super) fn rich_archive_payload(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let subjects = message
+        .subjects
+        .iter()
+        .map(|(lang, text)| (lang.0.clone(), text.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     // XEP-0421: capture the server-stamped occupant-id into the typed
     // projection so the non-`stanza_xml` fallback reconstruction can
     // re-emit it (#1268). `MucCanonicalizeHandler` stamped it (and
@@ -811,6 +897,7 @@ pub(super) fn rich_archive_payload(
         && reply.is_none()
         && references.is_empty()
         && mentions.is_empty()
+        && subjects.is_empty()
         && occupant_id.is_none()
         && muc_sender.is_none()
     {
@@ -821,6 +908,7 @@ pub(super) fn rich_archive_payload(
             reply,
             references,
             mentions,
+            subjects,
             occupant_id,
             muc_sender,
         })

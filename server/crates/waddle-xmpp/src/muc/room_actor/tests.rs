@@ -320,6 +320,47 @@ async fn test_join_existing_session_allowed_when_room_full() {
 }
 
 #[tokio::test]
+async fn join_and_leave_emit_presence_and_occupant_metrics() {
+    let guard = crate::telemetry::test_support::acquire().await;
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+
+    actor
+        .ask(JoinWithAffiliation {
+            sender_jid: alice.clone(),
+            nick: "alice".to_string(),
+            affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+            local_domain: "example.com".to_string(),
+            admission_revision: current_admission_revision(&actor).await,
+        })
+        .await
+        .expect("join should succeed");
+
+    assert_eq!(
+        guard.counter_sum("xmpp.muc.presence", &[("event", "join")]),
+        Some(1),
+        "an accepted join must emit exactly one presence join event",
+    );
+    assert!(
+        guard
+            .metric_names()
+            .contains(&"xmpp.muc.occupants".to_string()),
+        "a brand-new occupant must publish the occupants gauge",
+    );
+
+    actor
+        .ask(LeaveByRealJid { sender_jid: alice })
+        .await
+        .expect("leave is infallible");
+
+    assert_eq!(
+        guard.counter_sum("xmpp.muc.presence", &[("event", "leave")]),
+        Some(1),
+        "a processed leave must emit exactly one presence leave event",
+    );
+}
+
+#[tokio::test]
 async fn test_leave() {
     let actor = spawn_room_actor().await;
 

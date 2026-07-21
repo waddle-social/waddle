@@ -56,6 +56,10 @@ pub struct InterpretOutcome {
     /// connection-local timer wheel. Only the transport adapter owns a
     /// clock; the interpreter just relays the typed commands.
     pub timer_commands: Vec<TimerCommand>,
+    /// Batch-local reason a groupchat retry was swallowed. The room
+    /// dispatcher consumes this marker to avoid re-running extension
+    /// observers for a delivery whose original attempt already ran them.
+    pub retry_suppression: Option<GroupchatRetrySuppression>,
     /// XEP-0359 archive-id rewrites accumulated while interpreting the
     /// batch (a store deduped to an existing row). The interpreter
     /// already applies these to later events in the same batch; the
@@ -63,6 +67,12 @@ pub struct InterpretOutcome {
     /// wire stanza it extracts BEFORE interpreting, so live/MAM id
     /// parity holds under origin-id retries.
     pub(crate) archive_id_rewrites: Vec<ArchiveIdRewrite>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupchatRetrySuppression {
+    Deduplicated,
+    TombstoneSwallowed,
 }
 
 /// Typed timer instruction relayed from the state machine to the

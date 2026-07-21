@@ -209,7 +209,7 @@ export type CallEngineEvents = {
    * before our event listener attached.
    */
   connected: (snapshot: { localIdentity: string; remoteIdentities: string[] }) => void;
-  disconnected: (reason?: string) => void;
+  disconnected: (reason: "local" | "transport") => void;
   /**
    * Fires when LiveKit reports whether remote audio can currently
    * play. Browser autoplay policy can suspend Web Audio playback until
@@ -1081,7 +1081,7 @@ export class CallEngine {
     this.emit("participantDisconnected", participant.identity);
   };
 
-  private handleDisconnected = (reason?: unknown) => {
+  private handleDisconnected = (_reason?: unknown) => {
     this.clearParticipantAudioVolumes();
     // LiveKit destroys the processor when the track stops; just reset our
     // per-track failure guard + capture-NS state so the next call starts clean.
@@ -1091,7 +1091,10 @@ export class CallEngine {
     // our per-track guard + applied effect so the next call starts clean.
     this.backgroundFailedEffects.clear();
     this.appliedBackgroundEffect = BACKGROUND_OFF;
-    this.emit("disconnected", typeof reason === "string" ? reason : undefined);
+    // LiveKit exposes a numeric SDK enum here. Keep that unstable detail at
+    // the boundary; lifecycle telemetry combines this terminal transport loss
+    // with the independently observed reconnect phase before classifying it.
+    this.emit("disconnected", "transport");
   };
 
   private handleAudioPlaybackStatusChanged = (canPlaybackAudio: boolean) => {

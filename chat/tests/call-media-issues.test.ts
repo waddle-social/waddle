@@ -8,6 +8,7 @@ import {
   mediaIssueMessage,
   recordMediaIssue,
 } from "../src/lib/calls/call-media-issues";
+import { __setFaroForTesting } from "../src/lib/telemetry";
 
 function domError(name: string): Error {
   const err = new Error(`${name} message`);
@@ -17,6 +18,7 @@ function domError(name: string): Error {
 
 afterEach(() => {
   clearAllMediaIssues();
+  __setFaroForTesting(null);
 });
 
 describe("classifyMediaError", () => {
@@ -68,6 +70,49 @@ describe("mediaIssueMessage (notice copy)", () => {
 });
 
 describe("$callMediaIssues store", () => {
+  test("reports permission and missing-device failures as recoverable Faro errors", () => {
+    const errors: Array<{
+      error: Error;
+      options: { type?: string; context?: Record<string, string> };
+    }> = [];
+    __setFaroForTesting({
+      api: {
+        pushError: (error: Error, options?: { type?: string; context?: Record<string, string> }) => {
+          errors.push({ error, options: options ?? {} });
+        },
+      },
+    } as never);
+
+    recordMediaIssue("mic", domError("NotAllowedError"));
+    recordMediaIssue("cam", domError("NotFoundError"));
+
+    expect(errors.map(({ options }) => options)).toEqual([
+      {
+        type: "call.media",
+        context: expect.objectContaining({
+          kind: "call.media",
+          recoverable: "true",
+          media_kind: "mic",
+          reason: "denied",
+        }),
+      },
+      {
+        type: "call.media",
+        context: expect.objectContaining({
+          kind: "call.media",
+          recoverable: "true",
+          media_kind: "cam",
+          reason: "missing",
+        }),
+      },
+    ]);
+    expect(errors.map(({ error }) => error.message)).toEqual([
+      "call.media.mic.denied",
+      "call.media.cam.missing",
+    ]);
+    expect(errors.map(({ error }) => error.message).join(" ")).not.toContain("NotAllowedError message");
+  });
+
   test("record/clear a single kind without touching the other", () => {
     recordMediaIssue("mic", domError("NotFoundError"));
     expect($callMediaIssues.get()).toEqual({ mic: "missing", cam: null, screen: null });

@@ -68,6 +68,7 @@ use waddle_xmpp::auth::ScramServer;
 use waddle_xmpp::pubsub::PubSubStorage;
 
 mod batch_write;
+mod call_signaling_telemetry;
 mod cleanup;
 mod connection;
 mod frame;
@@ -100,6 +101,7 @@ pub use cleanup::cleanup_muc_presence_for_jid;
 pub use cleanup::cleanup_muc_presence_for_jid_with_origin;
 #[cfg(feature = "clustering")]
 pub(crate) use cleanup::redrive_remote_muc_cleanup;
+pub use cleanup::MucCleanupOutcome;
 pub use connection::router;
 pub use state::{
     ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore, PendingDmCallOffer, ProtocolServices,

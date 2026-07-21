@@ -257,7 +257,7 @@ pub fn is_muc_groupchat(msg: &Message) -> bool {
 /// Check if a JID appears to be a MUC room JID.
 ///
 /// This is a heuristic check based on the domain containing "muc." or "conference.".
-/// For accurate checks, use MucRoomRegistry::is_muc_jid().
+/// For accurate checks, resolve the JID against the live `RoomRegistryActor`.
 pub fn looks_like_muc_jid(jid: &BareJid) -> bool {
     let domain = jid.domain().as_str();
     domain.starts_with("muc.") || domain.starts_with("conference.")

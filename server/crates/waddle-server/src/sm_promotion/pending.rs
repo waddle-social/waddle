@@ -80,7 +80,7 @@ pub(super) async fn insert_pending(
             // typed StanzaError builder the routing layer uses for
             // intake-time quota overflow so the wire shape is
             // identical.
-            waddle_xmpp::prometheus::increment_pending_delivery_quota_exceeded();
+            waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
             send_quota_bounce(original_message, &recipient, delivery).await;
             PromotedOutcome::Bounced
         }
@@ -94,6 +94,7 @@ pub(super) async fn insert_pending(
             // node's own promote/confirm pass, never dead-lettered here.
             warn!(
                 recipient = %recipient,
+                message_id = original_message.id.as_ref().map_or("", |id| id.0.as_str()),
                 %entity,
                 "Q6 promotion: pending_delivery insert_fenced observed a lost claim \
                  (NotOwner); caller must NOT confirm_drained so the durable SM row \
@@ -104,6 +105,7 @@ pub(super) async fn insert_pending(
         Err(error) => {
             warn!(
                 recipient = %recipient,
+                message_id = original_message.id.as_ref().map_or("", |id| id.0.as_str()),
                 error = %error,
                 "Q6 promotion: pending_delivery insert failed; \
                  caller must NOT confirm_drained so durable SM row survives \
@@ -162,6 +164,7 @@ async fn send_quota_bounce(
         warn!(
             recipient = %recipient,
             sender = %sender_jid,
+            message_id = original_message.id.as_ref().map_or("", |id| id.0.as_str()),
             "Q6 promotion: <service-unavailable/> bounce was not deliverable \
              (remote sender or no bound resource) — XEP-0160 §3 step 3 \
              conformance gap until s2s lands"

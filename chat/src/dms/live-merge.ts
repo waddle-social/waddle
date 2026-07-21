@@ -13,6 +13,7 @@ import { applyDisplayedMarker } from "@/lib/messaging/displayed";
 import { applyReactionUpdate, type ReactionPolicy } from "@/lib/messaging/reactions";
 import { applyRetraction as applyRetractionUpdate, retractTimelineMessage } from "@/lib/messaging/retraction";
 import { insertLiveMessage } from "@/lib/messaging/timeline-insert";
+import { reportDisplayedMarkerFailure } from "@/lib/telemetry";
 
 // Inbound merge composable for DMs: applies incoming retractions
 // (XEP-0424), corrections (XEP-0308), reactions (XEP-0444), and displayed
@@ -56,8 +57,19 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
 
   /** XEP-0333 displayed marker — shared merge, no DM divergences. */
   function applyDisplayed(messageId: string, nick: string) {
-    const next = applyDisplayedMarker(messages.value, messageId, nick);
-    if (next) messages.value = next;
+    const target = findMessageById(messages.value, messageId);
+    if (!target) return;
+    try {
+      const next = applyDisplayedMarker(messages.value, messageId, nick);
+      if (next) messages.value = next;
+    } catch {
+      reportDisplayedMarkerFailure({
+        direction: "receive",
+        kind: "dm",
+        reason: "receive-processing-failed",
+        roundTripMs: elapsedSince(target.createdAt),
+      });
+    }
   }
 
   /**
@@ -170,4 +182,9 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     mergeLiveMessage,
     handleIncomingMessage,
   };
+}
+
+function elapsedSince(createdAt: string): number | null {
+  const startedAt = Date.parse(createdAt);
+  return Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null;
 }

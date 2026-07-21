@@ -39,6 +39,15 @@ spec:
       app.kubernetes.io/name: livekit-sfu
       app.kubernetes.io/instance: livekit-sfu
   ingress:
+    # Native Prometheus metrics. Grafana Alloy discovers the per-pod
+    # `prometheus` Service endpoints and scrapes LiveKit directly on 6789.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: grafana-alloy
+      toPorts:
+        - ports:
+            - port: "6789"
+              protocol: TCP
     # Signaling: the Cilium gateway proxy fronts `sfu.waddle.social`
     # and forwards to `livekit-sfu:7880`. Gateway traffic carries the
     # reserved `ingress` identity; with `gatewayAPI.hostNetwork.enabled`
