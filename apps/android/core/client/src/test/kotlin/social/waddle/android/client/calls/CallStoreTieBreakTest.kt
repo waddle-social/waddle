@@ -232,6 +232,64 @@ class CallStoreTieBreakTest {
     }
 
     @Test
+    fun `a tie-break reject landing mid-retract still rings the winning propose`() = runTest {
+        val f = Fixture(sid = { "c-zz" })
+        f.store.start(backgroundScope)
+        f.store.startCall(PEER_BARE, audio)
+
+        // Canonical simultaneous tie-break, both sides acting at once:
+        // while our tie-break retract of c-zz is in flight, the peer's
+        // tie-break reject of c-zz reduces the slot to Ended(Expired).
+        // The winning propose must still ring — declining it here would
+        // kill both calls.
+        f.client.callRetractTieBreakDelayMillis = 1_000
+        f.store.onCallEvent(propose(PEER_FULL, "c-aa"))
+        runCurrent()
+        f.store.onCallEvent(reject(PEER_FULL, "c-zz", tieBreak = true))
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertEquals(
+            CallState.Incoming(from = PEER_FULL, sid = "c-aa", media = audio),
+            f.store.state.value,
+        )
+        assertTrue(RecordedCallVerb.Ringing(PEER_BARE, "c-aa") in f.client.callVerbs)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
+    }
+
+    @Test
+    fun `migration to a retracted re-propose terminates the old session and ends the slot`() = runTest {
+        val f = Fixture(sid = { "c-old" })
+        f.store.start(backgroundScope)
+        f.store.startCall(PEER_BARE, audio)
+        f.store.onCallEvent(proceed(PEER_FULL, "c-old"))
+        f.store.onCallEvent(sessionAccept(PEER_FULL, "c-old"))
+        runCurrent()
+
+        // The peer retracts its re-propose while our migration markers
+        // (finish-migrated + proceed) are in flight. finishMigrated
+        // already retired c-old on the wire, so the slot must NOT stay
+        // Active (no timer runs there — the FGS and mic would be
+        // pinned forever): terminate the old Jingle session and end.
+        // Nothing goes out for c-new — the peer's own retract
+        // concluded it.
+        f.client.callProceedDelayMillis = 1_000
+        f.store.onCallEvent(propose(PEER_FULL, "c-new"))
+        runCurrent()
+        f.store.onCallEvent(retract(PEER_FULL, "c-new"))
+        f.client.callVerbs.clear()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertTrue(
+            RecordedCallVerb.SessionTerminate(PEER_FULL, "c-old", WaddleJingleReason.EXPIRED) in
+                f.client.callVerbs,
+        )
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.FinishWithReason })
+        assertEquals(CallState.Ended("c-old", CallEndReason.Expired), f.store.state.value)
+    }
+
+    @Test
     fun `a retract landing mid-tie-break does not install the dead ring`() = runTest {
         val f = Fixture(sid = { "c-zz" })
         f.store.start(backgroundScope)

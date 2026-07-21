@@ -437,9 +437,11 @@ class CallStore internal constructor(
      * higher sid with `<tie-break/>` + `<expired/>`, then treat the
      * incoming propose normally. If the swap is refused, our sid is
      * retracted on the wire either way: end the local ring if it still
-     * holds it, then answer the propose — decline it after a
-     * concurrent hang-up, nothing after the peer's own abort (already
-     * concluded).
+     * holds it (the propose died mid-retract), then answer per cause —
+     * [answerProposeAfterTieBreakSlotMoved] rings the winner when the
+     * peer's tie-break reject retired our sid mid-send, stays silent
+     * after the propose's own abort, and declines after a local
+     * hang-up.
      */
     private suspend fun takeOverWonTieBreak(
         event: WaddleCallEvent,
@@ -452,9 +454,7 @@ class CallStore internal constructor(
         }
         if (acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev)) return
         endRetractedOutgoing(prev)
-        if (!isRecentlyAborted(event.sid) && !signaling.reject(event.from, event.sid)) {
-            reportError("call reject failed")
-        }
+        answerProposeAfterTieBreakSlotMoved(event, kind, prev)
     }
 
     /**
@@ -466,6 +466,39 @@ class CallStore internal constructor(
      * (local hang-up/dismiss, a newer call) means we walked away:
      * decline theirs like the busy path.
      */
+    /**
+     * The migration swap was refused after `finishMigrated` + `proceed`
+     * went out. Two causes: the peer's own retract of the re-propose
+     * (dead sid, slot still Active) — nothing to send for the new sid,
+     * but `finishMigrated` already retired the OLD one on the wire, so
+     * the old Jingle session must terminate and the slot must end
+     * (Active has no timer; stranding it would pin the FGS and mic
+     * forever). Otherwise a racing local hang-up already sent
+     * terminate+finish for the old sid, and the freshly-PROCEEDED new
+     * one is abandoned with the finish bookend — a reject after our
+     * own proceed would be a contradictory double answer.
+     */
+    private suspend fun abandonRefusedMigration(event: WaddleCallEvent, prev: CallState.Active) {
+        val proposeDied = synchronized(stateLock) {
+            if (slotStillMatches(prev) && recentlyAbortedSids.containsKey(event.sid)) {
+                cancelCallTimersLocked()
+                _state.value = CallState.Ended(sid = prev.sid, reason = CallEndReason.Expired)
+                true
+            } else {
+                false
+            }
+        }
+        if (proposeDied) {
+            if (!signaling.sessionTerminate(prev.peer, prev.sid, WaddleJingleReason.EXPIRED)) {
+                reportError("call session terminate failed")
+            }
+            return
+        }
+        if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
+            reportError("call finish failed")
+        }
+    }
+
     private enum class SlotMovedAnswer { RING_WINNER, DECLINE, ALREADY_CONCLUDED }
 
     private suspend fun answerProposeAfterTieBreakSlotMoved(
@@ -570,13 +603,7 @@ class CallStore internal constructor(
         // the accepted sid — the same <reject/> hangUp() sends for an
         // accepting incoming — instead of ghosting the peer.
         if (!acceptIncomingTieBreakPropose(event, kind.media, expectedSlot = prev, accepting = true)) {
-            // The racing hang-up already sent terminate+finish for the
-            // old sid; the freshly-PROCEEDED one is abandoned with the
-            // finish bookend — a reject after our own proceed would be
-            // a contradictory double answer.
-            if (!signaling.finishWithReason(event.from, event.sid, WaddleJingleReason.CANCEL)) {
-                reportError("call finish failed")
-            }
+            abandonRefusedMigration(event, prev)
             return
         }
         scheduleSessionInitiateTimeout(event.from, event.sid)
