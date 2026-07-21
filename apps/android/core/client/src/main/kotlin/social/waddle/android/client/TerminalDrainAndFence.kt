@@ -83,41 +83,69 @@ internal sealed interface TerminalDrainAndFenceResult {
 internal fun DeliveryJournal.prepareTerminalDrainAndFence(
     request: TerminalDrainAndFenceRequest,
 ): TerminalDrainAndFenceResult {
-    if (request.attempt.ownerBareJid.isBlank()) {
-        return TerminalDrainAndFenceResult.Corrupt(this, TerminalDrainAndFenceFailureReason.BLANK_REQUESTED_OWNER)
-    }
-    if (activeOwnerBareJid?.isBlank() == true) {
-        return TerminalDrainAndFenceResult.Corrupt(this, TerminalDrainAndFenceFailureReason.BLANK_ACTIVE_OWNER)
-    }
+    terminalDrainOwnerValidation(request)?.let { return it }
     val requestedOwner = DeliveryOwnerBareJid(request.attempt.ownerBareJid)
     val owner = owners[requestedOwner.value]
-    val existing = owner?.terminalReceipt
-    if (existing != null) {
-        val exactReceipt =
-            existing.owner == requestedOwner &&
-                existing.attempt == request.attempt &&
-                existing.id == request.receiptId
-        val fullyPostFence =
-            owner.activeAttempt == null &&
-                owner.terminalIntents.isEmpty() &&
-                owner.outboundRows.none { it.ownership is OutboundOwnership.Terminal }
-        if (!fullyPostFence || !exactReceipt) {
-            return TerminalDrainAndFenceResult.Corrupt(this, TerminalDrainAndFenceFailureReason.RECEIPT_CONFLICT)
-        }
-        owner.validatePostFenceRows(requestedOwner.value)?.let { reason ->
-            return TerminalDrainAndFenceResult.Corrupt(this, reason)
-        }
-        when (existing.state) {
-            is TerminalReceiptState.Pending ->
-                return TerminalDrainAndFenceResult.PriorReceiptPending(this, existing)
-            is TerminalReceiptState.Acknowledged,
-            TerminalReceiptState.PreAcknowledged,
-            -> {
-                return TerminalDrainAndFenceResult.AlreadyAcknowledged(this, existing)
-            }
-        }
+    existingTerminalReceiptResult(owner, requestedOwner, request)?.let { return it }
+    activeTerminalAttemptResult(owner, requestedOwner, request)?.let { return it }
+
+    return prepareFencedTerminalDrain(checkNotNull(owner), requestedOwner, request)
+}
+
+private fun DeliveryJournal.terminalDrainOwnerValidation(
+    request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceResult.Corrupt? = when {
+    request.attempt.ownerBareJid.isBlank() ->
+        TerminalDrainAndFenceResult.Corrupt(
+            this,
+            TerminalDrainAndFenceFailureReason.BLANK_REQUESTED_OWNER,
+        )
+    activeOwnerBareJid?.isBlank() == true ->
+        TerminalDrainAndFenceResult.Corrupt(
+            this,
+            TerminalDrainAndFenceFailureReason.BLANK_ACTIVE_OWNER,
+        )
+    else -> null
+}
+
+private fun DeliveryJournal.existingTerminalReceiptResult(
+    owner: DeliveryOwnerJournal?,
+    requestedOwner: DeliveryOwnerBareJid,
+    request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceResult? {
+    val existing = owner?.terminalReceipt ?: return null
+    val exactReceipt =
+        existing.owner == requestedOwner &&
+            existing.attempt == request.attempt &&
+            existing.id == request.receiptId
+    val fullyPostFence =
+        owner.activeAttempt == null &&
+            owner.terminalIntents.isEmpty() &&
+            owner.outboundRows.none { it.ownership is OutboundOwnership.Terminal }
+    if (!fullyPostFence || !exactReceipt) {
+        return TerminalDrainAndFenceResult.Corrupt(
+            this,
+            TerminalDrainAndFenceFailureReason.RECEIPT_CONFLICT,
+        )
     }
-    if (activeOwnerBareJid != requestedOwner.value || owner?.activeAttempt != request.attempt) {
+    owner.validatePostFenceRows(requestedOwner.value)?.let { reason ->
+        return TerminalDrainAndFenceResult.Corrupt(this, reason)
+    }
+    return when (existing.state) {
+        is TerminalReceiptState.Pending ->
+            TerminalDrainAndFenceResult.PriorReceiptPending(this, existing)
+        is TerminalReceiptState.Acknowledged,
+        TerminalReceiptState.PreAcknowledged,
+        -> TerminalDrainAndFenceResult.AlreadyAcknowledged(this, existing)
+    }
+}
+
+private fun DeliveryJournal.activeTerminalAttemptResult(
+    owner: DeliveryOwnerJournal?,
+    requestedOwner: DeliveryOwnerBareJid,
+    request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceResult? {
+    if (activeOwnerBareJid != requestedOwner.value) {
         return TerminalDrainAndFenceResult.OwnershipMismatch(
             journal = this,
             requested = request.attempt,
@@ -125,10 +153,26 @@ internal fun DeliveryJournal.prepareTerminalDrainAndFence(
             actualAttempt = activeOwnerBareJid?.let(owners::get)?.activeAttempt,
         )
     }
-    checkNotNull(owner)
-    val validation = owner.validateTerminalDrain(request)
-    if (validation != null) return TerminalDrainAndFenceResult.Corrupt(this, validation)
+    val activeOwner = checkNotNull(owner)
+    if (activeOwner.activeAttempt != request.attempt) {
+        return TerminalDrainAndFenceResult.OwnershipMismatch(
+            journal = this,
+            requested = request.attempt,
+            actualOwner = activeOwnerBareJid?.let(::DeliveryOwnerBareJid),
+            actualAttempt = activeOwnerBareJid?.let(owners::get)?.activeAttempt,
+        )
+    }
+    activeOwner.validateTerminalDrain(request)?.let { reason ->
+        return TerminalDrainAndFenceResult.Corrupt(this, reason)
+    }
+    return null
+}
 
+private fun DeliveryJournal.prepareFencedTerminalDrain(
+    owner: DeliveryOwnerJournal,
+    requestedOwner: DeliveryOwnerBareJid,
+    request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceResult.Prepared {
     val effects = owner.terminalIntents.map { intent ->
         val row = owner.outboundRows.single { it.identity == intent.row }
         val callback = DeliveryCallbackRef(intent.row, request.attempt)
@@ -190,6 +234,13 @@ internal suspend fun SessionPrefs.persistTerminalDrainAndFence(
 
 private fun DeliveryOwnerJournal.validateTerminalDrain(
     request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceFailureReason? =
+    terminalDrainJournalFailure(request)
+        ?: terminalDrainIntentFailure(request)
+        ?: terminalDrainOrphanFailure()
+
+private fun DeliveryOwnerJournal.terminalDrainJournalFailure(
+    request: TerminalDrainAndFenceRequest,
 ): TerminalDrainAndFenceFailureReason? {
     if (terminalIntents.size > request.maxEffects) {
         return TerminalDrainAndFenceFailureReason.EFFECT_LIMIT_EXCEEDED
@@ -209,7 +260,12 @@ private fun DeliveryOwnerJournal.validateTerminalDrain(
     if (outboundRows.any { it.ownership is OutboundOwnership.NativeOwned }) {
         return TerminalDrainAndFenceFailureReason.NATIVE_OWNED_ROW_REMAINS
     }
-    val intentIdentities = terminalIntents.map { it.row }.toSet()
+    return null
+}
+
+private fun DeliveryOwnerJournal.terminalDrainIntentFailure(
+    request: TerminalDrainAndFenceRequest,
+): TerminalDrainAndFenceFailureReason? {
     for (intent in terminalIntents) {
         if (intent.row.ownerBareJid != request.attempt.ownerBareJid) {
             return TerminalDrainAndFenceFailureReason.INTENT_OWNER_MISMATCH
@@ -226,6 +282,11 @@ private fun DeliveryOwnerJournal.validateTerminalDrain(
             else -> return TerminalDrainAndFenceFailureReason.TERMINAL_OWNERSHIP_MISMATCH
         }
     }
+    return null
+}
+
+private fun DeliveryOwnerJournal.terminalDrainOrphanFailure(): TerminalDrainAndFenceFailureReason? {
+    val intentIdentities = terminalIntents.map { it.row }.toSet()
     if (outboundRows.any { row ->
             row.ownership is OutboundOwnership.Terminal && row.identity !in intentIdentities
         }

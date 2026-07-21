@@ -302,6 +302,19 @@ class TerminalDrainAndFenceTest {
     }
 
     @Test
+    fun `active owner without an owner journal fails fast without mutation`() {
+        val active = attempt("active")
+        val before = DeliveryJournal(activeOwnerBareJid = OWNER)
+
+        val failure = runCatching {
+            before.prepareTerminalDrainAndFence(request(active, "receipt"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(DeliveryJournal(activeOwnerBareJid = OWNER), before)
+    }
+
+    @Test
     fun `corrupt terminal state fails closed`() {
         val active = attempt("active")
         val id = intentId("one")

@@ -247,7 +247,7 @@ class TerminalReceiptReplayPersistenceTest {
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
                     owners = journal.owners + (
-                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)
                     ),
                 ),
                 Unit,
