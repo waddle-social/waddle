@@ -214,7 +214,6 @@ describe("root sync fail-closed contract", () => {
 			repoRoot: missingRepository,
 			commandRunner: commandHarness().commandRunner,
 			cuenvBinary,
-			cuenvBinary,
 		});
 		expect(missing.stderr).toContain("workspace project names mismatch");
 		expect(missing.stderr).toContain("missing: waddle-website");
@@ -228,7 +227,6 @@ describe("root sync fail-closed contract", () => {
 		const extra = checkRootSyncDrift({
 			repoRoot: extraRepository,
 			commandRunner: commandHarness().commandRunner,
-			cuenvBinary,
 			cuenvBinary,
 		});
 		expect(extra.stderr).toContain("extra: waddle-extra");

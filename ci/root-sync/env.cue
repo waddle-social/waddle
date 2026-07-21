@@ -57,7 +57,14 @@ schema.#Project & {
 		},
 	]
 
-	ci: provider: github: runner: "ubuntu-latest"
+	ci: provider: github: {
+		runner: "ubuntu-latest"
+		permissions: {
+			contents:        "read"
+			checks:          "none"
+			"pull-requests": "none"
+		}
+	}
 	ci: pipelines: {
 		default: {
 			mode:        "expanded"

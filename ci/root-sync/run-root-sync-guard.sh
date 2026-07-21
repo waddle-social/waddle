@@ -12,6 +12,9 @@ if [[ ! ${cuenv_bin} = /* || ! -x ${cuenv_bin} ]]; then
 	exit 1
 fi
 
+cd "${repo_root}"
+bun test ci/root-sync/run-root-sync-guard.test.ts
+
 "${cuenv_bin}" exec -p "${repo_root}/ci/root-sync" env ROOT_SYNC_CUENV="${cuenv_bin}" \
 	bash -ceu 'cd "$1"; bun test scripts/check-root-sync-drift.test.ts; bun scripts/check-root-sync-drift.mjs' \
 	bash "${repo_root}/server"
