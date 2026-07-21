@@ -13,7 +13,9 @@ internal class WorkerRecoveryOrchestrator(
                 decision.lifecycle,
                 state.currentLifecycle(),
             )
-            is WorkerRecoveryClaimDecision.RecoveryInProgress -> return WorkerRecoveryOutcome.RecoveryInProgress(decision.claim)
+            is WorkerRecoveryClaimDecision.RecoveryInProgress -> {
+                return WorkerRecoveryOutcome.RecoveryInProgress(decision.claim)
+            }
             is WorkerRecoveryClaimDecision.AwaitingExit -> return WorkerRecoveryOutcome.WorkerExitPending(
                 decision.lifecycle,
                 decision.ownership,
@@ -58,10 +60,21 @@ internal class WorkerRecoveryOrchestrator(
             return when (val cleanup = recoverDurableState(workers, lifecycle)) {
                 OwnerFinalizationResult.Finalized -> state.completeRecovery(claim, workers)
                 is OwnerFinalizationResult.Pending -> WorkerRecoveryOutcome.DurableCleanupPending(
-                    lifecycle, claim, cleanup.component, cleanup.count, cleanup.operation, cleanup.attempt,
+                    lifecycle,
+                    claim,
+                    cleanup.component,
+                    cleanup.count,
+                    cleanup.operation,
+                    cleanup.attempt,
                 )
                 is OwnerFinalizationResult.DurableCleanupFailed -> WorkerRecoveryOutcome.DurableCleanupFailed(
-                    lifecycle, claim, cleanup.component, cleanup.count, cleanup.operation, cleanup.cause, cleanup.attempt,
+                    lifecycle,
+                    claim,
+                    cleanup.component,
+                    cleanup.count,
+                    cleanup.operation,
+                    cleanup.cause,
+                    cleanup.attempt,
                 )
             }
         } finally {

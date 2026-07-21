@@ -9,32 +9,64 @@ data object Drain : LiveOutboundPurpose }
 internal sealed interface OutboundAdmissionLease {
     val lifecycle: SessionLifecycleRef
     val capability: LifecycleOperationRegistry.Lease
-    class OfflineOutbound private constructor(val source: DeliverySource, override val capability: LifecycleOperationRegistry.Lease) : OutboundAdmissionLease {
+    class OfflineOutbound private constructor(
+        val source: DeliverySource,
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
         override val lifecycle get() = capability.lifecycle
         val attempt: DeliveryAttemptRef? get() = capability.attempt
-        companion object { internal fun issue(source: DeliverySource, capability: LifecycleOperationRegistry.Lease) = OfflineOutbound(source, capability) }
+
+        companion object {
+            internal fun issue(
+                source: DeliverySource,
+                capability: LifecycleOperationRegistry.Lease,
+            ) = OfflineOutbound(source, capability)
+        }
     }
-    class LiveOutbound private constructor(val client: WaddleClientInterface, val purpose: LiveOutboundPurpose, override val capability: LifecycleOperationRegistry.Lease) : OutboundAdmissionLease {
+
+    class LiveOutbound private constructor(
+        val client: WaddleClientInterface,
+        val purpose: LiveOutboundPurpose,
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
         override val lifecycle get() = capability.lifecycle
         val attempt get() = requireNotNull(capability.attempt)
-        companion object { internal fun issue(client: WaddleClientInterface, purpose: LiveOutboundPurpose, capability: LifecycleOperationRegistry.Lease): LiveOutbound {
-            requireNotNull(capability.attempt) {
-                "live admission capability requires an attempt"
+
+        companion object {
+            internal fun issue(
+                client: WaddleClientInterface,
+                purpose: LiveOutboundPurpose,
+                capability: LifecycleOperationRegistry.Lease,
+            ): LiveOutbound {
+                requireNotNull(capability.attempt) {
+                    "live admission capability requires an attempt"
+                }
+                return LiveOutbound(client, purpose, capability)
             }
-            return LiveOutbound(client, purpose, capability)
-        } }
+        }
     }
-    class Terminal private constructor(override val capability: LifecycleOperationRegistry.Lease) : OutboundAdmissionLease {
+
+    class Terminal private constructor(
+        override val capability: LifecycleOperationRegistry.Lease,
+    ) : OutboundAdmissionLease {
         override val lifecycle get() = capability.lifecycle
         val attempt get() = requireNotNull(capability.attempt)
-        companion object { internal fun issue(capability: LifecycleOperationRegistry.Lease): Terminal {
-            requireNotNull(capability.attempt) {
-                "terminal admission capability requires an attempt"
+
+        companion object {
+            internal fun issue(capability: LifecycleOperationRegistry.Lease): Terminal {
+                requireNotNull(capability.attempt) {
+                    "terminal admission capability requires an attempt"
+                }
+                return Terminal(capability)
             }
-            return Terminal(capability)
-        } }
+        }
     }
 }
-internal sealed interface OutboundAdmissionResult { data class Granted(val lease: OutboundAdmissionLease) : OutboundAdmissionResult
-data object OwnerMismatch : OutboundAdmissionResult
-data object LifecycleUnavailable : OutboundAdmissionResult }
+
+internal sealed interface OutboundAdmissionResult {
+    data class Granted(val lease: OutboundAdmissionLease) : OutboundAdmissionResult
+
+    data object OwnerMismatch : OutboundAdmissionResult
+
+    data object LifecycleUnavailable : OutboundAdmissionResult
+}

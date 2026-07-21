@@ -12,12 +12,18 @@ internal fun DeliveryOwnerJournal.validateReceiptApplication(
     receipt: TerminalReceipt,
     ref: TerminalReceiptRef,
 ): TerminalReceiptCorruption? {
-    if (receipt.owner != requestedOwner || !receipt.matches(ref) || receipt.attempt.ownerBareJid != requestedOwner.value) {
+    if (
+        receipt.owner != requestedOwner ||
+        !receipt.matches(ref) ||
+        receipt.attempt.ownerBareJid != requestedOwner.value
+    ) {
         return TerminalReceiptCorruption.RECEIPT_BINDING_MISMATCH
     }
     if (activeAttempt != null) return TerminalReceiptCorruption.ACTIVE_ATTEMPT_REMAINS
     if (terminalIntents.isNotEmpty()) return TerminalReceiptCorruption.TERMINAL_INTENTS_REMAIN
-    if (outboundRows.map { it.identity }.toSet().size != outboundRows.size) return TerminalReceiptCorruption.DUPLICATE_ROW
+    if (outboundRows.map { it.identity }.toSet().size != outboundRows.size) {
+        return TerminalReceiptCorruption.DUPLICATE_ROW
+    }
     if (
         outboundRows.any {
             it.identity.ownerBareJid != requestedOwner.value

@@ -98,7 +98,10 @@ internal class OutboundSendService(
             }
             is LiveAdmissionResult.Queued -> {
                 OutboundSendDisposition.Queued(
-                    SendResult(WaddleSendMessageOutcome.NotConnected, DeliveryOutcomeRef(result.row.identity, result.row.source)),
+                    SendResult(
+                        WaddleSendMessageOutcome.NotConnected,
+                        DeliveryOutcomeRef(result.row.identity, result.row.source),
+                    ),
                 )
             }
             is LiveAdmissionResult.Conflict,

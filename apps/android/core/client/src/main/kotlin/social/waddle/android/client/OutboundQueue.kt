@@ -139,7 +139,9 @@ class DeliveryJournalStore(
      * Atomically consume this owner's SM snapshot, rotate durable UUID
      * attempt identity, and reconcile only this owner's rows.
      */
-    suspend fun beginAttempt(ownerBareJid: String): AttemptBootstrap = when (val result = beginAttemptResult(ownerBareJid)) {
+    suspend fun beginAttempt(ownerBareJid: String): AttemptBootstrap = when (
+        val result = beginAttemptResult(ownerBareJid)
+    ) {
         is BeginAttemptResult.Started -> result.bootstrap
         is BeginAttemptResult.PendingReceipt,
         is BeginAttemptResult.TombstoneNotPostFence,
