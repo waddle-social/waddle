@@ -1,11 +1,11 @@
 package social.waddle.android.client
 
-import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.store.TimelineStore
+import java.lang.reflect.Modifier
 
 class OutboundServiceArchitectureTest {
     @Test

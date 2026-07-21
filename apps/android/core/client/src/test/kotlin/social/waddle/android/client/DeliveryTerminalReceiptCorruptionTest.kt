@@ -1,9 +1,9 @@
 package social.waddle.android.client
 
-import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.mutablePreferencesOf
-import kotlinx.coroutines.flow.first
+import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals

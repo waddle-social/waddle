@@ -1,7 +1,6 @@
 package social.waddle.android.client
 
 import androidx.datastore.preferences.core.stringPreferencesKey
-import java.util.UUID
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -21,6 +20,7 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimant
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
 import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
+import java.util.UUID
 import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGeneration
 
 class TerminalReceiptLeasePersistenceTest {
@@ -98,10 +98,12 @@ class TerminalReceiptLeasePersistenceTest {
             fixture.prefs.updateDeliveryJournal { journal ->
                 DeliveryJournalMutation(journal.copy(activeOwnerBareJid = OTHER_OWNER), Unit)
             }
-            val wrongOwnerLease = fixture.lease.copy(ref = fixture.lease.ref.copy(
+            val wrongOwnerLease = fixture.lease.copy(
+                ref = fixture.lease.ref.copy(
                 owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(OTHER_OWNER),
                 attempt = fixture.lease.ref.attempt.copy(ownerBareJid = OTHER_OWNER),
-            ))
+            )
+            )
             val before = fixture.snapshot()
 
             when (operation) {
@@ -199,20 +201,30 @@ class TerminalReceiptLeasePersistenceTest {
 
     private fun leaseMismatchCases(): List<LeaseMismatchCase> = listOf(
         LeaseMismatchCase("attempt owner", workerClaimant("attempt-owner"), LeaseDenial.MISSING) { lease ->
-            lease.copy(ref = lease.ref.copy(
+            lease.copy(
+                ref = lease.ref.copy(
                 owner = social.waddle.android.client.prefs.DeliveryOwnerBareJid(OTHER_OWNER),
                 attempt = lease.ref.attempt.copy(ownerBareJid = OTHER_OWNER),
-            ))
+            )
+            )
         },
         LeaseMismatchCase("attempt id", workerClaimant("attempt-id"), LeaseDenial.REPLACED) { lease ->
-            lease.copy(ref = lease.ref.copy(attempt = lease.ref.attempt.copy(
+            lease.copy(
+                ref = lease.ref.copy(
+                    attempt = lease.ref.attempt.copy(
                 attemptId = DeliveryAttemptId(uuid("wrong-attempt-id")),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("native generation", workerClaimant("native-generation"), LeaseDenial.REPLACED) { lease ->
-            lease.copy(ref = lease.ref.copy(attempt = lease.ref.attempt.copy(
+            lease.copy(
+                ref = lease.ref.copy(
+                    attempt = lease.ref.attempt.copy(
                 nativeGeneration = NativeConnectionGeneration(lease.ref.attempt.nativeGeneration.value + 1u),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("receipt id", workerClaimant("receipt-id"), LeaseDenial.REPLACED) { lease ->
             lease.copy(ref = lease.ref.copy(id = TerminalReceiptId(uuid("wrong-receipt-id"))))
@@ -244,27 +256,43 @@ class TerminalReceiptLeasePersistenceTest {
         },
         LeaseMismatchCase("worker lifecycle generation", workerClaimant("worker-lifecycle"), LeaseDenial.LEASE_MISMATCH) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
-            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
+            lease.copy(
+                claim = lease.claim.copy(
+                    claimant = claimant.copy(
                 lifecycleGeneration = LifecycleGeneration(uuid("wrong-worker-lifecycle")),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("worker generation", workerClaimant("worker-generation"), LeaseDenial.LEASE_MISMATCH) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Worker
-            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
+            lease.copy(
+                claim = lease.claim.copy(
+                    claimant = claimant.copy(
                 workerGeneration = ReceiptWorkerGeneration(uuid("wrong-worker-generation")),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("finalizer lifecycle generation", finalizerClaimant("finalizer-lifecycle"), LeaseDenial.LEASE_MISMATCH) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Finalizer
-            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
+            lease.copy(
+                claim = lease.claim.copy(
+                    claimant = claimant.copy(
                 lifecycleGeneration = LifecycleGeneration(uuid("wrong-finalizer-lifecycle")),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("finalizer generation", finalizerClaimant("finalizer-generation"), LeaseDenial.LEASE_MISMATCH) { lease ->
             val claimant = lease.claim.claimant as TerminalReceiptClaimant.Finalizer
-            lease.copy(claim = lease.claim.copy(claimant = claimant.copy(
+            lease.copy(
+                claim = lease.claim.copy(
+                    claimant = claimant.copy(
                 finalizerGeneration = FinalizerGeneration(uuid("wrong-finalizer-generation")),
-            )))
+            )
+                )
+            )
         },
         LeaseMismatchCase("claim process epoch", workerClaimant("process-epoch"), LeaseDenial.LEASE_MISMATCH) { lease ->
             lease.copy(claim = lease.claim.copy(processEpoch = ProcessEpoch(uuid("wrong-process-epoch"))))

@@ -3,10 +3,6 @@ package social.waddle.android.client
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
-import java.io.IOException
-import java.util.concurrent.ConcurrentLinkedDeque
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -40,6 +36,10 @@ import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSmResumeState
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
+import java.io.IOException
+import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 fun testSessionInfo(
     sessionId: String = "sess-1",

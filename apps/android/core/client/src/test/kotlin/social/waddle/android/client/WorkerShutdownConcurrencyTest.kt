@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -21,6 +20,7 @@ import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -104,8 +104,10 @@ class WorkerShutdownConcurrencyTest {
     fun `O3 shutdown calls preserve live recovery claim across cancellation retry`() = runTest(timeout = 5.seconds) {
         val harness = ShutdownHarness(this, ownerFinalizer = null)
         val started = harness.start()
-        val held = (harness.coordinator.acquireOutbound(DeliverySource.Composer)
-            as OutboundAdmissionResult.Granted).lease as OutboundAdmissionLease.OfflineOutbound
+        val held = (
+            harness.coordinator.acquireOutbound(DeliverySource.Composer)
+            as OutboundAdmissionResult.Granted
+        ).lease as OutboundAdmissionLease.OfflineOutbound
         harness.holdDrain(started.attempt)
 
         harness.failDrain.complete(Unit)
@@ -127,8 +129,10 @@ class WorkerShutdownConcurrencyTest {
         assertEquals(expected, harness.coordinator.shutdown(LifecycleShutdownTarget.CurrentOwner(started.lifecycle)))
         assertEquals(
             loser.claim,
-            (harness.coordinator.recoverFencedWorkers(started.lifecycle)
-                as WorkerRecoveryOutcome.RecoveryInProgress).claim,
+            (
+                harness.coordinator.recoverFencedWorkers(started.lifecycle)
+                as WorkerRecoveryOutcome.RecoveryInProgress
+            ).claim,
         )
 
         winner.cancelAndJoin()

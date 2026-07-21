@@ -4,14 +4,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.IOException
-import java.util.logging.Level
-import java.util.logging.Logger
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import java.io.IOException
+import java.util.logging.Level
+import java.util.logging.Logger
 
 internal sealed interface OwnerFinalizationResult {
     data object Finalized : OwnerFinalizationResult
@@ -432,12 +432,20 @@ internal class OutboundLifecycleFinalizationOperations(
             journal.terminalIntentCount(lifecycle.ownerBareJid),
             if (terminalResult is WorkerAwaitOutcome.Exited &&
                 terminalResult.exit.reason is WorkerExitReason.RequestedStop
-            ) 0 else 1,
+            ) {
+                0
+            } else {
+                1
+            },
         )
-        return if (terminalPending == 0) OwnerFinalizationResult.Finalized else OwnerFinalizationResult.Pending(
+        return if (terminalPending == 0) {
+            OwnerFinalizationResult.Finalized
+        } else {
+            OwnerFinalizationResult.Pending(
             LifecyclePendingComponent.TERMINAL_DRAIN,
             terminalPending,
         )
+        }
     }
 
     private suspend fun collectAttempts(

@@ -1,15 +1,9 @@
 package social.waddle.android.client
 
-import java.util.UUID
-import java.util.logging.Handler
-import java.util.logging.LogRecord
-import java.util.logging.Logger
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -18,27 +12,21 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
-import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
-import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptId
+import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryCallbackRef
 import social.waddle.android.client.prefs.DeliveryJournalMutation
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
-import social.waddle.android.client.prefs.DeliverySource
-import social.waddle.android.client.prefs.DeliveryTerminalKind
-import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
-import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.ProcessEpoch
-import social.waddle.android.client.prefs.TerminalReceipt
 import social.waddle.android.client.prefs.TerminalClaimId
+import social.waddle.android.client.prefs.TerminalReceipt
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptId
@@ -236,8 +224,10 @@ class DeliveryTerminalReceiptApplicationTest {
         runCurrent()
 
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
-        val failure = ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as
-            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure
+        val failure = (
+            (exit.reason as WorkerExitReason.UnexpectedFailure).kind as
+            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+        ).failure
         assertEquals(
             TerminalReceiptApplicationFailure.PersistenceExhausted(
                 TerminalReceiptPersistenceOperation.DISCOVERY,
@@ -483,5 +473,4 @@ class DeliveryTerminalReceiptApplicationTest {
         assertTrue(restartedEvents.isEmpty())
         assertRequested(second)
     }
-
 }

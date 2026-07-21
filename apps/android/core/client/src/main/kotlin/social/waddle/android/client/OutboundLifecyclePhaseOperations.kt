@@ -2,11 +2,11 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import java.io.IOException
 import social.waddle.android.client.DeliveryJournalStore.ResumeTransitionResult
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import java.io.IOException
 import java.util.logging.Level
 import java.util.logging.Logger
 

@@ -1,14 +1,17 @@
 package social.waddle.android.client.prefs
 
-import java.util.UUID
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.UUID
 
 class TerminalReceiptSerializationTest {
-    private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+    private val json = Json {
+        encodeDefaults = true;
+    ignoreUnknownKeys = true
+    }
 
     @Test
     fun `terminal receipt round trips every claimant and receipt state`() {

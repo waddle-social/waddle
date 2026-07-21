@@ -4,7 +4,6 @@ import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
-import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.TerminalReceipt
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptId
@@ -216,6 +215,7 @@ internal sealed interface TerminalReceiptReleaseResult {
     val journal: DeliveryJournal
 
     data class Released(override val journal: DeliveryJournal, val lease: TerminalReceiptLease) : TerminalReceiptReleaseResult
+
     /** The exact receipt is already pending and unclaimed after a prior release commit. */
     data class AlreadyReleased(override val journal: DeliveryJournal, val receipt: TerminalReceipt) : TerminalReceiptReleaseResult
     data class AlreadyAcknowledged(

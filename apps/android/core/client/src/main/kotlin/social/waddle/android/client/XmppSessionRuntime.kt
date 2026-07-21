@@ -118,6 +118,7 @@ class XmppSessionRuntime private constructor(
     private val runtimeRootJob = SupervisorJob()
     private val runtimeRootScope = CoroutineScope(runtimeRootJob + dispatcher)
     private var nextGeneration = 0L
+
     @Volatile
     private var activeRuntime: ActiveRuntimeSession? = null
 

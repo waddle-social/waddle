@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -15,18 +14,19 @@ import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.NativeConnectionGeneration
 import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
+import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.QueuedOutboundContent
 import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.QueuedOutboundTarget
-import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TerminalReceipt
+import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptId
-import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.util.UUID
 
 internal fun terminalWorkerDraft(id: String): QueuedOutboundDraft = QueuedOutboundDraft.create(
     ownerBareJid = TERMINAL_WORKER_OWNER,

@@ -1,7 +1,7 @@
 package social.waddle.android.client
 
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,7 +14,6 @@ import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.client.ffi.WaddleClientInterface
-import java.util.UUID
 
 /**
  * The authoritative outbound lifecycle state store for one authenticated owner.
@@ -101,6 +100,7 @@ internal class OutboundLifecycleStateStore(
         recoverDurableState = finalizationOperations::recoverDurableState,
         timeoutMillis = transitionTimeoutMillis,
     )
+
     /** Replaced on every start; old completions cannot affect a new owner. */
     private var retainedOperations: LifecycleOperationRegistry? = null
     private var ownerWorkers: OwnerWorkers? = null
@@ -109,6 +109,7 @@ internal class OutboundLifecycleStateStore(
     private var lastClosedAttempt: AttemptRecord? = null
     private var pendingShutdown: LifecycleShutdownOutcome.FencedWithPending? = null
     private var recoveryClaim: WorkerRecoveryClaim? = null
+
     // Gate-confined bootstrap-pair state; it moves with the lifecycle owner.
     private var bootstrapStartupLifecycle: SessionLifecycleRef? = null
     private var bootstrapTeardownOwnerships: Set<WorkerOwnership> = emptySet()
@@ -173,8 +174,11 @@ internal class OutboundLifecycleStateStore(
             bootstrapWorkerExit = BootstrapWorkerExitFailure(exit)
             return BootstrapExitDisposition.RecordedFailure
         }
-        return if (bootstrapWorkerExit?.exit?.ownership() == exit.ownership()) BootstrapExitDisposition.DuplicateFailure
-        else BootstrapExitDisposition.SecondaryFailure
+        return if (bootstrapWorkerExit?.exit?.ownership() == exit.ownership()) {
+            BootstrapExitDisposition.DuplicateFailure
+        } else {
+            BootstrapExitDisposition.SecondaryFailure
+        }
     }
 
     @Volatile
@@ -238,7 +242,9 @@ internal class OutboundLifecycleStateStore(
                     false
                 }
             }
-            return if (opened) LifecycleStartResult.Started(lifecycle) else {
+            return if (opened) {
+                LifecycleStartResult.Started(lifecycle)
+            } else {
                 phaseObserver.after(OutboundLifecyclePhase.STARTUP_READINESS_LOST)
                 compensateFailedStart(lifecycle)
                 LifecycleStartResult.Failed(lifecycle, LifecycleStartFailure.WORKER_READINESS_FAILED)

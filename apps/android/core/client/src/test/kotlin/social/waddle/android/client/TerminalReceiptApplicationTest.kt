@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,6 +27,7 @@ import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
 import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
 import social.waddle.android.client.prefs.WorkerGeneration
+import java.util.UUID
 
 class TerminalReceiptApplicationTest {
     @Test
@@ -110,12 +110,16 @@ class TerminalReceiptApplicationTest {
         val wrongLeases = listOf(
             claimed.lease.copy(claim = claimed.lease.claim.copy(id = TerminalClaimId(uuid("released-other-claim")))),
             claimed.lease.copy(claim = claimed.lease.claim.copy(claimant = TerminalReceiptClaimant.BootstrapProcess)),
-            claimed.lease.copy(claim = claimed.lease.claim.copy(
+            claimed.lease.copy(
+                claim = claimed.lease.claim.copy(
                 claimant = exactWorker.copy(lifecycleGeneration = LifecycleGeneration(uuid("released-other-lifecycle"))),
-            )),
-            claimed.lease.copy(claim = claimed.lease.claim.copy(
+            )
+            ),
+            claimed.lease.copy(
+                claim = claimed.lease.claim.copy(
                 claimant = exactWorker.copy(workerGeneration = WorkerGeneration(uuid("released-other-worker"))),
-            )),
+            )
+            ),
             claimed.lease.copy(claim = claimed.lease.claim.copy(processEpoch = ProcessEpoch(uuid("released-other-epoch")))),
         )
 
@@ -173,12 +177,16 @@ class TerminalReceiptApplicationTest {
             as TerminalReceiptClaimResult.Claimed
         val workerIdentity = workerClaim.lease.claim.claimant as TerminalReceiptClaimant.Worker
         val workerWrongGenerations = listOf(
-            workerClaim.lease.copy(claim = workerClaim.lease.claim.copy(
+            workerClaim.lease.copy(
+                claim = workerClaim.lease.claim.copy(
                 claimant = workerIdentity.copy(lifecycleGeneration = LifecycleGeneration(uuid("other-lifecycle"))),
-            )),
-            workerClaim.lease.copy(claim = workerClaim.lease.claim.copy(
+            )
+            ),
+            workerClaim.lease.copy(
+                claim = workerClaim.lease.claim.copy(
                 claimant = workerIdentity.copy(workerGeneration = WorkerGeneration(uuid("other-worker"))),
-            )),
+            )
+            ),
         )
 
         val finalizer = TerminalReceiptClaimant.Finalizer(
@@ -191,9 +199,11 @@ class TerminalReceiptApplicationTest {
         )
             as TerminalReceiptClaimResult.Claimed
         val finalizerIdentity = finalizerClaim.lease.claim.claimant as TerminalReceiptClaimant.Finalizer
-        val finalizerWrongGeneration = finalizerClaim.lease.copy(claim = finalizerClaim.lease.claim.copy(
+        val finalizerWrongGeneration = finalizerClaim.lease.copy(
+            claim = finalizerClaim.lease.claim.copy(
             claimant = finalizerIdentity.copy(finalizerGeneration = FinalizerGeneration(uuid("other-finalizer"))),
-        ))
+        )
+        )
 
         (workerWrongGenerations + finalizerWrongGeneration).forEach { wrong ->
             val source = if (wrong.ref == workerClaim.lease.ref) workerClaim else finalizerClaim
@@ -246,16 +256,22 @@ class TerminalReceiptApplicationTest {
 
     private fun wrongLeases(lease: TerminalReceiptLease): List<TerminalReceiptLease> = listOf(
         lease.copy(claim = lease.claim.copy(id = TerminalClaimId(uuid("wrong-id")))),
-        lease.copy(claim = lease.claim.copy(claimant = TerminalReceiptClaimant.Worker(
+        lease.copy(
+            claim = lease.claim.copy(
+                claimant = TerminalReceiptClaimant.Worker(
             LifecycleGeneration(uuid("wrong-lifecycle")),
             TerminalReceiptWorkerKind.DELIVERY_TERMINAL,
             WorkerGeneration(uuid("wrong-worker")),
-        ))),
+        )
+            )
+        ),
         lease.copy(claim = lease.claim.copy(processEpoch = ProcessEpoch(uuid("wrong-epoch")))),
-        lease.copy(ref = lease.ref.copy(
+        lease.copy(
+            ref = lease.ref.copy(
             owner = DeliveryOwnerBareJid("other@waddle.test"),
             attempt = lease.ref.attempt.copy(ownerBareJid = "other@waddle.test"),
-        )),
+        )
+        ),
         lease.copy(ref = lease.ref.copy(attempt = lease.ref.attempt.copy(attemptId = DeliveryAttemptId(uuid("wrong-attempt"))))),
         lease.copy(ref = lease.ref.copy(id = TerminalReceiptId(uuid("wrong-receipt")))),
     )

@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -9,6 +8,7 @@ import org.junit.Test
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.NativeConnectionGeneration
+import java.util.UUID
 
 class LifecycleReleaseHandlingTest {
     @Test

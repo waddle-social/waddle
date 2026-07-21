@@ -1,8 +1,5 @@
 package social.waddle.android.client
 
-import java.io.IOException
-import java.util.logging.Level
-import java.util.logging.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -17,6 +14,7 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptClaimant
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
+import java.io.IOException
 import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGeneration
 
 /** Applies one durable terminal receipt and owns its exact claim cleanup. */
@@ -31,9 +29,11 @@ internal class TerminalReceiptProcessor(
     suspend fun drain() {
         val owner = DeliveryOwnerBareJid(ownership.lifecycle.ownerBareJid)
         try {
-            when (val discovery = retry(TerminalReceiptPersistenceOperation.DISCOVERY, owner, null) {
+            when (
+                val discovery = retry(TerminalReceiptPersistenceOperation.DISCOVERY, owner, null) {
                 journal.discoverTerminalReceipt(owner)
-            }) {
+            }
+            ) {
                 is TerminalReceiptDiscovery.Pending -> claimAndApply(owner, discovery)
                 is TerminalReceiptDiscovery.Corrupt -> fail(TerminalReceiptApplicationFailure.DiscoveryCorrupt(owner, discovery.reason))
                 is TerminalReceiptDiscovery.OwnerFenced -> fail(TerminalReceiptApplicationFailure.DiscoveryOwnerFenced(discovery.requested, discovery.actual))
@@ -58,7 +58,9 @@ internal class TerminalReceiptProcessor(
     fun failureOf(failure: Throwable): TerminalReceiptFailureExtraction {
         (failure as? TerminalReceiptApplicationException)?.let { return TerminalReceiptFailureExtraction.Found(it.failure) }
         val cleanup = failure.suppressed.filterIsInstance<TerminalReceiptCleanupException>().lastOrNull()
-        return cleanup?.let { TerminalReceiptFailureExtraction.Found(TerminalReceiptApplicationFailure.CleanupUnresolved(it.evidence)) }
+        return cleanup?.let {
+            TerminalReceiptFailureExtraction.Found(TerminalReceiptApplicationFailure.CleanupUnresolved(it.evidence))
+        }
             ?: TerminalReceiptFailureExtraction.None
     }
 
@@ -66,9 +68,11 @@ internal class TerminalReceiptProcessor(
         val claim = TerminalReceiptClaimState.Claimed(
             TerminalClaimId.random(), ownership.claimant(), processEpoch,
         )
-        when (val claimed = retry(TerminalReceiptPersistenceOperation.CLAIM, owner, discovery.ref) {
+        when (
+            val claimed = retry(TerminalReceiptPersistenceOperation.CLAIM, owner, discovery.ref) {
             journal.claimTerminalReceipt(TerminalReceiptClaimRequest(discovery.ref, claim))
-        }) {
+        }
+        ) {
             is TerminalReceiptClaimResult.Claimed -> apply(claimed)
             is TerminalReceiptClaimResult.AlreadyAcknowledged -> Unit
             is TerminalReceiptClaimResult.Busy -> fail(TerminalReceiptApplicationFailure.ClaimBusy(claimed))
@@ -82,9 +86,12 @@ internal class TerminalReceiptProcessor(
     private suspend fun apply(claimed: TerminalReceiptClaimResult.Claimed) {
         try {
             claimed.effects.forEach(::dispatch)
-            when (val result = retry(TerminalReceiptPersistenceOperation.ACKNOWLEDGE, claimed.lease.ref.owner, claimed.lease.ref) {
+            when (
+                val result =
+                    retry(TerminalReceiptPersistenceOperation.ACKNOWLEDGE, claimed.lease.ref.owner, claimed.lease.ref) {
                 journal.acknowledgeTerminalReceipt(claimed.lease)
-            }) {
+            }
+            ) {
                 is TerminalReceiptAcknowledgeResult.Acknowledged, is TerminalReceiptAcknowledgeResult.AlreadyAcknowledged -> Unit
                 is TerminalReceiptAcknowledgeResult.LeaseMismatch -> fail(TerminalReceiptApplicationFailure.AcknowledgeLeaseMismatch(result))
                 is TerminalReceiptAcknowledgeResult.ReceiptMissing -> fail(TerminalReceiptApplicationFailure.AcknowledgeMissing(result))
@@ -101,7 +108,10 @@ internal class TerminalReceiptProcessor(
         try {
             val cleanup = release(lease) as? TerminalReceiptCleanupResult.Unresolved
             if (cleanup != null) {
-                TerminalReceiptCleanupException(cleanup.evidence).also { unresolvedCleanup = it; primary.addSuppressed(it) }
+                TerminalReceiptCleanupException(cleanup.evidence).also {
+                    unresolvedCleanup = it;
+                primary.addSuppressed(it)
+                }
             }
         } catch (failure: TerminalReceiptCleanupException) {
             unresolvedCleanup = failure
@@ -122,9 +132,11 @@ internal class TerminalReceiptProcessor(
                     is TerminalReceiptReleaseResult.Corrupt -> unresolved(lease, TerminalReceiptCleanupReason.Corrupt(result.reason), attempts)
                 }
             } catch (failure: Throwable) {
-                if (attempts == MAX_ATTEMPTS) throw TerminalReceiptCleanupException(
+                if (attempts == MAX_ATTEMPTS) {
+                    throw TerminalReceiptCleanupException(
                     TerminalReceiptCleanupEvidence(lease, attempts, TerminalReceiptCleanupReason.Persistence(category(failure))), failure,
                 )
+                }
                 delay(RETRY_DELAYS[attempts - 1])
             }
         }
@@ -150,7 +162,9 @@ internal class TerminalReceiptProcessor(
     private fun unresolved(lease: TerminalReceiptLease, reason: TerminalReceiptCleanupReason, attempts: Int) =
         TerminalReceiptCleanupResult.Unresolved(TerminalReceiptCleanupEvidence(lease, attempts, reason))
     private fun category(failure: Throwable) = when {
-        failure is DeliveryJournalDecodeException && generateSequence<Throwable>(failure) { it.cause }.any { it is SerializationException } -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
+        failure is DeliveryJournalDecodeException && generateSequence<Throwable>(failure) {
+            it.cause
+        }.any { it is SerializationException } -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
         failure is IOException -> TerminalReceiptCleanupFailureCategory.IO_FAILURE
         failure is CancellationException -> TerminalReceiptCleanupFailureCategory.CANCELLATION
         failure is SerializationException -> TerminalReceiptCleanupFailureCategory.CODEC_FAILURE
@@ -160,5 +174,6 @@ internal class TerminalReceiptProcessor(
     }
     private fun fail(failure: TerminalReceiptApplicationFailure, cause: Throwable? = null): Nothing = throw TerminalReceiptApplicationException(failure, cause)
     private fun WorkerOwnership.claimant() = TerminalReceiptClaimant.Worker(LifecycleGeneration(lifecycle.id.value.toString()), TerminalReceiptWorkerKind.DELIVERY_TERMINAL, ReceiptWorkerGeneration(generation.value.toString()))
-    private companion object { val RETRY_DELAYS = longArrayOf(250, 500, 1_000, 2_000, 5_000); const val MAX_ATTEMPTS = 6 }
+    private companion object { val RETRY_DELAYS = longArrayOf(250, 500, 1_000, 2_000, 5_000);
+    const val MAX_ATTEMPTS = 6 }
 }

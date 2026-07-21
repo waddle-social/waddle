@@ -2,23 +2,21 @@ package social.waddle.android.client
 
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.stringPreferencesKey
-import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -26,6 +24,7 @@ import social.waddle.android.client.prefs.DeliveryJournal
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class XmppSessionRuntimeWorkerRecoveryTest {
@@ -206,7 +205,10 @@ class XmppSessionRuntimeWorkerRecoveryTest {
     }
 
     private suspend fun awaitCheckpoint(name: String, deferred: CompletableDeferred<Unit>) {
-        check(withTimeoutOrNull(5_000) { deferred.await(); true } == true) {
+        check(withTimeoutOrNull(5_000) {
+            deferred.await()
+        true
+        } == true) {
             "timed out waiting for $name"
         }
     }
@@ -328,5 +330,4 @@ class XmppSessionRuntimeWorkerRecoveryTest {
         assertEquals(2, factory.clients.size)
         assertLoggedOutTwice(manager, prefs)
     }
-
 }

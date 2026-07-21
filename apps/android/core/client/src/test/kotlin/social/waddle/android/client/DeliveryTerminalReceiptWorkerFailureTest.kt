@@ -1,48 +1,29 @@
 package social.waddle.android.client
 
-import java.io.IOException
-import java.util.UUID
-import java.util.logging.Handler
-import java.util.logging.LogRecord
-import java.util.logging.Logger
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.SerializationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.DeliveryJournalStore.EnqueueResult
-import social.waddle.android.client.DeliveryJournalStore.LiveAdmissionResult
-import social.waddle.android.client.prefs.DeliveryAttemptRef
-import social.waddle.android.client.prefs.DeliveryAttemptId
-import social.waddle.android.client.prefs.DeliveryCallbackRef
 import social.waddle.android.client.prefs.DeliveryJournalMutation
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
-import social.waddle.android.client.prefs.DeliverySource
-import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.NativeOutboundPhase
 import social.waddle.android.client.prefs.OutboundOwnership
-import social.waddle.android.client.prefs.QueuedOutboundContent
-import social.waddle.android.client.prefs.QueuedOutboundDraft
-import social.waddle.android.client.prefs.QueuedOutboundMessage
-import social.waddle.android.client.prefs.QueuedOutboundPayload
-import social.waddle.android.client.prefs.QueuedOutboundTarget
-import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.ProcessEpoch
-import social.waddle.android.client.prefs.TerminalReceipt
+import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
-import social.waddle.android.client.prefs.TerminalReceiptEffect
-import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
-import kotlinx.serialization.SerializationException
+import java.io.IOException
+import java.util.logging.Handler
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DeliveryTerminalReceiptWorkerFailureTest {
@@ -291,9 +272,10 @@ class DeliveryTerminalReceiptWorkerFailureTest {
         assertTrue(primary.suppressed.isEmpty())
         assertEquals(1, events.size)
         assertTrue(
-            (prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as
-                TerminalReceiptState.Pending).claim is TerminalReceiptClaimState.Unclaimed,
+            (
+                prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as
+                TerminalReceiptState.Pending
+            ).claim is TerminalReceiptClaimState.Unclaimed,
         )
     }
-
 }

@@ -1,29 +1,21 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.prefs.DeliveryAttemptId
-import social.waddle.android.client.prefs.DeliveryAttemptTransition
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.QueuedOutboundContent
@@ -33,8 +25,6 @@ import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
-import social.waddle.android.client.store.SessionStores
-import social.waddle.client.ffi.WaddleSendMessageOutcome
 import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -106,7 +96,8 @@ class OutboundLifecycleStateStoreRecoveryTest {
             ordinaryFixture.stop(ordinaryFixture.start())
 
             val cancellation = CancellationException("startup cancellation $afterTerminal")
-            val cancellationFixture = stateStoreFixture(workerStartHooks = failingStartHooks(afterTerminal, cancellation))
+            val cancellationFixture =
+                stateStoreFixture(workerStartHooks = failingStartHooks(afterTerminal, cancellation))
             val cancelled = runCatching {
                 cancellationFixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
             }.exceptionOrNull()
@@ -157,14 +148,16 @@ class OutboundLifecycleStateStoreRecoveryTest {
                 override suspend fun beforeTerminal() = Unit
 
                 override suspend fun afterTerminal(terminal: DeliveryTerminalWorker.Run) {
-                    terminalExitAwaiter.complete(backgroundScope.async {
+                    terminalExitAwaiter.complete(
+                        backgroundScope.async {
                         val exit = when (val outcome = terminal.awaitExit(STATE_STORE_TEST_TIMEOUT_MILLIS)) {
                             is WorkerAwaitOutcome.Exited -> outcome.exit
                             WorkerAwaitOutcome.TimedOut -> error("terminal startup worker did not exit")
                         }
                         terminalExitObserved.complete(exit)
                         exit
-                    })
+                    }
+                    )
                 }
 
                 override suspend fun afterInstall(workers: OwnerWorkers) {
@@ -224,9 +217,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
             workerStartHooks = failingAfterInstall(installed, cancellation),
         )
 
-        assertSame(cancellation, runCatching {
+        assertSame(
+            cancellation,
+            runCatching {
             fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
-        }.exceptionOrNull())
+        }.exceptionOrNull()
+        )
         assertRequestedStop(installed.await())
         fixture.stop(fixture.start())
     }
@@ -239,9 +235,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
             workerStartHooks = failingAfterInstall(installed, error),
         )
 
-        assertSame(error, runCatching {
+        assertSame(
+            error,
+            runCatching {
             fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
-        }.exceptionOrNull())
+        }.exceptionOrNull()
+        )
         assertRequestedStop(installed.await())
         fixture.stop(fixture.start())
     }
@@ -259,9 +258,12 @@ class OutboundLifecycleStateStoreRecoveryTest {
                 workerExitEvidence = FailThirdDiscardEvidence(cleanup),
             )
 
-            assertSame(primary, runCatching {
+            assertSame(
+                primary,
+                runCatching {
                 fixture.messenger.start(backgroundScope, STATE_STORE_OWNER)
-            }.exceptionOrNull())
+            }.exceptionOrNull()
+            )
             assertRequestedStop(installed.await())
             assertEquals(1, primary.suppressed.size)
             assertSame(cleanup, primary.suppressed.single())

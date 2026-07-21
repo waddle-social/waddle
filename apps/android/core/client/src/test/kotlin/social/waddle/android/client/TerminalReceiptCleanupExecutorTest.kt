@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -17,6 +16,7 @@ import social.waddle.android.client.prefs.ProcessEpoch
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TerminalReceiptCleanupExecutorTest {
@@ -133,8 +133,10 @@ class TerminalReceiptCleanupExecutorTest {
         }
 
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
-        val cleanup = ((exit.reason as WorkerExitReason.UnexpectedFailure).kind as
-            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION).failure as TerminalReceiptApplicationFailure.CleanupUnresolved
+        val cleanup = (
+            (exit.reason as WorkerExitReason.UnexpectedFailure).kind as
+            WorkerFailureKind.TERMINAL_RECEIPT_APPLICATION
+        ).failure as TerminalReceiptApplicationFailure.CleanupUnresolved
         assertEquals(6, cleanup.evidence.attempts)
         advanceTimeBy(60_000)
         runCurrent()

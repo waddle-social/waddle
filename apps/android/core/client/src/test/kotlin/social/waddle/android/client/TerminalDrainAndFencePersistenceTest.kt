@@ -2,15 +2,13 @@ package social.waddle.android.client
 
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
-import java.io.IOException
-import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
@@ -42,6 +40,8 @@ import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.io.IOException
+import java.util.UUID
 
 class TerminalDrainAndFencePersistenceTest {
     @Test
@@ -272,8 +272,10 @@ class TerminalDrainAndFencePersistenceTest {
         writeRawJournal(store, corruptRaw)
         assertEquals(
             TerminalDrainAndFenceFailureReason.NATIVE_OWNED_ROW_REMAINS,
-            (prefs.persistTerminalDrainAndFence(request(active, "receipt"))
-                as TerminalDrainAndFenceResult.Corrupt).reason,
+            (
+                prefs.persistTerminalDrainAndFence(request(active, "receipt"))
+                as TerminalDrainAndFenceResult.Corrupt
+            ).reason,
         )
         assertEquals(corruptRaw, store.data.first()[DELIVERY_JOURNAL_KEY])
     }
@@ -411,6 +413,9 @@ class TerminalDrainAndFencePersistenceTest {
         const val FOREIGN_OWNER = "foreign@waddle.test"
         val DELIVERY_JOURNAL_KEY = stringPreferencesKey("delivery_journal_v1")
         val journalJson = Json { encodeDefaults = true }
-        val prettyJournalJson = Json { encodeDefaults = true; prettyPrint = true }
+        val prettyJournalJson = Json {
+            encodeDefaults = true
+        prettyPrint = true
+        }
     }
 }

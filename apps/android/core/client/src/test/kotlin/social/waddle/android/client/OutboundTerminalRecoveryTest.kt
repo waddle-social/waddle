@@ -1,8 +1,8 @@
 package social.waddle.android.client
 
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -104,8 +104,10 @@ class OutboundTerminalRecoveryTest {
         assertEquals(WorkerRecoveryOutcome.Recovered, coordinator.recoverFencedWorkers(started.lifecycle))
         assertEquals(1, events.size)
         assertTrue(
-            (prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as
-                TerminalReceiptState.Pending).claim is TerminalReceiptClaimState.Unclaimed,
+            (
+                prefs.deliveryJournal.first().owners.getValue(OWNER).terminalReceipt?.state as
+                TerminalReceiptState.Pending
+            ).claim is TerminalReceiptClaimState.Unclaimed,
         )
 
         failDispatch = false

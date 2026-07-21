@@ -1,12 +1,12 @@
 package social.waddle.android.client
 
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.TestScope
@@ -27,11 +27,11 @@ import social.waddle.android.client.prefs.OutboundOwnership
 import social.waddle.android.client.prefs.toDomain
 import social.waddle.android.client.prefs.toFfi
 import social.waddle.android.client.prefs.toSnapshot
-import social.waddle.android.client.session.ConnectionAttemptRunner
 import social.waddle.android.client.session.ActiveSession
+import social.waddle.android.client.session.ConnectionAttemptRunner
 import social.waddle.android.client.session.ConnectionLoop
-import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleDeliveryAttemptTransition
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSessionReadyKind

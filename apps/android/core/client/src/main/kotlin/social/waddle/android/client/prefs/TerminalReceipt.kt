@@ -1,8 +1,8 @@
 package social.waddle.android.client.prefs
 
-import java.util.UUID
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import java.util.UUID
 
 @Serializable
 @JvmInline
@@ -200,10 +200,12 @@ data class TerminalReceipt(
         require(preparedAtMillis >= 0) { "terminal receipt timestamp must be non-negative" }
         val effects = (state as? TerminalReceiptState.Pending)?.effects
         if (effects != null) {
-            require(effects.all { effect ->
+            require(
+                effects.all { effect ->
                 effect.row.ownerBareJid == owner.value &&
                     effect.callback.attempt == attempt
-            }) { "terminal receipt effects must match the receipt owner and attempt" }
+            }
+            ) { "terminal receipt effects must match the receipt owner and attempt" }
         }
     }
 }

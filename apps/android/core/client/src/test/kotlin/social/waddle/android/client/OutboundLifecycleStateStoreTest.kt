@@ -1,38 +1,16 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import social.waddle.android.client.prefs.DeliveryAttemptId
-import social.waddle.android.client.prefs.DeliveryAttemptTransition
-import social.waddle.android.client.prefs.DeliverySource
-import social.waddle.android.client.prefs.DeliveryTerminalKind
-import social.waddle.android.client.prefs.QueuedOutboundContent
-import social.waddle.android.client.prefs.QueuedOutboundDraft
-import social.waddle.android.client.prefs.QueuedOutboundPayload
-import social.waddle.android.client.prefs.QueuedOutboundTarget
-import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.session.ActiveSession
-import social.waddle.android.client.session.ResumePersistence
-import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleSendMessageOutcome
-import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundLifecycleStateStoreTest {
@@ -279,5 +257,4 @@ class OutboundLifecycleStateStoreTest {
             ),
         )
     }
-
 }

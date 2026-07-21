@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -11,13 +10,13 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundDrainRecoveryTest {

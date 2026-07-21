@@ -133,8 +133,11 @@ internal class OutboundSendService(
     ): WaddleSendMessageOutcome {
         val (finalBody, options) = preparedSend(queued.clientStanzaId, queued.body, queued.sendExtras())
         val outcome = try {
-            if (queued.isGroupchat) client.sendGroupchatMessage(queued.conversationJid, finalBody, options)
-            else client.sendChatMessage(queued.conversationJid, finalBody, options)
+            if (queued.isGroupchat) {
+                client.sendGroupchatMessage(queued.conversationJid, finalBody, options)
+            } else {
+                client.sendChatMessage(queued.conversationJid, finalBody, options)
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {

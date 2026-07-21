@@ -1,14 +1,12 @@
 package social.waddle.android.client
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryAttemptTransition
-import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryOwnerBareJid
+import social.waddle.android.client.prefs.DeliverySource
 import social.waddle.android.client.prefs.DeliveryTerminalKind
 import social.waddle.android.client.prefs.QueuedOutboundContent
-import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundReply
 import social.waddle.android.client.prefs.QueuedOutboundTarget
 import social.waddle.android.client.prefs.QueuedOutboundThread
@@ -379,5 +377,4 @@ internal class OutboundMessenger(
             )
         }
     }
-
 }

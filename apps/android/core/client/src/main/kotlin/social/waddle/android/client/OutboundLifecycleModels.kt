@@ -139,8 +139,12 @@ internal class LifecycleOperationRegistry(
         (lease as? IssuedLease)?.let { it.isOwnedBy(this) && retained[it.operationId] === it } == true
 
     fun waiterIfRetained(): CompletableDeferred<Unit>? =
-        if (retained.isEmpty()) null else emptyWaiter ?: CompletableDeferred<Unit>().also {
+        if (retained.isEmpty()) {
+            null
+        } else {
+            emptyWaiter ?: CompletableDeferred<Unit>().also {
             emptyWaiter = it
+        }
         }
 
     fun waiterIfOtherRetained(
@@ -193,8 +197,11 @@ internal fun requireLifecycleRelease(
     when (outcome) {
         LifecycleReleaseOutcome.Released -> Unit
         LifecycleReleaseOutcome.AlreadyReleased ->
-            if (site == LifecycleReleaseSite.TRANSPORT_SUPERSEDED) Unit
-            else surfaceReleaseViolation(outcome, capability, site, primary)
+            if (site == LifecycleReleaseSite.TRANSPORT_SUPERSEDED) {
+                Unit
+            } else {
+                surfaceReleaseViolation(outcome, capability, site, primary)
+            }
         LifecycleReleaseOutcome.NotOwned ->
             surfaceReleaseViolation(outcome, capability, site, primary)
     }
@@ -267,8 +274,11 @@ internal fun decideRotationMutationRelease(
     current: RotationMutationLease?,
     requested: LifecycleOperationRegistry.Lease,
 ): RotationMutationReleaseDecision =
-    if (current?.capability === requested) RotationMutationReleaseDecision.ReleaseCurrent(current)
-    else RotationMutationReleaseDecision.NotOwned(current)
+    if (current?.capability === requested) {
+        RotationMutationReleaseDecision.ReleaseCurrent(current)
+    } else {
+        RotationMutationReleaseDecision.NotOwned(current)
+    }
 
 internal sealed interface TransportAttachOutcome {
     data object Attached : TransportAttachOutcome
@@ -340,10 +350,16 @@ internal fun decideRecoverySiblingStop(
         }
     }
     return when (failed) {
-        terminal -> if (drainExit == null) RecoverySiblingStopDecision.Stop(drain)
-        else RecoverySiblingStopDecision.AlreadyExited
-        drain -> if (terminalExit == null) RecoverySiblingStopDecision.Stop(terminal)
-        else RecoverySiblingStopDecision.AlreadyExited
+        terminal -> if (drainExit == null) {
+            RecoverySiblingStopDecision.Stop(drain)
+        } else {
+            RecoverySiblingStopDecision.AlreadyExited
+        }
+        drain -> if (terminalExit == null) {
+            RecoverySiblingStopDecision.Stop(terminal)
+        } else {
+            RecoverySiblingStopDecision.AlreadyExited
+        }
         else -> RecoverySiblingStopDecision.UnknownFailedWorker
     }
 }

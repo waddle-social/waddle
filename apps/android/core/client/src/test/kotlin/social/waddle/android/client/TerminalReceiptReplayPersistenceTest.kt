@@ -2,8 +2,6 @@ package social.waddle.android.client
 
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
-import java.io.IOException
-import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,6 +24,8 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptClaimant
 import social.waddle.android.client.prefs.TerminalReceiptEffect
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.io.IOException
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TerminalReceiptReplayPersistenceTest {
@@ -269,7 +269,8 @@ class TerminalReceiptReplayPersistenceTest {
         val first = (effects[0] as TerminalReceiptEffect.Acknowledged).row.identity
         val second = (effects[1] as TerminalReceiptEffect.Acknowledged).row.identity
         val malformed = when (corruption) {
-            "duplicate" -> raw
+            "duplicate" ->
+                raw
                 .replace(second.clientStanzaId, first.clientStanzaId)
                 .replace(second.incarnation.value, first.incarnation.value)
                 .replace(second.payloadDigest.value, first.payloadDigest.value)

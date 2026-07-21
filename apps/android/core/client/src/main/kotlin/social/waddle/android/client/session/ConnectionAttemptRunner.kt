@@ -14,7 +14,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.AttemptActivation
 import social.waddle.android.client.ConnectionAttemptHandle
-import social.waddle.android.client.DeliveryJournalStore
 import social.waddle.android.client.OutboundMessenger
 import social.waddle.android.client.ResumeHandoffOutcome
 import social.waddle.android.client.SaslRetryDisposition
@@ -148,9 +147,11 @@ internal class ConnectionAttemptRunner(
             handleNative = { event -> handleNativeControl(event, attempt) },
         )
         try {
-            when (val readiness = withTimeoutOrNull(connectTimeoutMillis) {
+            when (
+                val readiness = withTimeoutOrNull(connectTimeoutMillis) {
                 awaitReadiness(puller::nextDomain)
-            }) {
+            }
+            ) {
                 null -> return@coroutineScope ConnectionAttemptOutcome.RetryableFailure
                 Readiness.Fenced -> return@coroutineScope ConnectionAttemptOutcome.FencedOrReplaced
                 Readiness.Disconnected -> return@coroutineScope ConnectionAttemptOutcome.RetryableFailure
@@ -387,5 +388,4 @@ internal class ConnectionAttemptRunner(
         data object Disconnected : Readiness
         data object Fenced : Readiness
     }
-
 }

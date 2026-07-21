@@ -1,10 +1,5 @@
 package social.waddle.android.client
 
-import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.logging.Level
-import java.util.logging.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -16,21 +11,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.SerializationException
-import social.waddle.android.client.prefs.DeliveryJournalDecodeException
 import kotlinx.coroutines.yield
 import social.waddle.android.client.DeliveryJournalStore.TerminalEffect
 import social.waddle.android.client.DeliveryJournalStore.TerminalRecordResult
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryTerminalKind
-import social.waddle.android.client.prefs.LifecycleGeneration
 import social.waddle.android.client.prefs.ProcessEpoch
-import social.waddle.android.client.prefs.TerminalClaimId
-import social.waddle.android.client.prefs.TerminalReceiptClaimState
-import social.waddle.android.client.prefs.TerminalReceiptClaimant
-import social.waddle.android.client.prefs.TerminalReceiptEffect
-import social.waddle.android.client.prefs.TerminalReceiptWorkerKind
-import social.waddle.android.client.prefs.WorkerGeneration as ReceiptWorkerGeneration
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.logging.Level
+import java.util.logging.Logger
 
 /** Creates isolated terminal workers; each [Run] belongs to one lifecycle generation. */
 internal class DeliveryTerminalWorker(
@@ -231,7 +222,8 @@ internal class DeliveryTerminalWorker(
         private suspend fun drainPersisted() {
             while (retryingResult("terminal intent inspection") {
                 journal.hasTerminalIntents(ownership.lifecycle.ownerBareJid)
-            }) {
+            }
+            ) {
                 val effect = retryingResult("terminal intent apply") {
                     journal.applyNextTerminal(ownership.lifecycle.ownerBareJid)
                 }
@@ -304,7 +296,6 @@ internal class DeliveryTerminalWorker(
         val LOGGER: Logger = Logger.getLogger(DeliveryTerminalWorker::class.java.name)
         val RETRY_DELAYS_MILLIS = longArrayOf(250L, 500L, 1_000L, 2_000L, 5_000L)
         const val COMMAND_CAPACITY = 256
-
     }
 }
 

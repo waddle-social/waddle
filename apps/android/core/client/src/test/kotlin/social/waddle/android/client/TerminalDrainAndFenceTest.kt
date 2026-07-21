@@ -1,12 +1,12 @@
 package social.waddle.android.client
 
-import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.DeliveryAttemptId
 import social.waddle.android.client.prefs.DeliveryAttemptRef
 import social.waddle.android.client.prefs.DeliveryJournal
+import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.DeliveryOwnerJournal
 import social.waddle.android.client.prefs.DeliveryTerminalIntent
 import social.waddle.android.client.prefs.DeliveryTerminalIntentId
@@ -19,11 +19,11 @@ import social.waddle.android.client.prefs.QueuedOutboundDraft
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.QueuedOutboundPayload
 import social.waddle.android.client.prefs.QueuedOutboundTarget
-import social.waddle.android.client.prefs.DeliveryOwnerBareJid
 import social.waddle.android.client.prefs.TerminalReceipt
 import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.util.UUID
 
 class TerminalDrainAndFenceTest {
     @Test

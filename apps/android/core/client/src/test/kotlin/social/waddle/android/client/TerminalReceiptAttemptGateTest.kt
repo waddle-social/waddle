@@ -1,6 +1,5 @@
 package social.waddle.android.client
 
-import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,19 +19,26 @@ import social.waddle.android.client.prefs.TerminalReceiptClaimState
 import social.waddle.android.client.prefs.TerminalReceiptClaimant
 import social.waddle.android.client.prefs.TerminalReceiptId
 import social.waddle.android.client.prefs.TerminalReceiptState
+import java.util.UUID
 
 class TerminalReceiptAttemptGateTest {
     @Test
     fun `pending receipt blocks replacement without changing the journal`() {
         val previous = attempt("previous")
-        val journal = journal(previous, receipt(previous, TerminalReceiptState.Pending(
+        val journal = journal(
+            previous,
+            receipt(
+                previous,
+                TerminalReceiptState.Pending(
             TerminalReceiptClaimState.Claimed(
                 TerminalClaimId(id("claim")),
                 TerminalReceiptClaimant.BootstrapProcess,
                 ProcessEpoch(id("epoch")),
             ),
             listOf(effect(previous)),
-        )))
+        )
+            )
+        )
 
         val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement"), 1)
 
@@ -83,7 +89,7 @@ class TerminalReceiptAttemptGateTest {
 
         states.forEachIndexed { stateIndex, state ->
             projections.forEachIndexed { projectionIndex, projection ->
-                val previous = attempt("previous-${stateIndex}-${projectionIndex}")
+                val previous = attempt("previous-$stateIndex-$projectionIndex")
                 val owner = DeliveryOwnerJournal(
                     activeAttempt = null,
                     terminalReceipt = receipt(previous, state),
@@ -91,7 +97,7 @@ class TerminalReceiptAttemptGateTest {
                 )
                 val journal = DeliveryJournal(activeOwnerBareJid = OWNER, owners = mapOf(OWNER to owner))
 
-                val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement-${stateIndex}-${projectionIndex}"), 1)
+                val result = journal.beginDeliveryAttempt(OWNER, attempt("replacement-$stateIndex-$projectionIndex"), 1)
 
                 assertTrue(result.result is DeliveryJournalStore.BeginAttemptResult.TombstoneNotPostFence)
                 assertEquals(journal, result.journal)
