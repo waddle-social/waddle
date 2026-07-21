@@ -70,12 +70,21 @@ class TerminalReceiptApplicationTest {
         val second = first.journal.claimTerminalReceipt(request(first.journal, "second", "epoch-b"))
             as TerminalReceiptClaimResult.Claimed
 
-        assertTrue(second.journal.acknowledgeTerminalReceipt(first.lease) is TerminalReceiptAcknowledgeResult.LeaseMismatch)
+        assertTrue(
+            second.journal.acknowledgeTerminalReceipt(first.lease) is
+                TerminalReceiptAcknowledgeResult.LeaseMismatch,
+        )
         val acknowledged = second.journal.acknowledgeTerminalReceipt(second.lease)
             as TerminalReceiptAcknowledgeResult.Acknowledged
         assertEquals(second.lease.claim, (acknowledged.receipt.state as TerminalReceiptState.Acknowledged).claim)
-        assertTrue(acknowledged.journal.releaseTerminalReceipt(first.lease) is TerminalReceiptReleaseResult.LeaseMismatch)
-        assertTrue(acknowledged.journal.releaseTerminalReceipt(second.lease) is TerminalReceiptReleaseResult.AlreadyAcknowledged)
+        assertTrue(
+            acknowledged.journal.releaseTerminalReceipt(first.lease) is
+                TerminalReceiptReleaseResult.LeaseMismatch,
+        )
+        assertTrue(
+            acknowledged.journal.releaseTerminalReceipt(second.lease) is
+                TerminalReceiptReleaseResult.AlreadyAcknowledged,
+        )
     }
 
     @Test
@@ -86,12 +95,20 @@ class TerminalReceiptApplicationTest {
         val released = first.journal.releaseTerminalReceipt(first.lease)
             as TerminalReceiptReleaseResult.Released
         assertTrue(released.journal.releaseTerminalReceipt(first.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
-        val second = released.journal.claimTerminalReceipt(request(released.journal, "released-second", "released-epoch-b"))
+        val second = released.journal.claimTerminalReceipt(
+            request(released.journal, "released-second", "released-epoch-b"),
+        )
             as TerminalReceiptClaimResult.Claimed
         val releasedSecond = second.journal.releaseTerminalReceipt(second.lease)
             as TerminalReceiptReleaseResult.Released
-        assertTrue(releasedSecond.journal.releaseTerminalReceipt(first.lease) is TerminalReceiptReleaseResult.LeaseMismatch)
-        assertTrue(releasedSecond.journal.releaseTerminalReceipt(second.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+        assertTrue(
+            releasedSecond.journal.releaseTerminalReceipt(first.lease) is
+                TerminalReceiptReleaseResult.LeaseMismatch,
+        )
+        assertTrue(
+            releasedSecond.journal.releaseTerminalReceipt(second.lease) is
+                TerminalReceiptReleaseResult.AlreadyReleased,
+        )
     }
 
     @Test
@@ -112,7 +129,9 @@ class TerminalReceiptApplicationTest {
             claimed.lease.copy(claim = claimed.lease.claim.copy(claimant = TerminalReceiptClaimant.BootstrapProcess)),
             claimed.lease.copy(
                 claim = claimed.lease.claim.copy(
-                claimant = exactWorker.copy(lifecycleGeneration = LifecycleGeneration(uuid("released-other-lifecycle"))),
+                claimant = exactWorker.copy(
+                    lifecycleGeneration = LifecycleGeneration(uuid("released-other-lifecycle")),
+                ),
             )
             ),
             claimed.lease.copy(
@@ -120,7 +139,11 @@ class TerminalReceiptApplicationTest {
                 claimant = exactWorker.copy(workerGeneration = WorkerGeneration(uuid("released-other-worker"))),
             )
             ),
-            claimed.lease.copy(claim = claimed.lease.claim.copy(processEpoch = ProcessEpoch(uuid("released-other-epoch")))),
+            claimed.lease.copy(
+                claim = claimed.lease.claim.copy(
+                    processEpoch = ProcessEpoch(uuid("released-other-epoch")),
+                ),
+            ),
         )
 
         wrongLeases.forEach { wrong ->
@@ -128,7 +151,10 @@ class TerminalReceiptApplicationTest {
             assertTrue(result is TerminalReceiptReleaseResult.LeaseMismatch)
             assertEquals(released.journal, result.journal)
         }
-        assertTrue(released.journal.releaseTerminalReceipt(claimed.lease) is TerminalReceiptReleaseResult.AlreadyReleased)
+        assertTrue(
+            released.journal.releaseTerminalReceipt(claimed.lease) is
+                TerminalReceiptReleaseResult.AlreadyReleased,
+        )
     }
 
     @Test
@@ -147,7 +173,10 @@ class TerminalReceiptApplicationTest {
 
         val claimed = initial.claimTerminalReceipt(request) as TerminalReceiptClaimResult.Claimed
         val changedOwner = claimed.journal.copy(activeOwnerBareJid = "other@waddle.test")
-        assertTrue(changedOwner.acknowledgeTerminalReceipt(claimed.lease) is TerminalReceiptAcknowledgeResult.Acknowledged)
+        assertTrue(
+            changedOwner.acknowledgeTerminalReceipt(claimed.lease) is
+                TerminalReceiptAcknowledgeResult.Acknowledged,
+        )
     }
 
     @Test
@@ -272,7 +301,13 @@ class TerminalReceiptApplicationTest {
             attempt = lease.ref.attempt.copy(ownerBareJid = "other@waddle.test"),
         )
         ),
-        lease.copy(ref = lease.ref.copy(attempt = lease.ref.attempt.copy(attemptId = DeliveryAttemptId(uuid("wrong-attempt"))))),
+        lease.copy(
+            ref = lease.ref.copy(
+                attempt = lease.ref.attempt.copy(
+                    attemptId = DeliveryAttemptId(uuid("wrong-attempt")),
+                ),
+            ),
+        ),
         lease.copy(ref = lease.ref.copy(id = TerminalReceiptId(uuid("wrong-receipt")))),
     )
 

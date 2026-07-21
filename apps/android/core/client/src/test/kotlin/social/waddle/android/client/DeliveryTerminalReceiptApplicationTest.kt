@@ -66,7 +66,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -85,7 +87,10 @@ class DeliveryTerminalReceiptApplicationTest {
         run.awaitStartupDrain()
 
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
         assertRequested(run)
     }
 
@@ -98,7 +103,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -123,7 +130,10 @@ class DeliveryTerminalReceiptApplicationTest {
         runCurrent()
         run.awaitStartupDrain()
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
         assertRequested(run)
     }
 
@@ -144,14 +154,21 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
         }
         val effects = mutableListOf<XmppEvent>()
         val run = terminalRun(
-            DeliveryTerminalWorker(DeliveryJournalStore(prefs), { effects += it }, epoch, evidence = WorkerExitExceptionEvidence()),
+            DeliveryTerminalWorker(
+                journal = DeliveryJournalStore(prefs),
+                dispatchEvent = { effects += it },
+                processEpoch = epoch,
+                evidence = WorkerExitExceptionEvidence(),
+            ),
             this,
         )
         val exit = (run.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
@@ -172,7 +189,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -202,8 +221,15 @@ class DeliveryTerminalReceiptApplicationTest {
         val claimed = winner.await() as TerminalReceiptClaimResult.Claimed
         val busy = loser.await() as TerminalReceiptClaimResult.Busy
         assertEquals(claimed.lease, busy.current)
-        assertEquals(claimed.lease.claim, ((prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as TerminalReceiptState.Pending).claim))
-        val reclaimed = prefs.claimTerminalReceipt(request("persisted-race-reclaim", ProcessEpoch(terminalWorkerUuid("persisted-race-new-epoch"))))
+        val persisted = prefs.deliveryJournal.first().owners
+            .getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state as TerminalReceiptState.Pending
+        assertEquals(claimed.lease.claim, persisted.claim)
+        val reclaimed = prefs.claimTerminalReceipt(
+            request(
+                "persisted-race-reclaim",
+                ProcessEpoch(terminalWorkerUuid("persisted-race-new-epoch")),
+            ),
+        )
             as TerminalReceiptClaimResult.Claimed
         assertEquals(ProcessEpoch(terminalWorkerUuid("persisted-race-new-epoch")), reclaimed.lease.claim.processEpoch)
     }
@@ -244,7 +270,10 @@ class DeliveryTerminalReceiptApplicationTest {
     fun `new process epoch reclaims receipt and typed active owner mismatch fences`() = runTest {
         val prefs = SessionPrefs(InMemoryPreferencesDataStore())
         val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "reclaim").copy(
-            state = (pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "reclaim").state as TerminalReceiptState.Pending).copy(
+            state = (
+                pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "reclaim").state
+                    as TerminalReceiptState.Pending
+            ).copy(
                 claim = TerminalReceiptClaimState.Claimed(
                     social.waddle.android.client.prefs.TerminalClaimId(terminalWorkerUuid("old-claim")),
                     social.waddle.android.client.prefs.TerminalReceiptClaimant.BootstrapProcess,
@@ -256,7 +285,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -273,7 +304,10 @@ class DeliveryTerminalReceiptApplicationTest {
         )
         run.awaitStartupDrain()
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
         assertRequested(run)
     }
 
@@ -286,7 +320,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -308,7 +344,10 @@ class DeliveryTerminalReceiptApplicationTest {
         run.awaitStartupDrain()
 
         assertEquals(1, effects.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
         assertRequested(run)
     }
 
@@ -321,7 +360,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -336,7 +377,7 @@ class DeliveryTerminalReceiptApplicationTest {
                         store.afterCommitReturns = null
                         throw java.io.IOException("release returned uncertain")
                     }
-                    throw IllegalStateException("dispatch prefix failed")
+                    error("dispatch prefix failed")
                 },
                 processEpoch = ProcessEpoch(terminalWorkerUuid("prefix-first-process")),
                 evidence = WorkerExitExceptionEvidence(),
@@ -369,12 +410,15 @@ class DeliveryTerminalReceiptApplicationTest {
         second.awaitStartupDrain()
 
         assertEquals(2, replayed.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
         assertRequested(second)
     }
 
     @Test
-    fun `post commit release cancellation preserves the original cancellation and exact retry is idempotent`() = runTest {
+    fun `post commit cancellation keeps release retry exact and idempotent`() = runTest {
         val store = FailingPreferencesDataStore()
         val prefs = SessionPrefs(store)
         val receipt = pendingTerminalReceipt(TERMINAL_WORKER_OWNER, "release-cancel", effectCount = 2)
@@ -382,7 +426,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -431,7 +477,9 @@ class DeliveryTerminalReceiptApplicationTest {
             DeliveryJournalMutation(
                 journal.copy(
                     activeOwnerBareJid = TERMINAL_WORKER_OWNER,
-                    owners = journal.owners + (TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt)),
+                    owners = journal.owners + (
+                        TERMINAL_WORKER_OWNER to DeliveryOwnerJournal(terminalReceipt = receipt),
+                    ),
                 ),
                 Unit,
             )
@@ -457,7 +505,10 @@ class DeliveryTerminalReceiptApplicationTest {
         val firstExit = (first.awaitExit(1_000) as WorkerAwaitOutcome.Exited).exit
         assertEquals(WorkerExitReason.OwnerScopeCancelled, firstExit.reason)
         assertEquals(1, firstEvents.filterIsInstance<XmppEvent.DeliveryAcked>().size)
-        assertTrue(prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER).terminalReceipt?.state is TerminalReceiptState.Acknowledged)
+        assertTrue(
+            prefs.deliveryJournal.first().owners.getValue(TERMINAL_WORKER_OWNER)
+                .terminalReceipt?.state is TerminalReceiptState.Acknowledged,
+        )
 
         val restartedEvents = mutableListOf<XmppEvent>()
         val second = terminalRun(
