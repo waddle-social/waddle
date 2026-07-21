@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -30,7 +31,8 @@ import java.io.IOException
 @OptIn(ExperimentalCoroutinesApi::class)
 class OutboundLifecycleStateStoreRecoveryTest {
     @Test
-    fun `B cancellation before both workers are ready returns reachable lifecycle and replacement state store starts`() = runTest {
+    fun `B cancellation before both workers are ready returns reachable lifecycle and replacement state store starts`() =
+        runTest {
         val ownerJob = Job()
         val ownerScope = CoroutineScope(coroutineContext + ownerJob)
         val fixture = stateStoreFixture(scope = ownerScope)
@@ -88,7 +90,8 @@ class OutboundLifecycleStateStoreRecoveryTest {
             val ordinaryFixture = stateStoreFixture(
                 workerStartHooks = failingStartHooks(afterTerminal, exception),
             )
-            val failed = ordinaryFixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
+            val failed =
+                ordinaryFixture.messenger.start(backgroundScope, STATE_STORE_OWNER) as LifecycleStartResult.Failed
             assertEquals(
                 LifecycleStartFailure.WORKER_CONSTRUCTION_FAILED,
                 failed.cause,
@@ -271,7 +274,8 @@ class OutboundLifecycleStateStoreRecoveryTest {
     }
 
     @Test
-    fun `B unexpected terminal stop before install is retained as bootstrap failure and no pair is installed`() = runTest {
+    fun `B unexpected terminal stop before install is retained as bootstrap failure and no pair is installed`() =
+        runTest {
         val terminalExited = CompletableDeferred<Unit>()
         val fixture = stateStoreFixture(
             workerStartHooks = object : WorkerStartHooks {
@@ -447,12 +451,41 @@ class OutboundLifecycleStateStoreRecoveryTest {
         val releaseRequestedDependency = CompletableDeferred<Unit>()
         val siblingDependencyEntered = CompletableDeferred<Unit>()
         val failSiblingDependency = CompletableDeferred<Unit>()
+        val fixture = f3Fixture(backgroundScope, siblingDependencyEntered, failSiblingDependency)
+        val lifecycle = fixture.stateStore.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
+        val activation = fixture.stateStore.activate(lifecycle)
+        val terminal = fixture.startF3Terminal(
+            this,
+            activation,
+            requestedDependencyEntered,
+            releaseRequestedDependency,
+        )
+
+        requestedDependencyEntered.await()
+        fixture.stateStore.signalDrain(activation.bootstrap.attempt)
+        siblingDependencyEntered.await()
+
+        val first = fixture.awaitF3UnexpectedDrainFence(this, lifecycle, failSiblingDependency)
+        fixture.assertF3Recovery(
+            this,
+            lifecycle,
+            first,
+            terminal,
+            releaseRequestedDependency,
+        )
+    }
+
+    private suspend fun f3Fixture(
+        scope: CoroutineScope,
+        siblingDependencyEntered: CompletableDeferred<Unit>,
+        failSiblingDependency: CompletableDeferred<Unit>,
+    ): F3Fixture {
         val dataStore = FailingPreferencesDataStore()
         val prefs = SessionPrefs(dataStore)
         prefs.activateSession(STATE_STORE_OWNER, STATE_STORE_SESSION_ID)
         val queue = DeliveryJournalStore(prefs)
         val resume = ResumePersistence(prefs, queue)
-        resume.start(backgroundScope)
+        resume.start(scope)
         val activeSession = ActiveSession().also { it.ownBareJid = STATE_STORE_OWNER }
         val stateStore = OutboundLifecycleStateStore(
             activeSession = activeSession,
@@ -467,9 +500,15 @@ class OutboundLifecycleStateStoreRecoveryTest {
             transitionTimeoutMillis = STATE_STORE_TEST_TIMEOUT_MILLIS,
             workerExitEvidence = WorkerExitExceptionEvidence(),
         )
+        return F3Fixture(dataStore, queue, stateStore)
+    }
 
-        val lifecycle = stateStore.start(backgroundScope, STATE_STORE_OWNER).startedStateStoreLifecycle()
-        val activation = stateStore.activate(lifecycle)
+    private suspend fun F3Fixture.startF3Terminal(
+        scope: TestScope,
+        activation: AttemptActivation,
+        requestedDependencyEntered: CompletableDeferred<Unit>,
+        releaseRequestedDependency: CompletableDeferred<Unit>,
+    ): Deferred<TerminalCommandOutcome> {
         val terminalId = "f3-terminal"
         assertTrue(
             queue.enqueueAndClaimAbsoluteHead(
@@ -490,7 +529,7 @@ class OutboundLifecycleStateStoreRecoveryTest {
             requestedDependencyEntered.complete(Unit)
             releaseRequestedDependency.await()
         }
-        val terminal = async {
+        return scope.async {
             stateStore.submitTerminal(
                 STATE_STORE_OWNER,
                 terminalId,
@@ -498,18 +537,21 @@ class OutboundLifecycleStateStoreRecoveryTest {
                 DeliveryTerminalKind.ACK,
             )
         }
-        requestedDependencyEntered.await()
-        stateStore.signalDrain(activation.bootstrap.attempt)
-        siblingDependencyEntered.await()
+    }
 
-        val shutdown = async {
+    private suspend fun F3Fixture.awaitF3UnexpectedDrainFence(
+        scope: TestScope,
+        lifecycle: SessionLifecycleRef,
+        failSiblingDependency: CompletableDeferred<Unit>,
+    ): F3ShutdownFence {
+        val shutdown = scope.async {
             stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
         }
-        runCurrent()
+        scope.runCurrent()
         assertFalse(shutdown.isCompleted)
 
         failSiblingDependency.complete(Unit)
-        runCurrent()
+        scope.runCurrent()
         val first = stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle))
             as LifecycleShutdownOutcome.WorkerFenced
         val firstFence = first.cause as LifecycleFenceCause.WorkerExited
@@ -519,21 +561,42 @@ class OutboundLifecycleStateStoreRecoveryTest {
             WorkerExitReason.UnexpectedFailure(WorkerFailureKind.DEPENDENCY_FAILURE),
             firstFence.fence.exit.reason,
         )
+        return F3ShutdownFence(first, firstFence, shutdown)
+    }
 
-        val recovering = async { stateStore.recoverFencedWorkers(lifecycle) }
-        runCurrent()
+    private suspend fun F3Fixture.assertF3Recovery(
+        scope: TestScope,
+        lifecycle: SessionLifecycleRef,
+        first: F3ShutdownFence,
+        terminal: Deferred<TerminalCommandOutcome>,
+        releaseRequestedDependency: CompletableDeferred<Unit>,
+    ) {
+        val recovering = scope.async { stateStore.recoverFencedWorkers(lifecycle) }
+        scope.runCurrent()
         val losingRecovery = stateStore.recoverFencedWorkers(lifecycle)
             as WorkerRecoveryOutcome.RecoveryInProgress
-        assertEquals(firstFence.fence, losingRecovery.claim.fence)
+        assertEquals(first.fence.fence, losingRecovery.claim.fence)
         assertEquals(lifecycle, losingRecovery.claim.lifecycle)
         recovering.cancelAndJoin()
 
         releaseRequestedDependency.complete(Unit)
         assertEquals(TerminalCommandOutcome.Committed, terminal.await())
-        runCurrent()
-        assertEquals(first, shutdown.await())
-        assertEquals(first, stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)))
+        scope.runCurrent()
+        assertEquals(first.first, first.shutdown.await())
+        assertEquals(first.first, stateStore.shutdown(LifecycleShutdownTarget.CurrentOwner(lifecycle)))
         assertEquals(WorkerRecoveryOutcome.Recovered, stateStore.recoverFencedWorkers(lifecycle))
         assertEquals(WorkerRecoveryOutcome.NotFenced, stateStore.recoverFencedWorkers(lifecycle))
     }
+
+    private data class F3Fixture(
+        val dataStore: FailingPreferencesDataStore,
+        val queue: DeliveryJournalStore,
+        val stateStore: OutboundLifecycleStateStore,
+    )
+
+    private data class F3ShutdownFence(
+        val first: LifecycleShutdownOutcome.WorkerFenced,
+        val fence: LifecycleFenceCause.WorkerExited,
+        val shutdown: Deferred<LifecycleShutdownOutcome>,
+    )
 }
