@@ -6,7 +6,21 @@ import social.waddle.android.client.session.ActiveSession
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleJingleReason
+
+/**
+ * One XEP-0272 `<muji/>` presence publication, bundling the FFI's
+ * positional fields into a named record at the signaling boundary.
+ */
+internal data class MujiPresenceUpdate(
+    val roomJid: String,
+    val nick: String,
+    val active: Boolean,
+    val preparing: Boolean,
+    val video: Boolean,
+    val flags: WaddleInCallPresenceFlags,
+)
 
 /**
  * The call wire-verb surface the store and side-effect handler drive —
@@ -49,6 +63,35 @@ internal interface CallSignaling {
     ): Boolean
 
     suspend fun sessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?): Boolean
+
+    /**
+     * XEP-0272 Muji-bearing Jingle `session-initiate` to the SFU mixer
+     * (`calls.<domain>`). Resolves the EMPTY IQ-result ack only; the
+     * session-accept arrives later as a routed call event. The FFI
+     * throws on failure — surfaced here as `false`.
+     */
+    suspend fun mujiSessionInitiate(
+        roomJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        video: Boolean,
+    ): Boolean
+
+    /**
+     * XEP-0272 §Leaving mixer half: Jingle `session-terminate` for the
+     * group-call attempt. The bare-presence leave marker MUST go out
+     * first ([updateMujiPresence] with neither flag).
+     */
+    suspend fun mujiSessionTerminate(roomJid: String, sid: String): Boolean
+
+    /**
+     * Publish this occupant's XEP-0272 `<muji/>` MUC presence:
+     * `preparing` for the two-phase setup marker, `active` for the
+     * content-declaring join, neither for the leave marker. The
+     * update's flags re-stamp BOTH `urn:waddle:in-call:0` markers
+     * (presence is last-writer-wins).
+     */
+    suspend fun updateMujiPresence(update: MujiPresenceUpdate): Boolean
 
     suspend fun sessionTerminateWithOutcome(
         peerFullJid: String,
@@ -120,6 +163,33 @@ internal class ClientCallSignaling(
         sid: String,
         reason: WaddleJingleReason?,
     ): Boolean = verb { it.sendCallSessionTerminate(peerFullJid, sid, reason) }
+
+    override suspend fun mujiSessionInitiate(
+        roomJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        video: Boolean,
+    ): Boolean = verb {
+        it.sendMujiSessionInitiate(roomJid, initiatorFullJid, sid, video)
+        true
+    }
+
+    override suspend fun mujiSessionTerminate(roomJid: String, sid: String): Boolean = verb {
+        it.sendMujiSessionTerminate(roomJid, sid)
+        true
+    }
+
+    override suspend fun updateMujiPresence(update: MujiPresenceUpdate): Boolean = verb {
+        it.updateMujiPresence(
+            update.roomJid,
+            update.nick,
+            update.active,
+            update.preparing,
+            update.video,
+            update.flags,
+        )
+        true
+    }
 
     override suspend fun sessionTerminateWithOutcome(
         peerFullJid: String,

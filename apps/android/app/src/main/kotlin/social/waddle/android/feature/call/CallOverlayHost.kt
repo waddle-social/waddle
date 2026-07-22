@@ -68,7 +68,10 @@ fun CallOverlayHost(
             onAccept = viewModel::accept,
             onDecline = viewModel::decline,
         )
-        is CallState.Outgoing, is CallState.Active ->
+        // MucPending renders the same in-call surface as an outgoing
+        // ring: the XEP-0272 setup runs multi-second waits and the user
+        // needs the hang-up affordance to abandon it.
+        is CallState.Outgoing, is CallState.Active, is CallState.MucPending ->
             if (minimized) {
                 OngoingCallBanner(
                     state = call,
@@ -97,6 +100,7 @@ private fun OngoingCallBanner(
     val peerJid = when (state) {
         is CallState.Outgoing -> state.to
         is CallState.Active -> state.peer
+        is CallState.MucPending -> state.roomJid
         else -> return
     }
     Box(modifier = Modifier.fillMaxSize()) {

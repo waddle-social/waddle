@@ -29,6 +29,8 @@ data class ChannelListItem(
     val unreadCount: Int,
     /** XEP-0492: an explicit `never` override mutes this channel. */
     val isMuted: Boolean = false,
+    /** XEP-0272: occupants advertising the room's live group call. */
+    val inCallCount: Int = 0,
 )
 
 /** One drawer/list section; `name == null` is the unspaced-channels bucket. */
@@ -59,10 +61,16 @@ class HomeViewModel(
         sessionManager.unreadStore.counts,
         sessionManager.dmStore.peers,
         sessionManager.connectionState,
-        sessionManager.notifySettingsStore.entries,
-    ) { topology, counts, dmPeers, connection, notifyEntries ->
+        // XEP-0272 Muji view rides along with the bookmark entries so
+        // the five-arity combine stays available.
+        combine(
+            sessionManager.notifySettingsStore.entries,
+            sessionManager.callStore.mucCallPresence.participants,
+            ::Pair,
+        ),
+    ) { topology, counts, dmPeers, connection, (notifyEntries, callParticipants) ->
         HomeUiState(
-            sections = sectionsOf(topology, counts, notifyEntries),
+            sections = sectionsOf(topology, counts, notifyEntries, callParticipants),
             dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 },
             connectionState = connection,
         )
@@ -127,6 +135,7 @@ class HomeViewModel(
         topology: WaddleTopology,
         counts: Map<String, Int>,
         notifyEntries: Map<String, NotifySettingsEntry>,
+        callParticipants: Map<String, Set<String>>,
     ): List<SpaceSection> {
         fun itemOf(roomJid: String, name: String): ChannelListItem {
             val bare = bareJidOf(roomJid)
@@ -137,6 +146,9 @@ class HomeViewModel(
                 // A group's §3 default is never `never`, so only an
                 // explicit stored override can mute it.
                 isMuted = notifyEntries[bare]?.notifyMode == WaddleNotifyMode.NEVER,
+                // Muji presence keys rooms by normalized (lowercased)
+                // bare JID.
+                inCallCount = callParticipants[bare.lowercase()]?.size ?: 0,
             )
         }
 

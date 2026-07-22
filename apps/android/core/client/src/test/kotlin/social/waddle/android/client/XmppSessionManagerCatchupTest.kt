@@ -136,6 +136,39 @@ class XmppSessionManagerCatchupTest {
     }
 
     @Test
+    fun `session-ready retries a terminate-pending group-call session once`() = runTest {
+        val harness = Harness(this)
+        // A previous resource's group-call leave never got its mixer
+        // terminate onto the wire; the flagged entry survives in the
+        // session prefs.
+        harness.prefs.mucCallSessions.markTerminatePending(
+            "channel@muc.waddle.test",
+            "c-owed",
+            "icepuma@waddle.test/waddle-android-old",
+        )
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        assertEquals(
+            listOf<RecordedCallVerb>(
+                RecordedCallVerb.MujiSessionTerminate("channel@muc.waddle.test", "c-owed"),
+            ),
+            client.callVerbs,
+        )
+        assertTrue(
+            harness.prefs.mucCallSessions
+                .terminatePendingEntries("icepuma@waddle.test/waddle-android-new")
+                .isEmpty(),
+        )
+
+        harness.manager.logout()
+    }
+
+    @Test
     fun `a resumed stream skips catch-up`() = runTest {
         val harness = Harness(this)
         harness.prefs.setJoinedRooms(setOf("general@muc.waddle.test"))

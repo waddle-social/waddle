@@ -32,6 +32,7 @@ import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.call.CallMediaController
 import social.waddle.android.feature.call.CallSessionController
 import social.waddle.android.feature.call.LiveKitCallMediaController
+import social.waddle.android.feature.call.MucCallLiveParticipantsStore
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
@@ -127,6 +128,9 @@ class AppGraph(
         sessionManager = sessionManager,
     )
 
+    /** LiveKit-fed roster projection for the room we're in a call with. */
+    val mucCallLiveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore()
+
     /** Call platform glue: in-call FGS + LiveKit media session. */
     val callSessionController: CallSessionController = CallSessionController(
         context = appContext,
@@ -134,6 +138,7 @@ class AppGraph(
         media = callMediaControllerFactory?.invoke(applicationScope)
             ?: LiveKitCallMediaController(appContext, applicationScope),
         scope = applicationScope,
+        liveParticipants = mucCallLiveParticipants,
     )
 
     /** Incoming-call ring notification (full-screen intent + actions). */

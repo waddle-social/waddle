@@ -18,6 +18,7 @@ mod error;
 mod jid_parts;
 mod messaging;
 mod messaging_verbs;
+mod muji;
 mod notify_settings;
 mod profile_verbs;
 mod push;
@@ -34,6 +35,8 @@ mod client_tests;
 mod community_admin_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
+#[cfg(test)]
+mod muji_tests;
 #[cfg(test)]
 mod notify_settings_tests;
 #[cfg(test)]

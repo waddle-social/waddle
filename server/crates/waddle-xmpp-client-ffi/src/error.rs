@@ -19,6 +19,9 @@ pub enum WaddleError {
     /// avatar image, or an all-empty tune payload. Nothing was sent.
     #[error("invalid argument")]
     InvalidArgument,
+    /// A caller-supplied Jingle session id was empty or whitespace.
+    #[error("invalid session id")]
+    InvalidSessionId,
     /// The server answered with an RFC 6120 §8.3 stanza error.
     /// `condition` is the defined-condition element name (e.g.
     /// `forbidden`); `text` is the optional human-readable `<text/>`.

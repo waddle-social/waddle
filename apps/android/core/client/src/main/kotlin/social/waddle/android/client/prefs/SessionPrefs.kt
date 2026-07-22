@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
+import social.waddle.android.client.calls.MucCallSessionCache
 import kotlin.random.Random
 
 /**
@@ -20,6 +21,13 @@ class SessionPrefs(
     private val dataStore: DataStore<Preferences>,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
+    /**
+     * MUC group-call session cache sharing this session DataStore file,
+     * so [clear] on logout wipes retained call sessions with the rest
+     * of the session state (web localStorage parity).
+     */
+    val mucCallSessions: MucCallSessionCache = MucCallSessionCache(dataStore, json)
+
     val serverUrl: Flow<String?> = dataStore.data.map { it[KEY_SERVER_URL] }
     val sessionId: Flow<String?> = dataStore.data.map { it[KEY_SESSION_ID] }
     val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }

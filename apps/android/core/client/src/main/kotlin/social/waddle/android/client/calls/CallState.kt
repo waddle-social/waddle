@@ -5,10 +5,17 @@ import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLiveKitJoin
 
 /**
+ * Whether the live slot carries a 1:1 DM call or a XEP-0272 Muji MUC
+ * group call (web `CallState.kind`).
+ */
+enum class CallKind { DM, MUC }
+
+/**
  * Single-slot call lifecycle state, a literal port of the web client's
- * `CallState` (chat/src/lib/calls/types.ts) minus the Muji-only
- * `muc-pending` phase, which arrives with group calls. One call at a
- * time; concurrent calls would need a map keyed by sid.
+ * `CallState` (chat/src/lib/calls/types.ts). One call at a time; the
+ * MUC group-call flow shares the same slot (mutual exclusion with DM
+ * calls by construction). Concurrent calls would need a map keyed by
+ * sid.
  */
 sealed interface CallState {
     data object Idle : CallState
@@ -35,14 +42,38 @@ sealed interface CallState {
         val ringing: Boolean = false,
     ) : CallState
 
+    /**
+     * XEP-0272 §Joining two-phase group-call setup in flight (web
+     * `muc-pending`): preparing presence emitted, echo/peer waits and
+     * the Jingle handshake with the SFU mixer still pending.
+     */
+    data class MucPending(
+        /** Normalized bare room JID hosting the group call. */
+        val roomJid: String,
+        val sid: String,
+        val media: WaddleCallMedia,
+        /** Our XEP-0045 occupant nick in the room. */
+        val selfNick: String,
+        /** Our full JID, keying the preparing echo in non-anonymous rooms. */
+        val selfFullJid: String?,
+        /**
+         * The content-declaring active presence is already room-visible,
+         * so a rollback/teardown must also send the Jingle terminate.
+         */
+        val activePresencePublished: Boolean = false,
+    ) : CallState
+
     /** Jingle session established; [join] holds the LiveKit media credentials. */
     data class Active(
-        /** The peer's FULL JID owning the remote end of the session. */
+        /** The peer's FULL JID (DM) or bare room JID (MUC) owning the remote end. */
         val peer: String,
         val sid: String,
         val media: WaddleCallMedia,
         val join: WaddleLiveKitJoin,
         val initiator: String? = null,
+        val kind: CallKind = CallKind.DM,
+        /** Our MUC occupant nick; `null` for DM calls. */
+        val selfNick: String? = null,
     ) : CallState
 
     /** Terminal slot until the UI dismisses it back to [Idle]. */
@@ -52,12 +83,23 @@ sealed interface CallState {
     ) : CallState
 }
 
+/**
+ * Whether the slot holds a XEP-0272 MUC group-call phase. These are
+ * engine-owned ([MucCallEngine]): the DM reducer must never collapse
+ * them to `Ended` — the group-call teardown (leave presence, waiter
+ * cancellation, mixer terminate, cache forget) runs through the
+ * store's MUC end effect instead.
+ */
+internal val CallState.isMucCallPhase: Boolean
+    get() = this is CallState.MucPending || (this is CallState.Active && kind == CallKind.MUC)
+
 /** The live call slot's session id, `null` only for [CallState.Idle]. */
 val CallState.sidOrNull: String?
     get() = when (this) {
         CallState.Idle -> null
         is CallState.Incoming -> sid
         is CallState.Outgoing -> sid
+        is CallState.MucPending -> sid
         is CallState.Active -> sid
         is CallState.Ended -> sid
     }

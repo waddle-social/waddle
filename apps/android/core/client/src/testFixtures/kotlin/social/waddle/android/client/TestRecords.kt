@@ -15,6 +15,7 @@ import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleMucRole
+import social.waddle.client.ffi.WaddleMujiPresence
 import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
@@ -193,6 +194,10 @@ fun testPresence(
     idleSince: String? = null,
     /** `110` marks the recipient's own presence (XEP-0045 §7.2.2). */
     mucStatusCodes: List<UShort> = emptyList(),
+    /** XEP-0272 Muji advertisement; `null` is the §Leaving marker. */
+    muji: WaddleMujiPresence? = null,
+    handRaised: Boolean = false,
+    muted: Boolean = false,
 ): WaddlePresence = WaddlePresence(
     from = from,
     to = "me@waddle.test",
@@ -209,9 +214,9 @@ fun testPresence(
     errorCondition = null,
     errorType = null,
     errorText = null,
-    handRaised = false,
-    muted = false,
-    muji = null,
+    handRaised = handRaised,
+    muted = muted,
+    muji = muji,
 )
 
 fun testCallEvent(

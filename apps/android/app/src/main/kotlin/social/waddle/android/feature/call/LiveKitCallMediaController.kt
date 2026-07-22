@@ -57,6 +57,10 @@ class LiveKitCallMediaController(
     private val _localVideo = MutableStateFlow<VideoTrackHandle?>(null)
     override val localVideo: StateFlow<VideoTrackHandle?> = _localVideo.asStateFlow()
 
+    private val _remoteParticipantIdentities = MutableStateFlow<List<String>>(emptyList())
+    override val remoteParticipantIdentities: StateFlow<List<String>> =
+        _remoteParticipantIdentities.asStateFlow()
+
     // Written on the app-scope dispatcher, read from main-thread UI
     // actions — @Volatile for cross-thread visibility.
     @Volatile
@@ -104,6 +108,10 @@ class LiveKitCallMediaController(
         }
         room = freshRoom
         _connection.value = CallMediaConnection.Connected
+        // Seed the remote-roster snapshot at Connected time so peers
+        // that joined before our event collector attached are counted
+        // (web setLiveCallParticipants-at-Connected parity).
+        refreshRemoteParticipants(freshRoom)
         // Publishing is BEST-EFFORT and decoupled from joining: a
         // missing device or denied permission must not eject the user —
         // they stay a receive-only participant (web parity).
@@ -189,6 +197,11 @@ class LiveKitCallMediaController(
             is RoomEvent.LocalTrackSubscribed,
             is RoomEvent.TrackMuted, is RoomEvent.TrackUnmuted,
             -> refreshLocalTrackStates()
+            // Re-project the full remote set from the SDK's map instead
+            // of applying deltas — replay/duplicate events can't drift
+            // the snapshot that way.
+            is RoomEvent.ParticipantConnected -> refreshRemoteParticipants(event.room)
+            is RoomEvent.ParticipantDisconnected -> refreshRemoteParticipants(event.room)
             is RoomEvent.Reconnecting -> _connection.value = CallMediaConnection.Reconnecting
             is RoomEvent.Reconnected -> _connection.value = CallMediaConnection.Connected
             is RoomEvent.Disconnected -> {
@@ -217,9 +230,15 @@ class LiveKitCallMediaController(
         _localVideo.value = cameraTrack?.let { LiveKitVideoTrackHandle(current, it) }
     }
 
+    private fun refreshRemoteParticipants(target: Room) {
+        _remoteParticipantIdentities.value =
+            target.remoteParticipants.values.mapNotNull { participant -> participant.identity?.value }
+    }
+
     private fun teardown(target: Room) {
         eventsJob?.cancel()
         eventsJob = null
+        _remoteParticipantIdentities.value = emptyList()
         _remoteVideo.value = null
         _localVideo.value = null
         _micEnabled.value = false

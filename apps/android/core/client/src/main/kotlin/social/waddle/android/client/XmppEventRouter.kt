@@ -53,7 +53,12 @@ internal class XmppEventRouter(
             }
             is XmppEvent.RoomPins ->
                 stores.pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
-            is XmppEvent.Presence -> stores.presenceStore.onPresence(event.presence)
+            is XmppEvent.Presence -> {
+                stores.presenceStore.onPresence(event.presence)
+                // XEP-0272 Muji bookkeeping rides the same serialized
+                // presence stream (web `set_on_presence` wrapper parity).
+                callStore.onPresence(event.presence)
+            }
             is XmppEvent.MamResult -> routeMamResult(event)
             // The reducer + side-effect scheduling run HERE, on the
             // single-consumer dispatch path, so accept/reject can never
