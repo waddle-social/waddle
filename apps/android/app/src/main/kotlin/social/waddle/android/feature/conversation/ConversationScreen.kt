@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.filterNotNull
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
@@ -355,11 +356,15 @@ fun ConversationScreen(
             key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
             factory = StickerPacksViewModel.factory(graph),
         )
-        val removeFailure by packsViewModel.removeFailure.collectAsStateWithLifecycle()
-        LaunchedEffect(removeFailure) {
-            if (removeFailure != null) {
-                packsViewModel.consumeRemoveFailure()
+        // Keyed on the VM, not the value: consuming inside a
+        // value-keyed effect restarts it and cancels showSnackbar
+        // mid-suspend (Material3 clears the entry in its finally).
+        // Consume AFTER showing — a rotation mid-display re-shows
+        // once, which beats losing the signal.
+        LaunchedEffect(packsViewModel) {
+            packsViewModel.removeFailure.filterNotNull().collect {
                 snackbarHostState.showSnackbar(actionFailedText)
+                packsViewModel.consumeRemoveFailure()
             }
         }
         StickerPickerSheet(

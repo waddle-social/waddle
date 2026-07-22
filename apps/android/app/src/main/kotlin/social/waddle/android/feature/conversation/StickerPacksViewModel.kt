@@ -105,7 +105,7 @@ class StickerPacksViewModel(
     /**
      * Retract [packId]; the session cache reconciles inside the verb
      * on Ok (idempotently — an already-gone pack still reconciles),
-     * refusals surface via [removeFailures].
+     * refusals surface via [removeFailure].
      */
     fun removePack(packId: String) {
         viewModelScope.launch {
