@@ -296,13 +296,16 @@ class MucCallEngine internal constructor(
             }
         }
         if (!promoted) return false
-        // The re-publish must not wipe in-call state: joining without
-        // mic capture stays advertised muted, and any flags a live
-        // engine still carries survive (post-process-death both flows
-        // are at their false defaults anyway). The re-stamp serializes
-        // on the presence mutex and re-checks the slot, so it can never
-        // land after a leave that already claimed it.
-        _selfMuted.value = _selfMuted.value || !media.audio
+        // Claim-time flag initialization, exactly like begin(): a
+        // stale hand/mute from a previous room's teardown (whose
+        // leavePresence skips the reset once this attempt owns the
+        // slot) must not ride into the resumed call's re-stamps; the
+        // post-process-death resume has both at defaults anyway, and
+        // joining without mic capture stays advertised muted. The
+        // re-stamp serializes on the presence mutex and re-checks the
+        // slot, so it can never land after a leave that claimed it.
+        _selfHandRaised.value = false
+        _selfMuted.value = !media.audio
         restampActivePresence(promotedState, selfNick)
         return true
     }
@@ -627,7 +630,10 @@ class MucCallEngine internal constructor(
             )
         }
         if (!cleared) store.reportCallError("muji leave presence failed")
-        presence.markSelfLeaveEchoPending(room, selfNick)
+        // Marker only for a leave that actually reached the wire: a
+        // failed send gets no echo, and a stuck marker would hide the
+        // retained-leave recovery for the durable ghost it leaves.
+        if (cleared) presence.markSelfLeaveEchoPending(room, selfNick)
         presence.clearParticipant(room, selfNick, selfFullJid)
         // The optimistic flags belong to whatever MUC attempt owns the
         // slot NOW: a concurrently-begun different-room attempt already

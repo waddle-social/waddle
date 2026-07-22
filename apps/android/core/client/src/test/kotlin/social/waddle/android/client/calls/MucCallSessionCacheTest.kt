@@ -256,6 +256,44 @@ class MucCallSessionCacheTest {
     }
 
     @Test
+    fun `leaveRetained stands down in-lock when a begin claimed the room while it was parked`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        rememberSession(f)
+        // Park a DIFFERENT room's retained leave inside the mutex so
+        // this room's leaveRetained passes its entry guard (slot Idle)
+        // and queues behind; begin() then claims the room before the
+        // queued leave acquires the lock.
+        val otherRoom = "lounge@muc.waddle.test"
+        f.client.updateMujiPresenceDelaysMillis += 1_000L
+        val otherLeave = backgroundScope.async {
+            f.store.muc.leaveRetained(otherRoom, SELF_NICK, OWN_FULL, nowMillis = now + 1)
+        }
+        runCurrent()
+        val left = backgroundScope.async {
+            f.store.muc.leaveRetained(ROOM_JID, SELF_NICK, OWN_FULL, nowMillis = now + 1)
+        }
+        runCurrent()
+        val begun = backgroundScope.async {
+            f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID)
+        }
+        runCurrent()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        // The in-lock re-check stands down: no leave presence for this
+        // room may wipe the fresh attempt's marker.
+        assertFalse(left.await())
+        assertTrue(
+            f.client.callVerbs
+                .filterIsInstance<RecordedCallVerb.UpdateMujiPresence>()
+                .none { it.roomJid == ROOM_JID && !it.active && !it.preparing },
+        )
+        otherLeave.cancel()
+        begun.cancel()
+    }
+
+    @Test
     fun `a failed retained terminate marks the entry terminate-pending`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)
