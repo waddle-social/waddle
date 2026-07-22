@@ -17,6 +17,7 @@ import social.waddle.android.client.store.ConversationKind
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddleTopology
 
 /**
  * Reconnect catch-up + per-conversation resume cursors (web
@@ -230,6 +231,72 @@ class XmppSessionManagerCatchupTest {
             "fresh stream refetches the joined room",
             listOf(Triple("general@muc.waddle.test", XmppSessionManager.CATCHUP_PAGE_SIZE, null as String?)),
             harness.factory.clients.last().fetchHistoryCalls,
+        )
+
+        harness.manager.logout()
+    }
+
+    // ── XEP-0402 bookmark-driven rejoin ──────────────────────────────
+
+    @Test
+    fun `join set unions autojoin channels with persisted-intent rooms`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.setJoinedRooms(setOf("intent@muc.waddle.test"))
+        harness.factory.onCreate = { client ->
+            client.topology.result = WaddleTopology(
+                spaces = emptyList(),
+                channels = listOf(
+                    testChannel("general@muc.waddle.test", autojoin = true),
+                    testChannel("muted@muc.waddle.test", autojoin = false),
+                    // Group DMs join too (their live messages must
+                    // flow) — they are only excluded from LISTS.
+                    testChannel("gdm@muc.waddle.test", autojoin = true, isGroupDm = true),
+                ),
+            )
+        }
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val joined = harness.factory.clients.single().joinRoomCalls.map { it.first }.toSet()
+        assertEquals(
+            setOf("general@muc.waddle.test", "gdm@muc.waddle.test", "intent@muc.waddle.test"),
+            joined,
+        )
+        // The autojoin group DM is joined but never listed as a channel.
+        assertEquals(
+            listOf("general@muc.waddle.test", "muted@muc.waddle.test"),
+            harness.manager.roomStore.channels.value.map { it.roomJid },
+        )
+        assertEquals(
+            listOf("gdm@muc.waddle.test"),
+            harness.manager.roomStore.groupDms.value.map { it.roomJid },
+        )
+        // Autojoin rooms are session state, not user intent: the
+        // persisted overlay must stay exactly as the user left it.
+        assertEquals(setOf("intent@muc.waddle.test"), harness.prefs.joinedRooms.first())
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `failed topology discovery degrades the join set to persisted rooms`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.setJoinedRooms(setOf("intent@muc.waddle.test"))
+        harness.factory.onCreate = { client ->
+            client.topology.failure = IllegalStateException("disco down")
+        }
+
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        assertEquals(
+            listOf("intent@muc.waddle.test" to "icepuma"),
+            harness.factory.clients.single().joinRoomCalls,
         )
 
         harness.manager.logout()

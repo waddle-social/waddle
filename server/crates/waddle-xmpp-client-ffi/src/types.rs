@@ -640,6 +640,17 @@ pub struct WaddleChannel {
     pub channel_type: String,
     pub position: i32,
     pub space_id: String,
+    /// XEP-0402: join this room automatically on session ready. The
+    /// user's own bookmark wins; non-bookmarked catalog rooms default
+    /// to `true` (web parity).
+    pub autojoin: bool,
+    /// `<conference name='…'>` from the user's XEP-0402 bookmark,
+    /// when present.
+    pub bookmark_name: Option<String>,
+    /// Room advertises `urn:waddle:group-dm:0`: joined like any
+    /// autojoin room but surfaced on the DM list, never the channel
+    /// list.
+    pub is_group_dm: bool,
 }
 
 #[derive(uniffi::Record, Clone)]

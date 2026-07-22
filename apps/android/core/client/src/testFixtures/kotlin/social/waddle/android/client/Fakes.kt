@@ -315,8 +315,10 @@ class FakeWaddleClient : WaddleClientInterface {
         disconnectCalls += 1
     }
 
-    override suspend fun discoverTopology(): WaddleTopology =
-        WaddleTopology(spaces = emptyList(), channels = emptyList())
+    /** Topology fake state: canned result, call count, failure knob. */
+    val topology = FakeTopologyState()
+
+    override suspend fun discoverTopology(): WaddleTopology = topology.discoverTopology()
 
     /** Every recorded `sendCall*` wire verb, in send order. */
     val callVerbs = CopyOnWriteArrayList<RecordedCallVerb>()

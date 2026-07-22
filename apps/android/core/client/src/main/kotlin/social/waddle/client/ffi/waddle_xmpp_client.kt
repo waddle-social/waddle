@@ -7301,6 +7301,26 @@ data class WaddleChannel (
     var `position`: kotlin.Int
     ,
     var `spaceId`: kotlin.String
+    ,
+    /**
+     * XEP-0402: join this room automatically on session ready. The
+     * user's own bookmark wins; non-bookmarked catalog rooms default
+     * to `true` (web parity).
+     */
+    var `autojoin`: kotlin.Boolean
+    ,
+    /**
+     * `<conference name='…'>` from the user's XEP-0402 bookmark,
+     * when present.
+     */
+    var `bookmarkName`: kotlin.String?
+    ,
+    /**
+     * Room advertises `urn:waddle:group-dm:0`: joined like any
+     * autojoin room but surfaced on the DM list, never the channel
+     * list.
+     */
+    var `isGroupDm`: kotlin.Boolean
 
 ){
 
@@ -7324,6 +7344,9 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterString.read(buf),
             FfiConverterInt.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7334,7 +7357,10 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.allocationSize(value.`description`) +
             FfiConverterString.allocationSize(value.`channelType`) +
             FfiConverterInt.allocationSize(value.`position`) +
-            FfiConverterString.allocationSize(value.`spaceId`)
+            FfiConverterString.allocationSize(value.`spaceId`) +
+            FfiConverterBoolean.allocationSize(value.`autojoin`) +
+            FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
+            FfiConverterBoolean.allocationSize(value.`isGroupDm`)
     )
 
     override fun write(value: WaddleChannel, buf: ByteBuffer) {
@@ -7345,6 +7371,9 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterString.write(value.`channelType`, buf)
             FfiConverterInt.write(value.`position`, buf)
             FfiConverterString.write(value.`spaceId`, buf)
+            FfiConverterBoolean.write(value.`autojoin`, buf)
+            FfiConverterOptionalString.write(value.`bookmarkName`, buf)
+            FfiConverterBoolean.write(value.`isGroupDm`, buf)
     }
 }
 

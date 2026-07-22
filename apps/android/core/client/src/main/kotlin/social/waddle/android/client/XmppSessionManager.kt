@@ -434,7 +434,8 @@ class XmppSessionManager(
         session: WaddleSessionInfo,
         freshStream: Boolean,
     ) {
-        attemptScope.launch { catchup.refreshTopology(client) }
+        // Topology discovery now heads the sequential ready pipeline:
+        // the bookmark-driven rejoin derives its join set from it.
         attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending

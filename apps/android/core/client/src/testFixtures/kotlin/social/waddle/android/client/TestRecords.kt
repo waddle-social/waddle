@@ -7,6 +7,7 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
+import social.waddle.client.ffi.WaddleChannel
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleInboxResult
@@ -28,6 +29,27 @@ import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleVCard4
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
+
+fun testChannel(
+    roomJid: String,
+    name: String = roomJid.substringBefore('@'),
+    spaceId: String = "standalone",
+    position: Int = 0,
+    autojoin: Boolean = true,
+    bookmarkName: String? = null,
+    isGroupDm: Boolean = false,
+): WaddleChannel = WaddleChannel(
+    id = "$spaceId::$roomJid",
+    roomJid = roomJid,
+    name = name,
+    description = null,
+    channelType = "text",
+    position = position,
+    spaceId = spaceId,
+    autojoin = autojoin,
+    bookmarkName = bookmarkName,
+    isGroupDm = isGroupDm,
+)
 
 fun testMamPage(
     messages: List<WaddleArchivedMessage> = emptyList(),

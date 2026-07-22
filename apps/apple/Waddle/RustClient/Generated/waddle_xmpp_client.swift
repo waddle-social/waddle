@@ -6069,10 +6069,41 @@ public struct WaddleChannel: Equatable, Hashable {
     public var channelType: String
     public var position: Int32
     public var spaceId: String
+    /**
+     * XEP-0402: join this room automatically on session ready. The
+     * user's own bookmark wins; non-bookmarked catalog rooms default
+     * to `true` (web parity).
+     */
+    public var autojoin: Bool
+    /**
+     * `<conference name='…'>` from the user's XEP-0402 bookmark,
+     * when present.
+     */
+    public var bookmarkName: String?
+    /**
+     * Room advertises `urn:waddle:group-dm:0`: joined like any
+     * autojoin room but surfaced on the DM list, never the channel
+     * list.
+     */
+    public var isGroupDm: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, roomJid: String, name: String, description: String?, channelType: String, position: Int32, spaceId: String) {
+    public init(id: String, roomJid: String, name: String, description: String?, channelType: String, position: Int32, spaceId: String,
+        /**
+         * XEP-0402: join this room automatically on session ready. The
+         * user's own bookmark wins; non-bookmarked catalog rooms default
+         * to `true` (web parity).
+         */autojoin: Bool,
+        /**
+         * `<conference name='…'>` from the user's XEP-0402 bookmark,
+         * when present.
+         */bookmarkName: String?,
+        /**
+         * Room advertises `urn:waddle:group-dm:0`: joined like any
+         * autojoin room but surfaced on the DM list, never the channel
+         * list.
+         */isGroupDm: Bool) {
         self.id = id
         self.roomJid = roomJid
         self.name = name
@@ -6080,6 +6111,9 @@ public struct WaddleChannel: Equatable, Hashable {
         self.channelType = channelType
         self.position = position
         self.spaceId = spaceId
+        self.autojoin = autojoin
+        self.bookmarkName = bookmarkName
+        self.isGroupDm = isGroupDm
     }
 
 
@@ -6104,7 +6138,10 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
                 description: FfiConverterOptionString.read(from: &buf),
                 channelType: FfiConverterString.read(from: &buf),
                 position: FfiConverterInt32.read(from: &buf),
-                spaceId: FfiConverterString.read(from: &buf)
+                spaceId: FfiConverterString.read(from: &buf),
+                autojoin: FfiConverterBool.read(from: &buf),
+                bookmarkName: FfiConverterOptionString.read(from: &buf),
+                isGroupDm: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -6116,6 +6153,9 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
         FfiConverterString.write(value.channelType, into: &buf)
         FfiConverterInt32.write(value.position, into: &buf)
         FfiConverterString.write(value.spaceId, into: &buf)
+        FfiConverterBool.write(value.autojoin, into: &buf)
+        FfiConverterOptionString.write(value.bookmarkName, into: &buf)
+        FfiConverterBool.write(value.isGroupDm, into: &buf)
     }
 }
 

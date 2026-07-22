@@ -492,6 +492,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_numeric_autojoin_true() {
+        // XEP-0402 XSD types autojoin as xs:boolean — both lexical
+        // forms `true` and `1` are valid on the wire. The topology
+        // bookmark merge keys join behaviour off this flag, so a
+        // sibling client publishing `autojoin='1'` must not silently
+        // lose autojoin.
+        let xml =
+            "<item xmlns='http://jabber.org/protocol/pubsub' id='theplay@conference.example.com'>\
+                    <conference xmlns='urn:xmpp:bookmarks:1' autojoin='1' />\
+                    </item>";
+        let item: Element = xml.parse().expect("valid xml");
+        let parsed = BookmarkItem::parse_item(&item).expect("parsed");
+        assert!(parsed.autojoin);
+    }
+
+    #[test]
+    fn parse_response_ignores_items_from_a_foreign_node() {
+        // A response whose <items/> is not the urn:xmpp:bookmarks:1
+        // node must parse to zero bookmarks — otherwise a mis-routed
+        // pubsub reply could stamp bogus autojoin state onto the
+        // discovered topology.
+        let xml = "<iq xmlns='jabber:client' type='result'>\
+                    <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+                        <items node='urn:example:other'>\
+                            <item id='one@conference.example.com'>\
+                                <conference xmlns='urn:xmpp:bookmarks:1' name='One' autojoin='true' />\
+                            </item>\
+                        </items>\
+                    </pubsub>\
+                    </iq>";
+        let iq: Element = xml.parse().expect("valid xml");
+        assert!(parse_bookmarks_response(&iq).is_empty());
+    }
+
+    #[test]
     fn parse_response_extracts_multiple_items() {
         let xml = "<iq xmlns='jabber:client' type='result'>\
                     <pubsub xmlns='http://jabber.org/protocol/pubsub'>\

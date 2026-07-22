@@ -1,6 +1,8 @@
 //! Service discovery (XEP-0030), HTTP upload (XEP-0363), inbox (XEP-0430),
 //! push notifications, and XEP-0503 Spaces topology discovery.
 
+#[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+mod bookmarks;
 pub(crate) mod ids;
 mod iq;
 mod parsing;
@@ -59,6 +61,11 @@ pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
 /// advertised by Multi-User Chat services. Used at service
 /// discovery time to identify which component hosts MUC rooms.
 pub const MUC_NS: &str = "http://jabber.org/protocol/muc";
+/// `urn:waddle:group-dm:0` — the disco#info feature a Waddle group-DM
+/// room advertises. Group DMs are XEP-0045 rooms that belong on the
+/// DM surface, not the channel list; topology discovery stamps
+/// [`DiscoveredChannel::is_group_dm`] from this feature.
+pub const WADDLE_GROUP_DM_FEATURE_NS: &str = "urn:waddle:group-dm:0";
 /// Synthetic space id assigned to MUC rooms that are *not* bookmarked
 /// into any XEP-0503 space. Lets the UI place every joinable room
 /// under some space without requiring server-side bookmark
