@@ -395,6 +395,19 @@ class CallStore internal constructor(
             is WaddleCallEventKind.Propose -> proposeSideEffect(event, kind, prev)
             is WaddleCallEventKind.Proceed -> proceedSideEffect(event, prev)
             is WaddleCallEventKind.SessionInitiate -> sessionInitiateSideEffect(event, kind, prev)
+            // The DM reducer leaves MUC phases untouched: a matching
+            // remote end event runs the engine-owned teardown instead.
+            is WaddleCallEventKind.Reject -> muc.endFromRemote(
+                event.sid,
+                if (tieBreakExpired(kind.tieBreak, kind.reason)) CallEndReason.Expired else CallEndReason.Rejected,
+            )
+            is WaddleCallEventKind.Retract -> muc.endFromRemote(
+                event.sid,
+                if (tieBreakExpired(kind.tieBreak, kind.reason)) CallEndReason.Expired else CallEndReason.Retracted,
+            )
+            is WaddleCallEventKind.Finish -> muc.endFromRemote(event.sid, CallEndReason.Finished(kind.reason))
+            is WaddleCallEventKind.SessionTerminate ->
+                muc.endFromRemote(event.sid, CallEndReason.Finished(kind.reason))
             else -> Unit
         }
     }

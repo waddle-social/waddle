@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleLiveKitJoin
 import java.util.Base64
@@ -122,8 +123,47 @@ class MucCallSessionCache(
         if (entry.terminatePending) return false
         val join = entry.join() ?: return false
         if (join.identity != self) return false
-        val expiresAt = entry.expiresAtEpochMillis ?: return true
+        // No parseable `exp` claim means no connect-headroom proof:
+        // refuse and let the caller run a fresh initiate (web parity —
+        // `canResumeMucCallActivity` treats an unparseable exp as
+        // unusable).
+        val expiresAt = entry.expiresAtEpochMillis ?: return false
         return expiresAt > nowMillis + TOKEN_EXPIRY_SKEW_MILLIS
+    }
+
+    /**
+     * The room's freshest entry owed by this ACCOUNT — any resource
+     * sharing [selfFullJid]'s bare JID. The retained-call cleanup path
+     * matches on the account because the resource suffix that minted
+     * the session may not survive the process death that orphaned it.
+     */
+    suspend fun retainedEntry(
+        roomJid: String,
+        selfFullJid: String?,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): MucCallSessionEntry? {
+        val room = normalizeMucCallRoomJid(roomJid)
+        val selfBare = bareJid(selfFullJid?.trim().orEmpty()).lowercase()
+        if (room.isEmpty() || selfBare.isEmpty()) return null
+        return load()
+            .filterNot { isStale(it, nowMillis) }
+            .firstOrNull { it.roomJid == room && bareJid(it.selfFullJid).lowercase() == selfBare }
+    }
+
+    /**
+     * Every non-stale `terminatePending` entry owed by this account —
+     * the once-per-connect retry set (web
+     * `hydrateMucCallTerminatePendingSessions` parity).
+     */
+    suspend fun terminatePendingEntries(
+        selfFullJid: String?,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): List<MucCallSessionEntry> {
+        val selfBare = bareJid(selfFullJid?.trim().orEmpty()).lowercase()
+        if (selfBare.isEmpty()) return emptyList()
+        return load()
+            .filterNot { isStale(it, nowMillis) }
+            .filter { it.terminatePending && bareJid(it.selfFullJid).lowercase() == selfBare }
     }
 
     /**

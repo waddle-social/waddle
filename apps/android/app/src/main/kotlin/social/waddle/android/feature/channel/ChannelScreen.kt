@@ -12,7 +12,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -28,10 +30,12 @@ import social.waddle.android.R
 import social.waddle.android.feature.call.ChannelCallBanner
 import social.waddle.android.feature.call.ChannelCallControls
 import social.waddle.android.feature.call.ChannelCallTestTags
+import social.waddle.android.feature.call.RetainedSessionView
 import social.waddle.android.feature.call.channelCallBannerOf
 import social.waddle.android.feature.call.channelCallControlsOf
 import social.waddle.android.feature.call.normalizeCallRoomJid
 import social.waddle.android.feature.call.resolveRoomParticipantList
+import social.waddle.android.feature.call.shouldOfferRetainedLeave
 import social.waddle.android.feature.conversation.ConversationScreen
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.room.RoomSettingsSheet
@@ -72,6 +76,34 @@ fun ChannelScreen(
         normalizedRoom, participants, owners, liveParticipants, leavingRooms,
     )
     val roomHasVideoCall = roomMedia[normalizedRoom]?.video == true
+
+    // Retained-call cleanup (web leaveRetainedMucCallAction wiring):
+    // re-read the cache whenever the Muji view or the slot moves, plus
+    // after an explicit leave tap (the bump), so the affordance clears.
+    var retainedRefresh by remember { mutableIntStateOf(0) }
+    val retainedSession by produceState<RetainedSessionView?>(
+        initialValue = null, normalizedRoom, participants, callState, retainedRefresh,
+    ) {
+        value = graph.sessionPrefs.mucCallSessions
+            .retainedEntry(normalizedRoom, graph.sessionManager.ownFullJid())
+            ?.let { RetainedSessionView(terminatePending = it.terminatePending) }
+    }
+    val retainedLeave = shouldOfferRetainedLeave(
+        state = callState,
+        roomJid = roomJid,
+        retained = retainedSession,
+        mujiNicks = participants[normalizedRoom]?.toList() ?: emptyList(),
+        selfNick = session?.xmppLocalpart,
+    )
+
+    fun leaveRetainedCall() {
+        val nick = session?.xmppLocalpart ?: DEFAULT_NICK
+        val selfFullJid = graph.sessionManager.ownFullJid()
+        graph.applicationScope.launch {
+            graph.sessionManager.callStore.muc.leaveRetained(roomJid, nick, selfFullJid)
+            retainedRefresh += 1
+        }
+    }
 
     // Capture permissions are requested BEFORE the XEP-0272 setup so
     // the mixer's accept can go straight to media; a denial still
@@ -133,8 +165,12 @@ fun ChannelScreen(
         },
         aboveTimeline = {
             ChannelCallBanner(
-                banner = channelCallBannerOf(callState, roomJid, resolvedNicks, roomHasVideoCall),
+                banner = channelCallBannerOf(
+                    callState, roomJid, resolvedNicks, roomHasVideoCall,
+                    retainedLeave = retainedLeave,
+                ),
                 onJoin = { requestCall(video = roomHasVideoCall) },
+                onLeaveRetained = ::leaveRetainedCall,
             )
         },
     )

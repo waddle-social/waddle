@@ -417,6 +417,14 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var mujiSessionInitiateFailure: Throwable? = null
 
+    /**
+     * Per-call virtual-time stalls before [updateMujiPresence] answers,
+     * consumed in send order — lets tests land a concurrent action
+     * while ONE specific muji presence publication is in flight (the
+     * proceed/terminate delay hooks' presence twin).
+     */
+    val updateMujiPresenceDelaysMillis = ConcurrentLinkedDeque<Long>()
+
     @Volatile
     var mujiSessionTerminateFailure: Throwable? = null
 
@@ -446,6 +454,7 @@ class FakeWaddleClient : WaddleClientInterface {
         video: Boolean,
         flags: WaddleInCallPresenceFlags,
     ) {
+        updateMujiPresenceDelaysMillis.pollFirst()?.let { if (it > 0) delay(it) }
         callVerbs += RecordedCallVerb.UpdateMujiPresence(
             roomJid = roomJid,
             nick = nick,

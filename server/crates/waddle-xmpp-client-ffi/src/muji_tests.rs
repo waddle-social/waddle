@@ -3,13 +3,16 @@
 //! mixer session-terminate) plus their typed failure behavior — the
 //! same fixture style as `calls_tests.rs`.
 
+use std::sync::Arc;
+
 use jid::FullJid;
 use waddle_xmpp_client::messaging::SessionId;
 
 use crate::muji::{
-    muji_mixer_jid, muji_presence_stanza, muji_session_initiate_iq, muji_session_terminate_iq,
-    WaddleInCallPresenceFlags,
+    muji_mixer_jid, muji_mixer_target, muji_presence_stanza, muji_session_initiate_iq,
+    muji_session_terminate_iq, WaddleInCallPresenceFlags,
 };
+use crate::{WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError, WaddleEventListener};
 
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 const NS_JINGLE: &str = "urn:xmpp:jingle:1";
@@ -33,15 +36,57 @@ fn no_flags() -> WaddleInCallPresenceFlags {
     }
 }
 
+fn mixer() -> jid::Jid {
+    "calls.waddle.test".parse().expect("valid mixer JID")
+}
+
+struct NoopListener;
+
+impl WaddleEventListener for NoopListener {
+    fn on_event(&self, _event: WaddleClientEvent) {}
+}
+
+/// A never-connected client: the typed-input guards fire before any
+/// handle lookup, so no live session is needed (calls_tests fixture).
+fn test_client() -> Arc<WaddleClient> {
+    Arc::new(WaddleClient {
+        config: WaddleConfig {
+            server_url: "wss://xmpp.waddle.test".to_string(),
+            jid: "alice@waddle.test".to_string(),
+            access_token: "token".to_string(),
+            resource: "test".to_string(),
+            resume_state: None,
+        },
+        listener: Arc::new(Box::new(NoopListener) as Box<dyn WaddleEventListener>),
+        handle: tokio::sync::Mutex::new(None),
+    })
+}
+
 #[test]
 fn mixer_jid_is_calls_dot_domain() {
     assert_eq!(muji_mixer_jid("waddle.test"), "calls.waddle.test");
 }
 
-/// XEP-0272 §Joining phase 1: the `<preparing/>` presence carries no
-/// contents and no in-call flags, but always the caps advertisement.
+/// The mixer target derives from the BARE account JID: a stray
+/// resource must never leak into the mixer host.
 #[test]
-fn preparing_presence_carries_only_the_marker() {
+fn mixer_target_strips_the_resource_before_the_domain_split() {
+    let target = muji_mixer_target("alice@waddle.test/phone").expect("mixer target parses");
+    assert_eq!(target.to_string(), "calls.waddle.test");
+    assert_eq!(
+        muji_mixer_target("alice@waddle.test")
+            .expect("bare input parses")
+            .to_string(),
+        "calls.waddle.test",
+    );
+}
+
+/// XEP-0272 §Joining phase 1: the `<preparing/>` presence carries no
+/// contents, but the `urn:waddle:in-call:0` flags DO ride it (the
+/// shared builder stamps them whenever preparing or active — wasm
+/// parity), plus the caps advertisement.
+#[test]
+fn preparing_presence_carries_the_marker_and_flags() {
     let presence = muji_presence_stanza(
         "room@muc.waddle.test",
         "alice",
@@ -60,9 +105,11 @@ fn preparing_presence_carries_only_the_marker() {
         .expect("muji child present");
     assert!(muji.get_child("preparing", NS_MUJI).is_some());
     assert_eq!(muji.children().filter(|c| c.name() == "content").count(), 0);
-    // Flags ride only the active variant here — preparing publishes
-    // them too per the shared builder (in_call is meaningful while
-    // preparing or active).
+    let in_call = presence
+        .get_child("in-call", NS_IN_CALL)
+        .expect("in-call sibling rides the preparing variant too");
+    assert!(in_call.get_child("hand-raised", NS_IN_CALL).is_some());
+    assert!(in_call.get_child("muted", NS_IN_CALL).is_some());
     assert!(presence.get_child("c", NS_CAPS).is_some());
 }
 
@@ -146,7 +193,7 @@ fn leave_presence_is_bare() {
 #[test]
 fn session_initiate_targets_mixer_with_muji_room_and_livekit_placeholder() {
     let iq = muji_session_initiate_iq(
-        "calls.waddle.test",
+        &mixer(),
         &sid("attempt-1"),
         &full("alice@waddle.test/phone"),
         "room@muc.waddle.test",
@@ -180,7 +227,7 @@ fn session_initiate_targets_mixer_with_muji_room_and_livekit_placeholder() {
 #[test]
 fn session_initiate_with_video_adds_second_content() {
     let iq = muji_session_initiate_iq(
-        "calls.waddle.test",
+        &mixer(),
         &sid("attempt-2"),
         &full("alice@waddle.test/phone"),
         "room@muc.waddle.test",
@@ -201,11 +248,7 @@ fn session_initiate_with_video_adds_second_content() {
 /// `<reason><success/></reason>` (XEP-0166 §6.7).
 #[test]
 fn session_terminate_carries_room_and_success_reason() {
-    let iq = muji_session_terminate_iq(
-        "calls.waddle.test",
-        "room@muc.waddle.test",
-        &sid("attempt-1"),
-    );
+    let iq = muji_session_terminate_iq(&mixer(), "room@muc.waddle.test", &sid("attempt-1"));
     assert_eq!(iq.attr("to"), Some("calls.waddle.test"));
     let jingle = iq.get_child("jingle", NS_JINGLE).expect("jingle child");
     assert_eq!(jingle.attr("action"), Some("session-terminate"));
@@ -214,4 +257,59 @@ fn session_terminate_carries_room_and_success_reason() {
     assert_eq!(muji.attr("room"), Some("room@muc.waddle.test"));
     let reason = jingle.get_child("reason", NS_JINGLE).expect("reason");
     assert!(reason.get_child("success", NS_JINGLE).is_some());
+}
+
+// ── Typed failure behavior (input guards fire before any connection) ────────
+
+#[tokio::test]
+async fn send_muji_session_initiate_rejects_blank_sid() {
+    let client = test_client();
+    let result = client
+        .send_muji_session_initiate(
+            "room@muc.waddle.test".into(),
+            "alice@waddle.test/phone".into(),
+            "   ".into(),
+            false,
+        )
+        .await;
+    assert!(matches!(result, Err(WaddleError::InvalidSessionId)));
+}
+
+#[tokio::test]
+async fn send_muji_session_terminate_rejects_blank_sid() {
+    let client = test_client();
+    let result = client
+        .send_muji_session_terminate("room@muc.waddle.test".into(), String::new())
+        .await;
+    assert!(matches!(result, Err(WaddleError::InvalidSessionId)));
+}
+
+#[tokio::test]
+async fn update_muji_presence_rejects_an_empty_nick() {
+    let client = test_client();
+    let result = client
+        .update_muji_presence(
+            "room@muc.waddle.test".into(),
+            "  ".into(),
+            true,
+            false,
+            false,
+            no_flags(),
+        )
+        .await;
+    assert!(matches!(result, Err(WaddleError::InvalidJid)));
+}
+
+#[tokio::test]
+async fn send_muji_session_initiate_rejects_a_malformed_initiator() {
+    let client = test_client();
+    let result = client
+        .send_muji_session_initiate(
+            "room@muc.waddle.test".into(),
+            "not a jid".into(),
+            "attempt-1".into(),
+            false,
+        )
+        .await;
+    assert!(matches!(result, Err(WaddleError::InvalidJid)));
 }

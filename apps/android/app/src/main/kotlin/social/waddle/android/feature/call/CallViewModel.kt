@@ -68,15 +68,12 @@ class CallViewModel(
         mucRosterOf(room, presenceView, liveView)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), emptyList())
 
-    /** Whether our own nick advertises the raised-hand marker. */
-    val selfHandRaised: StateFlow<Boolean> = combine(
-        callState,
-        presence.raisedHands,
-    ) { state, raised ->
-        val room = activeMucRoomOf(state) ?: return@combine false
-        val nick = (state as? CallState.Active)?.selfNick ?: return@combine false
-        raised[room]?.contains(nick) == true
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+    /**
+     * Our own raised-hand marker — the engine's OPTIMISTIC state (web
+     * parity), never the room's presence echo: reading the echo makes
+     * a rapid double-tap flip the same direction twice.
+     */
+    val selfHandRaised: StateFlow<Boolean> = sessionManager.callStore.muc.selfHandRaised
 
     init {
         viewModelScope.launch {

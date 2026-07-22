@@ -52,7 +52,15 @@ internal val mucJoin = WaddleLiveKitJoin(
     token = liveKitToken(expEpochSeconds = 4_102_444_800), // 2100-01-01
 )
 
-internal class Fixture(sid: () -> String = { "c-fixed" }) {
+internal class Fixture(
+    sid: () -> String = { "c-fixed" },
+    /**
+     * Override for the store's bound-resource lookup; the default
+     * reads [activeSession]. A side-effecting override is the seam for
+     * driving a slot hijack at an exact point inside the MUC setup.
+     */
+    ownFullJid: (() -> String?)? = null,
+) {
     val client = FakeWaddleClient()
     val activeSession = ActiveSession { }
     val sessionCache = MucCallSessionCache(InMemoryPreferencesDataStore())
@@ -65,7 +73,7 @@ internal class Fixture(sid: () -> String = { "c-fixed" }) {
         store = CallStore(
             signaling = ClientCallSignaling(activeSession),
             ownBareJid = { activeSession.ownBareJid },
-            ownFullJid = { activeSession.ownFullJid },
+            ownFullJid = ownFullJid ?: { activeSession.ownFullJid },
             mucSessionCache = sessionCache,
             newSid = sid,
         )

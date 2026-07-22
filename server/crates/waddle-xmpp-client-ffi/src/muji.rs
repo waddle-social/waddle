@@ -36,6 +36,17 @@ pub(crate) fn muji_mixer_jid(server_domain: &str) -> String {
     format!("calls.{server_domain}")
 }
 
+/// Typed mixer target derived from the configured ACCOUNT JID: any
+/// resource is stripped BEFORE the domain split (a full JID would leak
+/// `domain/resource` into the mixer host), and a malformed result
+/// surfaces as [`WaddleError::InvalidJid`] instead of a panic.
+pub(crate) fn muji_mixer_target(account_jid: &str) -> Result<jid::Jid, WaddleError> {
+    let bare = account_jid.split('/').next().unwrap_or(account_jid);
+    muji_mixer_jid(jid_domain(bare))
+        .parse()
+        .map_err(|_| WaddleError::InvalidJid)
+}
+
 /// `urn:waddle:in-call:0` presence flags carried ALONGSIDE `<muji/>`
 /// (never inside it): raised hand and self-reported mute. Presence is
 /// last-writer-wins, so every update re-stamps BOTH flags.
@@ -78,15 +89,16 @@ pub(crate) fn muji_presence_stanza(
 /// Pure factory: the mixer-addressed `session-initiate` IQ (wasm
 /// parity — `<muji room=…/>` first, then audio content, plus video
 /// content when requested, each with the empty LiveKit transport
-/// placeholder the server rewrites).
+/// placeholder the server rewrites). Takes the pre-parsed mixer JID
+/// ([`muji_mixer_target`]) so no parse can fail here.
 pub(crate) fn muji_session_initiate_iq(
-    mixer: &str,
+    mixer: &jid::Jid,
     sid: &SessionId,
     initiator: &FullJid,
     room_jid: &str,
     video: bool,
 ) -> Element {
-    iq_set_to_component(
+    iq_set(
         mixer,
         build_muji_session_initiate(sid, initiator, room_jid, video),
     )
@@ -94,18 +106,12 @@ pub(crate) fn muji_session_initiate_iq(
 
 /// Pure factory: the mixer-addressed `session-terminate` IQ
 /// (`<muji room=…/>` + `<reason><success/></reason>`).
-pub(crate) fn muji_session_terminate_iq(mixer: &str, room_jid: &str, sid: &SessionId) -> Element {
-    iq_set_to_component(mixer, build_muji_session_terminate(room_jid, sid))
-}
-
-/// The mixer is a bare component domain, not a user JID — build the
-/// IQ envelope from the raw string instead of round-tripping through
-/// `jid::Jid` (which [`iq_set`] takes for user-addressed IQs).
-fn iq_set_to_component(mixer: &str, payload: Element) -> Element {
-    let domain: jid::Jid = mixer
-        .parse()
-        .expect("mixer JID is derived from the authenticated domain");
-    iq_set(&domain, payload)
+pub(crate) fn muji_session_terminate_iq(
+    mixer: &jid::Jid,
+    room_jid: &str,
+    sid: &SessionId,
+) -> Element {
+    iq_set(mixer, build_muji_session_terminate(room_jid, sid))
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -132,8 +138,8 @@ impl WaddleClient {
             .map_err(|_| WaddleError::InvalidJid)?;
         let room = self.require_bare_jid(&room_jid)?;
         let sid = require_session_id(sid)?;
+        let mixer = muji_mixer_target(&self.config.jid)?;
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
-        let mixer = muji_mixer_jid(jid_domain(&self.config.jid));
         let iq = muji_session_initiate_iq(&mixer, &sid, &initiator, room.as_str(), video);
         send_iq_with_timeout(&handle, iq)
             .await
@@ -155,8 +161,8 @@ impl WaddleClient {
     ) -> Result<(), WaddleError> {
         let room = self.require_bare_jid(&room_jid)?;
         let sid = require_session_id(sid)?;
+        let mixer = muji_mixer_target(&self.config.jid)?;
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
-        let mixer = muji_mixer_jid(jid_domain(&self.config.jid));
         let iq = muji_session_terminate_iq(&mixer, room.as_str(), &sid);
         send_iq_with_timeout(&handle, iq)
             .await

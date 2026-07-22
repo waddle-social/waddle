@@ -83,6 +83,16 @@ sealed interface CallState {
     ) : CallState
 }
 
+/**
+ * Whether the slot holds a XEP-0272 MUC group-call phase. These are
+ * engine-owned ([MucCallEngine]): the DM reducer must never collapse
+ * them to `Ended` — the group-call teardown (leave presence, waiter
+ * cancellation, mixer terminate, cache forget) runs through the
+ * store's MUC end effect instead.
+ */
+internal val CallState.isMucCallPhase: Boolean
+    get() = this is CallState.MucPending || (this is CallState.Active && kind == CallKind.MUC)
+
 /** The live call slot's session id, `null` only for [CallState.Idle]. */
 val CallState.sidOrNull: String?
     get() = when (this) {

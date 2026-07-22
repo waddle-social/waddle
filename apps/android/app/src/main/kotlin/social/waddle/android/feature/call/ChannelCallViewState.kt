@@ -64,21 +64,61 @@ sealed interface ChannelCallBannerState {
 
     /** We're in this room's call (surface minimized): compact pill. */
     data class Ongoing(val participantCount: Int) : ChannelCallBannerState
+
+    /**
+     * This resource still owes the room's call a cleanup — a cached
+     * session (Muji ghost or pending mixer terminate) with no live
+     * local call: offer "Leave call" (web `leaveRetainedMucCallAction`
+     * dock affordance).
+     */
+    data class LeaveRetained(val participantCount: Int) : ChannelCallBannerState
+}
+
+/**
+ * The session cache's view of the room's retained entry, when one
+ * exists for the current account (see `MucCallSessionCache.retainedEntry`).
+ */
+data class RetainedSessionView(
+    /** The entry's XEP-0166 mixer terminate never made it to the wire. */
+    val terminatePending: Boolean,
+)
+
+/**
+ * Whether the retained-call cleanup affordance applies: our slot holds
+ * NO call in this room, yet the session cache still has an entry our
+ * account owes the room — and either the Muji view still advertises
+ * our own nick (post-process-death ghost) or the entry's mixer
+ * terminate is still pending.
+ */
+fun shouldOfferRetainedLeave(
+    state: CallState,
+    roomJid: String,
+    retained: RetainedSessionView?,
+    mujiNicks: List<String>,
+    selfNick: String?,
+): Boolean {
+    if (localCallInRoom(state, roomJid)) return false
+    if (retained == null) return false
+    return retained.terminatePending || (!selfNick.isNullOrEmpty() && selfNick in mujiNicks)
 }
 
 /**
  * Conversation-banner state (web ConversationCallBanner group branch):
  * live-call join surface while we're out, a compact ongoing pill while
- * our own call in this room is minimized behind the chat.
+ * our own call in this room is minimized behind the chat, and the
+ * retained-call cleanup affordance when this resource still advertises
+ * a call it is no longer in.
  */
 fun channelCallBannerOf(
     state: CallState,
     roomJid: String,
     participants: List<String>,
     videoCall: Boolean,
+    retainedLeave: Boolean = false,
 ): ChannelCallBannerState = when {
     localCallInRoom(state, roomJid) ->
         ChannelCallBannerState.Ongoing(participantCount = maxOf(participants.size, 1))
+    retainedLeave -> ChannelCallBannerState.LeaveRetained(participantCount = maxOf(participants.size, 1))
     participants.isNotEmpty() -> ChannelCallBannerState.Join(
         participantCount = participants.size,
         nicks = participants,

@@ -2,6 +2,11 @@ package social.waddle.android.client.calls
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.bareJid
 import social.waddle.client.ffi.WaddleCallEvent
@@ -44,12 +49,27 @@ class MucCallEngine internal constructor(
     private val pendingAccepts = HashMap<String, PendingMujiAccept>()
 
     /**
-     * Our own `urn:waddle:in-call:0` markers. Presence is
-     * last-writer-wins, so every re-emit stamps BOTH (web
-     * `setMucCallHandRaised` / `broadcastMucCallSelfMute`).
+     * Serializes the muji presence re-stamps (hand raise / mute) so
+     * WIRE order matches snapshot order — two racing toggles must land
+     * on the last-writer-wins presence in the order they were taken.
+     * kotlinx's [Mutex] is fair, so waiters send in FIFO order.
      */
-    private var selfHandRaised = false
-    private var selfMuted = false
+    private val presenceSendMutex = Mutex()
+
+    private val _selfHandRaised = MutableStateFlow(false)
+
+    /**
+     * Our own optimistic `urn:waddle:in-call:0` raised-hand marker
+     * (web `$mucCallSelfHandRaised` parity): flipped BEFORE the
+     * presence send, rolled back on failure unless a newer toggle
+     * superseded it. The UI reads THIS, never the room's echo.
+     */
+    val selfHandRaised: StateFlow<Boolean> = _selfHandRaised.asStateFlow()
+
+    private val _selfMuted = MutableStateFlow(false)
+
+    /** Our own optimistic self-mute marker; the local mic toggle owns it. */
+    val selfMuted: StateFlow<Boolean> = _selfMuted.asStateFlow()
 
     private class PendingMujiAccept(
         val roomJid: String,
@@ -90,12 +110,10 @@ class MucCallEngine internal constructor(
             }
         }
         if (!claimed) return false
-        synchronized(lock) {
-            selfHandRaised = false
-            // Joining without mic capture advertises muted; a live mic
-            // toggle re-broadcasts the authoritative state post-connect.
-            selfMuted = !media.audio
-        }
+        _selfHandRaised.value = false
+        // Joining without mic capture advertises muted; a live mic
+        // toggle re-broadcasts the authoritative state post-connect.
+        _selfMuted.value = !media.audio
         return runSetup(attempt)
     }
 
@@ -130,6 +148,30 @@ class MucCallEngine internal constructor(
         terminate(current.peer, current.sid, ownFullJid())
     }
 
+    /**
+     * A remote end event (mixer session-terminate, or a stray
+     * reject/retract/finish) with the sid a MUC phase holds, routed
+     * from the store's effect queue: claim the slot → `Ended(reason)`,
+     * then run the full teardown — leave presence, waiter/resolver
+     * cancellation, (idempotent) mixer terminate, cache forget —
+     * keeping the XEP-0272 §Leaving order even for remote-initiated
+     * ends. No-op once the slot moved on.
+     */
+    internal suspend fun endFromRemote(sid: String, reason: CallEndReason) {
+        val claimed = store.updateCallSlot { current ->
+            if (current.isMucCallPhase && current.sidOrNull == sid) {
+                CallState.Ended(sid = sid, reason = reason) to current
+            } else {
+                current to null
+            }
+        } ?: return
+        when (claimed) {
+            is CallState.Active -> teardownActive(claimed)
+            is CallState.MucPending -> teardownPending(claimed)
+            else -> Unit
+        }
+    }
+
     /** Teardown for an abandoned setup whose slot the caller already cleared. */
     suspend fun teardownPending(current: CallState.MucPending) {
         presence.cancelPreparationWaiters(current.roomJid, current.selfNick)
@@ -148,19 +190,21 @@ class MucCallEngine internal constructor(
     suspend fun setHandRaised(raised: Boolean): Boolean {
         val target = mucActiveOrNull() ?: return false
         val nick = target.selfNick ?: return false
-        val muted = synchronized(lock) {
-            selfHandRaised = raised
-            selfMuted
+        _selfHandRaised.value = raised
+        val sent = presenceSendMutex.withLock {
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = target.peer, nick = nick,
+                    active = true, preparing = false, video = target.media.video,
+                    // Mute read INSIDE the send mutex: any earlier mute
+                    // broadcast has already landed, so the re-stamp
+                    // carries the newest marker.
+                    flags = WaddleInCallPresenceFlags(handRaised = raised, muted = _selfMuted.value),
+                ),
+            )
         }
-        val sent = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = target.peer, nick = nick,
-                active = true, preparing = false, video = target.media.video,
-                flags = WaddleInCallPresenceFlags(handRaised = raised, muted = muted),
-            ),
-        )
         if (!sent) {
-            synchronized(lock) { if (selfHandRaised == raised) selfHandRaised = !raised }
+            _selfHandRaised.compareAndSet(expect = raised, update = !raised)
             store.reportCallError("muji hand-raise update failed")
         }
         return sent
@@ -174,17 +218,16 @@ class MucCallEngine internal constructor(
     suspend fun broadcastSelfMute(muted: Boolean): Boolean {
         val target = mucActiveOrNull() ?: return false
         val nick = target.selfNick ?: return false
-        val handRaised = synchronized(lock) {
-            selfMuted = muted
-            selfHandRaised
+        _selfMuted.value = muted
+        val sent = presenceSendMutex.withLock {
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = target.peer, nick = nick,
+                    active = true, preparing = false, video = target.media.video,
+                    flags = WaddleInCallPresenceFlags(handRaised = _selfHandRaised.value, muted = muted),
+                ),
+            )
         }
-        val sent = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = target.peer, nick = nick,
-                active = true, preparing = false, video = target.media.video,
-                flags = WaddleInCallPresenceFlags(handRaised = handRaised, muted = muted),
-            ),
-        )
         if (!sent) store.reportCallError("muji mute update failed")
         return sent
     }
@@ -224,15 +267,18 @@ class MucCallEngine internal constructor(
             }
         }
         if (!promoted) return false
-        synchronized(lock) {
-            selfHandRaised = false
-            selfMuted = false
-        }
+        // The re-publish must not wipe in-call state: joining without
+        // mic capture stays advertised muted, and any flags a live
+        // engine still carries survive (post-process-death both flows
+        // are at their false defaults anyway).
+        val muted = _selfMuted.value || !media.audio
+        val handRaised = _selfHandRaised.value
+        _selfMuted.value = muted
         signaling.updateMujiPresence(
             MujiPresenceUpdate(
                 roomJid = room, nick = selfNick,
                 active = true, preparing = false, video = media.video,
-                flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
+                flags = WaddleInCallPresenceFlags(handRaised = handRaised, muted = muted),
             ),
         )
         return true
@@ -254,7 +300,14 @@ class MucCallEngine internal constructor(
         val room = normalizeMucCallRoomJid(roomJid)
         if (room.isEmpty() || selfNick.isNullOrEmpty()) return false
         val self = selfFullJid?.trim().orEmpty()
-        val cached = if (self.isEmpty()) null else sessionCache.read(room, self, nowMillis)
+        // Exact-resource entry first; otherwise any entry this ACCOUNT
+        // owes the mixer for the room (the resource suffix may have
+        // changed across the process death that orphaned the call).
+        val cached = if (self.isEmpty()) {
+            null
+        } else {
+            sessionCache.read(room, self, nowMillis) ?: sessionCache.retainedEntry(room, self, nowMillis)
+        }
         val cleared = signaling.updateMujiPresence(
             MujiPresenceUpdate(
                 roomJid = room, nick = selfNick,
@@ -269,20 +322,40 @@ class MucCallEngine internal constructor(
         presence.clearParticipant(room, selfNick, self.ifEmpty { null })
         if (cached == null) return true
         return if (signaling.mujiSessionTerminate(cached.roomJid, cached.sid)) {
-            sessionCache.forget(cached.roomJid, self, cached.sid)
+            sessionCache.forget(cached.roomJid, cached.selfFullJid, cached.sid)
             true
         } else {
-            sessionCache.markTerminatePending(cached.roomJid, cached.sid, self, nowMillis)
+            sessionCache.markTerminatePending(cached.roomJid, cached.sid, cached.selfFullJid, nowMillis)
             store.reportCallError("muji session terminate failed")
             false
         }
     }
 
+    /**
+     * Best-effort once-per-connect retry of the XEP-0166 terminates a
+     * previous leave still owes the mixer ([MucCallSessionCache]
+     * `terminatePending` entries for this account). Driven from the
+     * session-ready hook; a still-failing send keeps the entry flagged
+     * for the next connect.
+     */
+    suspend fun retryPendingTerminates(
+        selfFullJid: String?,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        val self = selfFullJid?.trim().orEmpty()
+        if (self.isEmpty()) return
+        for (entry in sessionCache.terminatePendingEntries(self, nowMillis)) {
+            if (signaling.mujiSessionTerminate(entry.roomJid, entry.sid)) {
+                sessionCache.forget(entry.roomJid, entry.selfFullJid, entry.sid)
+            }
+        }
+    }
+
     /** Session teardown: drop pending resolvers and in-call flags. */
     internal fun clear() {
+        _selfHandRaised.value = false
+        _selfMuted.value = false
         val cancelled = synchronized(lock) {
-            selfHandRaised = false
-            selfMuted = false
             val pending = pendingAccepts.values.toList()
             pendingAccepts.clear()
             pending
@@ -319,13 +392,31 @@ class MucCallEngine internal constructor(
                 flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
             ),
         )
-        if (!sent || !stillPending(attempt)) return false
-        if (!presence.awaitPreparingEcho(waiter, PREPARING_ECHO_TIMEOUT_MILLIS)) return false
-        if (!stillPending(attempt)) return false
+        if (!sent) return false
+        if (!stillPending(attempt)) return preparingFailed(attempt)
+        if (!presence.awaitPreparingEcho(waiter, PREPARING_ECHO_TIMEOUT_MILLIS)) return preparingFailed(attempt)
+        if (!stillPending(attempt)) return preparingFailed(attempt)
         if (!presence.awaitNoOtherPreparing(room, selfNick, selfFullJid, PREPARING_PEERS_TIMEOUT_MILLIS)) {
-            return false
+            return preparingFailed(attempt)
         }
-        return stillPending(attempt)
+        return stillPending(attempt) || preparingFailed(attempt)
+    }
+
+    /**
+     * A prepare step failed after the preparing presence hit the wire.
+     * When the slot no longer holds this attempt, a concurrent hangUp
+     * owned the cleanup — but its leave presence may have raced AHEAD
+     * of our still-in-flight preparing presence, leaving a permanent
+     * room-visible `<preparing/>` ghost that breaks every other
+     * occupant's `awaitNoOtherPreparing`. Re-clear it here (idempotent
+     * bare presence), mirroring [publishActivePresence]'s `!marked`
+     * branch; when the slot is still ours, [rollback] sends the leave.
+     */
+    private suspend fun preparingFailed(attempt: MucAttempt): Boolean {
+        if (!stillPending(attempt)) {
+            leavePresence(attempt.room, attempt.selfNick, attempt.selfFullJid)
+        }
+        return false
     }
 
     /**
@@ -373,6 +464,15 @@ class MucCallEngine internal constructor(
         synchronized(lock) {
             pendingAccepts[attempt.sid] = PendingMujiAccept(attempt.room, expected, deferred)
         }
+        // Last gate before the wire: a teardown that claimed the slot
+        // after the active-presence CAS already sent leave + terminate
+        // for this sid — a fresh initiate now would re-open a mixer
+        // session nothing local tracks. The teardown owner handled the
+        // room-visible cleanup, so bail without further sends.
+        if (!stillPending(attempt)) {
+            cancelPendingAccept(attempt.sid)
+            return null
+        }
         if (!signaling.mujiSessionInitiate(attempt.room, initiator, attempt.sid, attempt.media.video)) {
             cancelPendingAccept(attempt.sid)
             return null
@@ -406,6 +506,12 @@ class MucCallEngine internal constructor(
         }
         if (activated) {
             sessionCache.remember(attempt.room, attempt.sid, attempt.selfFullJid, attempt.media, join)
+        } else {
+            // The mixer accepted AFTER a teardown claimed the slot: the
+            // teardown's terminate provably predates the accept, so the
+            // fresh mixer session is half-open with no local trace.
+            // Close it here (the mixer-side terminate is idempotent).
+            terminate(attempt.room, attempt.sid, attempt.selfFullJid)
         }
         return activated
     }
@@ -443,10 +549,8 @@ class MucCallEngine internal constructor(
         )
         if (!cleared) store.reportCallError("muji leave presence failed")
         presence.clearParticipant(room, selfNick, selfFullJid)
-        synchronized(lock) {
-            selfHandRaised = false
-            selfMuted = false
-        }
+        _selfHandRaised.value = false
+        _selfMuted.value = false
     }
 
     private suspend fun terminate(room: String, sid: String, selfFullJid: String?) {

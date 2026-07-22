@@ -256,5 +256,6 @@
     <string name="call_action_lower_hand">Lower hand</string>
     <string name="call_roster_hand_raised">Hand raised</string>
     <string name="call_roster_muted">Muted</string>
+    <string name="call_leave_retained">Leave call</string>
     <string name="home_channel_call_badge">Active call</string>
 </resources>

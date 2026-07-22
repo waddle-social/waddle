@@ -56,6 +56,32 @@ class MucCallSessionCacheTest {
     }
 
     @Test
+    fun `a join token without a parseable exp claim refuses to resume`() = runTest {
+        val f = Fixture()
+        // `join.token` ("jwt") has no decodable payload, so the cache
+        // records no expiry — without connect headroom proof the entry
+        // must force a fresh initiate (web parity).
+        f.sessionCache.remember(ROOM_JID, "c-old", OWN_FULL, audio, join, nowMillis = now)
+
+        assertEquals("c-old", f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 1)?.sid)
+        assertFalse(f.sessionCache.canResume(ROOM_JID, OWN_FULL, nowMillis = now + 1))
+    }
+
+    @Test
+    fun `retainedEntry matches any resource of the same account`() = runTest {
+        val f = Fixture()
+        val oldResource = "alice@waddle.test/waddle-android-old"
+        f.sessionCache.remember(
+            ROOM_JID, "c-old", oldResource, audio,
+            mucJoin.copy(identity = oldResource),
+            nowMillis = now,
+        )
+
+        assertEquals("c-old", f.sessionCache.retainedEntry(ROOM_JID, OWN_FULL, nowMillis = now + 1)?.sid)
+        assertNull(f.sessionCache.retainedEntry(ROOM_JID, PEER_FULL, nowMillis = now + 1))
+    }
+
+    @Test
     fun `an identity mismatch refuses to resume`() = runTest {
         val f = Fixture()
         f.sessionCache.remember(
@@ -100,6 +126,31 @@ class MucCallSessionCacheTest {
             ),
             f.client.callVerbs,
         )
+    }
+
+    @Test
+    fun `resume without mic capture re-publishes the muted marker`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        val noMic = social.waddle.client.ffi.WaddleCallMedia(audio = false, video = false)
+        f.sessionCache.remember(ROOM_JID, "c-old", OWN_FULL, noMic, mucJoin, nowMillis = now)
+
+        assertTrue(f.store.muc.resume(ROOM_JID, SELF_NICK, OWN_FULL, nowMillis = now + 1))
+        runCurrent()
+
+        // The re-publish must not wipe in-call state: no captured mic
+        // means the resumed advertisement stays muted.
+        assertEquals(
+            listOf<RecordedCallVerb>(
+                RecordedCallVerb.UpdateMujiPresence(
+                    roomJid = ROOM_JID, nick = SELF_NICK,
+                    active = true, preparing = false, video = false,
+                    handRaised = false, muted = true,
+                ),
+            ),
+            f.client.callVerbs,
+        )
+        assertTrue(f.store.muc.selfMuted.value)
     }
 
     @Test
@@ -157,6 +208,59 @@ class MucCallSessionCacheTest {
         val entry = f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)
         assertTrue(entry?.terminatePending == true)
         assertFalse(f.sessionCache.canResume(ROOM_JID, OWN_FULL, nowMillis = now + 2))
+    }
+
+    @Test
+    fun `leaveRetained falls back to the account's entry from a previous resource`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        val oldResource = "alice@waddle.test/waddle-android-old"
+        f.sessionCache.remember(
+            ROOM_JID, "c-old", oldResource, audio,
+            mucJoin.copy(identity = oldResource),
+            nowMillis = now,
+        )
+
+        assertTrue(f.store.muc.leaveRetained(ROOM_JID, SELF_NICK, OWN_FULL, nowMillis = now + 1))
+
+        assertEquals(
+            listOf(
+                leavePresenceVerb,
+                RecordedCallVerb.MujiSessionTerminate(ROOM_JID, "c-old"),
+            ),
+            f.client.callVerbs,
+        )
+        assertNull(f.sessionCache.retainedEntry(ROOM_JID, OWN_FULL, nowMillis = now + 2))
+    }
+
+    // ── Terminate-pending retry (once per connect) ───────────────────────────
+
+    @Test
+    fun `retryPendingTerminates retries and forgets terminate-pending entries`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.sessionCache.markTerminatePending(ROOM_JID, "c-old", OWN_FULL, nowMillis = now)
+
+        f.store.muc.retryPendingTerminates(OWN_FULL, nowMillis = now + 1)
+
+        assertEquals(
+            listOf<RecordedCallVerb>(RecordedCallVerb.MujiSessionTerminate(ROOM_JID, "c-old")),
+            f.client.callVerbs,
+        )
+        assertNull(f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2))
+    }
+
+    @Test
+    fun `a still-failing retry keeps the entry flagged for the next connect`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.sessionCache.markTerminatePending(ROOM_JID, "c-old", OWN_FULL, nowMillis = now)
+        f.client.mujiSessionTerminateFailure = RuntimeException("boom")
+
+        f.store.muc.retryPendingTerminates(OWN_FULL, nowMillis = now + 1)
+
+        val entry = f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)
+        assertTrue(entry?.terminatePending == true)
     }
 
     @Test

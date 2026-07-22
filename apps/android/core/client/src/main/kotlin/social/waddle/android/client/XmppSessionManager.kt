@@ -372,6 +372,10 @@ class XmppSessionManager(
     ) {
         attemptScope.launch { catchup.refreshTopology(client) }
         attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
+        // Once per connect: retry the XEP-0166 mixer terminates a
+        // previous group-call leave still owes (terminate-pending
+        // session-cache entries survive process death and reconnects).
+        attemptScope.launch { callStore.muc.retryPendingTerminates(activeSession.ownFullJid) }
     }
 
     private suspend fun onTerminalAuthFailure() {

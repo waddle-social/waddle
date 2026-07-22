@@ -3,6 +3,7 @@ package social.waddle.android.feature.call
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * App-scoped projection of the LiveKit SFU's participant truth for the
@@ -49,27 +50,27 @@ class MucCallLiveParticipantsStore {
             return
         }
         clearLeaving(room)
-        _participants.value = _participants.value + (room to deduped)
+        _participants.update { it + (room to deduped) }
     }
 
     /** Drop the room's snapshot so the Muji-derived view re-engages. */
     fun clearRoom(roomJid: String) {
         val room = normalizeCallRoomJid(roomJid)
-        if (room.isEmpty() || room !in _participants.value) return
-        _participants.value = _participants.value - room
+        if (room.isEmpty()) return
+        _participants.update { it - room }
     }
 
     /** Mark [roomJid] locally leaving; no-op without a nick. */
     fun markLeaving(roomJid: String, selfNick: String?) {
         val room = normalizeCallRoomJid(roomJid)
         if (room.isEmpty() || selfNick.isNullOrEmpty()) return
-        _leavingRooms.value = _leavingRooms.value + (room to selfNick)
+        _leavingRooms.update { it + (room to selfNick) }
     }
 
     /** Consume the room's leave marker (Muji caught up, or a fresh join). */
     fun clearLeaving(roomJid: String) {
         val room = normalizeCallRoomJid(roomJid)
-        if (room.isEmpty() || room !in _leavingRooms.value) return
-        _leavingRooms.value = _leavingRooms.value - room
+        if (room.isEmpty()) return
+        _leavingRooms.update { it - room }
     }
 }

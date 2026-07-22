@@ -164,4 +164,91 @@ class ChannelCallViewStateTest {
             channelCallBannerOf(activeMucCall(), room, emptyList(), videoCall = false),
         )
     }
+
+    // ── Retained-call cleanup (web leaveRetainedMucCallAction dock) ──────────
+
+    @Test
+    fun retainedGhostStillAdvertisedInMujiOffersTheLeave() {
+        assertEquals(
+            true,
+            shouldOfferRetainedLeave(
+                state = CallState.Idle,
+                roomJid = room,
+                retained = RetainedSessionView(terminatePending = false),
+                mujiNicks = listOf("me", "alice"),
+                selfNick = "me",
+            ),
+        )
+    }
+
+    @Test
+    fun terminatePendingEntryOffersTheLeaveEvenWithoutAMujiGhost() {
+        assertEquals(
+            true,
+            shouldOfferRetainedLeave(
+                state = CallState.Idle,
+                roomJid = room,
+                retained = RetainedSessionView(terminatePending = true),
+                mujiNicks = emptyList(),
+                selfNick = "me",
+            ),
+        )
+    }
+
+    @Test
+    fun retainedLeaveNeverOffersWhileOurLiveCallOwnsTheRoom() {
+        assertEquals(
+            false,
+            shouldOfferRetainedLeave(
+                state = activeMucCall(),
+                roomJid = room,
+                retained = RetainedSessionView(terminatePending = true),
+                mujiNicks = listOf("me"),
+                selfNick = "me",
+            ),
+        )
+    }
+
+    @Test
+    fun aCachedSessionWithoutGhostOrPendingTerminateStaysQuiet() {
+        assertEquals(
+            false,
+            shouldOfferRetainedLeave(
+                state = CallState.Idle,
+                roomJid = room,
+                retained = RetainedSessionView(terminatePending = false),
+                mujiNicks = listOf("alice"),
+                selfNick = "me",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldOfferRetainedLeave(
+                state = CallState.Idle,
+                roomJid = room,
+                retained = null,
+                mujiNicks = listOf("me"),
+                selfNick = "me",
+            ),
+        )
+    }
+
+    @Test
+    fun retainedLeaveBannerOutranksJoinButNeverTheOngoingPill() {
+        assertEquals(
+            ChannelCallBannerState.LeaveRetained(participantCount = 2),
+            channelCallBannerOf(
+                CallState.Idle, room, listOf("me", "alice"), videoCall = false,
+                retainedLeave = true,
+            ),
+        )
+        assertEquals(
+            ChannelCallBannerState.LeaveRetained(participantCount = 1),
+            channelCallBannerOf(CallState.Idle, room, emptyList(), videoCall = false, retainedLeave = true),
+        )
+        assertEquals(
+            ChannelCallBannerState.Ongoing(participantCount = 1),
+            channelCallBannerOf(activeMucCall(), room, listOf("me"), videoCall = false, retainedLeave = true),
+        )
+    }
 }
