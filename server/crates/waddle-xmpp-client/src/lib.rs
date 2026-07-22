@@ -27,6 +27,7 @@ pub mod push;
 pub mod request;
 pub mod runtime;
 pub mod state;
+pub mod stickers;
 pub mod stream_management;
 pub mod transport;
 #[cfg(feature = "wasm")]
@@ -104,6 +105,12 @@ pub use request::{
 };
 pub use runtime::{RuntimeStatus, XmppRuntime};
 pub use state::{ClientState, SessionBinding, SessionPhase, SessionSnapshot, StreamId};
+pub use stickers::{
+    build_pack_publish_iq, build_pack_retract_iq, build_sticker_pack_items_iq,
+    build_sticker_packs_items_iq, compute_pack_hash, compute_pack_id, parse_pack_item,
+    parse_sticker_packs_result, HashAlgo, PackId, PackRef, PackSticker, StickerHash, StickerMarker,
+    StickerPackDoc, StickerText, NS_STICKERS, STICKERS_NODE,
+};
 pub use stream_management::SmResumeState;
 pub use transport::{
     decode_message, encode_message, StreamClose, StreamOpen, TransportCapabilities, TransportEvent,

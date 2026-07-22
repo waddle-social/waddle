@@ -250,6 +250,8 @@ fn parse_message(el: &Element) -> Option<InboundMessage> {
                             .and_then(|e| e.text().parse().ok()),
                         width: None,
                         height: None,
+                        desc: None,
+                        hashes: Vec::new(),
                         disposition: SharedFileDisposition::Attachment,
                         encrypted: None,
                     });

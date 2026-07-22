@@ -22,6 +22,7 @@ internal class SessionStores {
     val pinStore = PinStore()
     val notifySettingsStore = NotifySettingsStore()
     val roomMembersStore = RoomMembersStore()
+    val stickerPackStore = StickerPackStore()
     val profileStore = ProfileStore()
 
     fun clear() {
@@ -37,6 +38,7 @@ internal class SessionStores {
         pinStore.clear()
         notifySettingsStore.clear()
         roomMembersStore.clear()
+        stickerPackStore.clear()
         profileStore.clear()
     }
 

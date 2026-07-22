@@ -17,6 +17,16 @@ pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 /// matches the wire shape in the XEP-0490 examples.
 pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 
+/// XEP-0449 §"Creating a sticker pack" PEP node + payload namespace.
+///
+/// Sticker packs SHOULD be located at a PEP node named
+/// `urn:xmpp:stickers:0` whose access model SHOULD be `open` so that
+/// other users can fetch packs referenced from received stickers
+/// (xep-0449.xml "Creating a sticker pack"). Mirrored as
+/// `waddle_xmpp::xep::xep0449::NS_STICKERS` at the wire-handling
+/// layer; the two constants are pinned equal by a `waddle-xmpp` test.
+pub const PEP_NODE_STICKERS: &str = "urn:xmpp:stickers:0";
+
 /// XEP-0292 §3 vCard4 PEP node.
 ///
 /// Mirrored as `waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4` for use at
@@ -100,6 +110,7 @@ impl PepHandler {
             || node == PEP_NODE_AVATAR_DATA
             || node == PEP_NODE_AVATAR_METADATA
             || node == PEP_NODE_MDS_DISPLAYED
+            || node == PEP_NODE_STICKERS
             || node == PEP_NODE_VCARD4
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
@@ -125,6 +136,11 @@ impl PepHandler {
         if node == PEP_NODE_VCARD4 {
             // XEP-0292 §6.1: vCard4 is publicly readable; the canonical
             // PEP node access model is `open`.
+            return AccessModel::Open;
+        }
+        if node == PEP_NODE_STICKERS {
+            // XEP-0449: the sticker-pack node access model SHOULD be
+            // `open` so other users can fetch referenced packs.
             return AccessModel::Open;
         }
 
@@ -209,6 +225,18 @@ mod tests {
         assert!(!PepHandler::is_well_known_node(
             "eu.siacs.conversations.axolotl.devicelist"
         ));
+    }
+
+    #[test]
+    fn stickers_node_is_well_known_and_open() {
+        // XEP-0449: packs must be fetchable by other users, so the
+        // node's default access model is `open` — never the generic
+        // PEP `presence` default.
+        assert!(PepHandler::is_well_known_node(PEP_NODE_STICKERS));
+        assert_eq!(
+            PepHandler::default_access_model_for_node(PEP_NODE_STICKERS),
+            AccessModel::Open
+        );
     }
 
     #[test]

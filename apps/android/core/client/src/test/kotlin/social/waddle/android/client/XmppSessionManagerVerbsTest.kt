@@ -435,7 +435,7 @@ class XmppSessionManagerVerbsTest {
         assertEquals(NotifySettingsResult.Ok, result)
         assertEquals(
             listOf(Triple(room, WaddleNotifyMode.NEVER, false)),
-            harness.client.roomNotifyCalls,
+            harness.client.notify.roomCalls,
         )
         assertEquals(
             WaddleNotifyMode.NEVER,
@@ -478,8 +478,8 @@ class XmppSessionManagerVerbsTest {
     fun `a node config mismatch surfaces its own result and leaves the store untouched`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.roomNotifyOutcome = WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch
-        harness.client.dmNotifyOutcome = WaddleSetDmNotificationModeOutcome.NodeConfigMismatch
+        harness.client.notify.roomOutcome = WaddleSetRoomNotificationModeOutcome.NodeConfigMismatch
+        harness.client.notify.dmOutcome = WaddleSetDmNotificationModeOutcome.NodeConfigMismatch
 
         assertEquals(
             NotifySettingsResult.NodeConfigMismatch,
@@ -497,7 +497,7 @@ class XmppSessionManagerVerbsTest {
     fun `stanza-level errors report rejected`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.roomNotifyOutcome = WaddleSetRoomNotificationModeOutcome.Error
+        harness.client.notify.roomOutcome = WaddleSetRoomNotificationModeOutcome.Error
 
         assertEquals(
             NotifySettingsResult.Rejected,

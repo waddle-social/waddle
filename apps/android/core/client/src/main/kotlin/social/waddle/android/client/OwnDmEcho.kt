@@ -54,7 +54,9 @@ internal fun ownDmEcho(
     references = options.references,
     forumPostKind = null,
     forumTitle = null,
-    isSticker = false,
+    // The echo must render like the eventual MAM copy: a send carrying
+    // the XEP-0449 sticker ref IS a sticker message.
+    isSticker = options.sticker != null,
     linkPreviews = emptyList(),
     pinEvent = null,
     callThreadEnded = null,

@@ -28,7 +28,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | Channel (MUC) messaging | 0045 | ✅ | ✅ | `app/src/main/kotlin/social/waddle/android/feature/channel/ChannelScreen.kt` |
 | 1:1 direct messages | — | ✅ | ✅ | `app/src/main/kotlin/social/waddle/android/feature/dm/DmScreen.kt` |
-| Group DMs (multi-party) | 0045 | ✅ | ❌ | Web: `chat/src/lib/xmpp/group-dm.ts`; Android has only 1:1 DM + MUC |
+| Group DMs (multi-party) | 0045 | ✅ | ✅ | Android: DM-surface listing (`DmListScreen.kt`) plus create/rename/invite/leave in `GroupDmScreen.kt`/`NewGroupDmSheet.kt` over the group-dm FFI commands |
 | History (MAM) | 0313 | ✅ | ✅ | Android: `fetch_room_history`/`fetch_dm_history` FFI verbs |
 | Message search (MAM full-text) | 0313 | ✅ | ✅ | Android: `search_room_history`/`search_dm_history` FFI verbs + `feature/search/MessageSearchSheet.kt`, entry in the conversation top bar |
 | Corrections | 0308 | ✅ | ✅ | Edit action in `MessageActionSheet.kt` |
@@ -50,8 +50,8 @@ compares user-facing capability per area, verified against both codebases as of
 | @-mentions | 0372 | ✅ | ✅ | Composer autocomplete (`MentionPopover`/`MentionSpanTracker`) sends 0372 references; rendered + self-mention highlight in `RichMessageBody.kt` |
 | Mention/nick colors | 0392 | ✅ | ✅ | Shared Rust hue via `consistent_color_hue` FFI; `theme/ConsistentColor.kt` |
 | Per-conversation notify modes / mute | 0492 | ✅ | ✅ | Android: `NotifySettingsStore.kt` + notify sheet in the conversation top bar; `NotificationPolicy.kt` enforces never/on-mention/always |
-| Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
-| Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
+| Bookmarks | 0402 | ✅ | ✅ | Autojoin-driven room sync merged in the Rust core (`discovery/bookmarks.rs`), feeding `RoomStore.kt`; bookmark publishing + `+notify` deferred as web parity |
+| Inbox / unread overview | 0430 | ✅ | ✅ | Server-authoritative unread over the inbox FFI with local overlay (`InboxStore.kt` + `UnreadStore.kt`); thread entries stored, thread-inbox UI deferred |
 | Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
 | Room create / configure | 0045 | ✅ | ✅ | Android: create-channel dialog (owner-gated) + owner settings sheet over `create_room`/`fetch_room_config`/`submit_room_config`/`destroy_room` (§10 GET-merge-SET in Rust). Space intents deferred (need XEP-0060 spaces-node builders) |
 
@@ -84,7 +84,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Rich text editor / markup | 0394 | ✅ | ✅ | Rendered via `RichBody.kt`/`RichMessageBody.kt`; composer converts markdown at send (`ComposerMarkdown.kt`) |
 | Markdown rendering | — | ✅ | ✅ | Neither client renders markdown from received bodies (0394-only); Android converts typed markdown at send |
 | Link previews | urn:waddle:link-preview:0 | ✅ | ✅ | Cards in `LinkPreviewCard.kt`; composer lookup token via `lookup_link_preview` FFI |
-| Stickers | 0449 | ✅ | 🟡 | Inline sticker image (112dp, body = alt text); no picker on either client |
+| Stickers | 0449 | ✅ | ✅ | Android exceeds web parity: inline sticker image (112dp, body = alt text) plus picker (`StickerPickerSheet.kt`), sticker sends, and user-created packs (`CreateStickerPackSheet.kt` → 0363 upload → PEP publish over the FFI); web renders only |
 | GIF picker | — | ✅ | ✅ | `GifPickerSheet.kt` over the server-origin `/api/giphy` proxy contract |
 
 ## Calls
@@ -126,9 +126,7 @@ compares user-facing capability per area, verified against both codebases as of
 
 Remaining gaps, in priority order:
 
-1. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
-2. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-3. **Inbox sync (0430)** — the Rust client parses `urn:waddle:inbox:0`; expose it over the FFI and feed `UnreadStore`.
-4. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
-5. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload.
-6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+1. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
+2. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload (in flight on another train).
+3. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+4. **Deferred follow-ups** — bookmark publishing + `+notify` (0402) and the thread-inbox UI (0430).

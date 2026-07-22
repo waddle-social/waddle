@@ -48,6 +48,8 @@ fn invalid_send_options() -> WaddleSendOptions {
             size: None,
             width: None,
             height: None,
+            desc: None,
+            hashes: Vec::new(),
             disposition: "attachment".to_string(),
             encrypted: Some(WaddleEncryptedFile {
                 cipher: "urn:waddle:not-a-cipher".to_string(),

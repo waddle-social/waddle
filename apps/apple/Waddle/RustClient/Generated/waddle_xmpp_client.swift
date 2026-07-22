@@ -1313,6 +1313,44 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      */
     func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
 
+    /**
+     * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
+     * (XEP-0060 items-by-id). `node: None` defaults to the PEP
+     * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
+     * pubsub node per the `<sticker jid/node>` reference attributes.
+     * A missing pack (or empty node) yields `Ok(None)`.
+     */
+    func fetchStickerPack(ownerJid: String, node: String?, packId: String) async throws  -> WaddleStickerPack?
+
+    /**
+     * XEP-0449: fetch every sticker pack published on the
+     * `urn:xmpp:stickers:0` PEP node. `owner_jid: None` fetches the
+     * account's own packs; `Some(jid)` fetches another user's
+     * (readable because the node's access model is `open`). An
+     * `item-not-found` reply — no pack ever published — is the normal
+     * first-run state and returns an empty list.
+     */
+    func fetchStickerPacks(ownerJid: String?) async throws  -> [WaddleStickerPack]
+
+    /**
+     * XEP-0449: publish (create or update/import) a sticker pack on
+     * the account's own PEP node. The pubsub item id is recomputed
+     * from the pack content per §"Sticker pack hash calculation" —
+     * the caller-supplied `pack.id` is ignored — and the id actually
+     * published is returned.
+     */
+    func publishStickerPack(pack: WaddleStickerPack) async throws  -> String
+
+    /**
+     * XEP-0449: retract (delete) one pack from the account's own PEP
+     * node. Idempotent: an `item-not-found` reply (the pack is
+     * already gone) is success, so a retry after an interrupted
+     * retract self-heals. Returns `false` on invalid input, no live
+     * session, or any other stanza error (with an `Error` event
+     * carrying the diagnostic).
+     */
+    func retractStickerPack(packId: String) async  -> Bool
+
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3576,6 +3614,105 @@ open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async t
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
+     * (XEP-0060 items-by-id). `node: None` defaults to the PEP
+     * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
+     * pubsub node per the `<sticker jid/node>` reference attributes.
+     * A missing pack (or empty node) yields `Ok(None)`.
+     */
+open func fetchStickerPack(ownerJid: String, node: String?, packId: String)async throws  -> WaddleStickerPack?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(ownerJid),FfiConverterOptionString.lower(node),FfiConverterString.lower(packId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleStickerPack.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0449: fetch every sticker pack published on the
+     * `urn:xmpp:stickers:0` PEP node. `owner_jid: None` fetches the
+     * account's own packs; `Some(jid)` fetches another user's
+     * (readable because the node's access model is `open`). An
+     * `item-not-found` reply — no pack ever published — is the normal
+     * first-run state and returns an empty list.
+     */
+open func fetchStickerPacks(ownerJid: String?)async throws  -> [WaddleStickerPack]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_packs(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionString.lower(ownerJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleStickerPack.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0449: publish (create or update/import) a sticker pack on
+     * the account's own PEP node. The pubsub item id is recomputed
+     * from the pack content per §"Sticker pack hash calculation" —
+     * the caller-supplied `pack.id` is ignored — and the id actually
+     * published is returned.
+     */
+open func publishStickerPack(pack: WaddleStickerPack)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticker_pack(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleStickerPack_lower(pack)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0449: retract (delete) one pack from the account's own PEP
+     * node. Idempotent: an `item-not-found` reply (the pack is
+     * already gone) is success, so a retry after an interrupted
+     * retract self-heals. Returns `false` on invalid input, no live
+     * session, or any other stanza error (with an `Error` event
+     * carrying the diagnostic).
+     */
+open func retractStickerPack(packId: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_sticker_pack(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(packId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
         )
 }
 
@@ -8438,6 +8575,114 @@ public func FfiConverterTypeWaddleMujiPresence_lower(_ value: WaddleMujiPresence
 
 
 /**
+ * One sticker inside a XEP-0449 pack. Mirrors
+ * `waddle_xmpp_client::stickers::PackSticker` with the typed
+ * dimensions pair flattened to optional width/height and suggest
+ * entries flattened to their texts.
+ */
+public struct WaddlePackSticker: Equatable, Hashable {
+    /**
+     * Mandatory lang-less textual fallback (usually emoji).
+     */
+    public var desc: String
+    public var mediaType: String?
+    public var size: UInt64?
+    public var width: UInt32?
+    public var height: UInt32?
+    /**
+     * ≥1 per XEP-0449; all stickers in a pack share one algorithm.
+     */
+    public var hashes: [WaddleStickerHash]
+    /**
+     * XEP-0447 source URLs the image can be fetched from.
+     */
+    public var sources: [String]
+    /**
+     * XEP-0449 `<suggest/>` texts clients may replace with the sticker.
+     */
+    public var suggests: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Mandatory lang-less textual fallback (usually emoji).
+         */desc: String, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?,
+        /**
+         * ≥1 per XEP-0449; all stickers in a pack share one algorithm.
+         */hashes: [WaddleStickerHash],
+        /**
+         * XEP-0447 source URLs the image can be fetched from.
+         */sources: [String],
+        /**
+         * XEP-0449 `<suggest/>` texts clients may replace with the sticker.
+         */suggests: [String]) {
+        self.desc = desc
+        self.mediaType = mediaType
+        self.size = size
+        self.width = width
+        self.height = height
+        self.hashes = hashes
+        self.sources = sources
+        self.suggests = suggests
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePackSticker: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePackSticker: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePackSticker {
+        return
+            try WaddlePackSticker(
+                desc: FfiConverterString.read(from: &buf),
+                mediaType: FfiConverterOptionString.read(from: &buf),
+                size: FfiConverterOptionUInt64.read(from: &buf),
+                width: FfiConverterOptionUInt32.read(from: &buf),
+                height: FfiConverterOptionUInt32.read(from: &buf),
+                hashes: FfiConverterSequenceTypeWaddleStickerHash.read(from: &buf),
+                sources: FfiConverterSequenceString.read(from: &buf),
+                suggests: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePackSticker, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.desc, into: &buf)
+        FfiConverterOptionString.write(value.mediaType, into: &buf)
+        FfiConverterOptionUInt64.write(value.size, into: &buf)
+        FfiConverterOptionUInt32.write(value.width, into: &buf)
+        FfiConverterOptionUInt32.write(value.height, into: &buf)
+        FfiConverterSequenceTypeWaddleStickerHash.write(value.hashes, into: &buf)
+        FfiConverterSequenceString.write(value.sources, into: &buf)
+        FfiConverterSequenceString.write(value.suggests, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePackSticker_lift(_ buf: RustBuffer) throws -> WaddlePackSticker {
+    return try FfiConverterTypeWaddlePackSticker.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePackSticker_lower(_ value: WaddlePackSticker) -> RustBuffer {
+    return FfiConverterTypeWaddlePackSticker.lower(value)
+}
+
+
+/**
  * Snapshot of a user's mood/activity/tune PEP nodes, fetched via
  * three XEP-0060 items requests (wasm `fetch_user_pep_profile`
  * parity). A node that is absent, empty, or answers with a stanza
@@ -9509,6 +9754,11 @@ public struct WaddleSendOptions: Equatable, Hashable {
      * without knowing the room.
      */
     public var mucPm: Bool
+    /**
+     * XEP-0449: mark this send as a sticker referencing its source
+     * pack. The sticker image itself travels in `shared_files`.
+     */
+    public var sticker: WaddleStickerRef?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -9526,7 +9776,11 @@ public struct WaddleSendOptions: Equatable, Hashable {
          * XEP-0045 §7.5: mark the message as a MUC private message so
          * the sender's other clients can classify the sent-carbon copy
          * without knowing the room.
-         */mucPm: Bool) {
+         */mucPm: Bool,
+        /**
+         * XEP-0449: mark this send as a sticker referencing its source
+         * pack. The sticker image itself travels in `shared_files`.
+         */sticker: WaddleStickerRef?) {
         self.stanzaId = stanzaId
         self.subject = subject
         self.reply = reply
@@ -9538,6 +9792,7 @@ public struct WaddleSendOptions: Equatable, Hashable {
         self.linkPreviewToken = linkPreviewToken
         self.requestDisplayedMarker = requestDisplayedMarker
         self.mucPm = mucPm
+        self.sticker = sticker
     }
 
 
@@ -9566,7 +9821,8 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 linkPreviewToken: FfiConverterOptionString.read(from: &buf),
                 requestDisplayedMarker: FfiConverterBool.read(from: &buf),
-                mucPm: FfiConverterBool.read(from: &buf)
+                mucPm: FfiConverterBool.read(from: &buf),
+                sticker: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf)
         )
     }
 
@@ -9582,6 +9838,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.linkPreviewToken, into: &buf)
         FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
         FfiConverterBool.write(value.mucPm, into: &buf)
+        FfiConverterOptionTypeWaddleStickerRef.write(value.sticker, into: &buf)
     }
 }
 
@@ -9611,6 +9868,16 @@ public struct WaddleSharedFile: Equatable, Hashable {
     public var size: UInt64?
     public var width: UInt32?
     public var height: UInt32?
+    /**
+     * XEP-0446 lang-less `<desc/>` textual fallback. Mandatory on
+     * XEP-0449 sticker files (usually the sticker's emoji).
+     */
+    public var desc: String?
+    /**
+     * XEP-0446 / XEP-0300 plaintext content hashes inside `<file/>`.
+     * Distinct from the XEP-0448 ciphertext hashes on `encrypted`.
+     */
+    public var hashes: [WaddleStickerHash]
     public var disposition: String
     /**
      * XEP-0448 envelope when the bytes at `url` are ciphertext rather than
@@ -9621,7 +9888,15 @@ public struct WaddleSharedFile: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(url: String, name: String?, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?, disposition: String,
+    public init(url: String, name: String?, mediaType: String?, size: UInt64?, width: UInt32?, height: UInt32?,
+        /**
+         * XEP-0446 lang-less `<desc/>` textual fallback. Mandatory on
+         * XEP-0449 sticker files (usually the sticker's emoji).
+         */desc: String?,
+        /**
+         * XEP-0446 / XEP-0300 plaintext content hashes inside `<file/>`.
+         * Distinct from the XEP-0448 ciphertext hashes on `encrypted`.
+         */hashes: [WaddleStickerHash], disposition: String,
         /**
          * XEP-0448 envelope when the bytes at `url` are ciphertext rather than
          * the plaintext file. Recipients MUST use these values to decrypt before
@@ -9633,6 +9908,8 @@ public struct WaddleSharedFile: Equatable, Hashable {
         self.size = size
         self.width = width
         self.height = height
+        self.desc = desc
+        self.hashes = hashes
         self.disposition = disposition
         self.encrypted = encrypted
     }
@@ -9659,6 +9936,8 @@ public struct FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer {
                 size: FfiConverterOptionUInt64.read(from: &buf),
                 width: FfiConverterOptionUInt32.read(from: &buf),
                 height: FfiConverterOptionUInt32.read(from: &buf),
+                desc: FfiConverterOptionString.read(from: &buf),
+                hashes: FfiConverterSequenceTypeWaddleStickerHash.read(from: &buf),
                 disposition: FfiConverterString.read(from: &buf),
                 encrypted: FfiConverterOptionTypeWaddleEncryptedFile.read(from: &buf)
         )
@@ -9671,6 +9950,8 @@ public struct FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.size, into: &buf)
         FfiConverterOptionUInt32.write(value.width, into: &buf)
         FfiConverterOptionUInt32.write(value.height, into: &buf)
+        FfiConverterOptionString.write(value.desc, into: &buf)
+        FfiConverterSequenceTypeWaddleStickerHash.write(value.hashes, into: &buf)
         FfiConverterString.write(value.disposition, into: &buf)
         FfiConverterOptionTypeWaddleEncryptedFile.write(value.encrypted, into: &buf)
     }
@@ -9923,6 +10204,216 @@ public func FfiConverterTypeWaddleStanzaId_lift(_ buf: RustBuffer) throws -> Wad
 #endif
 public func FfiConverterTypeWaddleStanzaId_lower(_ value: WaddleStanzaId) -> RustBuffer {
     return FfiConverterTypeWaddleStanzaId.lower(value)
+}
+
+
+/**
+ * One XEP-0300 `urn:xmpp:hashes:2` hash value. `algo` is the wire
+ * algorithm name (only `sha-256` is accepted by the typed layer in
+ * v1; anything else is rejected on conversion).
+ */
+public struct WaddleStickerHash: Equatable, Hashable {
+    public var algo: String
+    public var valueB64: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(algo: String, valueB64: String) {
+        self.algo = algo
+        self.valueB64 = valueB64
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStickerHash: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStickerHash: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStickerHash {
+        return
+            try WaddleStickerHash(
+                algo: FfiConverterString.read(from: &buf),
+                valueB64: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStickerHash, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.algo, into: &buf)
+        FfiConverterString.write(value.valueB64, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerHash_lift(_ buf: RustBuffer) throws -> WaddleStickerHash {
+    return try FfiConverterTypeWaddleStickerHash.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerHash_lower(_ value: WaddleStickerHash) -> RustBuffer {
+    return FfiConverterTypeWaddleStickerHash.lower(value)
+}
+
+
+/**
+ * A XEP-0449 sticker pack (one pubsub item on the
+ * `urn:xmpp:stickers:0` node; the item id is the pack id derived from
+ * the pack hash).
+ */
+public struct WaddleStickerPack: Equatable, Hashable {
+    /**
+     * Pack id = first 24 Base64 chars of the pack hash. On publish
+     * the id is recomputed from the pack content server-side of this
+     * FFI — the caller's value is display state, never trusted.
+     */
+    public var id: String
+    public var name: String?
+    public var summary: String?
+    /**
+     * `<restricted/>`: the pack may not be imported by other users.
+     */
+    public var restricted: Bool
+    public var stickers: [WaddlePackSticker]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pack id = first 24 Base64 chars of the pack hash. On publish
+         * the id is recomputed from the pack content server-side of this
+         * FFI — the caller's value is display state, never trusted.
+         */id: String, name: String?, summary: String?,
+        /**
+         * `<restricted/>`: the pack may not be imported by other users.
+         */restricted: Bool, stickers: [WaddlePackSticker]) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.restricted = restricted
+        self.stickers = stickers
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStickerPack: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStickerPack: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStickerPack {
+        return
+            try WaddleStickerPack(
+                id: FfiConverterString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf),
+                summary: FfiConverterOptionString.read(from: &buf),
+                restricted: FfiConverterBool.read(from: &buf),
+                stickers: FfiConverterSequenceTypeWaddlePackSticker.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStickerPack, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.summary, into: &buf)
+        FfiConverterBool.write(value.restricted, into: &buf)
+        FfiConverterSequenceTypeWaddlePackSticker.write(value.stickers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerPack_lift(_ buf: RustBuffer) throws -> WaddleStickerPack {
+    return try FfiConverterTypeWaddleStickerPack.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerPack_lower(_ value: WaddleStickerPack) -> RustBuffer {
+    return FfiConverterTypeWaddleStickerPack.lower(value)
+}
+
+
+/**
+ * Reference to the source pack of an outbound sticker send
+ * (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
+ * `pack_node` locate packs hosted outside the sender's own PEP
+ * `urn:xmpp:stickers:0` node.
+ */
+public struct WaddleStickerRef: Equatable, Hashable {
+    public var packId: String
+    public var packJid: String?
+    public var packNode: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(packId: String, packJid: String?, packNode: String?) {
+        self.packId = packId
+        self.packJid = packJid
+        self.packNode = packNode
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStickerRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStickerRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStickerRef {
+        return
+            try WaddleStickerRef(
+                packId: FfiConverterString.read(from: &buf),
+                packJid: FfiConverterOptionString.read(from: &buf),
+                packNode: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleStickerRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.packId, into: &buf)
+        FfiConverterOptionString.write(value.packJid, into: &buf)
+        FfiConverterOptionString.write(value.packNode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerRef_lift(_ buf: RustBuffer) throws -> WaddleStickerRef {
+    return try FfiConverterTypeWaddleStickerRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStickerRef_lower(_ value: WaddleStickerRef) -> RustBuffer {
+    return FfiConverterTypeWaddleStickerRef.lower(value)
 }
 
 
@@ -11063,7 +11554,9 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
      * A caller-supplied argument failed validation before any stanza
      * was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
      * general (both become XML element names on the wire), an empty
-     * avatar image, or an all-empty tune payload. Nothing was sent.
+     * avatar image, an all-empty tune payload, or an XEP-0449 sticker
+     * pack whose id, content, or hash algorithm is empty, malformed,
+     * or unsupported. Nothing was sent.
      */
     case InvalidArgument
     /**
@@ -13900,6 +14393,54 @@ fileprivate struct FfiConverterOptionTypeWaddleSmResumeState: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleStickerPack: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStickerPack?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleStickerPack.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleStickerPack.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleStickerRef: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStickerRef?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleStickerRef.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleStickerRef.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleThreadTarget: FfiConverterRustBuffer {
     typealias SwiftType = WaddleThreadTarget?
 
@@ -14710,6 +15251,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddlePackSticker: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddlePackSticker]
+
+    public static func write(_ value: [WaddlePackSticker], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddlePackSticker.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddlePackSticker] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddlePackSticker]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddlePackSticker.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddlePinEntry: FfiConverterRustBuffer {
     typealias SwiftType = [WaddlePinEntry]
 
@@ -14877,6 +15443,56 @@ fileprivate struct FfiConverterSequenceTypeWaddleStanzaId: FfiConverterRustBuffe
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleStanzaId.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStickerHash: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStickerHash]
+
+    public static func write(_ value: [WaddleStickerHash], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStickerHash.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStickerHash] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStickerHash]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStickerHash.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleStickerPack]
+
+    public static func write(_ value: [WaddleStickerPack], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleStickerPack.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleStickerPack] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleStickerPack]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleStickerPack.read(from: &buf))
         }
         return seq
     }
@@ -15314,6 +15930,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs() != 18633) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack() != 16031) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {

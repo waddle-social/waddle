@@ -55,6 +55,8 @@ pub(super) fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
         size,
         width,
         height,
+        desc: None,
+        hashes: Vec::new(),
         disposition,
         encrypted: None,
     })
@@ -69,6 +71,8 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
     let mut height: Option<u32> = None;
     let disposition_attr = file_sharing_el.attr("disposition");
     let mut encrypted = None;
+    let mut desc: Option<String> = None;
+    let mut hashes: Vec<crate::stickers::StickerHash> = Vec::new();
 
     if let Some(file_el) = file_sharing_el.get_child("file", NS_FILE_METADATA) {
         name = file_el
@@ -86,6 +90,24 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
         height = file_el
             .get_child("height", NS_FILE_METADATA)
             .and_then(|e| e.text().parse().ok());
+        // XEP-0446 lang-less textual fallback — for XEP-0449 stickers
+        // this is the emoji rendered by non-image UIs. Only the
+        // lang-less variant is the mandated fallback.
+        desc = file_el
+            .children()
+            .find(|child| {
+                child.is("desc", NS_FILE_METADATA)
+                    && child
+                        .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                        .is_none()
+            })
+            .map(Element::text);
+        // XEP-0300 plaintext content hashes inside <file/>. Unknown
+        // algorithms are dropped at this boundary (typed HashAlgo).
+        hashes = file_el
+            .children()
+            .filter_map(crate::stickers::parse_file_hash_element)
+            .collect();
     }
 
     if let Some(sources_el) = file_sharing_el.get_child("sources", NS_SFS) {
@@ -114,6 +136,8 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
         size,
         width,
         height,
+        desc,
+        hashes,
         disposition,
         encrypted,
     })

@@ -43,6 +43,10 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
     Ok(SendMessageOptions {
         stanza_id,
         subject: options.subject,
+        // The wasm chat surface has no sticker picker yet; the field
+        // exists so the shared builder compiles against one options
+        // shape across FFI surfaces.
+        sticker: None,
         reply,
         fallback: options.fallback.map(|range| FallbackRange {
             start: range.start,
@@ -104,6 +108,8 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
                     size: file.size,
                     width: file.width,
                     height: file.height,
+                    desc: None,
+                    hashes: Vec::new(),
                     disposition,
                     encrypted,
                 })

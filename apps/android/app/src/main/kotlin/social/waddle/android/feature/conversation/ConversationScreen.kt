@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -48,9 +49,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.filterNotNull
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
@@ -104,6 +109,10 @@ fun ConversationScreen(
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     var gifPickerOpen by remember { mutableStateOf(false) }
+    // Saveable: the create pipeline runs in a ViewModel and survives a
+    // config change — the sheets observing it must come back too.
+    var stickerPickerOpen by rememberSaveable { mutableStateOf(false) }
+    var createStickerPackOpen by rememberSaveable { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -257,6 +266,7 @@ fun ConversationScreen(
                 onCancelReply = viewModel::cancelReply,
                 onAttach = { attachmentPicker.launch("*/*") },
                 onGif = { gifPickerOpen = true },
+                onSticker = { stickerPickerOpen = true },
                 uploadState = uploadState,
                 onClearUpload = viewModel::clearUploadState,
             )
@@ -332,6 +342,83 @@ fun ConversationScreen(
         )
     }
 
+    if (stickerPickerOpen) {
+        // Graph read stays inside the open branch: hosts without a
+        // provided graph (plain scaffold tests) never open the picker.
+        val graph = LocalAppGraph.current
+        val packs by graph.sessionManager.stickerPackStore.packs.collectAsStateWithLifecycle()
+        LaunchedEffect(graph) { graph.sessionManager.loadStickerPacks() }
+        // VM-scoped (not composition-scoped): a removal keeps running —
+        // and reconciles the store — even when the sheet closes or the
+        // screen rotates right after the confirm.
+        val stickerSession by graph.currentSession.collectAsStateWithLifecycle()
+        // Account-scoped key (ProfileScreen precedent): the activity
+        // retains VM stores across logout/login, and account A's sticky
+        // phase or in-flight pipeline must not serve account B.
+        val packsViewModel: StickerPacksViewModel = viewModel(
+            key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
+            factory = StickerPacksViewModel.factory(graph),
+        )
+        // Keyed on the VM, not the value (a value-keyed effect would
+        // restart on consume and cancel showSnackbar mid-suspend), and
+        // lifecycle-gated so a failure landing while STOPPED stays
+        // sticky instead of being shown invisibly and consumed.
+        // Consume AFTER showing, compare-and-set against the shown
+        // value — a rotation mid-display re-shows once, and a distinct
+        // failure landing mid-show survives.
+        val stickerLifecycle = LocalLifecycleOwner.current
+        LaunchedEffect(packsViewModel, stickerLifecycle) {
+            stickerLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                packsViewModel.removeFailure.filterNotNull().collect { shown ->
+                    snackbarHostState.showSnackbar(actionFailedText)
+                    packsViewModel.consumeRemoveFailure(shown)
+                }
+            }
+        }
+        StickerPickerSheet(
+            packs = packs,
+            onSelect = { item, pack ->
+                stickerPickerOpen = false
+                viewModel.sendSticker(item, pack.id)
+            },
+            onCreatePack = {
+                stickerPickerOpen = false
+                createStickerPackOpen = true
+            },
+            onRemovePack = { pack -> packsViewModel.removePack(pack.id) },
+            onDismiss = { stickerPickerOpen = false },
+        )
+    }
+
+    if (createStickerPackOpen) {
+        val graph = LocalAppGraph.current
+        val stickerSession by graph.currentSession.collectAsStateWithLifecycle()
+        // Same instance as the picker branch (shared account-scoped
+        // key): the create pipeline lives in the VM and survives sheet
+        // recreation.
+        val packsViewModel: StickerPacksViewModel = viewModel(
+            key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
+            factory = StickerPacksViewModel.factory(graph),
+        )
+        val createPhase by packsViewModel.createPhase.collectAsStateWithLifecycle()
+        CreateStickerPackSheet(
+            phase = createPhase,
+            onCreate = packsViewModel::createPack,
+            onCreated = {
+                packsViewModel.consumeCreateSuccess()
+                createStickerPackOpen = false
+                // Back to the picker: the store already holds the new pack.
+                stickerPickerOpen = true
+            },
+            onDismiss = {
+                // A terminal Failed phase is last attempt's news; a
+                // reopened sheet must start fresh.
+                packsViewModel.resetCreatePhase()
+                createStickerPackOpen = false
+            },
+        )
+    }
+
     searchTarget?.takeIf { searchOpen }?.let { target ->
         // Graph read stays inside the open branch: hosts without a
         // provided graph (plain scaffold tests) never search.
@@ -397,6 +484,9 @@ fun ConversationScreen(
         }
     }
 }
+
+/** Shared VM key: the picker and create sheets address ONE instance. */
+private const val STICKER_PACKS_VIEW_MODEL_KEY = "sticker-packs"
 
 /** Semantics tags for the DM call entry points, shared with tests. */
 object ConversationCallTestTags {
