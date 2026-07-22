@@ -57,6 +57,10 @@ internal class ProfileVerbs(
         activeSession.fetch { it.fetchUserPepProfile(own) }
             ?.takeIf { activeSession.generation == generation }
             ?.let { stores.profileStore.setSelfStatus(it) }
+        // The PEP fetch above can outlive the session: a stale
+        // coroutine must not issue avatar IQs through the NEXT
+        // session's client for the old account's JID.
+        if (activeSession.generation != generation) return VerbResult.NotConnected
         fetchAvatar(own)
         return VerbResult.Ok
     }

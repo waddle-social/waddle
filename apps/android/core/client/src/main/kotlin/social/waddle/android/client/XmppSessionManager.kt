@@ -146,10 +146,12 @@ class XmppSessionManager(
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
-        clearSessionState()
-        // New account session: in-flight verb replies from the previous
-        // one must not write into these freshly seeded stores.
+        // BEFORE the store clear (logout parity): a parked verb ack
+        // from the previous session resuming between the clear and the
+        // bump would pass its generation check and write stale state
+        // into the freshly seeded stores.
         activeSession.advanceGeneration()
+        clearSessionState()
         activeSession.ownBareJid = bareJid(session.jid)
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
@@ -432,6 +434,10 @@ class XmppSessionManager(
 
     private suspend fun onTerminalAuthFailure() {
         _appState.value = WaddleAppState.SignedOut
+        // The dead session's in-flight verb acks (caller-scoped, up to
+        // the 30 s IQ timeout away) must not write during the signed-out
+        // idle period or into the next login's stores.
+        activeSession.advanceGeneration()
         // A live call slot must not outlive the session: the shell is
         // about to render the login screen with no in-app hang-up, and
         // the app-scoped collectors (FGS, media, ring notification)
