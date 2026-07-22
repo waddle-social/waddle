@@ -155,6 +155,27 @@
     <string name="gif_rate_limited">Too many GIF searches — try again shortly.</string>
     <string name="gif_unavailable">GIF search is unavailable right now.</string>
 
+    <!-- XEP-0449 sticker picker + pack creation -->
+    <string name="composer_sticker">Stickers</string>
+    <string name="sticker_picker_title">Stickers</string>
+    <string name="sticker_picker_loading">Loading sticker packs…</string>
+    <string name="sticker_picker_unavailable">Sticker packs are unavailable right now.</string>
+    <string name="sticker_picker_empty">You have no sticker packs yet.</string>
+    <string name="sticker_create_pack">Create pack</string>
+    <string name="sticker_pack_actions">Pack actions</string>
+    <string name="sticker_remove_pack">Remove pack</string>
+    <string name="sticker_remove_confirm_title">Remove sticker pack?</string>
+    <string name="sticker_remove_confirm_body">“%1$s” will be removed from your account. Stickers already sent stay in their conversations.</string>
+    <string name="sticker_pack_name">Pack name</string>
+    <string name="sticker_pack_summary">Summary (optional)</string>
+    <string name="sticker_add_images">Add images</string>
+    <string name="sticker_desc_placeholder">Description (emoji or text)</string>
+    <string name="sticker_remove_image">Remove image</string>
+    <string name="sticker_publish_pack">Publish pack</string>
+    <string name="sticker_create_progress">Uploading sticker %1$d of %2$d…</string>
+    <string name="sticker_create_offline">You\'re offline — try again when connected.</string>
+    <string name="sticker_create_failed">Creating the pack failed. Check the images and try again.</string>
+
     <!-- XEP-0319 idle display (web ChatHeader parity: "away · idle 20m") -->
     <string name="dm_presence_away">away</string>
     <string name="dm_presence_away_idle">away · idle %1$s</string>

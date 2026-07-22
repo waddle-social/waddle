@@ -845,8 +845,27 @@ class FakeWaddleClient : WaddleClientInterface {
     val stickerPublishCalls = CopyOnWriteArrayList<WaddleStickerPack>()
     val stickerRetractCalls = CopyOnWriteArrayList<String>()
 
+    /** Set to fail the sticker fetch/publish/retract verbs (they throw). */
+    @Volatile
+    var stickerFetchFailure: Throwable? = null
+
+    @Volatile
+    var stickerPublishFailure: Throwable? = null
+
+    @Volatile
+    var stickerRetractFailure: Throwable? = null
+
+    /** Server-derived pack id echoed by [publishStickerPack]. */
+    @Volatile
+    var stickerPublishedId: String = "published-pack-id"
+
+    /** Canned retract answer (false = item-not-found shape). */
+    @Volatile
+    var stickerRetractResult = true
+
     override suspend fun fetchStickerPacks(ownerJid: String?): List<WaddleStickerPack> {
         stickerFetchCalls += ownerJid
+        stickerFetchFailure?.let { throw it }
         return stickerPacks
     }
 
@@ -856,17 +875,20 @@ class FakeWaddleClient : WaddleClientInterface {
         packId: String,
     ): WaddleStickerPack? {
         stickerFetchCalls += ownerJid
+        stickerFetchFailure?.let { throw it }
         return stickerPacks.firstOrNull { pack -> pack.id == packId }
     }
 
     override suspend fun publishStickerPack(pack: WaddleStickerPack): String {
         stickerPublishCalls += pack
-        return pack.id
+        stickerPublishFailure?.let { throw it }
+        return stickerPublishedId
     }
 
     override suspend fun retractStickerPack(packId: String): Boolean {
         stickerRetractCalls += packId
-        return true
+        stickerRetractFailure?.let { throw it }
+        return stickerRetractResult
     }
 
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */

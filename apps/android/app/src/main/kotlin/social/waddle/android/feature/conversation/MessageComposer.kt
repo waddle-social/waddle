@@ -11,6 +11,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Gif
+import androidx.compose.material.icons.outlined.Mood
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +54,8 @@ fun MessageComposer(
     onAttach: (() -> Unit)? = null,
     /** Opens the GIF picker sheet; `null` hides the affordance. */
     onGif: (() -> Unit)? = null,
+    /** Opens the sticker picker sheet; `null` hides the affordance. */
+    onSticker: (() -> Unit)? = null,
     uploadState: UploadState = UploadState.Idle,
     onClearUpload: () -> Unit = {},
     mentionCandidates: List<MentionCandidate> = emptyList(),
@@ -196,6 +199,19 @@ fun MessageComposer(
                         Icon(
                             Icons.Outlined.Gif,
                             contentDescription = stringResource(R.string.composer_gif),
+                        )
+                    }
+                }
+                if (onSticker != null) {
+                    IconButton(
+                        onClick = onSticker,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .size(48.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Mood,
+                            contentDescription = stringResource(R.string.composer_sticker),
                         )
                     }
                 }

@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
@@ -104,9 +106,14 @@ fun ConversationScreen(
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     var gifPickerOpen by remember { mutableStateOf(false) }
+    var stickerPickerOpen by remember { mutableStateOf(false) }
+    var createStickerPackOpen by remember { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
+    // Screen-scoped (not sheet-scoped): a pack removal must not be
+    // cancelled by the picker sheet closing right after the confirm.
+    val screenScope = rememberCoroutineScope()
     val actionFailedText = stringResource(R.string.action_failed)
     val actionFailedOfflineText = stringResource(R.string.action_failed_offline)
     // Carrier-aware XEP-0060 precondition-not-met copy (web parity):
@@ -257,6 +264,7 @@ fun ConversationScreen(
                 onCancelReply = viewModel::cancelReply,
                 onAttach = { attachmentPicker.launch("*/*") },
                 onGif = { gifPickerOpen = true },
+                onSticker = { stickerPickerOpen = true },
                 uploadState = uploadState,
                 onClearUpload = viewModel::clearUploadState,
             )
@@ -329,6 +337,48 @@ fun ConversationScreen(
                 viewModel.sendGif(url)
             },
             onDismiss = { gifPickerOpen = false },
+        )
+    }
+
+    if (stickerPickerOpen) {
+        // Graph read stays inside the open branch: hosts without a
+        // provided graph (plain scaffold tests) never open the picker.
+        val graph = LocalAppGraph.current
+        val packs by graph.sessionManager.stickerPackStore.packs.collectAsStateWithLifecycle()
+        LaunchedEffect(graph) { graph.sessionManager.loadStickerPacks() }
+        StickerPickerSheet(
+            packs = packs,
+            onSelect = { item, pack ->
+                stickerPickerOpen = false
+                viewModel.sendSticker(item, pack.id)
+            },
+            onCreatePack = {
+                stickerPickerOpen = false
+                createStickerPackOpen = true
+            },
+            onRemovePack = { pack ->
+                screenScope.launch {
+                    if (graph.sessionManager.removeStickerPack(pack.id) is VerbResult.Failure) {
+                        snackbarHostState.showSnackbar(actionFailedText)
+                    }
+                }
+            },
+            onDismiss = { stickerPickerOpen = false },
+        )
+    }
+
+    if (createStickerPackOpen) {
+        val graph = LocalAppGraph.current
+        CreateStickerPackSheet(
+            onCreate = { name, summary, images, onProgress ->
+                graph.stickerPackCreator.create(name, summary, images, onProgress)
+            },
+            onCreated = {
+                createStickerPackOpen = false
+                // Back to the picker: the store already holds the new pack.
+                stickerPickerOpen = true
+            },
+            onDismiss = { createStickerPackOpen = false },
         )
     }
 

@@ -10,6 +10,7 @@ import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleReplyTarget
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSharedFile
+import social.waddle.client.ffi.WaddleStickerRef
 import social.waddle.client.ffi.WaddleThreadTarget
 
 /**
@@ -34,6 +35,12 @@ data class MessageSendExtras(
     /** XEP-0394 markup, offsets over the pre-fallback send body. */
     val markup: List<MarkupRef> = emptyList(),
     /**
+     * XEP-0449 sticker: the `<sticker/>` pack reference plus the image
+     * as an inline shared file with desc/hashes. Persisted with queued
+     * sends — the pack item and its upload URL are durable.
+     */
+    val sticker: StickerSendRef? = null,
+    /**
      * Fresh `urn:waddle:link-preview:0` token minted for this send.
      * NOT persisted with queued sends — tokens expire in minutes, and
      * an offline replay must not attach a stale one.
@@ -54,6 +61,7 @@ internal fun QueuedOutboundMessage.sendExtras(): MessageSendExtras? {
         sharedFiles = sharedFiles,
         mentions = mentions,
         markup = markup,
+        sticker = sticker,
     )
     // A plain queued body carries no annotations at all.
     return extras.takeIf { it != MessageSendExtras() }
@@ -122,12 +130,33 @@ internal fun preparedSend(
         reply = reply,
         fallback = fallback,
         thread = thread,
-        sharedFiles = files,
+        sharedFiles = files + listOfNotNull(extras.sticker?.let(::stickerSharedFile)),
+        sticker = extras.sticker?.let { ref ->
+            WaddleStickerRef(packId = ref.packId, packJid = null, packNode = null)
+        },
         references = mentionReferences(extras.mentions, shiftBy = fallback?.end ?: 0u),
         markupSpans = markupWireSpans(extras.markup, shiftBy = fallback?.end ?: 0u),
         linkPreviewToken = extras.linkPreviewToken,
     )
 }
+
+/**
+ * The XEP-0447 file a sticker send attaches: inline disposition, the
+ * mandatory lang-less desc, and the XEP-0300 content hashes — the wire
+ * shape XEP-0449 mandates alongside the `<sticker/>` marker.
+ */
+private fun stickerSharedFile(ref: StickerSendRef): WaddleSharedFile = WaddleSharedFile(
+    url = ref.url,
+    name = null,
+    mediaType = ref.mediaType,
+    size = ref.sizeBytes?.toULong(),
+    width = ref.width?.toUInt(),
+    height = ref.height?.toUInt(),
+    desc = ref.desc,
+    hashes = ref.hashes.map { it.toFfi() },
+    disposition = FileDisposition.INLINE.wire,
+    encrypted = null,
+)
 
 /**
  * XEP-0394 wire spans for the composed markup, rebased onto the FINAL

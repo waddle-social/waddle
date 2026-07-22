@@ -21,6 +21,8 @@ import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.NotifySettingsResult
+import social.waddle.android.client.StickerItem
+import social.waddle.android.client.StickerSendRef
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.composeMarkdown
@@ -270,6 +272,33 @@ open class ConversationViewModel(
         val extras = composer.extrasFor(mode)
         if (mode is ComposerMode.Replying) composer.cancelReply()
         val message = tracker.append(url, extras, clock())
+        viewModelScope.launch { dispatch(message, lookupPreview = false) }
+    }
+
+    /**
+     * XEP-0449 sticker send: the body is the sticker's mandatory
+     * lang-less desc (the non-supporting-client fallback), the extras
+     * carry the `<sticker/>` pack ref plus the image as an inline
+     * shared file with desc/hashes, and — like [sendGif] — no
+     * link-preview lookup runs (the body is not a URL).
+     */
+    fun sendSticker(item: StickerItem, packId: String) {
+        val url = item.sources.firstOrNull() ?: return
+        if (item.desc.isBlank()) return
+        val mode = composer.mode.value
+        val ref = StickerSendRef(
+            packId = packId,
+            desc = item.desc,
+            url = url,
+            mediaType = item.mediaType,
+            sizeBytes = item.sizeBytes,
+            width = item.width,
+            height = item.height,
+            hashes = item.hashes,
+        )
+        val extras = (composer.extrasFor(mode) ?: MessageSendExtras()).copy(sticker = ref)
+        if (mode is ComposerMode.Replying) composer.cancelReply()
+        val message = tracker.append(item.desc, extras, clock())
         viewModelScope.launch { dispatch(message, lookupPreview = false) }
     }
 
