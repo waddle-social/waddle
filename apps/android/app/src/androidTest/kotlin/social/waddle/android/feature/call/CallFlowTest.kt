@@ -8,6 +8,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -325,6 +326,14 @@ class CallFlowTest {
         composeRule.waitUntil(timeoutMillis = 10_000) { harness.callMedia.connectCalls.isNotEmpty() }
         assertEquals(roomJid, harness.callMedia.connectCalls.single().join.room)
         waitForTag(CallTestTags.MUC_ROSTER)
+        // Real LiveKit delivers the other occupant via ParticipantConnected;
+        // the roster prefers the (non-empty, self-including) LK identity
+        // list over the Muji presence view, so the fake must script bob's
+        // identity the way the SFU would.
+        harness.callMedia.remoteIdentities.value = listOf("bob@waddle.test/phone")
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText("bob").fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithText("bob").assertIsDisplayed()
 
         composeRule.onNodeWithTag(CallTestTags.HANG_UP_BUTTON).performClick()
