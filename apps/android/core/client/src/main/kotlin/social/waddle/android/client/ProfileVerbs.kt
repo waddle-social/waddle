@@ -115,6 +115,12 @@ internal class ProfileVerbs(
      */
     suspend fun publishProfile(vcard: WaddleVCard4): VerbResult {
         activeSession.ownBareJid ?: return VerbResult.NotReady
+        // No live client → nothing to publish, and more importantly no
+        // optimistic write: inside login()'s bump→clear window the
+        // client is provably null, and capturing `previous` there would
+        // let the rollback resurrect the OLD account's vCard into the
+        // freshly seeded stores.
+        activeSession.client ?: return VerbResult.NotConnected
         val generation = activeSession.generation
         val previous = stores.profileStore.selfVcard.value
         stores.profileStore.setSelfVcard(vcard)
