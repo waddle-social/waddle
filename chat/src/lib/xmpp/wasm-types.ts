@@ -31,6 +31,8 @@ export interface WasmSharedFile {
   size?: number;
   width?: number;
   height?: number;
+  /** XEP-0300 plaintext content hashes inside `<file/>`. */
+  hashes?: WasmEncryptedFileHash[];
   disposition: string;
   encrypted?: WasmEncryptedFile;
 }
@@ -503,6 +505,7 @@ export interface WasmSendOptions {
     size?: number;
     width?: number;
     height?: number;
+    hashes?: WasmEncryptedFileHash[];
     disposition: string;
     encrypted?: WasmEncryptedFile;
   }>;

@@ -78,8 +78,17 @@ pub fn build_xep0050_command_request(
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
+    // xmpp_parsers DataForm round-trips through minidom::Element via
+    // AsXml. The conversion is infallible for serialization.
     let id = format!("adhoc-{}", next_id());
-    build_command_iq(service_jid, node, &id, None, action, form)
+    build_command_iq(
+        service_jid,
+        node,
+        &id,
+        None,
+        action,
+        form.map(Element::from),
+    )
 }
 
 /// Like [`build_xep0050_command_request`], but with a caller-supplied
@@ -92,7 +101,14 @@ pub fn build_xep0050_command_request_with_id(
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
-    build_command_iq(service_jid, node, iq_id, None, action, form)
+    build_command_iq(
+        service_jid,
+        node,
+        iq_id,
+        None,
+        action,
+        form.map(Element::from),
+    )
 }
 
 /// Build a SUBSEQUENT-stage IQ that carries the `sessionid` returned
@@ -107,7 +123,31 @@ pub fn build_xep0050_command_request_with_session(
     form: Option<DataForm>,
 ) -> Element {
     let id = format!("adhoc-{}", next_id());
-    build_command_iq(service_jid, node, &id, Some(session_id), action, form)
+    build_command_iq(
+        service_jid,
+        node,
+        &id,
+        Some(session_id),
+        action,
+        form.map(Element::from),
+    )
+}
+
+/// Build a command IQ around a pre-built `jabber:x:data` form
+/// element. Used where the wire form must not carry a XEP-0068
+/// `FORM_TYPE` field (the extension-command surface mirrors the wasm
+/// chat client, which submits bare `var`/`value` fields), which
+/// [`xmpp_parsers::data_forms::DataForm`] builders cannot express
+/// per-field-type faithfully.
+pub fn build_xep0050_command_request_with_form_element(
+    service_jid: &str,
+    node: &str,
+    session_id: Option<&str>,
+    action: AdHocAction,
+    form: Option<Element>,
+) -> Element {
+    let id = format!("adhoc-{}", next_id());
+    build_command_iq(service_jid, node, &id, session_id, action, form)
 }
 
 fn build_command_iq(
@@ -116,7 +156,7 @@ fn build_command_iq(
     id: &str,
     session_id: Option<&str>,
     action: AdHocAction,
-    form: Option<DataForm>,
+    form: Option<Element>,
 ) -> Element {
     let mut command = Element::builder("command", NS_COMMANDS)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
@@ -131,10 +171,7 @@ fn build_command_iq(
         );
     }
     if let Some(form) = form {
-        // xmpp_parsers DataForm round-trips through minidom::Element
-        // via AsXml. The conversion is infallible for serialization.
-        let element = Element::from(form);
-        command = command.append(element);
+        command = command.append(form);
     }
     Element::builder("iq", CLIENT_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")

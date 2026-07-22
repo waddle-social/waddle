@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.MarkupRef
 import social.waddle.android.client.MentionRef
+import social.waddle.android.client.StickerHash
 import social.waddle.android.client.StickerSendRef
 
 /**
@@ -16,9 +17,35 @@ data class SharedFileRef(
     val url: String,
     val name: String? = null,
     val mediaType: String? = null,
+    /** PLAINTEXT size — for encrypted uploads the ciphertext is +16. */
     val sizeBytes: Long? = null,
     /** `inline` (image/video/audio/pdf) or `attachment` (web parity). */
     val disposition: FileDisposition = FileDisposition.ATTACHMENT,
+    /**
+     * XEP-0300 plaintext content hashes for the `<file/>` metadata.
+     * XEP-0448 requires at least one on encrypted sends.
+     */
+    val hashes: List<StickerHash> = emptyList(),
+    /** XEP-0448 envelope when the uploaded bytes are ciphertext. */
+    val encrypted: EncryptedFileRef? = null,
+)
+
+/**
+ * The persisted XEP-0448 `<encrypted/>` envelope of an uploaded
+ * attachment: the symmetric key material recipients need to decrypt
+ * the ciphertext at [sources]. Durable alongside the upload URL so
+ * queued sends replay with their full wire shape.
+ */
+@Serializable
+data class EncryptedFileRef(
+    /** Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`. */
+    val cipher: String,
+    val keyB64: String,
+    val ivB64: String,
+    /** XEP-0300 CIPHERTEXT hashes nested inside `<encrypted/>`. */
+    val hashes: List<StickerHash> = emptyList(),
+    /** Ciphertext source URLs (the XEP-0363 GET URL). */
+    val sources: List<String> = emptyList(),
 )
 
 /**

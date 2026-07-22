@@ -329,6 +329,35 @@ fn xep0448_message_set_and_extract_round_trip() {
 }
 
 #[test]
+fn xep0448_set_preserves_the_mandatory_plaintext_hash_in_file_metadata() {
+    // XEP-0448 §2.1: the `<file/>` metadata of an encrypted transfer MUST
+    // carry at least one plaintext `<hash/>` (distinct from the ciphertext
+    // hash nested inside `<encrypted/>`). Pin that embedding the envelope
+    // leaves the plaintext hash in place alongside the ciphertext hash.
+    let mut msg = message_with_file_sharing();
+    set_encrypted_file(&mut msg, &sample()).expect("has sources");
+
+    let file_sharing = msg
+        .payloads
+        .iter()
+        .find(|payload| payload.is("file-sharing", NS_SFS))
+        .expect("file-sharing payload");
+    let plaintext_hash = file_sharing
+        .get_child("file", NS_FILE_METADATA)
+        .and_then(|file| file.get_child("hash", NS_HASHES))
+        .expect("plaintext <hash/> inside <file/>");
+    assert_eq!(plaintext_hash.attr("algo"), Some("sha-256"));
+    assert_eq!(plaintext_hash.text(), "cGxhaW4taGFzaA==");
+
+    let ciphertext_hash = file_sharing
+        .get_child("sources", NS_SFS)
+        .and_then(|sources| sources.get_child("encrypted", NS_ESFS))
+        .and_then(|encrypted| encrypted.get_child("hash", NS_HASHES))
+        .expect("ciphertext <hash/> inside <encrypted/>");
+    assert_eq!(ciphertext_hash.text(), "aGFzaA==");
+}
+
+#[test]
 fn xep0448_set_removes_stale_outer_url_data_for_encrypted_file() {
     let mut msg = message_with_plain_url_source();
     set_encrypted_file(&mut msg, &sample()).expect("has sources");

@@ -15,6 +15,7 @@ import {
   submitExtensionCommandForm,
   visibleExtensionCommandFields,
 } from "../src/lib/xmpp/extension-commands";
+import { parseCommandIqResponse } from "../src/lib/xmpp/extension-commands/xml";
 
 const launch: ExtensionLaunchDescriptor = {
   id: "vote-yes",
@@ -688,6 +689,67 @@ describe("extension command invocation", () => {
     expect(result.actions).toEqual({
       allowed: ["complete", "cancel"],
     });
+  });
+
+  test("wire responses without <actions/> imply complete plus cancel while executing", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form"><field var="prompt" type="text-single"><value/></field></x></command></iq>',
+    );
+
+    expect(result.status).toBe("executing");
+    expect(result.actions).toEqual({ allowed: ["complete", "cancel"] });
+  });
+
+  test("a self-closing actions element suppresses the implied complete", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" sessionid="s-1" status="executing">' +
+        '<actions/><x xmlns="jabber:x:data" type="form"><field var="prompt" type="text-single"><value/></field></x></command></iq>',
+    );
+
+    // <actions/> is the server saying "no forward actions": cancel only,
+    // matching the Rust parser (get_child sees the element as present).
+    expect(result.actions).toEqual({ allowed: ["cancel"] });
+  });
+
+  test("self-closing fields and values parse like their expanded forms", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:generic" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form">' +
+        '<field var="notify" type="boolean"/>' +
+        '<field var="topic" type="text-single"><value/></field>' +
+        '<field var="question" type="text-single"><value>Lunch?</value></field>' +
+        "</x></command></iq>",
+    );
+
+    // The childless <field/> must neither vanish nor swallow its
+    // successors (minidom emits optional valueless fields this way).
+    const fields = result.form?.fields ?? [];
+    expect(fields.map((f) => f.name)).toEqual(["notify", "topic", "question"]);
+    expect(fields[0]?.values).toEqual([]);
+    expect(fields[1]?.values).toEqual([""]);
+    expect(fields[2]?.values).toEqual(["Lunch?"]);
+    // The boolean default then applies during form normalization.
+    const normalized = parseExtensionCommandForm(result.form);
+    expect(normalized.find((f) => f.name === "notify")?.values).toEqual(["0"]);
+  });
+
+  test("a self-closing x element parses as an empty form", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:generic" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form"/></command></iq>',
+    );
+
+    expect(result.form).toEqual({ type: "form", fields: [] });
+  });
+
+  test("wire responses with completed status carry no implied actions", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" status="completed"/></iq>',
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.actions).toBeUndefined();
   });
 
   test("preserves XEP-0004 multi-value fields from command form values", () => {

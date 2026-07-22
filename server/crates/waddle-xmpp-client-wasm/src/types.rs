@@ -578,6 +578,11 @@ pub struct WaddleSharedFile {
     pub size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// XEP-0446 / XEP-0300 plaintext content hashes inside `<file/>`.
+    /// XEP-0448 requires at least one for encrypted sends; distinct from
+    /// the ciphertext hashes nested inside `encrypted`.
+    #[serde(default)]
+    pub hashes: Vec<WaddleEncryptedFileHash>,
     pub disposition: String,
     /// XEP-0448 envelope when the bytes at `url` are ciphertext rather than
     /// the plaintext file. Recipients MUST use these values to decrypt before
@@ -603,7 +608,8 @@ pub struct WaddleEncryptedFile {
     pub sources: Vec<String>,
 }
 
-/// XEP-0300 hash entry nested under a `WaddleEncryptedFile`.
+/// XEP-0300 hash entry: nested under a `WaddleEncryptedFile` (ciphertext
+/// digest) or inside a `WaddleSharedFile`'s file metadata (plaintext digest).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaddleEncryptedFileHash {
     pub algo: String,

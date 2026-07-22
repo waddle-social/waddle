@@ -6,61 +6,40 @@ import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import social.waddle.android.client.FileDisposition
-import social.waddle.android.client.SlotUploader
+import social.waddle.android.client.EncryptedAttachmentUploader
+import social.waddle.android.client.UploadResult
 import social.waddle.android.client.XmppSessionManager
-import social.waddle.android.client.prefs.SharedFileRef
-
-/** Outcome of one attachment upload attempt. */
-sealed interface UploadResult {
-    data class Done(val file: SharedFileRef) : UploadResult
-
-    data object TooLarge : UploadResult
-
-    data object Failed : UploadResult
-}
+import java.io.File
 
 /**
  * XEP-0363 upload of a user-picked document: resolve name/size/type
- * from the content Uri, request a slot through the live session, and
- * stream the bytes to the slot's PUT URL. 10 MB cap (web parity).
- * Uploads are plaintext — the native client has no OMEMO yet, so the
- * web's encrypted-attachment path does not apply.
+ * from the content Uri, then hand the stream to the shared XEP-0448
+ * encrypt-then-upload pipeline (web parity: attachments are ALWAYS
+ * encrypted — transport privacy against the file host). 10 MB
+ * plaintext cap, checked before encryption (web parity).
  */
 class AttachmentUploader(
     private val contentResolver: ContentResolver,
     httpClient: OkHttpClient,
-    private val sessionManager: XmppSessionManager,
+    sessionManager: XmppSessionManager,
+    cacheDir: File,
 ) {
-    private val slotUploader = SlotUploader(httpClient)
+    private val pipeline = EncryptedAttachmentUploader(
+        httpClient = httpClient,
+        requestSlot = sessionManager::requestUploadSlot,
+        tempDir = cacheDir,
+    )
 
     suspend fun upload(uri: Uri): UploadResult {
         val meta = withContext(Dispatchers.IO) { resolveMeta(uri) } ?: return UploadResult.Failed
-        if (meta.sizeBytes > MAX_UPLOAD_BYTES) return UploadResult.TooLarge
         val contentType = withContext(Dispatchers.IO) {
             runCatching { contentResolver.getType(uri) }.getOrNull()
         } ?: DEFAULT_CONTENT_TYPE
-        val slot = sessionManager.requestUploadSlot(
-            filename = meta.name,
-            sizeBytes = meta.sizeBytes.toULong(),
-            contentType = contentType,
-        ) ?: return UploadResult.Failed
-        val uploaded = slotUploader.put(
-            slot = slot,
-            contentType = contentType,
-            contentLength = meta.sizeBytes,
-            open = { contentResolver.openInputStream(uri) },
-        )
-        if (!uploaded) return UploadResult.Failed
-        return UploadResult.Done(
-            SharedFileRef(
-                url = slot.getUrl,
-                name = meta.name,
-                mediaType = contentType,
-                sizeBytes = meta.sizeBytes,
-                disposition = FileDisposition.forMediaType(contentType),
-            ),
-        )
+        return pipeline.upload(
+            name = meta.name,
+            declaredSize = meta.sizeBytes,
+            mediaType = contentType,
+        ) { contentResolver.openInputStream(uri) }
     }
 
     private fun resolveMeta(uri: Uri): AttachmentMeta? = runCatching {
@@ -87,8 +66,6 @@ class AttachmentUploader(
     private data class AttachmentMeta(val name: String, val sizeBytes: Long)
 
     private companion object {
-        /** Web MAX_UPLOAD_BYTES parity. */
-        const val MAX_UPLOAD_BYTES = 10L * 1024 * 1024
         const val DEFAULT_FILENAME = "attachment"
         const val DEFAULT_CONTENT_TYPE = "application/octet-stream"
     }

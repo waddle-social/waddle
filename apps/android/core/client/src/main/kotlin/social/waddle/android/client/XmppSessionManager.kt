@@ -78,6 +78,7 @@ class XmppSessionManager(
     val roomMembersStore = stores.roomMembersStore
     val stickerPackStore = stores.stickerPackStore
     val profileStore = stores.profileStore
+    val extensionCommandStore = stores.extensionCommandStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -119,6 +120,7 @@ class XmppSessionManager(
 
     private val stickers = StickerVerbs(activeSession, stores)
     private val profile = ProfileVerbs(activeSession, stores)
+    private val extensions = ExtensionCommandVerbs(activeSession, stores)
 
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
@@ -461,6 +463,26 @@ class XmppSessionManager(
 
     /** XEP-0118 §3.2: retract the tune via the empty payload. */
     suspend fun clearTune(): VerbResult = profile.clearTune()
+
+    /**
+     * `urn:waddle:extension:1`: discover the slash-command set via
+     * XEP-0050 disco (cached once per session in
+     * [extensionCommandStore]).
+     */
+    suspend fun discoverExtensionCommands(): List<ExtensionCommand> =
+        extensions.discoverExtensionCommands()
+
+    /** XEP-0050 §2.4: start an extension command with `execute`. */
+    suspend fun invokeExtensionCommand(
+        serviceJid: String,
+        node: String,
+        roomJid: String? = null,
+    ): ExtensionCommandCall = extensions.invokeExtensionCommand(serviceJid, node, roomJid)
+
+    /** XEP-0050 §3: submit a stage of an extension command session. */
+    suspend fun submitExtensionCommandForm(
+        submission: ExtensionCommandSubmission,
+    ): ExtensionCommandCall = extensions.submitExtensionCommandForm(submission)
 
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {

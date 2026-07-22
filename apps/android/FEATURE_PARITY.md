@@ -52,7 +52,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Per-conversation notify modes / mute | 0492 | ✅ | ✅ | Android: `NotifySettingsStore.kt` + notify sheet in the conversation top bar; `NotificationPolicy.kt` enforces never/on-mention/always |
 | Bookmarks | 0402 | ✅ | ✅ | Autojoin-driven room sync merged in the Rust core (`discovery/bookmarks.rs`), feeding `RoomStore.kt`; bookmark publishing + `+notify` deferred as web parity |
 | Inbox / unread overview | 0430 | ✅ | ✅ | Server-authoritative unread over the inbox FFI with local overlay (`InboxStore.kt` + `UnreadStore.kt`); thread entries stored, thread-inbox UI deferred |
-| Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
+| Slash commands | — | ✅ | ✅ | Dynamic XEP-0050 extension discovery (`urn:waddle:extension:1` disco forms) — tokenizer + popover + dispatch + XEP-0004 form sheet, incl. the AI inline/output special-casing |
 | Room create / configure | 0045 | ✅ | ✅ | Android: create-channel dialog (owner-gated) + owner settings sheet over `create_room`/`fetch_room_config`/`submit_room_config`/`destroy_room` (§10 GET-merge-SET in Rust). Space intents deferred (need XEP-0060 spaces-node builders) |
 
 ## Presence & profile
@@ -80,7 +80,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | File/HTTP upload + attachments | 0363, 0446, 0447 | ✅ | ✅ | Android: `AttachmentUploader.kt`, slot request via FFI |
 | Inline image display | 0447 | ✅ | ✅ | Android renders via Coil in `MessageCard.kt` |
-| Encrypted file attachments | 0448 | ✅ | ❌ | Web: `chat/src/lib/xmpp/encrypted-attachments.ts`; Android uploads plaintext (no OMEMO) |
+| Encrypted file attachments | 0448 | ✅ | ✅ | Decrypt-on-display (Coil fetcher, sha-256 verify, source fallback) + unconditional encrypt-on-upload; plaintext-hash REQUIRED fix landed in the shared Rust builder + web |
 | Rich text editor / markup | 0394 | ✅ | ✅ | Rendered via `RichBody.kt`/`RichMessageBody.kt`; composer converts markdown at send (`ComposerMarkdown.kt`) |
 | Markdown rendering | — | ✅ | ✅ | Neither client renders markdown from received bodies (0394-only); Android converts typed markdown at send |
 | Link previews | urn:waddle:link-preview:0 | ✅ | ✅ | Cards in `LinkPreviewCard.kt`; composer lookup token via `lookup_link_preview` FFI |
@@ -126,7 +126,5 @@ compares user-facing capability per area, verified against both codebases as of
 
 Remaining gaps, in priority order:
 
-1. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
-2. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload (in flight on another train).
-3. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
-4. **Deferred follow-ups** — bookmark publishing + `+notify` (0402) and the thread-inbox UI (0430).
+1. **Community surfaces** — feed (0472), stories (0501), events, extensions UI; lowest urgency, largest scope.
+2. Deferred follow-ups: XEP-0153 avatar hash publish, sticker import-from-received, generic XEP-0050 command palette + extensions toolbar, thread-inbox UI, XEP-0402 publishing/`+notify`.

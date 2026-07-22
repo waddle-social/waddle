@@ -737,6 +737,12 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_us
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_extension_commands(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invoke_extension_command(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_extension_command_form(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm(
@@ -969,6 +975,12 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_u
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(`ptr`: Long,`prefix`: RustBuffer.ByValue,`pageSize`: RustBuffer.ByValue,`afterCursor`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_extension_commands(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invoke_extension_command(`ptr`: Long,`serviceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`roomJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_extension_command_form(`ptr`: Long,`serviceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`sessionId`: RustBuffer.ByValue,`fields`: RustBuffer.ByValue,`action`: RustBuffer.ByValue,`roomJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(`ptr`: Long,`name`: RustBuffer.ByValue,`memberJids`: RustBuffer.ByValue,
 ): Long
@@ -1336,6 +1348,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_extension_commands() != 25241) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invoke_extension_command() != 62127) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_extension_command_form() != 46111) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
@@ -2352,6 +2373,27 @@ public interface WaddleClientInterface {
      * mechanism — the server re-checks every actual command.
      */
     suspend fun `isCommunityOwner`(): kotlin.Boolean
+
+    /**
+     * Discover the extension service and its XEP-0050 command list,
+     * hydrated with per-command composer metadata (scope, slash
+     * prefix, inline field, direct-execute). Cache-free: callers
+     * cache per session.
+     */
+    suspend fun `discoverExtensionCommands`(): List<WaddleExtensionCommand>
+
+    /**
+     * XEP-0050 §2.4: start an extension command with `execute`. In a
+     * room, `room_jid` travels as the `waddle#room_jid` submit field.
+     */
+    suspend fun `invokeExtensionCommand`(`serviceJid`: kotlin.String, `node`: kotlin.String, `roomJid`: kotlin.String?): WaddleExtensionCommandResult
+
+    /**
+     * XEP-0050 §3: submit a stage of an extension command session.
+     * `session_id` is threaded verbatim from the previous response;
+     * `cancel`/`prev` submissions never carry a form.
+     */
+    suspend fun `submitExtensionCommandForm`(`serviceJid`: kotlin.String, `node`: kotlin.String, `sessionId`: kotlin.String?, `fields`: List<WaddleExtensionFormField>, `action`: WaddleAdhocAction, `roomJid`: kotlin.String?): WaddleExtensionCommandResult
 
     /**
      * `urn:waddle:group-dm:create:0`: create a hidden members-only
@@ -3795,6 +3837,84 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Discover the extension service and its XEP-0050 command list,
+     * hydrated with per-command composer metadata (scope, slash
+     * prefix, inline field, direct-execute). Cache-free: callers
+     * cache per session.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `discoverExtensionCommands`() : List<WaddleExtensionCommand> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_extension_commands(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleExtensionCommand.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0050 §2.4: start an extension command with `execute`. In a
+     * room, `room_jid` travels as the `waddle#room_jid` submit field.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `invokeExtensionCommand`(`serviceJid`: kotlin.String, `node`: kotlin.String, `roomJid`: kotlin.String?) : WaddleExtensionCommandResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invoke_extension_command(
+                uniffiHandle,
+                FfiConverterString.lower(`serviceJid`),FfiConverterString.lower(`node`),FfiConverterOptionalString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleExtensionCommandResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0050 §3: submit a stage of an extension command session.
+     * `session_id` is threaded verbatim from the previous response;
+     * `cancel`/`prev` submissions never carry a form.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `submitExtensionCommandForm`(`serviceJid`: kotlin.String, `node`: kotlin.String, `sessionId`: kotlin.String?, `fields`: List<WaddleExtensionFormField>, `action`: WaddleAdhocAction, `roomJid`: kotlin.String?) : WaddleExtensionCommandResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_extension_command_form(
+                uniffiHandle,
+                FfiConverterString.lower(`serviceJid`),FfiConverterString.lower(`node`),FfiConverterOptionalString.lower(`sessionId`),FfiConverterSequenceTypeWaddleExtensionFormField.lower(`fields`),FfiConverterTypeWaddleAdhocAction.lower(`action`),FfiConverterOptionalString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleExtensionCommandResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -7959,6 +8079,386 @@ public object FfiConverterTypeWaddleEncryptedFileHash: FfiConverterRustBuffer<Wa
 
 
 /**
+ * One discovered extension command with its composer metadata.
+ */
+data class WaddleExtensionCommand (
+    var `serviceJid`: kotlin.String
+    ,
+    var `node`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `scope`: WaddleExtensionCommandScope
+    ,
+    /**
+     * Slash trigger (without the leading `/`), e.g. `poll`.
+     */
+    var `composerPrefix`: kotlin.String?
+    ,
+    /**
+     * Form field the composer may fill inline from trailing text.
+     */
+    var `inlineField`: kotlin.String?
+    ,
+    /**
+     * Whether a bare `/prefix` executes without opening the palette.
+     */
+    var `composerExecute`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommand: FfiConverterRustBuffer<WaddleExtensionCommand> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommand {
+        return WaddleExtensionCommand(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleExtensionCommandScope.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommand) = (
+            FfiConverterString.allocationSize(value.`serviceJid`) +
+            FfiConverterString.allocationSize(value.`node`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterTypeWaddleExtensionCommandScope.allocationSize(value.`scope`) +
+            FfiConverterOptionalString.allocationSize(value.`composerPrefix`) +
+            FfiConverterOptionalString.allocationSize(value.`inlineField`) +
+            FfiConverterBoolean.allocationSize(value.`composerExecute`)
+    )
+
+    override fun write(value: WaddleExtensionCommand, buf: ByteBuffer) {
+            FfiConverterString.write(value.`serviceJid`, buf)
+            FfiConverterString.write(value.`node`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterTypeWaddleExtensionCommandScope.write(value.`scope`, buf)
+            FfiConverterOptionalString.write(value.`composerPrefix`, buf)
+            FfiConverterOptionalString.write(value.`inlineField`, buf)
+            FfiConverterBoolean.write(value.`composerExecute`, buf)
+    }
+}
+
+
+
+/**
+ * The XEP-0004 form of a command response.
+ */
+data class WaddleExtensionCommandForm (
+    var `title`: kotlin.String?
+    ,
+    var `instructions`: kotlin.String?
+    ,
+    var `fields`: List<WaddleExtensionCommandFormField>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommandForm: FfiConverterRustBuffer<WaddleExtensionCommandForm> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommandForm {
+        return WaddleExtensionCommandForm(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeWaddleExtensionCommandFormField.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandForm) = (
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterOptionalString.allocationSize(value.`instructions`) +
+            FfiConverterSequenceTypeWaddleExtensionCommandFormField.allocationSize(value.`fields`)
+    )
+
+    override fun write(value: WaddleExtensionCommandForm, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterOptionalString.write(value.`instructions`, buf)
+            FfiConverterSequenceTypeWaddleExtensionCommandFormField.write(value.`fields`, buf)
+    }
+}
+
+
+
+/**
+ * One `<field/>` of a command-response form.
+ */
+data class WaddleExtensionCommandFormField (
+    /**
+     * The `var` attribute; empty only for `fixed` fields.
+     */
+    var `var`: kotlin.String
+    ,
+    var `label`: kotlin.String?
+    ,
+    var `fieldType`: WaddleExtensionFieldType
+    ,
+    var `required`: kotlin.Boolean
+    ,
+    /**
+     * Forbidden-field defense: `text-private` or secret-named fields
+     * must never render an input or submit.
+     */
+    var `blocked`: kotlin.Boolean
+    ,
+    var `options`: List<WaddleExtensionFieldOption>
+    ,
+    var `values`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustBuffer<WaddleExtensionCommandFormField> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommandFormField {
+        return WaddleExtensionCommandFormField(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeWaddleExtensionFieldType.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeWaddleExtensionFieldOption.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandFormField) = (
+            FfiConverterString.allocationSize(value.`var`) +
+            FfiConverterOptionalString.allocationSize(value.`label`) +
+            FfiConverterTypeWaddleExtensionFieldType.allocationSize(value.`fieldType`) +
+            FfiConverterBoolean.allocationSize(value.`required`) +
+            FfiConverterBoolean.allocationSize(value.`blocked`) +
+            FfiConverterSequenceTypeWaddleExtensionFieldOption.allocationSize(value.`options`) +
+            FfiConverterSequenceString.allocationSize(value.`values`)
+    )
+
+    override fun write(value: WaddleExtensionCommandFormField, buf: ByteBuffer) {
+            FfiConverterString.write(value.`var`, buf)
+            FfiConverterOptionalString.write(value.`label`, buf)
+            FfiConverterTypeWaddleExtensionFieldType.write(value.`fieldType`, buf)
+            FfiConverterBoolean.write(value.`required`, buf)
+            FfiConverterBoolean.write(value.`blocked`, buf)
+            FfiConverterSequenceTypeWaddleExtensionFieldOption.write(value.`options`, buf)
+            FfiConverterSequenceString.write(value.`values`, buf)
+    }
+}
+
+
+
+/**
+ * One `<note/>` diagnostic from a command response.
+ */
+data class WaddleExtensionCommandNote (
+    var `noteType`: WaddleExtensionNoteType
+    ,
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommandNote: FfiConverterRustBuffer<WaddleExtensionCommandNote> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommandNote {
+        return WaddleExtensionCommandNote(
+            FfiConverterTypeWaddleExtensionNoteType.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandNote) = (
+            FfiConverterTypeWaddleExtensionNoteType.allocationSize(value.`noteType`) +
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleExtensionCommandNote, buf: ByteBuffer) {
+            FfiConverterTypeWaddleExtensionNoteType.write(value.`noteType`, buf)
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
+ * A parsed extension command response.
+ */
+data class WaddleExtensionCommandResult (
+    var `status`: WaddleAdhocStatus
+    ,
+    /**
+     * XEP-0050 `sessionid`, threaded verbatim into follow-up
+     * submissions.
+     */
+    var `sessionId`: kotlin.String?
+    ,
+    /**
+     * Actions the service allows for the next stage.
+     */
+    var `actions`: List<WaddleAdhocAction>
+    ,
+    var `form`: WaddleExtensionCommandForm?
+    ,
+    var `notes`: List<WaddleExtensionCommandNote>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommandResult: FfiConverterRustBuffer<WaddleExtensionCommandResult> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommandResult {
+        return WaddleExtensionCommandResult(
+            FfiConverterTypeWaddleAdhocStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeWaddleAdhocAction.read(buf),
+            FfiConverterOptionalTypeWaddleExtensionCommandForm.read(buf),
+            FfiConverterSequenceTypeWaddleExtensionCommandNote.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandResult) = (
+            FfiConverterTypeWaddleAdhocStatus.allocationSize(value.`status`) +
+            FfiConverterOptionalString.allocationSize(value.`sessionId`) +
+            FfiConverterSequenceTypeWaddleAdhocAction.allocationSize(value.`actions`) +
+            FfiConverterOptionalTypeWaddleExtensionCommandForm.allocationSize(value.`form`) +
+            FfiConverterSequenceTypeWaddleExtensionCommandNote.allocationSize(value.`notes`)
+    )
+
+    override fun write(value: WaddleExtensionCommandResult, buf: ByteBuffer) {
+            FfiConverterTypeWaddleAdhocStatus.write(value.`status`, buf)
+            FfiConverterOptionalString.write(value.`sessionId`, buf)
+            FfiConverterSequenceTypeWaddleAdhocAction.write(value.`actions`, buf)
+            FfiConverterOptionalTypeWaddleExtensionCommandForm.write(value.`form`, buf)
+            FfiConverterSequenceTypeWaddleExtensionCommandNote.write(value.`notes`, buf)
+    }
+}
+
+
+
+/**
+ * One `<option/>` of a list field.
+ */
+data class WaddleExtensionFieldOption (
+    var `label`: kotlin.String?
+    ,
+    var `value`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionFieldOption: FfiConverterRustBuffer<WaddleExtensionFieldOption> {
+    override fun read(buf: ByteBuffer): WaddleExtensionFieldOption {
+        return WaddleExtensionFieldOption(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionFieldOption) = (
+            FfiConverterOptionalString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: WaddleExtensionFieldOption, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`label`, buf)
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
+ * One submitted field value pair (`var` → `<value/>` children).
+ */
+data class WaddleExtensionFormField (
+    var `var`: kotlin.String
+    ,
+    var `values`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionFormField: FfiConverterRustBuffer<WaddleExtensionFormField> {
+    override fun read(buf: ByteBuffer): WaddleExtensionFormField {
+        return WaddleExtensionFormField(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExtensionFormField) = (
+            FfiConverterString.allocationSize(value.`var`) +
+            FfiConverterSequenceString.allocationSize(value.`values`)
+    )
+
+    override fun write(value: WaddleExtensionFormField, buf: ByteBuffer) {
+            FfiConverterString.write(value.`var`, buf)
+            FfiConverterSequenceString.write(value.`values`, buf)
+    }
+}
+
+
+
+/**
  * One external service (TURN/STUN) advertised by the user's server
  * over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
  * The app maps a list of these to WebRTC ICE servers for LiveKit's
@@ -11121,6 +11621,84 @@ public object FfiConverterTypeWaddleVCard4: FfiConverterRustBuffer<WaddleVCard4>
 
 
 /**
+ * XEP-0050 §3 `action` attribute.
+ */
+
+enum class WaddleAdhocAction {
+
+    EXECUTE,
+    CANCEL,
+    NEXT,
+    PREV,
+    COMPLETE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdhocAction: FfiConverterRustBuffer<WaddleAdhocAction> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleAdhocAction.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleAdhocAction) = 4UL
+
+    override fun write(value: WaddleAdhocAction, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * XEP-0050 §3 `status` attribute on responses.
+ */
+
+enum class WaddleAdhocStatus {
+
+    EXECUTING,
+    COMPLETED,
+    CANCELED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdhocStatus: FfiConverterRustBuffer<WaddleAdhocStatus> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleAdhocStatus.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleAdhocStatus) = 4UL
+
+    override fun write(value: WaddleAdhocStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
  * chat client — flattened for UniFFI (no nested struct payloads
@@ -12136,6 +12714,133 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
     }
 
 }
+
+
+
+/**
+ * `waddle#command_scope` — where a command may be offered.
+ */
+
+enum class WaddleExtensionCommandScope {
+
+    /**
+     * Offered everywhere (DMs and rooms).
+     */
+    GLOBAL,
+    /**
+     * Offered only inside MUC rooms.
+     */
+    CHANNEL;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionCommandScope: FfiConverterRustBuffer<WaddleExtensionCommandScope> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleExtensionCommandScope.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandScope) = 4UL
+
+    override fun write(value: WaddleExtensionCommandScope, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * XEP-0004 §3.3 field types. Unknown or absent wire types map to
+ * `TextSingle` per the XEP's default.
+ */
+
+enum class WaddleExtensionFieldType {
+
+    BOOLEAN,
+    FIXED,
+    HIDDEN,
+    JID_MULTI,
+    JID_SINGLE,
+    LIST_MULTI,
+    LIST_SINGLE,
+    TEXT_MULTI,
+    TEXT_PRIVATE,
+    TEXT_SINGLE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionFieldType: FfiConverterRustBuffer<WaddleExtensionFieldType> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleExtensionFieldType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleExtensionFieldType) = 4UL
+
+    override fun write(value: WaddleExtensionFieldType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * XEP-0050 §3 `<note/>` severity; unknown types map to `Info`.
+ */
+
+enum class WaddleExtensionNoteType {
+
+    INFO,
+    WARN,
+    ERROR;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExtensionNoteType: FfiConverterRustBuffer<WaddleExtensionNoteType> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleExtensionNoteType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleExtensionNoteType) = 4UL
+
+    override fun write(value: WaddleExtensionNoteType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -13883,6 +14588,38 @@ public object FfiConverterOptionalTypeWaddleEncryptedFile: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleExtensionCommandForm: FfiConverterRustBuffer<WaddleExtensionCommandForm?> {
+    override fun read(buf: ByteBuffer): WaddleExtensionCommandForm? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleExtensionCommandForm.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleExtensionCommandForm?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleExtensionCommandForm.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleExtensionCommandForm?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleExtensionCommandForm.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleFallbackRange: FfiConverterRustBuffer<WaddleFallbackRange?> {
     override fun read(buf: ByteBuffer): WaddleFallbackRange? {
         if (buf.get().toInt() == 0) {
@@ -15239,6 +15976,146 @@ public object FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverterRustB
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleExtensionCommand: FfiConverterRustBuffer<List<WaddleExtensionCommand>> {
+    override fun read(buf: ByteBuffer): List<WaddleExtensionCommand> {
+        val len = buf.getInt()
+        return List<WaddleExtensionCommand>(len) {
+            FfiConverterTypeWaddleExtensionCommand.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExtensionCommand>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExtensionCommand.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExtensionCommand>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExtensionCommand.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleExtensionCommandFormField: FfiConverterRustBuffer<List<WaddleExtensionCommandFormField>> {
+    override fun read(buf: ByteBuffer): List<WaddleExtensionCommandFormField> {
+        val len = buf.getInt()
+        return List<WaddleExtensionCommandFormField>(len) {
+            FfiConverterTypeWaddleExtensionCommandFormField.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExtensionCommandFormField>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExtensionCommandFormField.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExtensionCommandFormField>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExtensionCommandFormField.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleExtensionCommandNote: FfiConverterRustBuffer<List<WaddleExtensionCommandNote>> {
+    override fun read(buf: ByteBuffer): List<WaddleExtensionCommandNote> {
+        val len = buf.getInt()
+        return List<WaddleExtensionCommandNote>(len) {
+            FfiConverterTypeWaddleExtensionCommandNote.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExtensionCommandNote>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExtensionCommandNote.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExtensionCommandNote>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExtensionCommandNote.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleExtensionFieldOption: FfiConverterRustBuffer<List<WaddleExtensionFieldOption>> {
+    override fun read(buf: ByteBuffer): List<WaddleExtensionFieldOption> {
+        val len = buf.getInt()
+        return List<WaddleExtensionFieldOption>(len) {
+            FfiConverterTypeWaddleExtensionFieldOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExtensionFieldOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExtensionFieldOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExtensionFieldOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExtensionFieldOption.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleExtensionFormField: FfiConverterRustBuffer<List<WaddleExtensionFormField>> {
+    override fun read(buf: ByteBuffer): List<WaddleExtensionFormField> {
+        val len = buf.getInt()
+        return List<WaddleExtensionFormField>(len) {
+            FfiConverterTypeWaddleExtensionFormField.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExtensionFormField>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExtensionFormField.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExtensionFormField>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExtensionFormField.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuffer<List<WaddleExternalService>> {
     override fun read(buf: ByteBuffer): List<WaddleExternalService> {
         val len = buf.getInt()
@@ -15705,6 +16582,34 @@ public object FfiConverterSequenceTypeWaddleUserSearchEntry: FfiConverterRustBuf
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleUserSearchEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer<List<WaddleAdhocAction>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdhocAction> {
+        val len = buf.getInt()
+        return List<WaddleAdhocAction>(len) {
+            FfiConverterTypeWaddleAdhocAction.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdhocAction>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdhocAction.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdhocAction>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdhocAction.write(it, buf)
         }
     }
 }

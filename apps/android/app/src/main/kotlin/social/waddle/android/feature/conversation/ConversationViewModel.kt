@@ -23,6 +23,7 @@ import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.StickerItem
 import social.waddle.android.client.StickerSendRef
+import social.waddle.android.client.UploadResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.composeMarkdown

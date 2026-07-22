@@ -13,6 +13,7 @@ import {
 } from "lucide-vue-next";
 import {
   extensionCommandFormBlockedReason,
+  missingRequiredExtensionCommandFields,
   visibleExtensionCommandFields,
   type DiscoveredExtensionCommand,
   type ExtensionCommandAction,
@@ -74,17 +75,8 @@ function stateDetail(command: DiscoveredExtensionCommand): string {
   return props.commandStates[command.node]?.detail ?? "";
 }
 
-function hasRequiredValue(field: ExtensionCommandFormField): boolean {
-  if (field.type === "fixed") return true;
-  if (field.type === "boolean") return field.value.trim().length > 0;
-  if (field.type === "list-multi" || field.type === "text-multi" || field.type === "jid-multi") {
-    return field.values.some((value) => value.trim().length > 0);
-  }
-  return field.value.trim().length > 0;
-}
-
 function missingRequiredFields(command: DiscoveredExtensionCommand): ExtensionCommandFormField[] {
-  return visibleFields(command).filter((field) => field.required && !hasRequiredValue(field));
+  return missingRequiredExtensionCommandFields(props.commandForms[command.node]?.fields ?? []);
 }
 
 function canSubmitAction(command: DiscoveredExtensionCommand, action: ExtensionCommandAction): boolean {

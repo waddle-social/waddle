@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Decrypted XEP-0448 attachments handed to external viewers
+     (see EncryptedAttachmentOpener). -->
+<paths>
+    <cache-path
+        name="decrypted_attachments"
+        path="decrypted_attachments/" />
+</paths>

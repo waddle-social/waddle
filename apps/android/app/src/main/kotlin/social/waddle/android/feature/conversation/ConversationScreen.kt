@@ -93,6 +93,8 @@ fun ConversationScreen(
     onStartCall: ((video: Boolean) -> Unit)? = null,
     /** Host slot rendered above the timeline (channel call banner). */
     aboveTimeline: @Composable () -> Unit = {},
+    /** Slash-command wiring; `null` (scaffold tests) hides the feature. */
+    slashCommandHost: SlashCommandHost? = null,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -256,6 +258,9 @@ fun ConversationScreen(
                 trustedMediaOrigin = trustedMediaOrigin,
             )
             TypingIndicator(names = typing)
+            val slashCommands = slashCommandHost
+                ?.let { host -> host.controller.commands.collectAsStateWithLifecycle().value }
+                .orEmpty()
             MessageComposer(
                 onSend = viewModel::send,
                 mentionCandidates = mentionCandidates,
@@ -269,8 +274,22 @@ fun ConversationScreen(
                 onSticker = { stickerPickerOpen = true },
                 uploadState = uploadState,
                 onClearUpload = viewModel::clearUploadState,
+                slashCommands = slashCommands,
+                inMuc = viewModel.isGroupchat,
+                onSlashArmed = { slashCommandHost?.controller?.ensureDiscovered() },
+                slashDispatch = slashCommandHost?.let { host ->
+                    slashDispatchOf(host) { body -> viewModel.send(body) }
+                },
             )
         }
+    }
+
+    if (slashCommandHost != null) {
+        SlashCommandSurfaces(
+            host = slashCommandHost,
+            snackbarHostState = snackbarHostState,
+            sendPublicMessage = { body -> viewModel.send(body) },
+        )
     }
 
     sheetTarget?.let { item ->

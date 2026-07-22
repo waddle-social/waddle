@@ -39,6 +39,8 @@ import social.waddle.android.feature.call.normalizeCallRoomJid
 import social.waddle.android.feature.call.resolveRoomParticipantList
 import social.waddle.android.feature.call.shouldOfferRetainedLeave
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.SlashCommandHost
+import social.waddle.android.feature.conversation.rememberExtensionCommandController
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.room.RoomSettingsSheet
 import social.waddle.android.feature.room.RoomSettingsViewModel
@@ -145,6 +147,10 @@ fun ChannelScreen(
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
         selfBareJid = session?.jid?.let(::bareJidOf),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        slashCommandHost = SlashCommandHost(
+            controller = rememberExtensionCommandController(graph),
+            roomJid = roomJid,
+        ),
         extraTopBarActions = {
             ChannelCallTopBarActions(
                 controls = channelCallControlsOf(callState, roomJid, resolvedNicks, roomHasVideoCall),

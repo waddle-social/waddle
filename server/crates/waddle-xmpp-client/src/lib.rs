@@ -12,6 +12,7 @@ pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod event;
+pub mod extension_commands;
 pub mod group_dm;
 pub mod inbox;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

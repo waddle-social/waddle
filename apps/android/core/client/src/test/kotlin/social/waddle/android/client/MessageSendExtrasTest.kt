@@ -3,6 +3,7 @@ package social.waddle.android.client
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import social.waddle.android.client.prefs.EncryptedFileRef
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleStickerHash
@@ -146,6 +147,46 @@ class MessageSendExtrasTest {
         val start = wireBody.offsetByCodePoints(0, reference.begin.toInt())
         val stop = wireBody.offsetByCodePoints(0, reference.end.toInt())
         assertEquals("@bob", wireBody.substring(start, stop))
+    }
+
+    @Test
+    fun `encrypted shared file maps its envelope and plaintext hashes onto the ffi record`() {
+        val (_, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "",
+            extras = MessageSendExtras(
+                sharedFiles = listOf(
+                    SharedFileRef(
+                        url = "https://files.waddle.test/report.pdf.enc",
+                        name = "report.pdf",
+                        mediaType = "application/pdf",
+                        sizeBytes = 2048L,
+                        disposition = FileDisposition.INLINE,
+                        hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "cGxhaW4=")),
+                        encrypted = EncryptedFileRef(
+                            cipher = EncryptedAttachmentCrypto.CIPHER_AES_256_GCM,
+                            keyB64 = "a2V5",
+                            ivB64 = "aXY=",
+                            hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "Y2lwaGVy")),
+                            sources = listOf("https://files.waddle.test/report.pdf.enc"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val file = options.sharedFiles.single()
+        assertEquals("report.pdf", file.name)
+        assertEquals(2048uL, file.size)
+        // XEP-0448: the plaintext hash rides in the <file/> metadata…
+        assertEquals(listOf(WaddleStickerHash(algo = "sha-256", valueB64 = "cGxhaW4=")), file.hashes)
+        // …and the envelope carries key/iv plus the CIPHERTEXT hash.
+        val encrypted = checkNotNull(file.encrypted)
+        assertEquals(EncryptedAttachmentCrypto.CIPHER_AES_256_GCM, encrypted.cipher)
+        assertEquals("a2V5", encrypted.keyB64)
+        assertEquals("aXY=", encrypted.ivB64)
+        assertEquals(listOf("sha-256" to "Y2lwaGVy"), encrypted.hashes.map { it.algo to it.valueB64 })
+        assertEquals(listOf("https://files.waddle.test/report.pdf.enc"), encrypted.sources)
     }
 
     @Test

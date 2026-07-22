@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import social.waddle.android.client.ClientFactory
 import social.waddle.android.client.ConnectivityNetworkSignal
+import social.waddle.android.client.EncryptedAttachmentDownloader
 import social.waddle.android.client.GifSearchGateway
 import social.waddle.android.client.GiphyProxyGateway
 import social.waddle.android.client.NetworkSignal
@@ -34,6 +35,7 @@ import social.waddle.android.feature.call.CallSessionController
 import social.waddle.android.feature.call.LiveKitCallMediaController
 import social.waddle.android.feature.call.MucCallLiveParticipantsStore
 import social.waddle.android.feature.conversation.AttachmentUploader
+import social.waddle.android.feature.conversation.EncryptedAttachmentOpener
 import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
@@ -127,6 +129,17 @@ class AppGraph(
         contentResolver = appContext.contentResolver,
         httpClient = okHttpClient,
         sessionManager = sessionManager,
+        cacheDir = appContext.cacheDir,
+    )
+
+    /** XEP-0448 decrypt-on-display fetch (memory-only plaintext). */
+    val encryptedAttachmentDownloader: EncryptedAttachmentDownloader =
+        EncryptedAttachmentDownloader(okHttpClient)
+
+    /** XEP-0448 non-image attachments: decrypt to cache + viewer intent. */
+    val encryptedAttachmentOpener: EncryptedAttachmentOpener = EncryptedAttachmentOpener(
+        context = appContext,
+        downloader = encryptedAttachmentDownloader,
     )
 
     /** XEP-0449 create-pack pipeline (downscale → slot upload → publish). */
@@ -177,6 +190,10 @@ class AppGraph(
         callSessionController.start()
         callNotifier.start(applicationScope)
         startSignedOutCleanup()
+        // Decrypted XEP-0448 attachments never survive a process
+        // restart: their FileProvider grants are gone, so the
+        // plaintext on disk is only liability.
+        applicationScope.launch { encryptedAttachmentOpener.clearCache() }
         bootstrap.restore()
     }
 
@@ -197,6 +214,7 @@ class AppGraph(
             sessionManager.appState.collect { state ->
                 if (state == WaddleAppState.SignedOut) {
                     messageNotifier.clearAll()
+                    encryptedAttachmentOpener.clearCache()
                 }
             }
         }

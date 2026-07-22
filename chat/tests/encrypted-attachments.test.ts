@@ -38,6 +38,20 @@ describe("encrypted attachment runtime", () => {
     expect(decrypted.type).toStartWith("text/plain");
   });
 
+  test("advertises the plaintext sha-256 for the XEP-0448 file metadata", async () => {
+    const original = new File(["hello encrypted world"], "note.txt", { type: "text/plain" });
+    const prepared = await prepareEncryptedAttachmentUpload(original);
+
+    const digest = await crypto.subtle.digest("SHA-256", await original.arrayBuffer());
+    const expectedB64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+
+    // XEP-0448 §2.1: at least one plaintext <hash/> is REQUIRED in the
+    // <file/> metadata; it must differ from the ciphertext hash inside
+    // <encrypted/> (they digest different bytes).
+    expect(prepared.plaintextHashes).toEqual([{ algo: "sha-256", valueB64: expectedB64 }]);
+    expect(prepared.encrypted.hashes?.[0]?.valueB64).not.toBe(expectedB64);
+  });
+
   test("rejects encrypted payloads that fail the advertised hash check", async () => {
     const original = new File(["hello encrypted world"], "note.txt", { type: "text/plain" });
     const prepared = await prepareEncryptedAttachmentUpload(original);

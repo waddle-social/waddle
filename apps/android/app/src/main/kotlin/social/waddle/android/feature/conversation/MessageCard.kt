@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -33,13 +34,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
@@ -49,7 +53,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import social.waddle.android.R
+import social.waddle.android.WaddleApplication
 import social.waddle.android.client.AuthorBadge
 import social.waddle.android.client.AuthorBadgeKind
 import social.waddle.android.client.FileDisposition
@@ -62,6 +69,8 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.jid.resourcepartOf
+import social.waddle.android.media.imageModelOf
+import social.waddle.android.media.isInlineImage
 import social.waddle.android.theme.consistentColor
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSharedFile
@@ -209,7 +218,7 @@ private fun StoredMessageCard(
             stickerFile != null -> StickerContent(stickerFile, altText = item.body)
             else -> {
                 if (item.isSticker) {
-                    // Degraded sticker (encrypted or missing media):
+                    // Degraded sticker (no inline image attachment):
                     // keep the label row instead of a broken image.
                     AttachmentRow(
                         icon = { Icon(Icons.Outlined.Mood, contentDescription = null) },
@@ -463,20 +472,19 @@ private fun ReactionChips(
 
 /**
  * One XEP-0447 attachment: inline images render via Coil with a tap-to-
- * expand viewer (web lightbox parity); everything else is a card that
- * opens the URL externally. Encrypted attachments (XEP-0448) cannot be
- * decrypted without OMEMO — they degrade to a plain card.
+ * expand viewer (web lightbox parity) — XEP-0448 encrypted images go
+ * through the typed [imageModelOf] model so the registered fetcher
+ * decrypts them in-process. Everything else is a card: plaintext files
+ * open their URL externally; encrypted files decrypt to the app cache
+ * and open through the FileProvider.
  */
 @Composable
 private fun SharedFileContent(file: WaddleSharedFile) {
     val uriHandler = LocalUriHandler.current
     var viewerOpen by remember { mutableStateOf(false) }
-    val isInlineImage = file.encrypted == null &&
-        FileDisposition.fromWire(file.disposition) == FileDisposition.INLINE &&
-        file.mediaType?.startsWith("image/") == true
-    if (isInlineImage) {
+    if (isInlineImage(file)) {
         AsyncImage(
-            model = file.url,
+            model = imageModelOf(file),
             contentDescription = file.name ?: stringResource(R.string.message_attachment),
             contentScale = ContentScale.Crop,
             modifier = Modifier
@@ -487,40 +495,81 @@ private fun SharedFileContent(file: WaddleSharedFile) {
         )
         if (viewerOpen) {
             MediaViewerDialog(
-                url = file.url,
+                model = imageModelOf(file),
                 contentDescription = file.name,
                 onDismiss = { viewerOpen = false },
             )
         }
     } else {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            // Guarded: the URL is peer-controlled metadata and openUri
-            // throws when no activity handles the scheme.
-            modifier = Modifier.clickable {
-                runCatching { uriHandler.openUri(file.url) }
-            },
-        ) {
-            Icon(
-                Icons.Outlined.AttachFile,
-                contentDescription = stringResource(R.string.message_attachment),
-            )
-            Text(
-                text = file.name ?: file.url,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 4.dp),
-            )
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var openFailed by remember(file.url) { mutableStateOf(false) }
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clickable {
+                    openFailed = false
+                    openSharedFile(context, uriHandler, scope, file) { openFailed = true }
+                },
+            ) {
+                Icon(
+                    Icons.Outlined.AttachFile,
+                    contentDescription = stringResource(R.string.message_attachment),
+                )
+                Text(
+                    text = file.name ?: file.url,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
+            if (openFailed) {
+                Text(
+                    text = stringResource(R.string.attachment_open_failed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
+}
+
+/**
+ * Open a tapped non-image attachment. Plaintext files hand the URL to
+ * the system (guarded: the URL is peer-controlled metadata and openUri
+ * throws when no activity handles the scheme). XEP-0448 files would
+ * show an external viewer only ciphertext, so they route through the
+ * download → verify → decrypt → FileProvider opener instead.
+ * [onFailure] fires when the open cannot complete (failed download,
+ * decrypt, or no viewer) so the row can show an inline error.
+ */
+private fun openSharedFile(
+    context: Context,
+    uriHandler: UriHandler,
+    scope: CoroutineScope,
+    file: WaddleSharedFile,
+    onFailure: () -> Unit,
+) {
+    if (file.encrypted == null) {
+        runCatching { uriHandler.openUri(file.url) }.onFailure { onFailure() }
+        return
+    }
+    val opener = (context.applicationContext as? WaddleApplication)
+        ?.graph
+        ?.encryptedAttachmentOpener
+    if (opener == null) {
+        onFailure()
+        return
+    }
+    scope.launch { if (!opener.open(file)) onFailure() }
 }
 
 /** Full-screen image viewer (single image; tap anywhere to dismiss). */
 @Composable
 private fun MediaViewerDialog(
-    url: String,
+    model: Any,
     contentDescription: String?,
     onDismiss: () -> Unit,
 ) {
@@ -536,7 +585,7 @@ private fun MediaViewerDialog(
             contentAlignment = Alignment.Center,
         ) {
             AsyncImage(
-                model = url,
+                model = model,
                 contentDescription = contentDescription,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
@@ -568,7 +617,7 @@ private fun AttachmentRow(icon: @Composable () -> Unit, label: String) {
 private fun StickerContent(file: WaddleSharedFile, altText: String) {
     var viewerOpen by remember { mutableStateOf(false) }
     AsyncImage(
-        model = file.url,
+        model = imageModelOf(file),
         contentDescription = altText.ifBlank { stringResource(R.string.message_sticker) },
         contentScale = ContentScale.Fit,
         modifier = Modifier
@@ -578,7 +627,7 @@ private fun StickerContent(file: WaddleSharedFile, altText: String) {
     )
     if (viewerOpen) {
         MediaViewerDialog(
-            url = file.url,
+            model = imageModelOf(file),
             contentDescription = altText,
             onDismiss = { viewerOpen = false },
         )
@@ -609,16 +658,12 @@ private fun InlineImageBody(url: String) {
 
 /**
  * The XEP-0447 file a sticker message renders as its image: the first
- * UNENCRYPTED inline image attachment. XEP-0448-encrypted stickers
- * cannot decrypt here and degrade to the label row instead.
+ * inline image attachment. XEP-0448-encrypted stickers decrypt through
+ * the registered Coil fetcher exactly like plaintext ones.
  */
 private fun stickerFileOf(item: TimelineItem): WaddleSharedFile? {
     if (!item.isSticker) return null
-    return item.sharedFiles.firstOrNull { file ->
-        file.encrypted == null &&
-            FileDisposition.fromWire(file.disposition) == FileDisposition.INLINE &&
-            file.mediaType?.startsWith("image/") == true
-    }
+    return item.sharedFiles.firstOrNull(::isInlineImage)
 }
 
 @Composable

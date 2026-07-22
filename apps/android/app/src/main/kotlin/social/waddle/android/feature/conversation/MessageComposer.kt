@@ -23,16 +23,20 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import social.waddle.android.R
+import social.waddle.android.client.ExtensionCommand
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
 
@@ -41,6 +45,15 @@ import social.waddle.android.client.MentionRef
  * Group chats pass [mentionCandidates]: an active `@token` under the
  * cursor opens [MentionPopover], and accepted mentions travel with the
  * send as XEP-0372 refs.
+ *
+ * A draft that is entirely a `/prefix …` slash trigger (and
+ * [slashDispatch] is wired) is intercepted at the send button: a
+ * resolved command dispatches through [slashDispatch] — the draft
+ * clears only when the dispatch reports success, so a failure leaves
+ * the slash draft armed for a retry — and an unresolved prefix blocks
+ * the send with an inline hint (web `slashSubmitBlocked` parity).
+ * Two web-parity escapes send the draft as plain text instead: a bare
+ * `/` with no prefix, and a prefix whose popover the user dismissed.
  */
 @Composable
 fun MessageComposer(
@@ -59,6 +72,14 @@ fun MessageComposer(
     uploadState: UploadState = UploadState.Idle,
     onClearUpload: () -> Unit = {},
     mentionCandidates: List<MentionCandidate> = emptyList(),
+    /** Discovered slash commands; empty until discovery answers. */
+    slashCommands: List<ExtensionCommand> = emptyList(),
+    /** Channel-scoped commands only match inside MUC rooms. */
+    inMuc: Boolean = false,
+    /** Fires when the draft becomes a slash trigger (start discovery). */
+    onSlashArmed: () -> Unit = {},
+    /** Runs a resolved invocation; `null` disables slash handling. */
+    slashDispatch: (suspend (SlashInvocation) -> Boolean)? = null,
 ) {
     var draft by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(""))
@@ -68,8 +89,12 @@ fun MessageComposer(
     // plain `@Nick` text (a resent label without its span is just text —
     // never a mislabelled reference).
     val mentionTracker = remember { MentionSpanTracker() }
+    // Unresolved `/xyz` prefix the send button refused; cleared on the
+    // next text change so the hint never outlives the draft it blocked.
+    var slashBlockedPrefix by remember { mutableStateOf<String?>(null) }
 
     fun updateDraft(value: TextFieldValue) {
+        if (value.text != draft.text) slashBlockedPrefix = null
         mentionTracker.onTextChanged(value.text)
         draft = value
     }
@@ -116,6 +141,28 @@ fun MessageComposer(
     }
     val mentionResults = mentionToken?.let { filterMentionCandidates(mentionCandidates, it.query) }.orEmpty()
 
+    // Slash-command autocomplete arms when the whole draft is a
+    // `/prefix` trigger (never in edit mode — a XEP-0308 correction of
+    // `/poll` is a text fix, not a command; cursor must be collapsed
+    // like mentions).
+    val slashTrigger = if (slashDispatch != null && editing == null && draft.selection.collapsed) {
+        parseSlashTrigger(draft.text)
+    } else {
+        null
+    }
+    // Per-prefix dismissal memory: closing the popover hides it until
+    // the typed prefix changes; disarming forgets the dismissal.
+    var dismissedSlashPrefix by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(slashTrigger != null) {
+        if (slashTrigger != null) onSlashArmed() else dismissedSlashPrefix = null
+    }
+    val slashCandidates = slashTrigger
+        ?.takeIf { it.trailing.isEmpty() && it.prefix != dismissedSlashPrefix }
+        ?.let { filterSlashCandidates(it.prefix, slashCommands, inMuc) }
+        .orEmpty()
+    var slashDispatching by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
     Surface(tonalElevation = 3.dp, modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.navigationBarsPadding()) {
             if (editing != null) {
@@ -151,6 +198,50 @@ fun MessageComposer(
                     onCancel = onClearUpload,
                     isError = true,
                 )
+            }
+            if (slashCandidates.isNotEmpty()) {
+                SlashCommandPopover(
+                    candidates = slashCandidates,
+                    onSelect = { command ->
+                        val completed = "/${command.composerPrefix.orEmpty()} "
+                        updateDraft(TextFieldValue(completed, TextRange(completed.length)))
+                        onDraftChanged()
+                    },
+                    onDismiss = { dismissedSlashPrefix = slashTrigger?.prefix },
+                )
+            }
+            slashBlockedPrefix?.let { blocked ->
+                // Dismissing the hint is the mobile Esc: it disarms
+                // interception for this prefix so the next send posts
+                // the draft as plain text. Without it, a prefix that
+                // matches no command (no popover to dismiss) would be
+                // unsendable.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 4.dp, top = 4.dp)
+                        .testTag(SlashCommandTestTags.BLOCKED_HINT),
+                ) {
+                    Text(
+                        text = stringResource(R.string.composer_slash_unknown, blocked),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(
+                        onClick = {
+                            dismissedSlashPrefix = blocked.removePrefix("/")
+                            slashBlockedPrefix = null
+                        },
+                        modifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT_DISMISS),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = stringResource(R.string.composer_slash_send_as_text),
+                        )
+                    }
+                }
             }
             if (mentionToken != null && mentionResults.isNotEmpty()) {
                 MentionPopover(
@@ -227,10 +318,40 @@ fun MessageComposer(
                 )
                 IconButton(
                     onClick = {
-                        onSend(draft.text, mentionTracker.mentionRefs())
-                        updateDraft(TextFieldValue(""))
+                        val trigger = if (slashDispatch != null && editing == null) {
+                            parseSlashTrigger(draft.text)?.takeIf { candidate ->
+                                shouldInterceptSlashSend(candidate, dismissedSlashPrefix)
+                            }
+                        } else {
+                            null
+                        }
+                        if (trigger == null) {
+                            onSend(draft.text, mentionTracker.mentionRefs())
+                            updateDraft(TextFieldValue(""))
+                        } else {
+                            val command = resolveSlashCommand(trigger.prefix, slashCommands, inMuc)
+                            if (command == null || slashDispatch == null) {
+                                // Unresolved (or ambiguous) prefix: block the
+                                // send instead of posting a broken command as
+                                // a message (web slashSubmitBlocked parity).
+                                slashBlockedPrefix = "/${trigger.prefix}"
+                            } else {
+                                val invocation = buildSlashInvocation(command, trigger.trailing)
+                                slashDispatching = true
+                                scope.launch {
+                                    val handled = try {
+                                        slashDispatch(invocation)
+                                    } finally {
+                                        slashDispatching = false
+                                    }
+                                    // Only a successful handoff clears the
+                                    // draft — failure leaves slash mode armed.
+                                    if (handled) updateDraft(TextFieldValue(""))
+                                }
+                            }
+                        }
                     },
-                    enabled = draft.text.isNotBlank(),
+                    enabled = draft.text.isNotBlank() && !slashDispatching,
                     modifier = Modifier
                         .padding(start = 4.dp)
                         .size(48.dp),

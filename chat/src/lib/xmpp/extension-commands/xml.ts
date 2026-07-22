@@ -44,37 +44,61 @@ export function parseCommandIqResponse(xml: string): ExtensionCommandResult {
   const notes: ExtensionCommandNote[] = Array.from(commandBody.matchAll(/<note\b([^>]*)>([\s\S]*?)<\/note>/g))
     .map(([, attrs, value]) => ({ type: readXmlAttr(attrs, "type"), value: decodeXml(value).trim() }))
     .filter((note) => note.value.length > 0);
-  const actionsMatch = commandBody.match(/<actions\b([^>]*)>([\s\S]*?)<\/actions>/);
+  // A self-closing <actions/> counts as PRESENT (Rust-parser parity):
+  // it is the server saying "no forward actions", which must suppress
+  // the implied `complete` below, not trigger it.
+  const actionsMatch = commandBody.match(/<actions\b([^>]*)>([\s\S]*?)<\/actions>|<actions\b([^>]*)\/>/);
+  const actionsAttrs = actionsMatch?.[1] ?? actionsMatch?.[3] ?? "";
+  const actionsBody = actionsMatch?.[2] ?? "";
   const actions = actionsMatch ? {
-    execute: readXmlAttr(actionsMatch[1], "execute"),
-    next: actionsMatch[2].includes("<next") || undefined,
-    prev: actionsMatch[2].includes("<prev") || actionsMatch[2].includes("<previous") || undefined,
-    complete: actionsMatch[2].includes("<complete") || undefined,
-    cancel: actionsMatch[2].includes("<cancel") || undefined,
+    execute: readXmlAttr(actionsAttrs, "execute"),
+    next: actionsBody.includes("<next") || undefined,
+    prev: actionsBody.includes("<prev") || actionsBody.includes("<previous") || undefined,
+    complete: actionsBody.includes("<complete") || undefined,
+    cancel: actionsBody.includes("<cancel") || undefined,
   } : undefined;
-  const formMatch = commandBody.match(/<x\b([^>]*)>([\s\S]*?)<\/x>/);
+  // Self-closing shapes are matched everywhere the server's minidom
+  // serializer can produce them (Rust-parser parity): a childless
+  // <field/> is a real optional valueless field, and <value/> is an
+  // empty-string value, exactly as minidom's get_child/text see them.
+  // <option/> stays dropped on both sides (no <value/> child).
+  const formMatch = commandBody.match(/<x\b([^>]*)>([\s\S]*?)<\/x>|<x\b([^>]*)\/>/);
+  const formAttrs = formMatch?.[1] ?? formMatch?.[3] ?? "";
+  const formBody = formMatch?.[2] ?? "";
   const form = formMatch ? {
-    type: readXmlAttr(formMatch[1], "type") ?? "form",
-    fields: Array.from(formMatch[2].matchAll(/<field\b([^>]*)>([\s\S]*?)<\/field>/g)).map(([, attrs, body]) => ({
-      name: readXmlAttr(attrs, "var") ?? "",
-      var: readXmlAttr(attrs, "var") ?? "",
-      type: readXmlAttr(attrs, "type") ?? "text-single",
-      label: readXmlAttr(attrs, "label"),
-      desc: body.match(/<desc>([\s\S]*?)<\/desc>/)?.[1] ? decodeXml(body.match(/<desc>([\s\S]*?)<\/desc>/)![1]) : undefined,
-      value: decodeXml(body.match(/<value>([\s\S]*?)<\/value>/)?.[1] ?? ""),
-      values: Array.from(body.matchAll(/<value>([\s\S]*?)<\/value>/g)).map(([, value]) => decodeXml(value)),
-      required: body.includes("<required"),
-      options: Array.from(body.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)).map(([, optionAttrs, optionBody]) => ({
-        label: readXmlAttr(optionAttrs, "label"),
-        value: decodeXml(optionBody.match(/<value>([\s\S]*?)<\/value>/)?.[1] ?? ""),
-      })),
-    })),
+    type: readXmlAttr(formAttrs, "type") ?? "form",
+    // The expanded-form alternative must reject a trailing "/" in its
+    // attrs, otherwise `<field a/><field b>…</field>` would swallow
+    // both repeated fields into one match.
+    fields: Array.from(formBody.matchAll(/<field\b((?:[^>]*[^/>])?)>([\s\S]*?)<\/field>|<field\b([^>]*)\/>/g)).map((match) => {
+      const attrs = match[1] ?? match[3] ?? "";
+      const body = match[2] ?? "";
+      return {
+        name: readXmlAttr(attrs, "var") ?? "",
+        var: readXmlAttr(attrs, "var") ?? "",
+        type: readXmlAttr(attrs, "type") ?? "text-single",
+        label: readXmlAttr(attrs, "label"),
+        desc: body.match(/<desc>([\s\S]*?)<\/desc>/)?.[1] ? decodeXml(body.match(/<desc>([\s\S]*?)<\/desc>/)![1]) : undefined,
+        value: decodeXml(body.match(/<value>([\s\S]*?)<\/value>|<value\s*\/>/)?.[1] ?? ""),
+        values: Array.from(body.matchAll(/<value>([\s\S]*?)<\/value>|<value\s*\/>/g)).map(([, value]) => decodeXml(value ?? "")),
+        required: body.includes("<required"),
+        options: Array.from(body.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)).map(([, optionAttrs, optionBody]) => ({
+          label: readXmlAttr(optionAttrs, "label"),
+          value: decodeXml(optionBody.match(/<value>([\s\S]*?)<\/value>/)?.[1] ?? ""),
+        })),
+      };
+    }),
   } : undefined;
+  // Always derive actions, even without an <actions/> element: per
+  // XEP-0050 "Command Actions", an executing response with no
+  // <actions/> implies complete (plus the always-allowed cancel), so
+  // single-stage commands stay inline instead of opening the palette.
+  const parsedActions = parseCommandActions(actions, status, !!actionsMatch);
   return {
     ...(status ? { status } : {}),
     ...(sessionId ? { sessionId } : {}),
     notes,
-    ...(actions ? { actions: parseCommandActions(actions, status, !!actionsMatch) } : {}),
+    ...(parsedActions ? { actions: parsedActions } : {}),
     ...(form ? { form } : {}),
   };
 }
