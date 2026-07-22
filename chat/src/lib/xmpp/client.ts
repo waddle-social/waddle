@@ -1783,7 +1783,7 @@ export class BrowserXmppClient {
         loaded[index] = progress.loaded;
         onProgress?.({ loaded: loaded.reduce((a, b) => a + b, 0), total: grandTotal }, index);
       });
-      results.push({ url: result.getUrl, name: prepared.originalName, mediaType: prepared.originalMediaType, size: prepared.originalSize, disposition: inferredFileDisposition(prepared.originalMediaType, prepared.originalName), encrypted: { ...prepared.encrypted, sources: [result.getUrl] } });
+      results.push({ url: result.getUrl, name: prepared.originalName, mediaType: prepared.originalMediaType, size: prepared.originalSize, disposition: inferredFileDisposition(prepared.originalMediaType, prepared.originalName), hashes: prepared.plaintextHashes, encrypted: { ...prepared.encrypted, sources: [result.getUrl] } });
     }
     return results;
   }

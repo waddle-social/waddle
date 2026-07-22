@@ -1,5 +1,5 @@
 import type { MarkupSpan, MessageReference } from "@/lib/chat-ui";
-import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { EncryptedFileHash, WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 export interface OutboundFileAttachment {
   url: string;
@@ -9,6 +9,11 @@ export interface OutboundFileAttachment {
   disposition: "inline" | "attachment";
   width?: number;
   height?: number;
+  /**
+   * XEP-0300 plaintext content hashes for the `<file/>` metadata.
+   * XEP-0448 requires at least one on encrypted sends.
+   */
+  hashes?: EncryptedFileHash[];
   encrypted?: WaddleEncryptedFile;
 }
 

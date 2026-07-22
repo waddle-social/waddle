@@ -1,5 +1,5 @@
 import { markSensitiveUrlForTelemetry } from "@/lib/telemetry";
-import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { EncryptedFileHash, WaddleEncryptedFile } from "./extensions/encrypted-file";
 
 const AES_GCM_NAME = "AES-GCM";
 const AES_GCM_IV_BYTES = 12;
@@ -13,6 +13,11 @@ interface PreparedEncryptedAttachmentUpload {
   originalName: string;
   originalMediaType: string;
   originalSize: number;
+  /**
+   * XEP-0448-mandated plaintext content hashes for the `<file/>`
+   * metadata (distinct from the ciphertext hash inside `<encrypted/>`).
+   */
+  plaintextHashes: EncryptedFileHash[];
 }
 
 interface EncryptedAttachmentDescriptor {
@@ -124,6 +129,7 @@ export async function prepareEncryptedAttachmentUpload(
     { type: "application/octet-stream" },
   );
   const hashB64 = await sha256Base64(encryptedBytes);
+  const plaintextHashB64 = await sha256Base64(clearBytes);
 
   return {
     uploadFile: encryptedBlob,
@@ -136,6 +142,7 @@ export async function prepareEncryptedAttachmentUpload(
     originalName,
     originalMediaType,
     originalSize,
+    plaintextHashes: [{ algo: SHA_256, valueB64: plaintextHashB64 }],
   };
 }
 

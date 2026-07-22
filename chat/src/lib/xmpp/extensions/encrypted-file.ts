@@ -9,7 +9,11 @@ type EncryptedFileCipher =
   | "urn:xmpp:ciphers:aes-128-gcm-nopadding:0"
   | "urn:xmpp:ciphers:aes-256-gcm-nopadding:0";
 
-interface EncryptedFileHash {
+/**
+ * One XEP-0300 hash entry — the ciphertext digest inside `<encrypted/>`
+ * or the XEP-0448-mandated plaintext digest inside `<file/>`.
+ */
+export interface EncryptedFileHash {
   algo: string;
   valueB64: string;
 }

@@ -1610,6 +1610,7 @@ fn build_outbound_message_with_link_preview_token_request() {
 
 #[test]
 fn build_outbound_message_emits_xep0448_when_encrypted() {
+    use crate::stickers::{HashAlgo, StickerHash, NS_HASHES};
     use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash, NS_ESFS};
     let url = "https://files.example.com/photo.jpg.enc";
     let options = SendMessageOptions {
@@ -1621,7 +1622,10 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
             width: Some(800),
             height: Some(600),
             desc: None,
-            hashes: Vec::new(),
+            hashes: vec![StickerHash {
+                algo: HashAlgo::Sha256,
+                value_b64: "cGxhaW4taGFzaA==".to_string(),
+            }],
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1645,6 +1649,16 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
         .get_child("file-sharing", NS_SFS)
         .expect("file-sharing child present");
     assert_eq!(file_sharing.attr("disposition"), Some("inline"));
+
+    // XEP-0448 §2.1: the `<file/>` metadata of an encrypted send MUST
+    // carry the plaintext content hash (distinct from the ciphertext
+    // hash nested inside `<encrypted/>`).
+    let plaintext_hash = file_sharing
+        .get_child("file", NS_FILE_METADATA)
+        .and_then(|file| file.get_child("hash", NS_HASHES))
+        .expect("plaintext <hash/> inside <file/>");
+    assert_eq!(plaintext_hash.attr("algo"), Some("sha-256"));
+    assert_eq!(plaintext_hash.text(), "cGxhaW4taGFzaA==");
 
     let sources = file_sharing
         .get_child("sources", NS_SFS)
@@ -1684,6 +1698,7 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
 
 #[test]
 fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
+    use crate::stickers::{HashAlgo, StickerHash};
     use crate::xep::encrypted_file::{Cipher, EncryptedFile, NS_ESFS};
     let url = "https://files.example.com/photo.jpg.enc";
     let options = SendMessageOptions {
@@ -1695,7 +1710,10 @@ fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
             width: None,
             height: None,
             desc: None,
-            hashes: Vec::new(),
+            hashes: vec![StickerHash {
+                algo: HashAlgo::Sha256,
+                value_b64: "cGxhaW4taGFzaA==".to_string(),
+            }],
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1728,6 +1746,7 @@ fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
 
 #[test]
 fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
+    use crate::stickers::{HashAlgo, StickerHash};
     use crate::xep::encrypted_file::{Cipher, EncryptedFile, NS_ESFS};
     let url = "https://files.example.com/photo.jpg.enc";
     let mirror_url = "https://mirror.example.com/photo.jpg.enc";
@@ -1740,7 +1759,10 @@ fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
             width: None,
             height: None,
             desc: None,
-            hashes: Vec::new(),
+            hashes: vec![StickerHash {
+                algo: HashAlgo::Sha256,
+                value_b64: "cGxhaW4taGFzaA==".to_string(),
+            }],
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1771,6 +1793,7 @@ fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
 
 #[test]
 fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
+    use crate::stickers::{HashAlgo, StickerHash};
     use crate::xep::encrypted_file::{Cipher, EncryptedFile};
     let options = SendMessageOptions {
         shared_files: vec![SharedFile {
@@ -1781,7 +1804,10 @@ fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
             width: None,
             height: None,
             desc: None,
-            hashes: Vec::new(),
+            hashes: vec![StickerHash {
+                algo: HashAlgo::Sha256,
+                value_b64: "cGxhaW4taGFzaA==".to_string(),
+            }],
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1806,6 +1832,48 @@ fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
 }
 
 #[test]
+fn build_outbound_message_rejects_encrypted_file_without_plaintext_hash() {
+    // XEP-0448 §2.1: the `<file/>` metadata MUST contain at least one
+    // plaintext `<hash/>` for encrypted transfers.
+    use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+    let url = "https://files.example.com/photo.jpg.enc";
+    let options = SendMessageOptions {
+        shared_files: vec![SharedFile {
+            url: url.to_string(),
+            name: Some("photo.jpg".to_string()),
+            media_type: Some("image/jpeg".to_string()),
+            size: Some(2048),
+            width: None,
+            height: None,
+            desc: None,
+            hashes: Vec::new(),
+            disposition: SharedFileDisposition::Inline,
+            encrypted: Some(EncryptedFile {
+                cipher: Cipher::Aes256GcmNoPadding,
+                key_b64: "a2V5".to_string(),
+                iv_b64: "aXY=".to_string(),
+                hashes: vec![EncryptedHash {
+                    algo: "sha-256".to_string(),
+                    value_b64: "aGFzaA==".to_string(),
+                }],
+                sources: vec![url.to_string()],
+            }),
+        }],
+        ..Default::default()
+    };
+    let error = build_outbound_message("bob@example.com", "chat", "see attached", &options)
+        .expect_err("encrypted file without a plaintext hash must fail");
+    assert!(
+        matches!(
+            error,
+            ClientError::Core(CoreError::BadRequest(Some(ref text)))
+                if text == "encrypted shared file requires a plaintext <hash/> in its file metadata"
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn parse_message_collects_encrypted_metadata_into_shared_file() {
     let url = "https://files.example.com/photo.jpg.enc";
     let xml = format!(
@@ -1816,6 +1884,7 @@ fn parse_message_collects_encrypted_metadata_into_shared_file() {
                <media-type>image/jpeg</media-type>\
                <name>photo.jpg</name>\
                <size>2048</size>\
+               <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>cGxhaW4taGFzaA==</hash>\
              </file>\
              <sources xmlns='urn:xmpp:sfs:0'>\
                <url-data xmlns='http://jabber.org/protocol/url-data' target='{url}'/>\
@@ -1840,6 +1909,11 @@ fn parse_message_collects_encrypted_metadata_into_shared_file() {
     let file = &parsed.shared_files[0];
     assert_eq!(file.url, url);
     assert_eq!(file.media_type.as_deref(), Some("image/jpeg"));
+    // The XEP-0448-mandated plaintext hash inside <file/> parses into the
+    // typed file-level hashes, distinct from the ciphertext hash below.
+    assert_eq!(file.hashes.len(), 1);
+    assert_eq!(file.hashes[0].algo, crate::stickers::HashAlgo::Sha256);
+    assert_eq!(file.hashes[0].value_b64, "cGxhaW4taGFzaA==");
     let encrypted = file
         .encrypted
         .as_ref()
@@ -1942,6 +2016,7 @@ fn parse_message_ignores_orphan_encrypted_sibling() {
 
 #[test]
 fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
+    use crate::stickers::{HashAlgo, StickerHash};
     use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
     let url = "https://files.example.com/blob.enc";
     let original = SharedFile {
@@ -1952,7 +2027,10 @@ fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
         width: None,
         height: None,
         desc: None,
-        hashes: Vec::new(),
+        hashes: vec![StickerHash {
+            algo: HashAlgo::Sha256,
+            value_b64: "cGxhaW4taGFzaA==".to_string(),
+        }],
         disposition: SharedFileDisposition::Attachment,
         encrypted: Some(EncryptedFile {
             cipher: Cipher::Aes128GcmNoPadding,
@@ -1976,6 +2054,7 @@ fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
     assert_eq!(parsed.shared_files.len(), 1);
     let round_tripped = &parsed.shared_files[0];
     assert_eq!(round_tripped.url, original.url);
+    assert_eq!(round_tripped.hashes, original.hashes);
     assert_eq!(round_tripped.encrypted, original.encrypted);
 }
 

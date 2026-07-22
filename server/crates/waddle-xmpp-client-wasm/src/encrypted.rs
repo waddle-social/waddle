@@ -58,6 +58,26 @@ pub(crate) fn encrypted_file_from_js(
     })
 }
 
+/// Convert the file-level plaintext hashes from the JS boundary into
+/// typed XEP-0300 values. Unknown algorithms are refused rather than
+/// smuggled through as strings; native-testable like the envelope path.
+pub(crate) fn file_hashes_from_js(
+    hashes: Vec<WaddleEncryptedFileHash>,
+) -> Result<Vec<waddle_xmpp_client::stickers::StickerHash>, String> {
+    use waddle_xmpp_client::stickers::{HashAlgo, StickerHash};
+    hashes
+        .into_iter()
+        .map(|hash| {
+            let algo = HashAlgo::from_attr(&hash.algo)
+                .ok_or_else(|| format!("unsupported hash algorithm '{}'", hash.algo))?;
+            Ok(StickerHash {
+                algo,
+                value_b64: hash.value_b64,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod encrypted_file_bridge_tests {
     use super::*;
@@ -108,5 +128,28 @@ mod encrypted_file_bridge_tests {
             sources: Vec::new(),
         };
         assert!(encrypted_file_from_js(invalid).is_err());
+    }
+
+    #[test]
+    fn converts_plaintext_file_hashes_into_typed_values() {
+        use waddle_xmpp_client::stickers::HashAlgo;
+        let hashes = file_hashes_from_js(vec![WaddleEncryptedFileHash {
+            algo: "sha-256".to_string(),
+            value_b64: "cGxhaW4taGFzaA==".to_string(),
+        }])
+        .expect("sha-256 converts");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].algo, HashAlgo::Sha256);
+        assert_eq!(hashes[0].value_b64, "cGxhaW4taGFzaA==");
+    }
+
+    #[test]
+    fn refuses_unknown_plaintext_hash_algorithms() {
+        let err = file_hashes_from_js(vec![WaddleEncryptedFileHash {
+            algo: "crc32".to_string(),
+            value_b64: "AAAA".to_string(),
+        }])
+        .expect_err("unknown algo refused");
+        assert!(err.contains("crc32"));
     }
 }

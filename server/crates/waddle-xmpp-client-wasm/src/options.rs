@@ -101,6 +101,10 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
                     .map(encrypted_file_from_js)
                     .transpose()
                     .map_err(|err| js_error(err.to_string()))?;
+                // Plaintext file-level hashes (XEP-0448 requires ≥1 for
+                // encrypted sends). Unknown algorithms are refused at
+                // this boundary rather than smuggled through as strings.
+                let hashes = file_hashes_from_js(file.hashes).map_err(js_error)?;
                 Ok(messaging::SharedFile {
                     url: file.url,
                     name: file.name,
@@ -109,7 +113,7 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
                     width: file.width,
                     height: file.height,
                     desc: None,
-                    hashes: Vec::new(),
+                    hashes,
                     disposition,
                     encrypted,
                 })

@@ -839,6 +839,11 @@ export function buildWasmSendOptions(
       size: file.size,
       width: file.width,
       height: file.height,
+      // XEP-0448 requires the plaintext content hash inside <file/> for
+      // encrypted sends; the Rust builder refuses encrypted files without one.
+      ...(file.hashes?.length
+        ? { hashes: file.hashes.map((hash) => ({ algo: hash.algo, value_b64: hash.valueB64 })) }
+        : {}),
       disposition: file.disposition,
       ...(file.encrypted ? { encrypted: encryptedToWasm(file.encrypted, file.url) } : {}),
     }));

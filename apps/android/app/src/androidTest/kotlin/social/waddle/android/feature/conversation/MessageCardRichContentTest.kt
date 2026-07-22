@@ -12,6 +12,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
 import social.waddle.android.client.testPresence
+import social.waddle.client.ffi.WaddleEncryptedFile
 import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMarkupSpanType
@@ -138,6 +139,70 @@ class MessageCardRichContentTest {
         // The body is the sticker's alt text, never a text bubble.
         composeRule.onNodeWithText("penguin sticker").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("penguin sticker").assertExists()
+    }
+
+    @Test
+    fun encryptedStickerRendersAsTheStickerImageNotADegradedLabel() {
+        // XEP-0448: encrypted stickers decrypt through the registered
+        // Coil fetcher — they render exactly like plaintext stickers.
+        setCard(
+            testMessage(
+                body = "penguin sticker",
+                isSticker = true,
+                sharedFiles = listOf(
+                    WaddleSharedFile(
+                        url = "https://xmpp.waddle.test/files/sticker.png.enc",
+                        name = "sticker.png",
+                        mediaType = "image/png",
+                        size = 1024uL,
+                        width = null,
+                        height = null,
+                        desc = null,
+                        hashes = emptyList(),
+                        disposition = "inline",
+                        encrypted = WaddleEncryptedFile(
+                            cipher = "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+                            keyB64 = "a2V5",
+                            ivB64 = "aXY=",
+                            hashes = emptyList(),
+                            sources = listOf("https://xmpp.waddle.test/files/sticker.png.enc"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        composeRule.onNodeWithContentDescription("penguin sticker").assertExists()
+        composeRule.onNodeWithText("penguin sticker").assertDoesNotExist()
+    }
+
+    @Test
+    fun encryptedInlineImageRendersAsAnImageNotAPlainCard() {
+        setCard(
+            testMessage(
+                body = "",
+                sharedFiles = listOf(
+                    WaddleSharedFile(
+                        url = "https://xmpp.waddle.test/files/photo.jpg.enc",
+                        name = "photo.jpg",
+                        mediaType = "image/jpeg",
+                        size = 2048uL,
+                        width = null,
+                        height = null,
+                        desc = null,
+                        hashes = emptyList(),
+                        disposition = "inline",
+                        encrypted = WaddleEncryptedFile(
+                            cipher = "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+                            keyB64 = "a2V5",
+                            ivB64 = "aXY=",
+                            hashes = emptyList(),
+                            sources = listOf("https://xmpp.waddle.test/files/photo.jpg.enc"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        composeRule.onNodeWithContentDescription("photo.jpg").assertExists()
     }
 
     @Test

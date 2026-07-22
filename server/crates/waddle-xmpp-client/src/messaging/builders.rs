@@ -548,6 +548,15 @@ fn build_origin_id(stanza_id: &str) -> Element {
 }
 
 pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
+    // XEP-0448 §2.1: for encrypted transfers the `<file/>` metadata MUST
+    // carry at least one plaintext `<hash/>` so recipients can verify the
+    // decrypted content. Refuse to build a non-conformant send.
+    if file.encrypted.is_some() && file.hashes.is_empty() {
+        return Err(CoreError::bad_request(Some(
+            "encrypted shared file requires a plaintext <hash/> in its file metadata".to_string(),
+        ))
+        .into());
+    }
     let mut file_sharing = Element::builder("file-sharing", NS_SFS)
         .attr(
             minidom::rxml::xml_ncname!("disposition").to_owned(),

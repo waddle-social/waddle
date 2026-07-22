@@ -15,6 +15,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import social.waddle.android.client.MentionRef
+import social.waddle.android.client.StickerHash
 import java.io.File
 
 /** Plain-JVM DataStore over a temp dir — no Robolectric needed. */
@@ -83,6 +84,38 @@ class SessionPrefsTest {
 
         prefs.updateOutboundQueue { current -> current.filterNot { it.clientStanzaId == "q-1" } }
         assertTrue(prefs.outboundQueue.first().isEmpty())
+    }
+
+    @Test
+    fun `queued encrypted attachments survive the json round trip`() = runBlocking {
+        val prefs = newPrefs()
+        val message = QueuedOutboundMessage(
+            conversationJid = "alice@waddle.test",
+            isGroupchat = false,
+            body = "",
+            clientStanzaId = "q-enc-1",
+            enqueuedAtMillis = 1_000L,
+            sharedFiles = listOf(
+                SharedFileRef(
+                    url = "https://files.waddle.test/report.pdf.enc",
+                    name = "report.pdf",
+                    mediaType = "application/pdf",
+                    sizeBytes = 2048L,
+                    hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "cGxhaW4=")),
+                    encrypted = EncryptedFileRef(
+                        cipher = "urn:xmpp:ciphers:aes-256-gcm-nopadding:0",
+                        keyB64 = "a2V5",
+                        ivB64 = "aXY=",
+                        hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "Y2lwaGVy")),
+                        sources = listOf("https://files.waddle.test/report.pdf.enc"),
+                    ),
+                ),
+            ),
+        )
+
+        prefs.updateOutboundQueue { current -> current + message }
+
+        assertEquals(listOf(message), prefs.outboundQueue.first())
     }
 
     @Test

@@ -1,7 +1,10 @@
 package social.waddle.android.client
 
+import social.waddle.android.client.prefs.EncryptedFileRef
 import social.waddle.android.client.prefs.QueuedOutboundMessage
 import social.waddle.android.client.prefs.SharedFileRef
+import social.waddle.client.ffi.WaddleEncryptedFile
+import social.waddle.client.ffi.WaddleEncryptedFileHash
 import social.waddle.client.ffi.WaddleFallbackRange
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMarkupSpanType
@@ -119,11 +122,13 @@ internal fun preparedSend(
             height = null,
             // XEP-0449 sticker metadata; plain attachments carry none.
             desc = null,
-            hashes = emptyList(),
+            // XEP-0300 plaintext content hashes — XEP-0448 requires at
+            // least one on encrypted sends; the Rust builder enforces it.
+            hashes = ref.hashes.map { it.toFfi() },
             // The generated FFI record keeps its String field (wire
             // contract); typed → wire happens only at this boundary.
             disposition = ref.disposition.wire,
-            encrypted = null,
+            encrypted = ref.encrypted?.toFfi(),
         )
     }
     return finalBody to base.copy(
@@ -139,6 +144,15 @@ internal fun preparedSend(
         linkPreviewToken = extras.linkPreviewToken,
     )
 }
+
+/** FFI twin of the persisted XEP-0448 envelope. */
+private fun EncryptedFileRef.toFfi(): WaddleEncryptedFile = WaddleEncryptedFile(
+    cipher = cipher,
+    keyB64 = keyB64,
+    ivB64 = ivB64,
+    hashes = hashes.map { WaddleEncryptedFileHash(algo = it.algo, valueB64 = it.valueB64) },
+    sources = sources,
+)
 
 /**
  * The XEP-0447 file a sticker send attaches: inline disposition, the

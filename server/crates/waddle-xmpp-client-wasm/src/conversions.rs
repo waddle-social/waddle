@@ -570,6 +570,14 @@ pub(crate) fn shared_file_to_js(file: messaging::SharedFile) -> WaddleSharedFile
         size: file.size,
         width: file.width,
         height: file.height,
+        hashes: file
+            .hashes
+            .into_iter()
+            .map(|hash| WaddleEncryptedFileHash {
+                algo: hash.algo.as_str().to_string(),
+                value_b64: hash.value_b64,
+            })
+            .collect(),
         disposition: file.disposition.as_str().to_string(),
         encrypted: file.encrypted.map(encrypted_file_to_js),
     }
