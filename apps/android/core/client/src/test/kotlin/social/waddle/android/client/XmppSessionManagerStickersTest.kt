@@ -68,7 +68,7 @@ class XmppSessionManagerStickersTest {
     fun `load maps the fetched packs into the ready state and caches it`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.stickerPacks = listOf(ffiPack())
+        harness.client.stickers.packs = listOf(ffiPack())
 
         harness.manager.loadStickerPacks()
 
@@ -86,11 +86,11 @@ class XmppSessionManagerStickersTest {
             ),
             harness.manager.stickerPackStore.packs.value,
         )
-        assertEquals(listOf<String?>(null), harness.client.stickerFetchCalls)
+        assertEquals(listOf<String?>(null), harness.client.stickers.fetchCalls)
 
         // Cached: a second load never refetches the PEP node.
         harness.manager.loadStickerPacks()
-        assertEquals(1, harness.client.stickerFetchCalls.size)
+        assertEquals(1, harness.client.stickers.fetchCalls.size)
         harness.manager.logout()
     }
 
@@ -103,7 +103,7 @@ class XmppSessionManagerStickersTest {
         harness.manager.loadStickerPacks()
 
         assertEquals(StickerPacksResult.Empty, harness.manager.stickerPackStore.packs.value)
-        assertEquals(1, harness.client.stickerFetchCalls.size)
+        assertEquals(1, harness.client.stickers.fetchCalls.size)
         harness.manager.logout()
     }
 
@@ -111,16 +111,16 @@ class XmppSessionManagerStickersTest {
     fun `load failure degrades to unavailable and the next load retries`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.stickerFetchFailure = RuntimeException("boom")
+        harness.client.stickers.fetchFailure = RuntimeException("boom")
 
         harness.manager.loadStickerPacks()
         assertEquals(StickerPacksResult.Unavailable, harness.manager.stickerPackStore.packs.value)
 
-        harness.client.stickerFetchFailure = null
-        harness.client.stickerPacks = listOf(ffiPack())
+        harness.client.stickers.fetchFailure = null
+        harness.client.stickers.packs = listOf(ffiPack())
         harness.manager.loadStickerPacks()
         assertTrue(harness.manager.stickerPackStore.packs.value is StickerPacksResult.Ready)
-        assertEquals(2, harness.client.stickerFetchCalls.size)
+        assertEquals(2, harness.client.stickers.fetchCalls.size)
         harness.manager.logout()
     }
 
@@ -143,7 +143,7 @@ class XmppSessionManagerStickersTest {
         // Loaded first (the picker always loads before creating): a
         // publish into an unloaded cache deliberately stays unloaded.
         harness.manager.loadStickerPacks()
-        harness.client.stickerPublishedId = "server-pack-id"
+        harness.client.stickers.publishedId = "server-pack-id"
 
         val result = harness.manager.publishStickerPack(
             name = "  Penguins  ",
@@ -152,7 +152,7 @@ class XmppSessionManagerStickersTest {
         )
 
         assertEquals(VerbResult.Ok, result)
-        val published = harness.client.stickerPublishCalls.single()
+        val published = harness.client.stickers.publishCalls.single()
         assertEquals("", published.id)
         assertEquals("Penguins", published.name)
         assertEquals("waddling", published.summary)
@@ -179,7 +179,7 @@ class XmppSessionManagerStickersTest {
         val harness = Harness(this)
         harness.loginReady(this)
         harness.manager.loadStickerPacks()
-        harness.client.stickerPublishFailure = RuntimeException("boom")
+        harness.client.stickers.publishFailure = RuntimeException("boom")
 
         val result = harness.manager.publishStickerPack("Penguins", null, listOf(domainSticker()))
 
@@ -196,7 +196,7 @@ class XmppSessionManagerStickersTest {
         val result = harness.manager.publishStickerPack("Penguins", null, emptyList())
 
         assertEquals(VerbResult.NotReady, result)
-        assertTrue(harness.client.stickerPublishCalls.isEmpty())
+        assertTrue(harness.client.stickers.publishCalls.isEmpty())
         harness.manager.logout()
     }
 
@@ -204,13 +204,13 @@ class XmppSessionManagerStickersTest {
     fun `remove drops the pack and the last removal empties the store`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.stickerPacks = listOf(ffiPack())
+        harness.client.stickers.packs = listOf(ffiPack())
         harness.manager.loadStickerPacks()
 
         val result = harness.manager.removeStickerPack("pack-1")
 
         assertEquals(VerbResult.Ok, result)
-        assertEquals(listOf("pack-1"), harness.client.stickerRetractCalls)
+        assertEquals(listOf("pack-1"), harness.client.stickers.retractCalls)
         assertEquals(StickerPacksResult.Empty, harness.manager.stickerPackStore.packs.value)
         harness.manager.logout()
     }
@@ -219,9 +219,9 @@ class XmppSessionManagerStickersTest {
     fun `retract refusal is rejected and keeps the store`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.stickerPacks = listOf(ffiPack())
+        harness.client.stickers.packs = listOf(ffiPack())
         harness.manager.loadStickerPacks()
-        harness.client.stickerRetractResult = false
+        harness.client.stickers.retractResult = false
 
         val result = harness.manager.removeStickerPack("pack-1")
 
@@ -234,7 +234,7 @@ class XmppSessionManagerStickersTest {
     fun `retract failure knob is rejected`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.stickerRetractFailure = RuntimeException("boom")
+        harness.client.stickers.retractFailure = RuntimeException("boom")
 
         assertEquals(VerbResult.Rejected, harness.manager.removeStickerPack("pack-1"))
         harness.manager.logout()

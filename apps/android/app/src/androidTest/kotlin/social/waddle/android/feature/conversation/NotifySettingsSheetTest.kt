@@ -77,7 +77,7 @@ class NotifySettingsSheetTest {
 
         // The fake client recorded the XEP-0492 set call...
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            harness.activeFakeClient().dmNotifyCalls.any { (jid, mode, _) ->
+            harness.activeFakeClient().notify.dmCalls.any { (jid, mode, _) ->
                 jid == PEER_JID && mode == WaddleNotifyMode.NEVER
             }
         }

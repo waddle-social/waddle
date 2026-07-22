@@ -622,6 +622,17 @@ pub struct WaddleAvatar {
     pub url: Option<String>,
 }
 
+/// Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+/// resolved; `avatar` is `None` exactly when that id was in the
+/// caller's known set — the data IQ was skipped (XEP-0084 §4.2 "MUST
+/// NOT retrieve the image data") and the caller serves its cached
+/// bytes for `id` instead.
+#[derive(uniffi::Record, Clone)]
+pub struct WaddleAvatarResult {
+    pub id: String,
+    pub avatar: Option<WaddleAvatar>,
+}
+
 /// XEP-0446 / XEP-0447 shared-file metadata exposed to Swift.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleSharedFile {

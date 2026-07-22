@@ -9,13 +9,22 @@
 //!
 //! Typed payloads only — JIDs use [`BareJid`], errors use [`ClientError`], and
 //! the raw image bytes / URL live in [`Avatar`].
+//!
+//! Publishing (XEP-0084 §3) is builder-only here: callers compute the SHA-1
+//! item id with [`compute_avatar_item_id`], publish the data item first via
+//! [`build_publish_avatar_data_iq`], and only then the metadata item via
+//! [`build_publish_avatar_metadata_iq`] — the §3.2 data-before-metadata order
+//! is enforced by the calling boundary (FFI/wasm), which owns the IQ acks.
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::BareJid;
 use minidom::Element;
+use sha1::{Digest, Sha1};
 use std::future::Future;
 use url::Url;
 use uuid::Uuid;
+
+use crate::pep::build_pep_publish_iq_with_item_id;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -29,6 +38,11 @@ pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const NS_VCARD_TEMP: &str = "vcard-temp";
 
 const NS_CLIENT: &str = "jabber:client";
+
+/// XEP-0084 §4.3 removal convention: the empty `<metadata/>` "no avatar"
+/// item is published under this fixed item id (mirrors the server's
+/// `AVATAR_METADATA_REMOVE_ITEM_ID`).
+pub const AVATAR_REMOVE_ITEM_ID: &str = "current";
 
 /// Metadata advertised on the `urn:xmpp:avatar:metadata` PEP node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +148,94 @@ pub fn build_vcard_request_iq(to: &BareJid) -> Element {
         .build()
 }
 
+// ── Publish builders (XEP-0084 §3) ───────────────────────────────────────────
+
+/// Metadata for an avatar about to be published. Unlike the fetch-side
+/// [`AvatarInfo`], the attributes XEP-0084 §4.2.1 marks REQUIRED on
+/// `<info/>` (`bytes`, `id`, `type`) are non-optional here so a publish
+/// can never omit them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarPublishInfo {
+    /// Image size in bytes (REQUIRED).
+    pub bytes: u32,
+    /// SHA-1 hash of the image bytes, hex-encoded — also the item id (REQUIRED).
+    pub id: String,
+    /// MIME type, e.g. `image/png` (REQUIRED).
+    pub mime_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Compute the XEP-0084 §3.1 pubsub item id: the SHA-1 hash of the raw
+/// image bytes, lowercase hex-encoded.
+pub fn compute_avatar_item_id(data: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(40), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// Build the §3.2 avatar-data publish IQ: `<data/>` carries the RFC 4648
+/// §4 base64 of the raw image bytes, published at `item_id` (the SHA-1
+/// hex of those bytes, from [`compute_avatar_item_id`]).
+pub fn build_publish_avatar_data_iq(item_id: &str, data: &[u8]) -> Element {
+    let id = format!("avatar-publish-data-{}", Uuid::new_v4());
+    let payload = Element::builder("data", NS_AVATAR_DATA)
+        .append(BASE64_STANDARD.encode(data))
+        .build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_DATA, item_id, payload)
+}
+
+/// Build the §3.3 avatar-metadata publish IQ: `<metadata><info/></metadata>`
+/// with the REQUIRED `bytes`/`id`/`type` attributes plus `width`/`height`
+/// when known, published at the same SHA-1 item id as the data item.
+pub fn build_publish_avatar_metadata_iq(info: &AvatarPublishInfo) -> Element {
+    let id = format!("avatar-publish-meta-{}", Uuid::new_v4());
+    let mut info_builder = Element::builder("info", NS_AVATAR_METADATA)
+        .attr(
+            minidom::rxml::xml_ncname!("bytes").to_owned(),
+            info.bytes.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            info.id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            info.mime_type.as_str(),
+        );
+    if let Some(width) = info.width {
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("width").to_owned(),
+            width.to_string(),
+        );
+    }
+    if let Some(height) = info.height {
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("height").to_owned(),
+            height.to_string(),
+        );
+    }
+    let payload = Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(info_builder.build())
+        .build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_METADATA, &info.id, payload)
+}
+
+/// Build the §4.3 "no avatar" IQ: publish an EMPTY `<metadata/>` at the
+/// fixed [`AVATAR_REMOVE_ITEM_ID`] so subscribers drop their cached avatar.
+pub fn build_disable_avatar_iq() -> Element {
+    let id = format!("avatar-disable-{}", Uuid::new_v4());
+    let payload = Element::builder("metadata", NS_AVATAR_METADATA).build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_METADATA, AVATAR_REMOVE_ITEM_ID, payload)
+}
+
 // ── Response parsers ─────────────────────────────────────────────────────────
 
 /// Parse a pubsub-items IQ result carrying an avatar-metadata payload.
@@ -217,11 +319,43 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
     })
 }
 
+/// Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+/// resolved (the advertised XEP-0084 metadata id, or the synthetic
+/// vCard fallback id). `avatar` is `None` exactly when `id` was in the
+/// caller's known set — XEP-0084 §4.2 forbids re-retrieving image data
+/// the client already holds, so the data IQ was skipped and the caller
+/// serves the bytes from its own cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarFetch {
+    pub id: String,
+    pub avatar: Option<Avatar>,
+}
+
 /// Request an avatar using XEP-0084 first, then XEP-0054 vCard PHOTO fallback.
 pub async fn request_avatar_with_iq<F, Fut, E>(
     jid: &BareJid,
-    mut send_iq: F,
+    send_iq: F,
 ) -> Result<Option<Avatar>, E>
+where
+    F: FnMut(Element) -> Fut,
+    Fut: Future<Output = Result<Element, AvatarRequestFailure<E>>>,
+{
+    request_avatar_with_iq_skipping(jid, &[], send_iq)
+        .await
+        .map(|fetch| fetch.and_then(|fetch| fetch.avatar))
+}
+
+/// XEP-0084 fetch honoring the §4.2 no-refetch rule: query the metadata
+/// node, and if the advertised item id is in `known_ids` answer with an
+/// id-only [`AvatarFetch`] WITHOUT issuing the data IQ. Unknown ids
+/// fetch data as usual; when the metadata path yields nothing the
+/// XEP-0054 vCard PHOTO fallback runs (never skipped — its synthetic id
+/// does not address a pubsub data item).
+pub async fn request_avatar_with_iq_skipping<F, Fut, E>(
+    jid: &BareJid,
+    known_ids: &[String],
+    mut send_iq: F,
+) -> Result<Option<AvatarFetch>, E>
 where
     F: FnMut(Element) -> Fut,
     Fut: Future<Output = Result<Element, AvatarRequestFailure<E>>>,
@@ -235,13 +369,23 @@ where
 
     if let Some(meta_response) = meta_response {
         if let Some(info) = parse_metadata_response(&meta_response) {
-            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
-                return Ok(Some(Avatar {
-                    jid: jid.clone(),
+            if known_ids.iter().any(|known| known == &info.id) {
+                return Ok(Some(AvatarFetch {
                     id: info.id,
-                    mime_type: info.mime_type,
-                    data: Vec::new(),
-                    url: Some(url),
+                    avatar: None,
+                }));
+            }
+
+            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
+                return Ok(Some(AvatarFetch {
+                    id: info.id.clone(),
+                    avatar: Some(Avatar {
+                        jid: jid.clone(),
+                        id: info.id,
+                        mime_type: info.mime_type,
+                        data: Vec::new(),
+                        url: Some(url),
+                    }),
                 }));
             }
 
@@ -250,12 +394,15 @@ where
                 Ok(data_response) => {
                     if let Some(base64_text) = parse_data_response(&data_response) {
                         if let Some(data) = decode_base64_bytes(&base64_text) {
-                            return Ok(Some(Avatar {
-                                jid: jid.clone(),
-                                id: info.id,
-                                mime_type: info.mime_type,
-                                data,
-                                url: None,
+                            return Ok(Some(AvatarFetch {
+                                id: info.id.clone(),
+                                avatar: Some(Avatar {
+                                    jid: jid.clone(),
+                                    id: info.id,
+                                    mime_type: info.mime_type,
+                                    data,
+                                    url: None,
+                                }),
                             }));
                         }
                         warn!(jid = %jid, "avatar data base64 decode failed");
@@ -267,7 +414,12 @@ where
         }
     }
 
-    request_vcard_avatar(jid, send_iq).await
+    Ok(request_vcard_avatar(jid, send_iq)
+        .await?
+        .map(|avatar| AvatarFetch {
+            id: avatar.id.clone(),
+            avatar: Some(avatar),
+        }))
 }
 
 async fn request_vcard_avatar<F, Fut, E>(jid: &BareJid, mut send_iq: F) -> Result<Option<Avatar>, E>
@@ -333,17 +485,24 @@ pub trait AvatarExt {
     /// Fetch the published avatar for the given JID, if any.
     ///
     /// Issues XEP-0084 IQ round-trips first and falls back to XEP-0054 vCard
-    /// PHOTO when avatar metadata or data is unavailable.
+    /// PHOTO when avatar metadata or data is unavailable. Item ids in
+    /// `known_ids` honor the §4.2 no-refetch rule: an advertised id the
+    /// caller already holds answers id-only, without the data IQ.
     fn request_avatar<'a>(
         &'a self,
         jid: &'a BareJid,
-    ) -> impl std::future::Future<Output = ClientResult<Option<Avatar>>> + Send + 'a;
+        known_ids: &'a [String],
+    ) -> impl std::future::Future<Output = ClientResult<Option<AvatarFetch>>> + Send + 'a;
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl AvatarExt for ClientHandle {
-    async fn request_avatar(&self, jid: &BareJid) -> ClientResult<Option<Avatar>> {
-        request_avatar_with_iq(jid, |stanza| async move {
+    async fn request_avatar(
+        &self,
+        jid: &BareJid,
+        known_ids: &[String],
+    ) -> ClientResult<Option<AvatarFetch>> {
+        request_avatar_with_iq_skipping(jid, known_ids, |stanza| async move {
             self.send_iq(stanza).await.map_err(|error| match error {
                 ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
                 other => AvatarRequestFailure::Other(other),

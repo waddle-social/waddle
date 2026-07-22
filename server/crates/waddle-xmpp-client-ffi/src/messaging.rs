@@ -10,8 +10,8 @@ use crate::boundary_convert::{
 use crate::convert::send_options_from_ffi;
 use crate::send_outcome::send_failure_outcome;
 use crate::{
-    WaddleAvatar, WaddleClient, WaddleMamPage, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleTopology, WaddleUploadSlot,
+    WaddleAvatar, WaddleAvatarResult, WaddleClient, WaddleMamPage, WaddleSendMessageOutcome,
+    WaddleSendOptions, WaddleTopology, WaddleUploadSlot,
 };
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -245,11 +245,18 @@ impl WaddleClient {
         }
     }
 
-    /// Request the XEP-0084 avatar for a user. Returns `None` when the target
-    /// JID hasn't published an avatar or the fetch failed; errors are
-    /// reported on the event listener so the caller can treat `None` as
-    /// "fall back to initials".
-    pub async fn request_avatar(&self, jid: String) -> Option<WaddleAvatar> {
+    /// Request the XEP-0084 avatar for a user. `known_ids` are item ids
+    /// whose bytes the caller already caches: when the advertised
+    /// metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+    /// retrieve the image data") and the result carries the id alone.
+    /// Returns `None` when the target JID hasn't published an avatar or
+    /// the fetch failed; errors are reported on the event listener so
+    /// the caller can treat `None` as "fall back to initials".
+    pub async fn request_avatar(
+        &self,
+        jid: String,
+        known_ids: Vec<String>,
+    ) -> Option<WaddleAvatarResult> {
         let bare: BareJid = match jid.parse() {
             Ok(j) => j,
             Err(e) => {
@@ -259,13 +266,16 @@ impl WaddleClient {
         };
         let handle = self.clone_handle().await?;
 
-        match handle.request_avatar(&bare).await {
-            Ok(Some(avatar)) => Some(WaddleAvatar {
-                jid: avatar.jid.to_string(),
-                id: avatar.id,
-                mime_type: avatar.mime_type,
-                data: avatar.data,
-                url: avatar.url,
+        match handle.request_avatar(&bare, &known_ids).await {
+            Ok(Some(fetch)) => Some(WaddleAvatarResult {
+                id: fetch.id,
+                avatar: fetch.avatar.map(|avatar| WaddleAvatar {
+                    jid: avatar.jid.to_string(),
+                    id: avatar.id,
+                    mime_type: avatar.mime_type,
+                    data: avatar.data,
+                    url: avatar.url,
+                }),
             }),
             Ok(None) => None,
             Err(e) => {

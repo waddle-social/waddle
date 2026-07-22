@@ -22,6 +22,7 @@ internal class SessionStores {
     val notifySettingsStore = NotifySettingsStore()
     val roomMembersStore = RoomMembersStore()
     val stickerPackStore = StickerPackStore()
+    val profileStore = ProfileStore()
 
     fun clear() {
         timelineStore.clear()
@@ -36,6 +37,7 @@ internal class SessionStores {
         notifySettingsStore.clear()
         roomMembersStore.clear()
         stickerPackStore.clear()
+        profileStore.clear()
     }
 
     /** Restore joined rooms and the DM recency list from [sessionPrefs]. */

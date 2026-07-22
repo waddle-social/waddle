@@ -241,6 +241,46 @@
     <string name="community_users_load_more">Load more</string>
     <string name="community_users_failed">Couldn\'t load the user list.</string>
 
+    <!-- Profile publishing (XEP-0292 vCard4, XEP-0084 avatar, XEP-0107/0108/0118 status) -->
+    <string name="profile_title">Profile</string>
+    <string name="profile_vcard_section">Profile (vCard4)</string>
+    <string name="profile_mood_section">Mood</string>
+    <string name="profile_activity_section">Activity</string>
+    <string name="profile_tune_section">Tune</string>
+    <string name="profile_full_name">Full name</string>
+    <string name="profile_nickname">Nickname</string>
+    <string name="profile_pronouns">Pronouns</string>
+    <string name="profile_url">URL</string>
+    <string name="profile_note">Bio</string>
+    <string name="profile_save">Save profile</string>
+    <string name="profile_saving">Publishing…</string>
+    <string name="profile_revert">Revert</string>
+    <string name="profile_load_failed">Couldn\'t load your profile.</string>
+    <string name="profile_retry">Retry</string>
+    <string name="profile_publish">Publish</string>
+    <string name="profile_clear">Clear</string>
+    <string name="profile_avatar_change">Change avatar</string>
+    <string name="profile_avatar_remove">Remove</string>
+    <string name="profile_mood_choose">Choose a mood</string>
+    <string name="profile_mood_search">Search moods</string>
+    <string name="profile_optional_note">Optional note</string>
+    <string name="profile_activity_general">General activity</string>
+    <string name="profile_activity_specific">Specific activity</string>
+    <string name="profile_tune_title">Title</string>
+    <string name="profile_tune_artist">Artist</string>
+    <string name="profile_tune_source">Source</string>
+    <string name="profile_tune_track">Track</string>
+    <string name="profile_tune_length">Length (seconds)</string>
+    <string name="profile_tune_rating">Rating (1–10)</string>
+    <string name="profile_tune_uri">URL or URI</string>
+    <string name="profile_tune_empty">Add at least one tune detail, or use Clear to remove your current tune.</string>
+    <string name="profile_feedback_published">Published.</string>
+    <string name="profile_feedback_cleared">Cleared.</string>
+    <string name="profile_feedback_unchanged">Nothing to publish — your draft matches the saved profile.</string>
+    <string name="profile_feedback_invalid">Check the fields and try again.</string>
+    <string name="profile_feedback_failed">Couldn\'t publish the change. Any optimistic edit was rolled back.</string>
+    <string name="profile_feedback_offline">Reconnect before publishing.</string>
+
     <!-- A/V calls (XEP-0353 Jingle Message Initiation + XEP-0166 Jingle) -->
     <string name="notification_channel_incoming_calls">Incoming calls</string>
     <string name="notification_channel_incoming_calls_description">Rings for incoming voice and video calls</string>

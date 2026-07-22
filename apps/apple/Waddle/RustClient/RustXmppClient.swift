@@ -170,9 +170,11 @@ final class RustXmppClient: ObservableObject {
 
     /// Fetch the published PEP avatar for a JID. Returns nil when the user
     /// hasn't published one or the fetch fails (errors surface via the event
-    /// listener's `on_error` path; this call never throws).
+    /// listener's `on_error` path; this call never throws). The Apple app
+    /// keeps no item-id-keyed byte cache yet, so no known ids are passed
+    /// and an advertised avatar always carries its bytes.
     func requestAvatar(jid: String) async -> WaddleAvatar? {
-        await waddleClient.requestAvatar(jid: jid)
+        await waddleClient.requestAvatar(jid: jid, knownIds: [])?.avatar
     }
 
     // MARK: - Direct messages

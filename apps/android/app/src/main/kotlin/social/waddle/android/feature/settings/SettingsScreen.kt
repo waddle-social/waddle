@@ -2,8 +2,10 @@ package social.waddle.android.feature.settings
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
@@ -40,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -53,6 +56,7 @@ import coil3.compose.AsyncImage
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.client.ffi.WaddleAvatar
 
 /**
  * Account, theme mode, notification toggles, battery-optimization
@@ -60,11 +64,16 @@ import social.waddle.android.client.prefs.ThemeMode
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onOpenCommunityUsers: () -> Unit = {}) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenCommunityUsers: () -> Unit = {},
+    onOpenProfile: () -> Unit = {},
+) {
     val graph = LocalAppGraph.current
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val isCommunityOwner by viewModel.isCommunityOwner.collectAsStateWithLifecycle()
+    val selfAvatar by viewModel.selfAvatar.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -87,7 +96,7 @@ fun SettingsScreen(onBack: () -> Unit, onOpenCommunityUsers: () -> Unit = {}) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
         ) {
-            AccountRow(state = state)
+            AccountRow(state = state, selfAvatar = selfAvatar, onOpenProfile = onOpenProfile)
             SectionHeader(text = stringResource(R.string.settings_appearance))
             ThemeSelector(selected = state.theme, onSelect = viewModel::setTheme)
             SectionHeader(text = stringResource(R.string.settings_notifications))
@@ -151,15 +160,33 @@ fun SettingsScreen(onBack: () -> Unit, onOpenCommunityUsers: () -> Unit = {}) {
 }
 
 @Composable
-private fun AccountRow(state: SettingsUiState) {
+private fun AccountRow(
+    state: SettingsUiState,
+    selfAvatar: WaddleAvatar?,
+    onOpenProfile: () -> Unit,
+) {
+    // XMPP-published XEP-0084 bytes win over the REST avatar URL.
+    val xmppAvatar = remember(selfAvatar?.id) {
+        selfAvatar?.data?.let { bytes ->
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        }
+    }
     ListItem(
         headlineContent = {
             Text(text = state.username ?: stringResource(R.string.settings_account))
         },
         supportingContent = { state.jid?.let { Text(text = it) } },
         leadingContent = {
-            if (state.avatarUrl != null) {
-                AsyncImage(
+            when {
+                xmppAvatar != null -> Image(
+                    bitmap = xmppAvatar,
+                    contentDescription = stringResource(R.string.settings_avatar),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape),
+                )
+                state.avatarUrl != null -> AsyncImage(
                     model = state.avatarUrl,
                     contentDescription = stringResource(R.string.settings_avatar),
                     contentScale = ContentScale.Crop,
@@ -167,14 +194,16 @@ private fun AccountRow(state: SettingsUiState) {
                         .size(40.dp)
                         .clip(CircleShape),
                 )
-            } else {
-                Icon(
+                else -> Icon(
                     Icons.Outlined.AccountCircle,
                     contentDescription = stringResource(R.string.settings_avatar),
                     modifier = Modifier.size(40.dp),
                 )
             }
         },
+        modifier = Modifier
+            .clickable(onClick = onOpenProfile)
+            .testTag(SettingsScreenTestTags.ACCOUNT_ROW),
     )
 }
 
@@ -219,6 +248,7 @@ private fun ToggleRow(
 
 /** Semantics tags shared with instrumented tests. */
 object SettingsScreenTestTags {
+    const val ACCOUNT_ROW = "settings-account-row"
     const val NOTIFICATIONS_TOGGLE = "settings-notifications-toggle"
     const val MESSAGE_SOUNDS_TOGGLE = "settings-message-sounds-toggle"
     const val READ_RECEIPTS_TOGGLE = "settings-read-receipts-toggle"

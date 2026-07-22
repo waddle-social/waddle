@@ -93,8 +93,39 @@ fn parse_tune_cleared() {
 }
 
 #[test]
+fn build_pep_publish_iq_uses_current_item_id() {
+    let iq = build_pep_publish_iq("iq-1", NS_MOOD, build_mood_clear_element());
+    let item = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .and_then(|publish| publish.get_child("item", NS_PUBSUB))
+        .expect("item");
+    assert_eq!(item.attr("id"), Some("current"));
+}
+
+#[test]
+fn build_pep_publish_iq_with_item_id_uses_custom_item_id() {
+    let iq = build_pep_publish_iq_with_item_id(
+        "iq-2",
+        "urn:xmpp:avatar:data",
+        "cafef00d",
+        Element::builder("data", "urn:xmpp:avatar:data").build(),
+    );
+    assert_eq!(iq.attr("type"), Some("set"));
+    assert_eq!(iq.attr("id"), Some("iq-2"));
+    let publish = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .expect("publish");
+    assert_eq!(publish.attr("node"), Some("urn:xmpp:avatar:data"));
+    let item = publish.get_child("item", NS_PUBSUB).expect("item");
+    assert_eq!(item.attr("id"), Some("cafef00d"));
+}
+
+#[test]
 fn build_publish_mood_iq_structure() {
-    let iq = build_publish_mood_iq("content", Some("steady"));
+    let iq = build_publish_mood_iq("mood-req-1", "content", Some("steady"));
+    assert_eq!(iq.attr("id"), Some("mood-req-1"));
     let mood = iq
         .get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
@@ -110,7 +141,8 @@ fn build_publish_mood_iq_structure() {
 
 #[test]
 fn build_retract_activity_iq_publishes_empty_activity() {
-    let iq = build_retract_activity_iq();
+    let iq = build_retract_activity_iq("activity-req-1");
+    assert_eq!(iq.attr("id"), Some("activity-req-1"));
     let activity = iq
         .get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
@@ -123,14 +155,18 @@ fn build_retract_activity_iq_publishes_empty_activity() {
 #[test]
 fn build_publish_tune_iq_includes_extended_fields() {
     let iq = build_publish_tune_iq(
-        Some("The Beatles"),
-        Some("Come Together"),
-        Some("Abbey Road"),
-        Some(259),
-        Some(9),
-        Some("1"),
-        Some("https://example.com/track"),
+        "tune-req-1",
+        &UserTune {
+            artist: Some("The Beatles".to_string()),
+            title: Some("Come Together".to_string()),
+            source: Some("Abbey Road".to_string()),
+            length: Some(259),
+            rating: Some(9),
+            track: Some("1".to_string()),
+            uri: Some("https://example.com/track".to_string()),
+        },
     );
+    assert_eq!(iq.attr("id"), Some("tune-req-1"));
     let tune = iq
         .get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
@@ -149,7 +185,8 @@ fn build_publish_tune_iq_includes_extended_fields() {
 
 #[test]
 fn build_pep_items_iq_targets_requested_jid_and_node() {
-    let iq = build_pep_items_iq("alice@example.com", NS_MOOD);
+    let iq = build_pep_items_iq("items-req-1", "alice@example.com", NS_MOOD);
+    assert_eq!(iq.attr("id"), Some("items-req-1"));
     assert_eq!(iq.attr("to"), Some("alice@example.com"));
     assert_eq!(
         iq.get_child("pubsub", NS_PUBSUB)

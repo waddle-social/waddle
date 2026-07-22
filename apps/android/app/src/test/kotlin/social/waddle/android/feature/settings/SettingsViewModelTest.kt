@@ -2,6 +2,7 @@ package social.waddle.android.feature.settings
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -16,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import social.waddle.android.client.InMemoryPreferencesDataStore
+import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
@@ -24,6 +26,7 @@ import social.waddle.android.client.testSessionInfo
 class SettingsViewModelTest {
     private val userPrefs = UserPrefs(InMemoryPreferencesDataStore())
     private var signOutCalls = 0
+    private val currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
 
     @Before
     fun setUp() {
@@ -35,12 +38,14 @@ class SettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun createViewModel(withSession: Boolean = true): SettingsViewModel =
-        SettingsViewModel(
+    private fun createViewModel(withSession: Boolean = true): SettingsViewModel {
+        currentSession.value = if (withSession) testSessionInfo() else null
+        return SettingsViewModel(
             userPrefs = userPrefs,
-            session = if (withSession) testSessionInfo() else null,
+            currentSession = currentSession,
             performSignOut = { signOutCalls += 1 },
         )
+    }
 
     @Test
     fun `account row reflects the signed-in session`() = runTest {
@@ -51,6 +56,24 @@ class SettingsViewModelTest {
         assertEquals("icepuma", state.username)
         assertEquals("icepuma@waddle.test", state.jid)
         assertNull(state.avatarUrl)
+    }
+
+    @Test
+    fun `account row follows the CURRENT session across a relogin`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        assertEquals("icepuma@waddle.test", viewModel.uiState.value.jid)
+
+        // Logout → login as another account: the row must track the
+        // live session flow, not a constructor-frozen snapshot.
+        currentSession.value = null
+        runCurrent()
+        assertNull(viewModel.uiState.value.jid)
+
+        currentSession.value = testSessionInfo(username = "pingu", jid = "pingu@waddle.test")
+        runCurrent()
+        assertEquals("pingu", viewModel.uiState.value.username)
+        assertEquals("pingu@waddle.test", viewModel.uiState.value.jid)
     }
 
     @Test
