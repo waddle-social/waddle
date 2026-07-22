@@ -1,5 +1,6 @@
 //! Native XMPP client scaffold for Waddle.
 
+pub mod admin_commands;
 pub mod avatar;
 pub mod bootstrap;
 pub mod caps;

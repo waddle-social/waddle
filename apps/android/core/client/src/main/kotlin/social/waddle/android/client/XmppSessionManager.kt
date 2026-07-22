@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,7 +14,11 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.calls.CallState
+import social.waddle.android.client.calls.CallStore
+import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -21,12 +26,17 @@ import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddleRoomConfig
+import social.waddle.client.ffi.WaddleRoomConfigPatch
 import social.waddle.client.ffi.WaddleUploadSlot
+import social.waddle.client.ffi.WaddleUserSearchEntry
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -61,6 +71,7 @@ class XmppSessionManager(
     val readCursorStore = stores.readCursorStore
     val pinStore = stores.pinStore
     val notifySettingsStore = stores.notifySettingsStore
+    val roomMembersStore = stores.roomMembersStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -78,14 +89,26 @@ class XmppSessionManager(
             router.emit(event)
         }
 
+    /**
+     * Single-slot DM call engine (reducer + XEP-0353/0166 side
+     * effects), fed from the router's serialized dispatch path.
+     */
+    val callStore: CallStore = CallStore(
+        signaling = ClientCallSignaling(activeSession),
+        ownBareJid = { activeSession.ownBareJid },
+        ownFullJid = { activeSession.ownFullJid },
+    )
+
     private val router: XmppEventRouter =
-        XmppEventRouter(activeSession, stores, resume, readState) { peer, timestamp ->
+        XmppEventRouter(activeSession, stores, resume, readState, callStore) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
 
     private val messenger = OutboundMessenger(activeSession, stores, sessionPrefs, router::dispatch)
 
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
+
+    private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
@@ -120,14 +143,34 @@ class XmppSessionManager(
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
+        callStore.start(scope)
         scope.launch { router.sweepChatStates() }
         scope.launch { loop.run(session) }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // Best-effort call teardown BEFORE the stream closes (web
+        // client.ts disconnect parity): the peer must get the
+        // retract/reject/terminate + XEP-0353 <finish/> bookend instead
+        // of ringing into a dead session until their timeout. Bounded:
+        // on a silently-dead network the terminate IQ only fails after
+        // the FFI's full 30 s timeout, and sign-out must not hold
+        // [lifecycleMutex] that long. Cancellation must propagate —
+        // swallowing it would run the teardown below inside an
+        // already-cancelled coroutine and abort it halfway.
+        if (callStore.state.value != CallState.Idle) {
+            try {
+                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) { callStore.hangUp() }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Best-effort: sign-out proceeds even if teardown fails.
+            }
+        }
         cancelSessionScope()
         activeSession.ownBareJid = null
+        activeSession.ownFullJid = null
         clearSessionState()
         sessionPrefs.clear()
         loop.resetToIdle()
@@ -251,6 +294,57 @@ class XmppSessionManager(
     suspend fun setDmNotificationMode(peerJid: String, mode: WaddleNotifyMode): NotifySettingsResult =
         verbs.setDmNotificationMode(peerJid, mode)
 
+    /** XEP-0425: ask the room to moderate (remove) another user's message. */
+    suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String? = null): VerbResult =
+        verbs.sendModeration(roomJid, targetStanzaId, reason)
+
+    /** Refresh a room's §9.5 member list into [roomMembersStore]. */
+    suspend fun refreshRoomMembers(roomJid: String) = roomAdmin.refreshRoomMembers(roomJid)
+
+    /** XEP-0045 §5.2 affiliation change (ban = outcast, remove = none). */
+    suspend fun setRoomAffiliation(
+        roomJid: String,
+        targetJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String? = null,
+    ): RoomAdminResult = roomAdmin.setRoomAffiliation(roomJid, targetJid, affiliation, reason)
+
+    /** XEP-0045 §8.2 kick by nick (role → none; affiliation kept). */
+    suspend fun kickOccupant(roomJid: String, nick: String, reason: String? = null): RoomAdminResult =
+        roomAdmin.kickOccupant(roomJid, nick, reason)
+
+    /** XEP-0045 §10.2 owner config fetch; `null` offline / not owner. */
+    suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig? = roomAdmin.fetchRoomConfig(roomJid)
+
+    /** XEP-0045 §10.2 GET-merge-SET owner config submit. */
+    suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch): RoomAdminResult =
+        roomAdmin.submitRoomConfig(roomJid, patch)
+
+    /** XEP-0045 §10.1: create + configure a channel; refreshes topology. */
+    suspend fun createRoom(
+        name: String,
+        nick: String,
+        description: String? = null,
+        forum: Boolean = false,
+    ): CreateRoomResult = roomAdmin.createRoom(name, nick, description, forum)
+
+    /** XEP-0045 §10.9: destroy a room (owner only); refreshes topology. */
+    suspend fun destroyRoom(roomJid: String, reason: String? = null): RoomAdminResult =
+        roomAdmin.destroyRoom(roomJid, reason)
+
+    /** XEP-0055 user directory search backing the add-member flow. */
+    suspend fun searchUsers(query: String): List<WaddleUserSearchEntry>? = roomAdmin.searchUsers(query)
+
+    /** Best-effort community-owner probe gating the admin UI entry. */
+    suspend fun isCommunityOwner(): Boolean = roomAdmin.isCommunityOwner()
+
+    /** `urn:waddle:admin:users:list:0` page; `null` offline / refused. */
+    suspend fun adminUsersList(
+        prefix: String? = null,
+        pageSize: UInt? = null,
+        afterCursor: String? = null,
+    ): WaddleAdminUsersPage? = roomAdmin.adminUsersList(prefix, pageSize, afterCursor)
+
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {
         loop.requestReconnect()
@@ -274,6 +368,11 @@ class XmppSessionManager(
 
     private suspend fun onTerminalAuthFailure() {
         _appState.value = WaddleAppState.SignedOut
+        // A live call slot must not outlive the session: the shell is
+        // about to render the login screen with no in-app hang-up, and
+        // the app-scoped collectors (FGS, media, ring notification)
+        // tear down off this transition.
+        callStore.clear()
         persistQuietly { sessionPrefs.clear() }
         // Last statement on purpose: cancelling the session scope kills
         // this coroutine too, but also the parked snapshot persister that
@@ -308,6 +407,7 @@ class XmppSessionManager(
         stores.clear()
         readState.clearPending()
         resume.clear()
+        callStore.clear()
     }
 
     /**
@@ -334,5 +434,8 @@ class XmppSessionManager(
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = SessionCatchup.CATCHUP_DM_LIMIT
+
+        /** Sign-out budget for the pre-disconnect call hang-up. */
+        const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
     }
 }

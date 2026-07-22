@@ -35,7 +35,8 @@ private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "👀")
 
 /**
  * Long-press actions for a timeline row: quick reactions, edit/delete
- * for own messages, copy, pin/unpin in rooms. [actionable] is false
+ * for own messages, copy, pin/unpin in rooms, and XEP-0425 moderation
+ * of others' messages for room moderators. [actionable] is false
  * when the row has no usable action target id (e.g. a MUC row without
  * a room-assigned stanza id) — reaction/delete/pin hide, copy stays.
  */
@@ -46,6 +47,7 @@ fun MessageActionSheet(
     actionable: Boolean,
     canPin: Boolean,
     isPinned: Boolean,
+    canModerate: Boolean = false,
     onDismiss: () -> Unit,
     onReact: (String) -> Unit,
     onReply: () -> Unit,
@@ -54,6 +56,7 @@ fun MessageActionSheet(
     onRetract: () -> Unit,
     onCopy: () -> Unit,
     onSetPinned: (Boolean) -> Unit,
+    onModerate: () -> Unit = {},
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
@@ -132,6 +135,25 @@ fun MessageActionSheet(
                     ),
                 ) {
                     onSetPinned(!isPinned)
+                    onDismiss()
+                }
+            }
+            // XEP-0425: moderators remove OTHERS' messages; own rows
+            // use the retract action above instead.
+            val moderatable = canModerate && !item.isMine
+            if (moderatable && actionable && item.tombstone == null) {
+                SheetAction(
+                    icon = {
+                        Icon(
+                            Icons.Outlined.Delete,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    label = stringResource(R.string.action_moderate_message),
+                    labelColor = MaterialTheme.colorScheme.error,
+                ) {
+                    onModerate()
                     onDismiss()
                 }
             }

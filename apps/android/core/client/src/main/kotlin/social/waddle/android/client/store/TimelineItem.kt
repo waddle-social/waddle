@@ -1,6 +1,8 @@
 package social.waddle.android.client.store
 
 import social.waddle.client.ffi.WaddleArchivedMessage
+import social.waddle.client.ffi.WaddleCallThreadAnchor
+import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMessage
@@ -110,6 +112,12 @@ data class TimelineItem(
     /** `urn:waddle:call-thread:0` anchor riding this message. */
     val hasCallThread: Boolean get() = source.hasCallThread
 
+    /** The call-started anchor payload, for the timeline call row. */
+    val callAnchor: WaddleCallThreadAnchor? get() = source.callThreadAnchor
+
+    /** The call-ended marker payload (XEP-0422 apply-to + duration). */
+    val callEndedMarker: WaddleCallThreadEnded? get() = source.callThreadEndedMarker
+
     /**
      * True when this row renders in the main conversation feed: thread
      * REPLIES render only inside their thread screen, while the thread
@@ -174,8 +182,14 @@ sealed interface TimelineSource {
     val reactionTargetId: String?
     val reactionEmojis: List<String>
 
+    /** `urn:waddle:call-thread:0` call-started anchor payload. */
+    val callThreadAnchor: WaddleCallThreadAnchor?
+
+    /** `urn:waddle:call-thread:0` call-ended marker payload. */
+    val callThreadEndedMarker: WaddleCallThreadEnded?
+
     /** `urn:waddle:call-thread:0` anchor riding this message. */
-    val hasCallThread: Boolean
+    val hasCallThread: Boolean get() = callThreadAnchor != null
 
     /** XEP-0372 references; offsets are code points over the WIRE body. */
     val references: List<WaddleReference>
@@ -218,7 +232,8 @@ sealed interface TimelineSource {
         override val replacesId: String? get() = message.replacesId
         override val reactionTargetId: String? get() = message.reactionTargetId
         override val reactionEmojis: List<String> get() = message.reactionEmojis
-        override val hasCallThread: Boolean get() = message.callThread != null
+        override val callThreadAnchor: WaddleCallThreadAnchor? get() = message.callThread
+        override val callThreadEndedMarker: WaddleCallThreadEnded? get() = message.callThreadEnded
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
@@ -248,7 +263,8 @@ sealed interface TimelineSource {
         override val replacesId: String? get() = message.replacesId
         override val reactionTargetId: String? get() = message.reactionTargetId
         override val reactionEmojis: List<String> get() = message.reactionEmojis
-        override val hasCallThread: Boolean get() = message.callThread != null
+        override val callThreadAnchor: WaddleCallThreadAnchor? get() = message.callThread
+        override val callThreadEndedMarker: WaddleCallThreadEnded? get() = message.callThreadEnded
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention

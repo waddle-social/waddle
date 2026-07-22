@@ -501,7 +501,7 @@ pub struct WaddlePresenceHat {
     pub title: String,
 }
 
-#[derive(uniffi::Enum, Clone)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddleMucAffiliation {
     Owner,
     Admin,
@@ -510,7 +510,7 @@ pub enum WaddleMucAffiliation {
     None,
 }
 
-#[derive(uniffi::Enum, Clone)]
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddleMucRole {
     Moderator,
     Participant,
@@ -847,6 +847,67 @@ pub struct WaddleCallEvent {
     pub to: Option<String>,
     pub sid: String,
     pub kind: WaddleCallEventKind,
+}
+
+/// Typed outcome of `send_call_session_terminate_with_outcome`.
+/// Mirrors the wasm client's three-way classification so the app can
+/// still send the XEP-0353 `<finish/>` bookend after a terminate the
+/// server refused only because it already lost the call registry.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleCallSessionTerminateOutcome {
+    /// The server acked the terminate with an `<iq type='result'/>`.
+    Ok,
+    /// The server answered `forbidden` with the Waddle Jingle handler's
+    /// "terminator is not a participant" text: the call registry entry
+    /// is already gone (crashed peer, recovered session). Callers treat
+    /// this like success for the message-level `<finish/>` bookend.
+    Orphaned,
+    /// Invalid input, no live session, transport failure, or any other
+    /// stanza error.
+    Error,
+}
+
+// ── External Service Discovery (XEP-0215) ───────────────────────────────────
+
+/// Service type of a XEP-0215 `<service type='…'/>` entry. `Turns` is
+/// TLS-protected TURN (XEP-0215 §3.6.5) — the shape Waddle's own server
+/// advertises.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleExternalServiceType {
+    Stun,
+    Turn,
+    Turns,
+}
+
+/// Transport of a XEP-0215 `<service transport='…'/>` entry.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleExternalServiceTransport {
+    Udp,
+    Tcp,
+}
+
+/// One external service (TURN/STUN) advertised by the user's server
+/// over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
+/// The app maps a list of these to WebRTC ICE servers for LiveKit's
+/// RTC configuration (RFC 7064/7065 URI mapping happens app-side, web
+/// `ice-servers.ts` parity). Credentials are present only on
+/// TURN/TURNS entries.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExternalService {
+    pub service_type: WaddleExternalServiceType,
+    pub host: String,
+    /// RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+    /// carries no explicit port and the scheme default applies.
+    pub port: Option<u16>,
+    pub transport: Option<WaddleExternalServiceTransport>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+    /// serialized for the FFI boundary exactly like the wasm client's
+    /// JSON transit shape.
+    pub expires: Option<String>,
+    /// Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+    pub restricted: bool,
 }
 
 // ── Push notifications (XEP-0357 + XEP-0050) ─────────────────────────────────

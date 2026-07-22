@@ -53,7 +53,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
 | Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
 | Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
-| Room create / configure | 0045 | ✅ | ❌ | Android FFI has only `join_room`/`leave_room`; web has create + edit dialogs |
+| Room create / configure | 0045 | ✅ | ✅ | Android: create-channel dialog (owner-gated) + owner settings sheet over `create_room`/`fetch_room_config`/`submit_room_config`/`destroy_room` (§10 GET-merge-SET in Rust). Space intents deferred (need XEP-0060 spaces-node builders) |
 
 ## Presence & profile
 
@@ -91,7 +91,7 @@ compares user-facing capability per area, verified against both codebases as of
 
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
-| Voice/video calls | 0166, 0353, 0272 | ✅ | ❌ | Web uses LiveKit SFU (`chat/src/lib/calls/engine.ts`); full signaling exists in FFI (`calls.rs`) but Android only hides call anchors from the feed |
+| Voice/video calls | 0166, 0353, 0272 | ✅ | 🟡 | DM audio + video calls shipped (CallStore reducer port, LiveKit media, CallStyle notifications, in-call UI, timeline call rows); Muji group calls (0272) pending |
 | Call extras (backgrounds, noise filter) | — | ✅ | ❌ | Web-only: MediaPipe background effects, AI noise filter |
 
 ## Social & community
@@ -107,11 +107,11 @@ compares user-facing capability per area, verified against both codebases as of
 
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
-| Message moderation (remove others' messages) | 0425 | ✅ | ✅ | Android: `send_moderation` FFI verb wired to action sheet |
-| Affiliation management (kick/ban/roles) | 0045 | ✅ | 🟡 | Android has read-only affiliation models; no management actions or UI |
-| Hats (role badges) | 0317 | ✅ | ✅ | Single seniority badge on message rows (`AuthorBadges.kt`); authority stays 0045 |
-| Ad-hoc commands | 0050 | ✅ | ❌ | Web: extension-commands infrastructure |
-| Server admin pages | — | ✅ | ❌ | Web: `chat/src/pages/admin/[panel].astro` |
+| Message moderation (remove others' messages) | 0425 | ✅ | ✅ | Android: "Delete for everyone" in the message action sheet, gated on self-presence owner/admin/moderator, with confirm dialog |
+| Affiliation management (kick/ban/roles) | 0045 | ✅ | ✅ | Android: members screen (four-tier §9.5 lists merged with live presence) with promote/demote/remove/ban (§9.1) and true §8.2 kick (role→none), owner/admin-gated; XEP-0055 add-member search |
+| Hats (role badges) | 0317 | ✅ | ✅ | Single seniority badge on message rows (`AuthorBadges.kt`, authority stays 0045); hat titles on member rows in the members screen |
+| Ad-hoc commands | 0050 | ✅ | 🟡 | Android drives typed 0050 commands (push register/disable, `urn:waddle:admin:*`); no generic command palette/form renderer (follow-up) |
+| Server admin pages | — | ✅ | 🟡 | Android ships a reduced-scope "Community admin" users list (V1) in settings, gated on the `is_community_owner` probe; the six-panel web console (spaces/channels CRUD, audit, push-health, settings) stays desktop-only by design — the V2 FFI commands exist for a follow-up |
 
 ## Platform
 
@@ -132,9 +132,8 @@ In flight in the current improvement sweep:
 
 Biggest remaining gaps after that, in priority order:
 
-1. **Voice/video calls** — the FFI signaling layer is complete; Android needs a call UI and media stack. Largest single capability gap.
-2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), ad-hoc commands.
-3. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
-4. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
-5. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+1. **Muji group calls (XEP-0272)** — DM calls shipped; the group-call presence flow, mixer session-initiate, and in-call roster remain.
+2. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
+3. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
+4. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
+5. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.

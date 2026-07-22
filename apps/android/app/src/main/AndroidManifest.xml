@@ -9,6 +9,24 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- A/V calls: capture + the in-call foreground service types.
+         Camera/mic hardware is optional — calls degrade to
+         receive-only on devices without them. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- MANAGE_OWN_CALLS (normal permission) legitimizes the phoneCall
+         FGS type for this self-managed calling app. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
     <application
         android:name=".WaddleApplication"
         android:label="@string/app_name"
@@ -38,6 +56,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains the user's persistent XMPP connection for realtime chat delivery without Google Play push services" />
         </service>
+
+        <!-- In-call foreground service: raised for outgoing/active calls;
+             the camera type is exercised only after the CAMERA runtime
+             grant on a video call. -->
+        <service
+            android:name=".service.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone|camera" />
+
+        <receiver
+            android:name=".service.CallActionReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".service.ReplyReceiver"

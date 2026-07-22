@@ -14,9 +14,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,6 +31,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -77,6 +82,10 @@ fun ConversationScreen(
     subtitle: String? = null,
     /** Origin whose cached XEP-0363 preview images may load. */
     trustedMediaOrigin: String? = null,
+    /** Extra host-specific top-bar actions (room members/settings). */
+    extraTopBarActions: @Composable () -> Unit = {},
+    /** DM-only call entry points; `null` (channels, threads) hides them. */
+    onStartCall: ((video: Boolean) -> Unit)? = null,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -89,6 +98,7 @@ fun ConversationScreen(
     ) { uri -> uri?.let(viewModel::sendAttachment) }
     val authorPresence by viewModel.authorPresence.collectAsStateWithLifecycle()
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
+    var moderateTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     var gifPickerOpen by remember { mutableStateOf(false) }
@@ -150,6 +160,27 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+                    extraTopBarActions()
+                    if (onStartCall != null) {
+                        IconButton(
+                            onClick = { onStartCall(false) },
+                            modifier = Modifier.testTag(ConversationCallTestTags.AUDIO_CALL_BUTTON),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Call,
+                                contentDescription = stringResource(R.string.call_start_audio),
+                            )
+                        }
+                        IconButton(
+                            onClick = { onStartCall(true) },
+                            modifier = Modifier.testTag(ConversationCallTestTags.VIDEO_CALL_BUTTON),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Videocam,
+                                contentDescription = stringResource(R.string.call_start_video),
+                            )
+                        }
+                    }
                     if (onOpenThread != null && state.threads.isNotEmpty()) {
                         IconButton(onClick = { threadsOverviewOpen = true }) {
                             Icon(
@@ -235,6 +266,7 @@ fun ConversationScreen(
             actionable = viewModel.actionTargetIdOf(item) != null,
             canPin = state.canPin,
             isPinned = item.identityIds.any { it in state.pinnedIds },
+            canModerate = state.canModerate,
             onDismiss = { sheetTarget = null },
             onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
             onReply = { viewModel.startReply(item) },
@@ -247,6 +279,31 @@ fun ConversationScreen(
             onRetract = { viewModel.retract(item) },
             onCopy = { clipboard.setText(AnnotatedString(item.body)) },
             onSetPinned = { pinned -> viewModel.setPinned(item, pinned) },
+            onModerate = { moderateTarget = item },
+        )
+    }
+
+    moderateTarget?.let { item ->
+        AlertDialog(
+            onDismissRequest = { moderateTarget = null },
+            title = { Text(text = stringResource(R.string.moderate_confirm_title)) },
+            text = { Text(text = stringResource(R.string.moderate_confirm_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.moderate(item)
+                    moderateTarget = null
+                }) {
+                    Text(
+                        text = stringResource(R.string.action_moderate_message),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { moderateTarget = null }) {
+                    Text(text = stringResource(R.string.action_cancel))
+                }
+            },
         )
     }
 
@@ -336,4 +393,10 @@ fun ConversationScreen(
             }
         }
     }
+}
+
+/** Semantics tags for the DM call entry points, shared with tests. */
+object ConversationCallTestTags {
+    const val AUDIO_CALL_BUTTON = "conversation-call-audio"
+    const val VIDEO_CALL_BUTTON = "conversation-call-video"
 }

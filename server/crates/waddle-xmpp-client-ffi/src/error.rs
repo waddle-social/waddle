@@ -21,12 +21,21 @@ pub enum WaddleError {
         condition: String,
         text: Option<String>,
     },
+    /// The server answered success but the payload did not match the
+    /// expected typed shape (server-side bug or schema drift).
+    #[error("malformed server response")]
+    MalformedResponse,
     /// The websocket transport failed or closed mid-request.
     #[error("transport failure")]
     Transport,
     /// The request timed out before the server replied.
     #[error("request timed out")]
     Timeout,
+    /// The reply's stamped `from` does not match the queried entity
+    /// (RFC 6120 §8.1.2.1 defense-in-depth); the payload was
+    /// discarded rather than trusted.
+    #[error("reply from an unexpected sender")]
+    UntrustedReply,
 }
 
 /// Collapse the shared client error into the typed FFI error. Stanza

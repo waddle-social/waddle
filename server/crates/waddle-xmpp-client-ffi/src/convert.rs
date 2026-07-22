@@ -173,7 +173,7 @@ fn presence_hat_to_ffi(hat: waddle_xmpp_client::messaging::PresenceHat) -> Waddl
     }
 }
 
-fn muc_affiliation_to_ffi(
+pub(crate) fn muc_affiliation_to_ffi(
     affiliation: waddle_xmpp_client::messaging::MucAffiliation,
 ) -> WaddleMucAffiliation {
     use waddle_xmpp_client::messaging::MucAffiliation;
@@ -186,7 +186,7 @@ fn muc_affiliation_to_ffi(
     }
 }
 
-fn muc_role_to_ffi(role: waddle_xmpp_client::messaging::MucRole) -> WaddleMucRole {
+pub(crate) fn muc_role_to_ffi(role: waddle_xmpp_client::messaging::MucRole) -> WaddleMucRole {
     use waddle_xmpp_client::messaging::MucRole;
     match role {
         MucRole::Moderator => WaddleMucRole::Moderator,

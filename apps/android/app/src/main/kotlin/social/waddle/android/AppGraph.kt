@@ -29,9 +29,13 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
 import social.waddle.android.client.store.ConversationKind
+import social.waddle.android.feature.call.CallMediaController
+import social.waddle.android.feature.call.CallSessionController
+import social.waddle.android.feature.call.LiveKitCallMediaController
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
+import social.waddle.android.service.CallNotifier
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
 
@@ -55,6 +59,11 @@ class AppGraph(
     networkSignal: NetworkSignal? = null,
     loginGatewayFactory: (() -> LoginAuthGateway)? = null,
     gifSearchGateway: GifSearchGateway? = null,
+    /**
+     * Media plane behind the call engine. Tests inject a fake so the
+     * hermetic suites never open a real mic/camera or WebRTC stack.
+     */
+    callMediaControllerFactory: ((CoroutineScope) -> CallMediaController)? = null,
 ) {
     private val appContext: Context = context.applicationContext
 
@@ -118,6 +127,21 @@ class AppGraph(
         sessionManager = sessionManager,
     )
 
+    /** Call platform glue: in-call FGS + LiveKit media session. */
+    val callSessionController: CallSessionController = CallSessionController(
+        context = appContext,
+        sessionManager = sessionManager,
+        media = callMediaControllerFactory?.invoke(applicationScope)
+            ?: LiveKitCallMediaController(appContext, applicationScope),
+        scope = applicationScope,
+    )
+
+    /** Incoming-call ring notification (full-screen intent + actions). */
+    val callNotifier: CallNotifier = CallNotifier(
+        context = appContext,
+        callState = sessionManager.callStore.state,
+    )
+
     val messageNotifier: MessageNotifier = MessageNotifier(
         context = appContext,
         events = sessionManager.events,
@@ -137,6 +161,8 @@ class AppGraph(
     fun start() {
         serviceController.start()
         messageNotifier.start(applicationScope)
+        callSessionController.start()
+        callNotifier.start(applicationScope)
         startSignedOutCleanup()
         bootstrap.restore()
     }

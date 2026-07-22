@@ -127,6 +127,9 @@ internal class ConnectionLoop(
     private suspend fun runAttempt(session: WaddleSessionInfo): AttemptEnd {
         val bridge = activeSession.beginAttempt()
         val config = buildConfig(session)
+        // The full JID the call engine signs Jingle stanzas with
+        // (initiator/responder attributes, tie-break comparand).
+        activeSession.ownFullJid = "${config.jid}/${config.resource}"
         val client = clientFactory.create(config, bridge)
         val hadResumeSnapshot = config.resumeState != null
         try {

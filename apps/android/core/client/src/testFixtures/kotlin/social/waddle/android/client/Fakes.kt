@@ -4,35 +4,63 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleAdminChannelRef
+import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsArgs
+import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsPage
+import social.waddle.client.ffi.WaddleAdminChannelsCreateArgs
+import social.waddle.client.ffi.WaddleAdminChannelsKickResult
+import social.waddle.client.ffi.WaddleAdminChannelsListArgs
+import social.waddle.client.ffi.WaddleAdminChannelsListPage
+import social.waddle.client.ffi.WaddleAdminChannelsOccupantsArgs
+import social.waddle.client.ffi.WaddleAdminChannelsSetAffiliationResult
+import social.waddle.client.ffi.WaddleAdminChannelsUpdateArgs
+import social.waddle.client.ffi.WaddleAdminSpaceRef
+import social.waddle.client.ffi.WaddleAdminSpacesCreateArgs
+import social.waddle.client.ffi.WaddleAdminSpacesListArgs
+import social.waddle.client.ffi.WaddleAdminSpacesListPage
+import social.waddle.client.ffi.WaddleAdminSpacesMembersArgs
+import social.waddle.client.ffi.WaddleAdminSpacesMembersPage
+import social.waddle.client.ffi.WaddleAdminSpacesSetRoleResult
+import social.waddle.client.ffi.WaddleAdminSpacesUpdateArgs
+import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleBookmarkItem
+import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
+import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleLinkPreviewLookupStatus
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
+import social.waddle.client.ffi.WaddleRoomConfig
+import social.waddle.client.ffi.WaddleRoomConfigPatch
+import social.waddle.client.ffi.WaddleRoomMemberEntry
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
+import social.waddle.client.ffi.WaddleUserSearchEntry
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -106,6 +134,74 @@ data class SearchCall(
 )
 
 /**
+ * One recorded `sendCall*` wire verb, in send order, so call-engine
+ * tests can assert exact sequences (e.g. the tie-break branch's
+ * finish-migrated → proceed → session-terminate ordering).
+ */
+sealed interface RecordedCallVerb {
+    data class Propose(
+        val peerBareJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class Ringing(val peerBareJid: String, val sid: String) : RecordedCallVerb
+
+    data class Proceed(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Reject(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class RejectTieBreak(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Retract(val peerBareJid: String, val sid: String) : RecordedCallVerb
+
+    data class RetractTieBreak(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Finish(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class FinishWithReason(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason,
+    ) : RecordedCallVerb
+
+    data class FinishMigrated(
+        val peerFullJid: String,
+        val oldSid: String,
+        val newSid: String,
+    ) : RecordedCallVerb
+
+    data class SessionInitiate(
+        val peerFullJid: String,
+        val initiatorFullJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class SessionAccept(
+        val peerFullJid: String,
+        val responderFullJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class SessionTerminate(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason?,
+    ) : RecordedCallVerb
+
+    data class SessionTerminateWithOutcome(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason?,
+    ) : RecordedCallVerb
+}
+
+/**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
@@ -154,30 +250,107 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun discoverTopology(): WaddleTopology =
         WaddleTopology(spaces = emptyList(), channels = emptyList())
 
-    override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean = unused()
+    /** Every recorded `sendCall*` wire verb, in send order. */
+    val callVerbs = CopyOnWriteArrayList<RecordedCallVerb>()
+
+    /** Canned result for the bool-returning call verbs. */
+    @Volatile
+    var callVerbResult = true
+
+    /** Canned outcome for [sendCallSessionTerminateWithOutcome]. */
+    @Volatile
+    var callTerminateOutcome: WaddleCallSessionTerminateOutcome =
+        WaddleCallSessionTerminateOutcome.OK
+
+    /**
+     * Virtual-time stall before [sendCallSessionTerminateWithOutcome]
+     * answers — models the FFI's IQ timeout on a dead network.
+     */
+    @Volatile
+    var callTerminateDelayMillis = 0L
+
+    /**
+     * Virtual-time stall before [sendCallProceed] answers — lets tests
+     * land a concurrent action while a proceed is in flight.
+     */
+    @Volatile
+    var callProceedDelayMillis = 0L
+
+    /**
+     * Virtual-time stall before [sendCallRetractTieBreak] answers —
+     * lets tests land an inbound event mid-tie-break.
+     */
+    @Volatile
+    var callRetractTieBreakDelayMillis = 0L
+
+    /** Canned XEP-0215 services served by [fetchExternalServices]. */
+    @Volatile
+    var externalServices: List<WaddleExternalService> = emptyList()
+
+    override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Finish(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallFinishWithReason(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ): Boolean {
+        callVerbs += RecordedCallVerb.FinishWithReason(peerFullJid, sid, reason)
+        return callVerbResult
+    }
 
     override suspend fun sendCallFinishMigrated(
         peerFullJid: String,
         oldSid: String,
         newSid: String,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.FinishMigrated(peerFullJid, oldSid, newSid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean {
+        if (callProceedDelayMillis > 0) delay(callProceedDelayMillis)
+        callVerbs += RecordedCallVerb.Proceed(peerFullJid, sid)
+        return callVerbResult
+    }
 
     override suspend fun sendCallPropose(
         peerBareJid: String,
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.Propose(peerBareJid, sid, audio, video)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallReject(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallReject(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Reject(peerFullJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRejectTieBreak(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRejectTieBreak(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.RejectTieBreak(peerFullJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRetract(peerBareJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRetract(peerBareJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Retract(peerBareJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean {
+        if (callRetractTieBreakDelayMillis > 0) delay(callRetractTieBreakDelayMillis)
+        callVerbs += RecordedCallVerb.RetractTieBreak(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallRinging(peerBareJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Ringing(peerBareJid, sid)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionAccept(
         peerFullJid: String,
@@ -185,7 +358,10 @@ class FakeWaddleClient : WaddleClientInterface {
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionAccept(peerFullJid, responderFullJid, sid, audio, video)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionInitiate(
         peerFullJid: String,
@@ -193,13 +369,31 @@ class FakeWaddleClient : WaddleClientInterface {
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionInitiate(peerFullJid, initiatorFullJid, sid, audio, video)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionTerminate(
         peerFullJid: String,
         sid: String,
         reason: WaddleJingleReason?,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionTerminate(peerFullJid, sid, reason)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallSessionTerminateWithOutcome(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason?,
+    ): WaddleCallSessionTerminateOutcome {
+        if (callTerminateDelayMillis > 0) delay(callTerminateDelayMillis)
+        callVerbs += RecordedCallVerb.SessionTerminateWithOutcome(peerFullJid, sid, reason)
+        return callTerminateOutcome
+    }
+
+    override suspend fun fetchExternalServices(): List<WaddleExternalService> = externalServices
 
     override suspend fun discoverUploadService(): String? = unused()
 
@@ -312,7 +506,200 @@ class FakeWaddleClient : WaddleClientInterface {
         return retractionResult
     }
 
-    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
+    /** Recorded (roomJid, targetStanzaId, reason) XEP-0425 moderations. */
+    val moderationCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var moderationResult = true
+
+    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean {
+        moderationCalls += Triple(roomJid, targetStanzaId, reason)
+        return moderationResult
+    }
+
+    /**
+     * Canned §9.5 member lists per affiliation tier; a tier mapped to
+     * `null` (or [memberListFailure] set) throws, mirroring per-tier
+     * `forbidden` responses.
+     */
+    @Volatile
+    var roomMembersByTier: Map<WaddleMucAffiliation, List<WaddleRoomMemberEntry>> = emptyMap()
+
+    @Volatile
+    var memberListFailure: Throwable? = null
+
+    /** Recorded (roomJid, affiliation) member-list queries. */
+    val listMembersCalls = CopyOnWriteArrayList<Pair<String, WaddleMucAffiliation>>()
+
+    override suspend fun listRoomMembers(
+        roomJid: String,
+        affiliation: WaddleMucAffiliation,
+    ): List<WaddleRoomMemberEntry> {
+        listMembersCalls += roomJid to affiliation
+        memberListFailure?.let { throw it }
+        return roomMembersByTier[affiliation] ?: emptyList()
+    }
+
+    /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */
+    val setAffiliationCalls = CopyOnWriteArrayList<List<Any?>>()
+
+    @Volatile
+    var setAffiliationFailure: Throwable? = null
+
+    override suspend fun setRoomAffiliation(
+        roomJid: String,
+        targetJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ) {
+        setAffiliationCalls += listOf(roomJid, targetJid, affiliation, reason)
+        setAffiliationFailure?.let { throw it }
+    }
+
+    /** Recorded (roomJid, nick, reason) §8.2 kicks. */
+    val kickCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var kickFailure: Throwable? = null
+
+    override suspend fun kickOccupant(roomJid: String, nick: String, reason: String?) {
+        kickCalls += Triple(roomJid, nick, reason)
+        kickFailure?.let { throw it }
+    }
+
+    /** Canned §10.2 owner config served by [fetchRoomConfig]. */
+    @Volatile
+    var roomConfig: WaddleRoomConfig = WaddleRoomConfig(
+        name = null,
+        description = null,
+        membersOnly = null,
+        publicRoom = null,
+        moderated = null,
+        forum = null,
+        pinPermission = null,
+    )
+
+    @Volatile
+    var fetchRoomConfigFailure: Throwable? = null
+
+    override suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig {
+        fetchRoomConfigFailure?.let { throw it }
+        return roomConfig
+    }
+
+    /** Recorded (roomJid, patch) §10.2 config submits. */
+    val submitConfigCalls = CopyOnWriteArrayList<Pair<String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var submitConfigFailure: Throwable? = null
+
+    override suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) {
+        submitConfigCalls += roomJid to patch
+        submitConfigFailure?.let { throw it }
+    }
+
+    /** Recorded (localpart, nick, patch) §10.1 creations. */
+    val createRoomCalls = CopyOnWriteArrayList<Triple<String, String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var createRoomFailure: Throwable? = null
+
+    /** Domain the fake muc service appends to created localparts. */
+    @Volatile
+    var createRoomDomain: String = "muc.waddle.test"
+
+    override suspend fun createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch): String {
+        createRoomCalls += Triple(localpart, nick, patch)
+        createRoomFailure?.let { throw it }
+        return "$localpart@$createRoomDomain"
+    }
+
+    /** Recorded (roomJid, reason) §10.9 destroys. */
+    val destroyRoomCalls = CopyOnWriteArrayList<Pair<String, String?>>()
+
+    @Volatile
+    var destroyRoomFailure: Throwable? = null
+
+    override suspend fun destroyRoom(roomJid: String, reason: String?) {
+        destroyRoomCalls += roomJid to reason
+        destroyRoomFailure?.let { throw it }
+    }
+
+    /** Canned XEP-0055 hits; recorded queries. */
+    @Volatile
+    var userSearchResults: List<WaddleUserSearchEntry> = emptyList()
+    val searchUsersCalls = CopyOnWriteArrayList<String>()
+
+    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> {
+        searchUsersCalls += query
+        return userSearchResults
+    }
+
+    /** Canned owner-probe answer + V1 users page. */
+    @Volatile
+    var communityOwner = false
+
+    @Volatile
+    var adminUsersPage: WaddleAdminUsersPage = WaddleAdminUsersPage(entries = emptyList(), nextCursor = null)
+
+    /** Recorded (prefix, pageSize, afterCursor) users-list queries. */
+    val adminUsersListCalls = CopyOnWriteArrayList<Triple<String?, UInt?, String?>>()
+
+    override suspend fun isCommunityOwner(): Boolean = communityOwner
+
+    override suspend fun adminUsersList(
+        prefix: String?,
+        pageSize: UInt?,
+        afterCursor: String?,
+    ): WaddleAdminUsersPage {
+        adminUsersListCalls += Triple(prefix, pageSize, afterCursor)
+        return adminUsersPage
+    }
+
+    override suspend fun adminSpacesList(args: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage = unused()
+    override suspend fun adminSpacesCreate(args: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesDelete(spaceJid: String, spaceNode: String?) = unused()
+    override suspend fun adminSpacesMembers(args: WaddleAdminSpacesMembersArgs): WaddleAdminSpacesMembersPage =
+        unused()
+
+    override suspend fun adminSpacesSetRole(
+        spaceJid: String,
+        spaceNode: String?,
+        memberJid: String,
+        role: WaddleSpaceRole,
+    ): WaddleAdminSpacesSetRoleResult = unused()
+
+    override suspend fun adminChannelsList(args: WaddleAdminChannelsListArgs): WaddleAdminChannelsListPage =
+        unused()
+
+    override suspend fun adminChannelsCreate(args: WaddleAdminChannelsCreateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsDelete(channelJid: String) = unused()
+    override suspend fun adminChannelsOccupants(
+        args: WaddleAdminChannelsOccupantsArgs,
+    ): social.waddle.client.ffi.WaddleAdminChannelsOccupantsPage = unused()
+
+    override suspend fun adminChannelsAffiliations(
+        args: WaddleAdminChannelsAffiliationsArgs,
+    ): WaddleAdminChannelsAffiliationsPage = unused()
+
+    override suspend fun adminChannelsSetAffiliation(
+        channelJid: String,
+        memberJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ): WaddleAdminChannelsSetAffiliationResult = unused()
+
+    override suspend fun adminChannelsKick(
+        channelJid: String,
+        occupantJid: String,
+        reason: String?,
+    ): WaddleAdminChannelsKickResult = unused()
 
     /** Recorded (conversation, state, isMuc) typing notifications. */
     val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, Boolean>>()

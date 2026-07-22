@@ -4,6 +4,8 @@ import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
+import social.waddle.client.ffi.WaddleCallThreadAnchor
+import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMamPage
@@ -65,6 +67,8 @@ fun testMessage(
     linkPreviews: List<WaddleLinkPreview> = emptyList(),
     isSticker: Boolean = false,
     sharedFiles: List<WaddleSharedFile> = emptyList(),
+    callThread: WaddleCallThreadAnchor? = null,
+    callThreadEnded: WaddleCallThreadEnded? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -101,13 +105,13 @@ fun testMessage(
     isSticker = isSticker,
     linkPreviews = linkPreviews,
     pinEvent = pinEvent,
-    callThreadEnded = null,
+    callThreadEnded = callThreadEnded,
     carbon = null,
     replyToId = null,
     replyToSender = null,
     replyFallbackStart = replyFallbackStart,
     replyFallbackEnd = replyFallbackEnd,
-    callThread = null,
+    callThread = callThread,
     sharedFiles = sharedFiles,
     mdsDisplayed = mdsDisplayed,
 )
@@ -184,6 +188,8 @@ fun testPresence(
     show: String? = null,
     hats: List<WaddlePresenceHat> = emptyList(),
     idleSince: String? = null,
+    /** `110` marks the recipient's own presence (XEP-0045 §7.2.2). */
+    mucStatusCodes: List<UShort> = emptyList(),
 ): WaddlePresence = WaddlePresence(
     from = from,
     to = "me@waddle.test",
@@ -194,7 +200,7 @@ fun testPresence(
     mucAffiliation = mucAffiliation,
     mucRole = mucRole,
     mucJid = mucJid,
-    mucStatusCodes = emptyList(),
+    mucStatusCodes = mucStatusCodes,
     vcardAvatar = null,
     idleSince = idleSince,
     errorCondition = null,

@@ -600,6 +600,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func disconnect() async
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+    func fetchExternalServices() async throws  -> [WaddleExternalService]
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -612,6 +622,16 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * `<migrated to='new-sid'/>`.
      */
     func sendCallFinishMigrated(peerFullJid: String, oldSid: String, newSid: String) async  -> Bool
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    func sendCallFinishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason) async  -> Bool
 
     /**
      * Send a XEP-0353 §5.1.2 `<proceed/>` to the *full* JID of the
@@ -653,6 +673,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallRetractTieBreak(peerFullJid: String, sid: String) async  -> Bool
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+    func sendCallRinging(peerBareJid: String, sid: String) async  -> Bool
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
     func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool) async  -> Bool
@@ -667,6 +696,112 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * Send a XEP-0166 §7.4 `session-terminate` IQ.
      */
     func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> Bool
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+    func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> WaddleCallSessionTerminateOutcome
+
+    /**
+     * `urn:waddle:admin:channels:affiliations:0`.
+     */
+    func adminChannelsAffiliations(args: WaddleAdminChannelsAffiliationsArgs) async throws  -> WaddleAdminChannelsAffiliationsPage
+
+    /**
+     * `urn:waddle:admin:channels:create:0`.
+     */
+    func adminChannelsCreate(args: WaddleAdminChannelsCreateArgs) async throws  -> WaddleAdminChannelRef
+
+    /**
+     * `urn:waddle:admin:channels:delete:0` — destroys the MUC room.
+     * Calling this export is the confirmation (see
+     * [`Self::admin_spaces_delete`]).
+     */
+    func adminChannelsDelete(channelJid: String) async throws
+
+    /**
+     * `urn:waddle:admin:channels:kick:0` — operator kick by full
+     * occupant JID (server-side XEP-0045 §8.2 role→none).
+     */
+    func adminChannelsKick(channelJid: String, occupantJid: String, reason: String?) async throws  -> WaddleAdminChannelsKickResult
+
+    /**
+     * `urn:waddle:admin:channels:list:0`.
+     */
+    func adminChannelsList(args: WaddleAdminChannelsListArgs) async throws  -> WaddleAdminChannelsListPage
+
+    /**
+     * `urn:waddle:admin:channels:occupants:0`.
+     */
+    func adminChannelsOccupants(args: WaddleAdminChannelsOccupantsArgs) async throws  -> WaddleAdminChannelsOccupantsPage
+
+    /**
+     * `urn:waddle:admin:channels:set-affiliation:0`.
+     */
+    func adminChannelsSetAffiliation(channelJid: String, memberJid: String, affiliation: WaddleMucAffiliation, reason: String?) async throws  -> WaddleAdminChannelsSetAffiliationResult
+
+    /**
+     * `urn:waddle:admin:channels:update:0`.
+     */
+    func adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs) async throws  -> WaddleAdminChannelRef
+
+    /**
+     * `urn:waddle:admin:spaces:create:0`.
+     */
+    func adminSpacesCreate(args: WaddleAdminSpacesCreateArgs) async throws  -> WaddleAdminSpaceRef
+
+    /**
+     * `urn:waddle:admin:spaces:delete:0` — cascade-destroys the
+     * space and its channels. Calling this export is the
+     * confirmation: the server-required `confirm="yes"` literal is
+     * supplied here, so UIs MUST show their own confirm dialog
+     * first.
+     */
+    func adminSpacesDelete(spaceJid: String, spaceNode: String?) async throws
+
+    /**
+     * `urn:waddle:admin:spaces:list:0`.
+     */
+    func adminSpacesList(args: WaddleAdminSpacesListArgs) async throws  -> WaddleAdminSpacesListPage
+
+    /**
+     * `urn:waddle:admin:spaces:members:0`.
+     */
+    func adminSpacesMembers(args: WaddleAdminSpacesMembersArgs) async throws  -> WaddleAdminSpacesMembersPage
+
+    /**
+     * `urn:waddle:admin:spaces:set-role:0`.
+     */
+    func adminSpacesSetRole(spaceJid: String, spaceNode: String?, memberJid: String, role: WaddleSpaceRole) async throws  -> WaddleAdminSpacesSetRoleResult
+
+    /**
+     * `urn:waddle:admin:spaces:update:0`.
+     */
+    func adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs) async throws  -> WaddleAdminSpaceRef
+
+    /**
+     * `urn:waddle:admin:users:list:0`: paginated user directory for
+     * the community owner. Non-owners receive a `forbidden` stanza
+     * error.
+     */
+    func adminUsersList(prefix: String?, pageSize: UInt32?, afterCursor: String?) async throws  -> WaddleAdminUsersPage
+
+    /**
+     * `true` iff the authenticated user is the community owner —
+     * i.e. the server accepts a `page_size=1` probe of the V1 users
+     * command. Any error (including `forbidden` and transport
+     * failures) resolves to `false`: the probe is best-effort
+     * gating for the admin UI entry point, never an authorization
+     * mechanism — the server re-checks every actual command.
+     */
+    func isCommunityOwner() async  -> Bool
 
     func discoverTopology() async  -> WaddleTopology
 
@@ -911,6 +1046,72 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      */
     func registerPushDevice(pushServiceJid: String, appId: String, environment: WaddlePushEnvironment, credentials: WaddlePushDeviceCredentials) async  -> WaddleRegisterDeviceResult?
 
+    /**
+     * XEP-0045 §10.1 room creation: join `localpart@<muc service>`
+     * with `nick` (creating the room), then run the §10.1.3/§10.2
+     * reserved-room sequence — fetch the config form, merge the
+     * initial `patch`, submit — and leave again best-effort (web
+     * `createMucRoom` parity: the caller joins properly through the
+     * normal flow afterwards). Returns the bare room JID.
+     *
+     * If `localpart` collides with an existing room the creator does
+     * not own, the config fetch fails with a `forbidden` stanza
+     * error — surfaced verbatim so the UI can report the conflict.
+     */
+    func createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch) async throws  -> String
+
+    /**
+     * XEP-0045 §10.9: destroy the room. Owner-only server-side.
+     */
+    func destroyRoom(roomJid: String, reason: String?) async throws
+
+    /**
+     * XEP-0045 §10.2: fetch the owner configuration form and project
+     * it into the typed [`WaddleRoomConfig`]. Owner-only; the
+     * service answers `forbidden` for everyone else.
+     */
+    func fetchRoomConfig(roomJid: String) async throws  -> WaddleRoomConfig
+
+    /**
+     * XEP-0045 §8.2 kick: eject the occupant with nickname `nick` by
+     * setting `role='none'`. Distinct from a ban — the target's
+     * affiliation is untouched and they may rejoin.
+     */
+    func kickOccupant(roomJid: String, nick: String, reason: String?) async throws
+
+    /**
+     * XEP-0045 §9.5: retrieve the affiliation list for one tier.
+     * Callers query the four tiers (owner/admin/member/outcast)
+     * separately and tolerate per-tier `forbidden` /
+     * `service-unavailable` errors — web `MucAdmin.listRoomMembers`
+     * parity.
+     */
+    func listRoomMembers(roomJid: String, affiliation: WaddleMucAffiliation) async throws  -> [WaddleRoomMemberEntry]
+
+    /**
+     * XEP-0055 user search against the account domain's
+     * `jabber:iq:search` directory, matching on the `nick` column
+     * (wasm `search_users` parity). Backs the members add-member
+     * flow.
+     */
+    func searchUsers(query: String) async throws  -> [WaddleUserSearchEntry]
+
+    /**
+     * XEP-0045 §5.2 affiliation change addressed by bare JID:
+     * promote/demote (member/admin/owner), remove (`none`), or ban
+     * (§9.1 `outcast`). The service enforces the admin/owner
+     * privilege matrix and answers `forbidden`/`not-allowed`
+     * otherwise.
+     */
+    func setRoomAffiliation(roomJid: String, targetJid: String, affiliation: WaddleMucAffiliation, reason: String?) async throws
+
+    /**
+     * XEP-0045 §10.2 GET-merge-SET: apply `patch` on top of the
+     * service's current form and submit the merged result, so
+     * unedited settings round-trip verbatim.
+     */
+    func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
+
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1011,6 +1212,31 @@ open func disconnect()async   {
 }
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+open func fetchExternalServices()async throws  -> [WaddleExternalService]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleExternalService.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -1045,6 +1271,32 @@ open func sendCallFinishMigrated(peerFullJid: String, oldSid: String, newSid: St
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(
                     self.uniffiCloneHandle(),
                     FfiConverterString.lower(peerFullJid),FfiConverterString.lower(oldSid),FfiConverterString.lower(newSid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+open func sendCallFinishWithReason(peerFullJid: String, sid: String, reason: WaddleJingleReason)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid),FfiConverterTypeWaddleJingleReason_lower(reason)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -1192,6 +1444,31 @@ open func sendCallRetractTieBreak(peerFullJid: String, sid: String)async  -> Boo
 }
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+open func sendCallRinging(peerBareJid: String, sid: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerBareJid),FfiConverterString.lower(sid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
 open func sendCallSessionAccept(peerFullJid: String, responderFullJid: String, sid: String, audio: Bool, video: Bool)async  -> Bool  {
@@ -1244,6 +1521,369 @@ open func sendCallSessionTerminate(peerFullJid: String, sid: String, reason: Wad
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate(
                     self.uniffiCloneHandle(),
                     FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid),FfiConverterOptionTypeWaddleJingleReason.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+open func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?)async  -> WaddleCallSessionTerminateOutcome  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate_with_outcome(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid),FfiConverterOptionTypeWaddleJingleReason.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleCallSessionTerminateOutcome_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:affiliations:0`.
+     */
+open func adminChannelsAffiliations(args: WaddleAdminChannelsAffiliationsArgs)async throws  -> WaddleAdminChannelsAffiliationsPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_affiliations(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminChannelsAffiliationsArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelsAffiliationsPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:create:0`.
+     */
+open func adminChannelsCreate(args: WaddleAdminChannelsCreateArgs)async throws  -> WaddleAdminChannelRef  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_create(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminChannelsCreateArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelRef_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:delete:0` — destroys the MUC room.
+     * Calling this export is the confirmation (see
+     * [`Self::admin_spaces_delete`]).
+     */
+open func adminChannelsDelete(channelJid: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_delete(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(channelJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:kick:0` — operator kick by full
+     * occupant JID (server-side XEP-0045 §8.2 role→none).
+     */
+open func adminChannelsKick(channelJid: String, occupantJid: String, reason: String?)async throws  -> WaddleAdminChannelsKickResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_kick(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(channelJid),FfiConverterString.lower(occupantJid),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelsKickResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:list:0`.
+     */
+open func adminChannelsList(args: WaddleAdminChannelsListArgs)async throws  -> WaddleAdminChannelsListPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_list(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminChannelsListArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelsListPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:occupants:0`.
+     */
+open func adminChannelsOccupants(args: WaddleAdminChannelsOccupantsArgs)async throws  -> WaddleAdminChannelsOccupantsPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_occupants(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminChannelsOccupantsArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelsOccupantsPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:set-affiliation:0`.
+     */
+open func adminChannelsSetAffiliation(channelJid: String, memberJid: String, affiliation: WaddleMucAffiliation, reason: String?)async throws  -> WaddleAdminChannelsSetAffiliationResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_set_affiliation(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(channelJid),FfiConverterString.lower(memberJid),FfiConverterTypeWaddleMucAffiliation_lower(affiliation),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelsSetAffiliationResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:channels:update:0`.
+     */
+open func adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs)async throws  -> WaddleAdminChannelRef  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_update(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminChannelsUpdateArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminChannelRef_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:create:0`.
+     */
+open func adminSpacesCreate(args: WaddleAdminSpacesCreateArgs)async throws  -> WaddleAdminSpaceRef  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_create(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminSpacesCreateArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminSpaceRef_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:delete:0` — cascade-destroys the
+     * space and its channels. Calling this export is the
+     * confirmation: the server-required `confirm="yes"` literal is
+     * supplied here, so UIs MUST show their own confirm dialog
+     * first.
+     */
+open func adminSpacesDelete(spaceJid: String, spaceNode: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_delete(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(spaceJid),FfiConverterOptionString.lower(spaceNode)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:list:0`.
+     */
+open func adminSpacesList(args: WaddleAdminSpacesListArgs)async throws  -> WaddleAdminSpacesListPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_list(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminSpacesListArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminSpacesListPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:members:0`.
+     */
+open func adminSpacesMembers(args: WaddleAdminSpacesMembersArgs)async throws  -> WaddleAdminSpacesMembersPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_members(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminSpacesMembersArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminSpacesMembersPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:set-role:0`.
+     */
+open func adminSpacesSetRole(spaceJid: String, spaceNode: String?, memberJid: String, role: WaddleSpaceRole)async throws  -> WaddleAdminSpacesSetRoleResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_set_role(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(spaceJid),FfiConverterOptionString.lower(spaceNode),FfiConverterString.lower(memberJid),FfiConverterTypeWaddleSpaceRole_lower(role)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminSpacesSetRoleResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:spaces:update:0`.
+     */
+open func adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs)async throws  -> WaddleAdminSpaceRef  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_update(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleAdminSpacesUpdateArgs_lower(args)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminSpaceRef_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:admin:users:list:0`: paginated user directory for
+     * the community owner. Non-owners receive a `forbidden` stanza
+     * error.
+     */
+open func adminUsersList(prefix: String?, pageSize: UInt32?, afterCursor: String?)async throws  -> WaddleAdminUsersPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionString.lower(prefix),FfiConverterOptionUInt32.lower(pageSize),FfiConverterOptionString.lower(afterCursor)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleAdminUsersPage_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `true` iff the authenticated user is the community owner —
+     * i.e. the server accepts a `page_size=1` probe of the V1 users
+     * command. Any error (including `forbidden` and transport
+     * failures) resolves to `false`: the probe is best-effort
+     * gating for the admin UI entry point, never an authorization
+     * mechanism — the server re-checks every actual command.
+     */
+open func isCommunityOwner()async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(
+                    self.uniffiCloneHandle()
+
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -2083,6 +2723,192 @@ open func registerPushDevice(pushServiceJid: String, appId: String, environment:
         )
 }
 
+    /**
+     * XEP-0045 §10.1 room creation: join `localpart@<muc service>`
+     * with `nick` (creating the room), then run the §10.1.3/§10.2
+     * reserved-room sequence — fetch the config form, merge the
+     * initial `patch`, submit — and leave again best-effort (web
+     * `createMucRoom` parity: the caller joins properly through the
+     * normal flow afterwards). Returns the bare room JID.
+     *
+     * If `localpart` collides with an existing room the creator does
+     * not own, the config fetch fails with a `forbidden` stanza
+     * error — surfaced verbatim so the UI can report the conflict.
+     */
+open func createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(localpart),FfiConverterString.lower(nick),FfiConverterTypeWaddleRoomConfigPatch_lower(patch)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §10.9: destroy the room. Owner-only server-side.
+     */
+open func destroyRoom(roomJid: String, reason: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_destroy_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §10.2: fetch the owner configuration form and project
+     * it into the typed [`WaddleRoomConfig`]. Owner-only; the
+     * service answers `forbidden` for everyone else.
+     */
+open func fetchRoomConfig(roomJid: String)async throws  -> WaddleRoomConfig  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_config(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleRoomConfig_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §8.2 kick: eject the occupant with nickname `nick` by
+     * setting `role='none'`. Distinct from a ban — the target's
+     * affiliation is untouched and they may rejoin.
+     */
+open func kickOccupant(roomJid: String, nick: String, reason: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_kick_occupant(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §9.5: retrieve the affiliation list for one tier.
+     * Callers query the four tiers (owner/admin/member/outcast)
+     * separately and tolerate per-tier `forbidden` /
+     * `service-unavailable` errors — web `MucAdmin.listRoomMembers`
+     * parity.
+     */
+open func listRoomMembers(roomJid: String, affiliation: WaddleMucAffiliation)async throws  -> [WaddleRoomMemberEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_members(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterTypeWaddleMucAffiliation_lower(affiliation)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleRoomMemberEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0055 user search against the account domain's
+     * `jabber:iq:search` directory, matching on the `nick` column
+     * (wasm `search_users` parity). Backs the members add-member
+     * flow.
+     */
+open func searchUsers(query: String)async throws  -> [WaddleUserSearchEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(query)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleUserSearchEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §5.2 affiliation change addressed by bare JID:
+     * promote/demote (member/admin/owner), remove (`none`), or ban
+     * (§9.1 `outcast`). The service enforces the admin/owner
+     * privilege matrix and answers `forbidden`/`not-allowed`
+     * otherwise.
+     */
+open func setRoomAffiliation(roomJid: String, targetJid: String, affiliation: WaddleMucAffiliation, reason: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(targetJid),FfiConverterTypeWaddleMucAffiliation_lower(affiliation),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §10.2 GET-merge-SET: apply `patch` on top of the
+     * service's current form and submit the merged result, so
+     * unedited settings round-trip verbatim.
+     */
+open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterTypeWaddleRoomConfigPatch_lower(patch)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
 
 
 }
@@ -2129,6 +2955,1615 @@ public func FfiConverterTypeWaddleClient_lower(_ value: WaddleClient) -> UInt64 
 }
 
 
+
+
+public struct WaddleAdminChannelAffiliationEntry: Equatable, Hashable {
+    public var jid: String
+    public var affiliation: WaddleMucAffiliation
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String, affiliation: WaddleMucAffiliation, reason: String?) {
+        self.jid = jid
+        self.affiliation = affiliation
+        self.reason = reason
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelAffiliationEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelAffiliationEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelAffiliationEntry {
+        return
+            try WaddleAdminChannelAffiliationEntry(
+                jid: FfiConverterString.read(from: &buf),
+                affiliation: FfiConverterTypeWaddleMucAffiliation.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelAffiliationEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterTypeWaddleMucAffiliation.write(value.affiliation, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelAffiliationEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelAffiliationEntry {
+    return try FfiConverterTypeWaddleAdminChannelAffiliationEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelAffiliationEntry_lower(_ value: WaddleAdminChannelAffiliationEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelAffiliationEntry.lower(value)
+}
+
+
+public struct WaddleAdminChannelListEntry: Equatable, Hashable {
+    public var channelJid: String
+    public var name: String
+    public var topic: String?
+    /**
+     * `text` | `announcement` | `forum` | `group_dm` (open set).
+     */
+    public var channelType: String
+    public var isPublic: Bool
+    public var membersOnly: Bool
+    public var occupantCount: UInt32
+    public var ownerCount: UInt32
+    public var adminCount: UInt32
+    public var memberCount: UInt32
+    public var outcastCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelJid: String, name: String, topic: String?,
+        /**
+         * `text` | `announcement` | `forum` | `group_dm` (open set).
+         */channelType: String, isPublic: Bool, membersOnly: Bool, occupantCount: UInt32, ownerCount: UInt32, adminCount: UInt32, memberCount: UInt32, outcastCount: UInt32) {
+        self.channelJid = channelJid
+        self.name = name
+        self.topic = topic
+        self.channelType = channelType
+        self.isPublic = isPublic
+        self.membersOnly = membersOnly
+        self.occupantCount = occupantCount
+        self.ownerCount = ownerCount
+        self.adminCount = adminCount
+        self.memberCount = memberCount
+        self.outcastCount = outcastCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelListEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelListEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelListEntry {
+        return
+            try WaddleAdminChannelListEntry(
+                channelJid: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                topic: FfiConverterOptionString.read(from: &buf),
+                channelType: FfiConverterString.read(from: &buf),
+                isPublic: FfiConverterBool.read(from: &buf),
+                membersOnly: FfiConverterBool.read(from: &buf),
+                occupantCount: FfiConverterUInt32.read(from: &buf),
+                ownerCount: FfiConverterUInt32.read(from: &buf),
+                adminCount: FfiConverterUInt32.read(from: &buf),
+                memberCount: FfiConverterUInt32.read(from: &buf),
+                outcastCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelListEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channelJid, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.topic, into: &buf)
+        FfiConverterString.write(value.channelType, into: &buf)
+        FfiConverterBool.write(value.isPublic, into: &buf)
+        FfiConverterBool.write(value.membersOnly, into: &buf)
+        FfiConverterUInt32.write(value.occupantCount, into: &buf)
+        FfiConverterUInt32.write(value.ownerCount, into: &buf)
+        FfiConverterUInt32.write(value.adminCount, into: &buf)
+        FfiConverterUInt32.write(value.memberCount, into: &buf)
+        FfiConverterUInt32.write(value.outcastCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelListEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelListEntry {
+    return try FfiConverterTypeWaddleAdminChannelListEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelListEntry_lower(_ value: WaddleAdminChannelListEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelListEntry.lower(value)
+}
+
+
+public struct WaddleAdminChannelOccupantEntry: Equatable, Hashable {
+    public var nick: String
+    public var realJid: String
+    public var role: WaddleMucRole
+    public var affiliation: WaddleMucAffiliation
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nick: String, realJid: String, role: WaddleMucRole, affiliation: WaddleMucAffiliation) {
+        self.nick = nick
+        self.realJid = realJid
+        self.role = role
+        self.affiliation = affiliation
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelOccupantEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelOccupantEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelOccupantEntry {
+        return
+            try WaddleAdminChannelOccupantEntry(
+                nick: FfiConverterString.read(from: &buf),
+                realJid: FfiConverterString.read(from: &buf),
+                role: FfiConverterTypeWaddleMucRole.read(from: &buf),
+                affiliation: FfiConverterTypeWaddleMucAffiliation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelOccupantEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.nick, into: &buf)
+        FfiConverterString.write(value.realJid, into: &buf)
+        FfiConverterTypeWaddleMucRole.write(value.role, into: &buf)
+        FfiConverterTypeWaddleMucAffiliation.write(value.affiliation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelOccupantEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelOccupantEntry {
+    return try FfiConverterTypeWaddleAdminChannelOccupantEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelOccupantEntry_lower(_ value: WaddleAdminChannelOccupantEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelOccupantEntry.lower(value)
+}
+
+
+public struct WaddleAdminChannelRef: Equatable, Hashable {
+    public var channelJid: String
+    public var name: String
+    public var topic: String?
+    public var channelType: String
+    public var isPublic: Bool
+    public var membersOnly: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelJid: String, name: String, topic: String?, channelType: String, isPublic: Bool, membersOnly: Bool) {
+        self.channelJid = channelJid
+        self.name = name
+        self.topic = topic
+        self.channelType = channelType
+        self.isPublic = isPublic
+        self.membersOnly = membersOnly
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelRef {
+        return
+            try WaddleAdminChannelRef(
+                channelJid: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                topic: FfiConverterOptionString.read(from: &buf),
+                channelType: FfiConverterString.read(from: &buf),
+                isPublic: FfiConverterBool.read(from: &buf),
+                membersOnly: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channelJid, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.topic, into: &buf)
+        FfiConverterString.write(value.channelType, into: &buf)
+        FfiConverterBool.write(value.isPublic, into: &buf)
+        FfiConverterBool.write(value.membersOnly, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelRef_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelRef {
+    return try FfiConverterTypeWaddleAdminChannelRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelRef_lower(_ value: WaddleAdminChannelRef) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelRef.lower(value)
+}
+
+
+public struct WaddleAdminChannelsAffiliationsArgs: Equatable, Hashable {
+    public var channelJid: String
+    /**
+     * Optional tier filter.
+     */
+    public var filter: WaddleMucAffiliation?
+    public var pageSize: UInt32?
+    public var afterCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelJid: String,
+        /**
+         * Optional tier filter.
+         */filter: WaddleMucAffiliation?, pageSize: UInt32?, afterCursor: String?) {
+        self.channelJid = channelJid
+        self.filter = filter
+        self.pageSize = pageSize
+        self.afterCursor = afterCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsAffiliationsArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsAffiliationsArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsAffiliationsArgs {
+        return
+            try WaddleAdminChannelsAffiliationsArgs(
+                channelJid: FfiConverterString.read(from: &buf),
+                filter: FfiConverterOptionTypeWaddleMucAffiliation.read(from: &buf),
+                pageSize: FfiConverterOptionUInt32.read(from: &buf),
+                afterCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsAffiliationsArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channelJid, into: &buf)
+        FfiConverterOptionTypeWaddleMucAffiliation.write(value.filter, into: &buf)
+        FfiConverterOptionUInt32.write(value.pageSize, into: &buf)
+        FfiConverterOptionString.write(value.afterCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsAffiliationsArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsAffiliationsArgs {
+    return try FfiConverterTypeWaddleAdminChannelsAffiliationsArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsAffiliationsArgs_lower(_ value: WaddleAdminChannelsAffiliationsArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsAffiliationsArgs.lower(value)
+}
+
+
+public struct WaddleAdminChannelsAffiliationsPage: Equatable, Hashable {
+    public var entries: [WaddleAdminChannelAffiliationEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminChannelAffiliationEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsAffiliationsPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsAffiliationsPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsAffiliationsPage {
+        return
+            try WaddleAdminChannelsAffiliationsPage(
+                entries: FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsAffiliationsPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsAffiliationsPage_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsAffiliationsPage {
+    return try FfiConverterTypeWaddleAdminChannelsAffiliationsPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsAffiliationsPage_lower(_ value: WaddleAdminChannelsAffiliationsPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsAffiliationsPage.lower(value)
+}
+
+
+public struct WaddleAdminChannelsCreateArgs: Equatable, Hashable {
+    public var name: String
+    public var topic: String?
+    public var channelType: String?
+    public var spaceJid: String?
+    public var spaceNode: String?
+    public var isPublic: Bool?
+    public var membersOnly: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, topic: String?, channelType: String?, spaceJid: String?, spaceNode: String?, isPublic: Bool?, membersOnly: Bool?) {
+        self.name = name
+        self.topic = topic
+        self.channelType = channelType
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.isPublic = isPublic
+        self.membersOnly = membersOnly
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsCreateArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsCreateArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsCreateArgs {
+        return
+            try WaddleAdminChannelsCreateArgs(
+                name: FfiConverterString.read(from: &buf),
+                topic: FfiConverterOptionString.read(from: &buf),
+                channelType: FfiConverterOptionString.read(from: &buf),
+                spaceJid: FfiConverterOptionString.read(from: &buf),
+                spaceNode: FfiConverterOptionString.read(from: &buf),
+                isPublic: FfiConverterOptionBool.read(from: &buf),
+                membersOnly: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsCreateArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.topic, into: &buf)
+        FfiConverterOptionString.write(value.channelType, into: &buf)
+        FfiConverterOptionString.write(value.spaceJid, into: &buf)
+        FfiConverterOptionString.write(value.spaceNode, into: &buf)
+        FfiConverterOptionBool.write(value.isPublic, into: &buf)
+        FfiConverterOptionBool.write(value.membersOnly, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsCreateArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsCreateArgs {
+    return try FfiConverterTypeWaddleAdminChannelsCreateArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsCreateArgs_lower(_ value: WaddleAdminChannelsCreateArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsCreateArgs.lower(value)
+}
+
+
+public struct WaddleAdminChannelsKickResult: Equatable, Hashable {
+    public var occupantJid: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(occupantJid: String) {
+        self.occupantJid = occupantJid
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsKickResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsKickResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsKickResult {
+        return
+            try WaddleAdminChannelsKickResult(
+                occupantJid: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsKickResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.occupantJid, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsKickResult_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsKickResult {
+    return try FfiConverterTypeWaddleAdminChannelsKickResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsKickResult_lower(_ value: WaddleAdminChannelsKickResult) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsKickResult.lower(value)
+}
+
+
+public struct WaddleAdminChannelsListArgs: Equatable, Hashable {
+    public var spaceJid: String?
+    public var spaceNode: String?
+    public var prefix: String?
+    public var pageSize: UInt32?
+    public var afterCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceJid: String?, spaceNode: String?, prefix: String?, pageSize: UInt32?, afterCursor: String?) {
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.prefix = prefix
+        self.pageSize = pageSize
+        self.afterCursor = afterCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsListArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsListArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsListArgs {
+        return
+            try WaddleAdminChannelsListArgs(
+                spaceJid: FfiConverterOptionString.read(from: &buf),
+                spaceNode: FfiConverterOptionString.read(from: &buf),
+                prefix: FfiConverterOptionString.read(from: &buf),
+                pageSize: FfiConverterOptionUInt32.read(from: &buf),
+                afterCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsListArgs, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.spaceJid, into: &buf)
+        FfiConverterOptionString.write(value.spaceNode, into: &buf)
+        FfiConverterOptionString.write(value.prefix, into: &buf)
+        FfiConverterOptionUInt32.write(value.pageSize, into: &buf)
+        FfiConverterOptionString.write(value.afterCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsListArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsListArgs {
+    return try FfiConverterTypeWaddleAdminChannelsListArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsListArgs_lower(_ value: WaddleAdminChannelsListArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsListArgs.lower(value)
+}
+
+
+public struct WaddleAdminChannelsListPage: Equatable, Hashable {
+    public var entries: [WaddleAdminChannelListEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminChannelListEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsListPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsListPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsListPage {
+        return
+            try WaddleAdminChannelsListPage(
+                entries: FfiConverterSequenceTypeWaddleAdminChannelListEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsListPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminChannelListEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsListPage_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsListPage {
+    return try FfiConverterTypeWaddleAdminChannelsListPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsListPage_lower(_ value: WaddleAdminChannelsListPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsListPage.lower(value)
+}
+
+
+public struct WaddleAdminChannelsOccupantsArgs: Equatable, Hashable {
+    public var channelJid: String
+    public var pageSize: UInt32?
+    public var afterCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelJid: String, pageSize: UInt32?, afterCursor: String?) {
+        self.channelJid = channelJid
+        self.pageSize = pageSize
+        self.afterCursor = afterCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsOccupantsArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsOccupantsArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsOccupantsArgs {
+        return
+            try WaddleAdminChannelsOccupantsArgs(
+                channelJid: FfiConverterString.read(from: &buf),
+                pageSize: FfiConverterOptionUInt32.read(from: &buf),
+                afterCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsOccupantsArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channelJid, into: &buf)
+        FfiConverterOptionUInt32.write(value.pageSize, into: &buf)
+        FfiConverterOptionString.write(value.afterCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsOccupantsArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsOccupantsArgs {
+    return try FfiConverterTypeWaddleAdminChannelsOccupantsArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsOccupantsArgs_lower(_ value: WaddleAdminChannelsOccupantsArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsOccupantsArgs.lower(value)
+}
+
+
+public struct WaddleAdminChannelsOccupantsPage: Equatable, Hashable {
+    public var entries: [WaddleAdminChannelOccupantEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminChannelOccupantEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsOccupantsPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsOccupantsPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsOccupantsPage {
+        return
+            try WaddleAdminChannelsOccupantsPage(
+                entries: FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsOccupantsPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsOccupantsPage_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsOccupantsPage {
+    return try FfiConverterTypeWaddleAdminChannelsOccupantsPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsOccupantsPage_lower(_ value: WaddleAdminChannelsOccupantsPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsOccupantsPage.lower(value)
+}
+
+
+public struct WaddleAdminChannelsSetAffiliationResult: Equatable, Hashable {
+    public var memberJid: String
+    public var affiliation: WaddleMucAffiliation
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(memberJid: String, affiliation: WaddleMucAffiliation) {
+        self.memberJid = memberJid
+        self.affiliation = affiliation
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsSetAffiliationResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsSetAffiliationResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsSetAffiliationResult {
+        return
+            try WaddleAdminChannelsSetAffiliationResult(
+                memberJid: FfiConverterString.read(from: &buf),
+                affiliation: FfiConverterTypeWaddleMucAffiliation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsSetAffiliationResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.memberJid, into: &buf)
+        FfiConverterTypeWaddleMucAffiliation.write(value.affiliation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsSetAffiliationResult_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsSetAffiliationResult {
+    return try FfiConverterTypeWaddleAdminChannelsSetAffiliationResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsSetAffiliationResult_lower(_ value: WaddleAdminChannelsSetAffiliationResult) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsSetAffiliationResult.lower(value)
+}
+
+
+public struct WaddleAdminChannelsUpdateArgs: Equatable, Hashable {
+    public var channelJid: String
+    public var name: String?
+    public var topic: String?
+    public var channelType: String?
+    public var isPublic: Bool?
+    public var membersOnly: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channelJid: String, name: String?, topic: String?, channelType: String?, isPublic: Bool?, membersOnly: Bool?) {
+        self.channelJid = channelJid
+        self.name = name
+        self.topic = topic
+        self.channelType = channelType
+        self.isPublic = isPublic
+        self.membersOnly = membersOnly
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminChannelsUpdateArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminChannelsUpdateArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminChannelsUpdateArgs {
+        return
+            try WaddleAdminChannelsUpdateArgs(
+                channelJid: FfiConverterString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf),
+                topic: FfiConverterOptionString.read(from: &buf),
+                channelType: FfiConverterOptionString.read(from: &buf),
+                isPublic: FfiConverterOptionBool.read(from: &buf),
+                membersOnly: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminChannelsUpdateArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channelJid, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.topic, into: &buf)
+        FfiConverterOptionString.write(value.channelType, into: &buf)
+        FfiConverterOptionBool.write(value.isPublic, into: &buf)
+        FfiConverterOptionBool.write(value.membersOnly, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsUpdateArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminChannelsUpdateArgs {
+    return try FfiConverterTypeWaddleAdminChannelsUpdateArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminChannelsUpdateArgs_lower(_ value: WaddleAdminChannelsUpdateArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminChannelsUpdateArgs.lower(value)
+}
+
+
+public struct WaddleAdminSpaceEntry: Equatable, Hashable {
+    public var spaceJid: String
+    public var spaceNode: String
+    public var name: String
+    public var description: String?
+    public var iconUrl: String?
+    public var channelCount: UInt32
+    public var memberCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceJid: String, spaceNode: String, name: String, description: String?, iconUrl: String?, channelCount: UInt32, memberCount: UInt32) {
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.name = name
+        self.description = description
+        self.iconUrl = iconUrl
+        self.channelCount = channelCount
+        self.memberCount = memberCount
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpaceEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpaceEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpaceEntry {
+        return
+            try WaddleAdminSpaceEntry(
+                spaceJid: FfiConverterString.read(from: &buf),
+                spaceNode: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                iconUrl: FfiConverterOptionString.read(from: &buf),
+                channelCount: FfiConverterUInt32.read(from: &buf),
+                memberCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpaceEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.spaceJid, into: &buf)
+        FfiConverterString.write(value.spaceNode, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.iconUrl, into: &buf)
+        FfiConverterUInt32.write(value.channelCount, into: &buf)
+        FfiConverterUInt32.write(value.memberCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminSpaceEntry {
+    return try FfiConverterTypeWaddleAdminSpaceEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceEntry_lower(_ value: WaddleAdminSpaceEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpaceEntry.lower(value)
+}
+
+
+public struct WaddleAdminSpaceMemberEntry: Equatable, Hashable {
+    public var jid: String
+    public var role: WaddleSpaceRole
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String, role: WaddleSpaceRole) {
+        self.jid = jid
+        self.role = role
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpaceMemberEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpaceMemberEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpaceMemberEntry {
+        return
+            try WaddleAdminSpaceMemberEntry(
+                jid: FfiConverterString.read(from: &buf),
+                role: FfiConverterTypeWaddleSpaceRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpaceMemberEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterTypeWaddleSpaceRole.write(value.role, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceMemberEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminSpaceMemberEntry {
+    return try FfiConverterTypeWaddleAdminSpaceMemberEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceMemberEntry_lower(_ value: WaddleAdminSpaceMemberEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpaceMemberEntry.lower(value)
+}
+
+
+public struct WaddleAdminSpaceRef: Equatable, Hashable {
+    public var spaceJid: String
+    public var spaceNode: String
+    public var name: String
+    public var description: String?
+    public var iconUrl: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceJid: String, spaceNode: String, name: String, description: String?, iconUrl: String?) {
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.name = name
+        self.description = description
+        self.iconUrl = iconUrl
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpaceRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpaceRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpaceRef {
+        return
+            try WaddleAdminSpaceRef(
+                spaceJid: FfiConverterString.read(from: &buf),
+                spaceNode: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                iconUrl: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpaceRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.spaceJid, into: &buf)
+        FfiConverterString.write(value.spaceNode, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.iconUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceRef_lift(_ buf: RustBuffer) throws -> WaddleAdminSpaceRef {
+    return try FfiConverterTypeWaddleAdminSpaceRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpaceRef_lower(_ value: WaddleAdminSpaceRef) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpaceRef.lower(value)
+}
+
+
+public struct WaddleAdminSpacesCreateArgs: Equatable, Hashable {
+    public var name: String
+    public var description: String?
+    public var iconUrl: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, description: String?, iconUrl: String?) {
+        self.name = name
+        self.description = description
+        self.iconUrl = iconUrl
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesCreateArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesCreateArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesCreateArgs {
+        return
+            try WaddleAdminSpacesCreateArgs(
+                name: FfiConverterString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                iconUrl: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesCreateArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.iconUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesCreateArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesCreateArgs {
+    return try FfiConverterTypeWaddleAdminSpacesCreateArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesCreateArgs_lower(_ value: WaddleAdminSpacesCreateArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesCreateArgs.lower(value)
+}
+
+
+public struct WaddleAdminSpacesListArgs: Equatable, Hashable {
+    public var prefix: String?
+    public var pageSize: UInt32?
+    public var afterCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(prefix: String?, pageSize: UInt32?, afterCursor: String?) {
+        self.prefix = prefix
+        self.pageSize = pageSize
+        self.afterCursor = afterCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesListArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesListArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesListArgs {
+        return
+            try WaddleAdminSpacesListArgs(
+                prefix: FfiConverterOptionString.read(from: &buf),
+                pageSize: FfiConverterOptionUInt32.read(from: &buf),
+                afterCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesListArgs, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.prefix, into: &buf)
+        FfiConverterOptionUInt32.write(value.pageSize, into: &buf)
+        FfiConverterOptionString.write(value.afterCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesListArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesListArgs {
+    return try FfiConverterTypeWaddleAdminSpacesListArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesListArgs_lower(_ value: WaddleAdminSpacesListArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesListArgs.lower(value)
+}
+
+
+public struct WaddleAdminSpacesListPage: Equatable, Hashable {
+    public var entries: [WaddleAdminSpaceEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminSpaceEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesListPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesListPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesListPage {
+        return
+            try WaddleAdminSpacesListPage(
+                entries: FfiConverterSequenceTypeWaddleAdminSpaceEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesListPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminSpaceEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesListPage_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesListPage {
+    return try FfiConverterTypeWaddleAdminSpacesListPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesListPage_lower(_ value: WaddleAdminSpacesListPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesListPage.lower(value)
+}
+
+
+public struct WaddleAdminSpacesMembersArgs: Equatable, Hashable {
+    public var spaceJid: String
+    public var spaceNode: String?
+    public var pageSize: UInt32?
+    public var afterCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceJid: String, spaceNode: String?, pageSize: UInt32?, afterCursor: String?) {
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.pageSize = pageSize
+        self.afterCursor = afterCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesMembersArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesMembersArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesMembersArgs {
+        return
+            try WaddleAdminSpacesMembersArgs(
+                spaceJid: FfiConverterString.read(from: &buf),
+                spaceNode: FfiConverterOptionString.read(from: &buf),
+                pageSize: FfiConverterOptionUInt32.read(from: &buf),
+                afterCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesMembersArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.spaceJid, into: &buf)
+        FfiConverterOptionString.write(value.spaceNode, into: &buf)
+        FfiConverterOptionUInt32.write(value.pageSize, into: &buf)
+        FfiConverterOptionString.write(value.afterCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesMembersArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesMembersArgs {
+    return try FfiConverterTypeWaddleAdminSpacesMembersArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesMembersArgs_lower(_ value: WaddleAdminSpacesMembersArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesMembersArgs.lower(value)
+}
+
+
+public struct WaddleAdminSpacesMembersPage: Equatable, Hashable {
+    public var entries: [WaddleAdminSpaceMemberEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminSpaceMemberEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesMembersPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesMembersPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesMembersPage {
+        return
+            try WaddleAdminSpacesMembersPage(
+                entries: FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesMembersPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesMembersPage_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesMembersPage {
+    return try FfiConverterTypeWaddleAdminSpacesMembersPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesMembersPage_lower(_ value: WaddleAdminSpacesMembersPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesMembersPage.lower(value)
+}
+
+
+public struct WaddleAdminSpacesSetRoleResult: Equatable, Hashable {
+    public var memberJid: String
+    public var role: WaddleSpaceRole
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(memberJid: String, role: WaddleSpaceRole) {
+        self.memberJid = memberJid
+        self.role = role
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesSetRoleResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesSetRoleResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesSetRoleResult {
+        return
+            try WaddleAdminSpacesSetRoleResult(
+                memberJid: FfiConverterString.read(from: &buf),
+                role: FfiConverterTypeWaddleSpaceRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesSetRoleResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.memberJid, into: &buf)
+        FfiConverterTypeWaddleSpaceRole.write(value.role, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesSetRoleResult_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesSetRoleResult {
+    return try FfiConverterTypeWaddleAdminSpacesSetRoleResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesSetRoleResult_lower(_ value: WaddleAdminSpacesSetRoleResult) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesSetRoleResult.lower(value)
+}
+
+
+public struct WaddleAdminSpacesUpdateArgs: Equatable, Hashable {
+    public var spaceJid: String
+    public var spaceNode: String?
+    public var name: String?
+    public var description: String?
+    public var iconUrl: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(spaceJid: String, spaceNode: String?, name: String?, description: String?, iconUrl: String?) {
+        self.spaceJid = spaceJid
+        self.spaceNode = spaceNode
+        self.name = name
+        self.description = description
+        self.iconUrl = iconUrl
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminSpacesUpdateArgs: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminSpacesUpdateArgs: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminSpacesUpdateArgs {
+        return
+            try WaddleAdminSpacesUpdateArgs(
+                spaceJid: FfiConverterString.read(from: &buf),
+                spaceNode: FfiConverterOptionString.read(from: &buf),
+                name: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                iconUrl: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminSpacesUpdateArgs, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.spaceJid, into: &buf)
+        FfiConverterOptionString.write(value.spaceNode, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.iconUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesUpdateArgs_lift(_ buf: RustBuffer) throws -> WaddleAdminSpacesUpdateArgs {
+    return try FfiConverterTypeWaddleAdminSpacesUpdateArgs.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminSpacesUpdateArgs_lower(_ value: WaddleAdminSpacesUpdateArgs) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminSpacesUpdateArgs.lower(value)
+}
+
+
+/**
+ * V1 users-list row.
+ */
+public struct WaddleAdminUserEntry: Equatable, Hashable {
+    public var jid: String
+    public var displayName: String?
+    /**
+     * Whether the user wears the community-owner hat (XEP-0317).
+     */
+    public var hasOwnerHat: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String, displayName: String?,
+        /**
+         * Whether the user wears the community-owner hat (XEP-0317).
+         */hasOwnerHat: Bool) {
+        self.jid = jid
+        self.displayName = displayName
+        self.hasOwnerHat = hasOwnerHat
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminUserEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminUserEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminUserEntry {
+        return
+            try WaddleAdminUserEntry(
+                jid: FfiConverterString.read(from: &buf),
+                displayName: FfiConverterOptionString.read(from: &buf),
+                hasOwnerHat: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminUserEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterBool.write(value.hasOwnerHat, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminUserEntry_lift(_ buf: RustBuffer) throws -> WaddleAdminUserEntry {
+    return try FfiConverterTypeWaddleAdminUserEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminUserEntry_lower(_ value: WaddleAdminUserEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminUserEntry.lower(value)
+}
+
+
+public struct WaddleAdminUsersPage: Equatable, Hashable {
+    public var entries: [WaddleAdminUserEntry]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entries: [WaddleAdminUserEntry], nextCursor: String?) {
+        self.entries = entries
+        self.nextCursor = nextCursor
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdminUsersPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdminUsersPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdminUsersPage {
+        return
+            try WaddleAdminUsersPage(
+                entries: FfiConverterSequenceTypeWaddleAdminUserEntry.read(from: &buf),
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAdminUsersPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleAdminUserEntry.write(value.entries, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminUsersPage_lift(_ buf: RustBuffer) throws -> WaddleAdminUsersPage {
+    return try FfiConverterTypeWaddleAdminUsersPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdminUsersPage_lower(_ value: WaddleAdminUsersPage) -> RustBuffer {
+    return FfiConverterTypeWaddleAdminUsersPage.lower(value)
+}
 
 
 public struct WaddleArchivedMessage: Equatable, Hashable {
@@ -3340,6 +5775,116 @@ public func FfiConverterTypeWaddleEncryptedFileHash_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeWaddleEncryptedFileHash_lower(_ value: WaddleEncryptedFileHash) -> RustBuffer {
     return FfiConverterTypeWaddleEncryptedFileHash.lower(value)
+}
+
+
+/**
+ * One external service (TURN/STUN) advertised by the user's server
+ * over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
+ * The app maps a list of these to WebRTC ICE servers for LiveKit's
+ * RTC configuration (RFC 7064/7065 URI mapping happens app-side, web
+ * `ice-servers.ts` parity). Credentials are present only on
+ * TURN/TURNS entries.
+ */
+public struct WaddleExternalService: Equatable, Hashable {
+    public var serviceType: WaddleExternalServiceType
+    public var host: String
+    /**
+     * RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+     * carries no explicit port and the scheme default applies.
+     */
+    public var port: UInt16?
+    public var transport: WaddleExternalServiceTransport?
+    public var username: String?
+    public var password: String?
+    /**
+     * RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+     * serialized for the FFI boundary exactly like the wasm client's
+     * JSON transit shape.
+     */
+    public var expires: String?
+    /**
+     * Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+     */
+    public var restricted: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(serviceType: WaddleExternalServiceType, host: String,
+        /**
+         * RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+         * carries no explicit port and the scheme default applies.
+         */port: UInt16?, transport: WaddleExternalServiceTransport?, username: String?, password: String?,
+        /**
+         * RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+         * serialized for the FFI boundary exactly like the wasm client's
+         * JSON transit shape.
+         */expires: String?,
+        /**
+         * Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+         */restricted: Bool) {
+        self.serviceType = serviceType
+        self.host = host
+        self.port = port
+        self.transport = transport
+        self.username = username
+        self.password = password
+        self.expires = expires
+        self.restricted = restricted
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalService: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalService: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalService {
+        return
+            try WaddleExternalService(
+                serviceType: FfiConverterTypeWaddleExternalServiceType.read(from: &buf),
+                host: FfiConverterString.read(from: &buf),
+                port: FfiConverterOptionUInt16.read(from: &buf),
+                transport: FfiConverterOptionTypeWaddleExternalServiceTransport.read(from: &buf),
+                username: FfiConverterOptionString.read(from: &buf),
+                password: FfiConverterOptionString.read(from: &buf),
+                expires: FfiConverterOptionString.read(from: &buf),
+                restricted: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExternalService, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleExternalServiceType.write(value.serviceType, into: &buf)
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterOptionUInt16.write(value.port, into: &buf)
+        FfiConverterOptionTypeWaddleExternalServiceTransport.write(value.transport, into: &buf)
+        FfiConverterOptionString.write(value.username, into: &buf)
+        FfiConverterOptionString.write(value.password, into: &buf)
+        FfiConverterOptionString.write(value.expires, into: &buf)
+        FfiConverterBool.write(value.restricted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalService_lift(_ buf: RustBuffer) throws -> WaddleExternalService {
+    return try FfiConverterTypeWaddleExternalService.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalService_lower(_ value: WaddleExternalService) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalService.lower(value)
 }
 
 
@@ -5446,6 +7991,245 @@ public func FfiConverterTypeWaddleReplyTarget_lower(_ value: WaddleReplyTarget) 
 
 
 /**
+ * Current owner-visible room configuration, projected from the
+ * XEP-0045 §10.2 config form. Every field is optional: `None` means
+ * the service did not offer that field (or reported no value), so
+ * UIs can distinguish "unset" from an explicit `false`/empty.
+ */
+public struct WaddleRoomConfig: Equatable, Hashable {
+    public var name: String?
+    public var description: String?
+    public var membersOnly: Bool?
+    public var publicRoom: Bool?
+    public var moderated: Bool?
+    /**
+     * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+     * registrar-prefix debt carried for parity).
+     */
+    public var forum: Bool?
+    public var pinPermission: WaddlePinPermission?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String?, description: String?, membersOnly: Bool?, publicRoom: Bool?, moderated: Bool?,
+        /**
+         * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+         * registrar-prefix debt carried for parity).
+         */forum: Bool?, pinPermission: WaddlePinPermission?) {
+        self.name = name
+        self.description = description
+        self.membersOnly = membersOnly
+        self.publicRoom = publicRoom
+        self.moderated = moderated
+        self.forum = forum
+        self.pinPermission = pinPermission
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRoomConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoomConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomConfig {
+        return
+            try WaddleRoomConfig(
+                name: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                membersOnly: FfiConverterOptionBool.read(from: &buf),
+                publicRoom: FfiConverterOptionBool.read(from: &buf),
+                moderated: FfiConverterOptionBool.read(from: &buf),
+                forum: FfiConverterOptionBool.read(from: &buf),
+                pinPermission: FfiConverterOptionTypeWaddlePinPermission.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRoomConfig, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionBool.write(value.membersOnly, into: &buf)
+        FfiConverterOptionBool.write(value.publicRoom, into: &buf)
+        FfiConverterOptionBool.write(value.moderated, into: &buf)
+        FfiConverterOptionBool.write(value.forum, into: &buf)
+        FfiConverterOptionTypeWaddlePinPermission.write(value.pinPermission, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomConfig_lift(_ buf: RustBuffer) throws -> WaddleRoomConfig {
+    return try FfiConverterTypeWaddleRoomConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomConfig_lower(_ value: WaddleRoomConfig) -> RustBuffer {
+    return FfiConverterTypeWaddleRoomConfig.lower(value)
+}
+
+
+/**
+ * Owner edit patch for [`WaddleClient::submit_room_config`]. `None`
+ * keeps the value the service currently reports (§10.2 GET-merge-SET
+ * round-trips unedited fields verbatim). `description: Some("")`
+ * clears the description.
+ */
+public struct WaddleRoomConfigPatch: Equatable, Hashable {
+    public var name: String?
+    public var description: String?
+    public var forum: Bool?
+    public var pinPermission: WaddlePinPermission?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String?, description: String?, forum: Bool?, pinPermission: WaddlePinPermission?) {
+        self.name = name
+        self.description = description
+        self.forum = forum
+        self.pinPermission = pinPermission
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRoomConfigPatch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoomConfigPatch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomConfigPatch {
+        return
+            try WaddleRoomConfigPatch(
+                name: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                forum: FfiConverterOptionBool.read(from: &buf),
+                pinPermission: FfiConverterOptionTypeWaddlePinPermission.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRoomConfigPatch, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionBool.write(value.forum, into: &buf)
+        FfiConverterOptionTypeWaddlePinPermission.write(value.pinPermission, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomConfigPatch_lift(_ buf: RustBuffer) throws -> WaddleRoomConfigPatch {
+    return try FfiConverterTypeWaddleRoomConfigPatch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomConfigPatch_lower(_ value: WaddleRoomConfigPatch) -> RustBuffer {
+    return FfiConverterTypeWaddleRoomConfigPatch.lower(value)
+}
+
+
+/**
+ * One entry of a XEP-0045 §9.5 affiliation list.
+ */
+public struct WaddleRoomMemberEntry: Equatable, Hashable {
+    /**
+     * Bare JID of the affiliated user.
+     */
+    public var jid: String
+    public var affiliation: WaddleMucAffiliation
+    /**
+     * Reserved room nickname, when the service reports one.
+     */
+    public var nick: String?
+    /**
+     * Reason recorded with the affiliation change (e.g. ban reason).
+     */
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Bare JID of the affiliated user.
+         */jid: String, affiliation: WaddleMucAffiliation,
+        /**
+         * Reserved room nickname, when the service reports one.
+         */nick: String?,
+        /**
+         * Reason recorded with the affiliation change (e.g. ban reason).
+         */reason: String?) {
+        self.jid = jid
+        self.affiliation = affiliation
+        self.nick = nick
+        self.reason = reason
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleRoomMemberEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleRoomMemberEntry {
+        return
+            try WaddleRoomMemberEntry(
+                jid: FfiConverterString.read(from: &buf),
+                affiliation: FfiConverterTypeWaddleMucAffiliation.read(from: &buf),
+                nick: FfiConverterOptionString.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleRoomMemberEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterTypeWaddleMucAffiliation.write(value.affiliation, into: &buf)
+        FfiConverterOptionString.write(value.nick, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomMemberEntry_lift(_ buf: RustBuffer) throws -> WaddleRoomMemberEntry {
+    return try FfiConverterTypeWaddleRoomMemberEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleRoomMemberEntry_lower(_ value: WaddleRoomMemberEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleRoomMemberEntry.lower(value)
+}
+
+
+/**
  * Options bag attached to an outbound chat or groupchat send.
  */
 public struct WaddleSendOptions: Equatable, Hashable {
@@ -6119,6 +8903,73 @@ public func FfiConverterTypeWaddleUploadSlot_lower(_ value: WaddleUploadSlot) ->
     return FfiConverterTypeWaddleUploadSlot.lower(value)
 }
 
+
+/**
+ * XEP-0055 user directory search hit (`jabber:iq:search`).
+ */
+public struct WaddleUserSearchEntry: Equatable, Hashable {
+    public var jid: String
+    /**
+     * The `<nick/>` column — Waddle usernames.
+     */
+    public var username: String
+    public var displayName: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jid: String,
+        /**
+         * The `<nick/>` column — Waddle usernames.
+         */username: String, displayName: String?) {
+        self.jid = jid
+        self.username = username
+        self.displayName = displayName
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleUserSearchEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleUserSearchEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleUserSearchEntry {
+        return
+            try WaddleUserSearchEntry(
+                jid: FfiConverterString.read(from: &buf),
+                username: FfiConverterString.read(from: &buf),
+                displayName: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleUserSearchEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jid, into: &buf)
+        FfiConverterString.write(value.username, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUserSearchEntry_lift(_ buf: RustBuffer) throws -> WaddleUserSearchEntry {
+    return try FfiConverterTypeWaddleUserSearchEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleUserSearchEntry_lower(_ value: WaddleUserSearchEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleUserSearchEntry.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
@@ -6299,6 +9150,99 @@ public func FfiConverterTypeWaddleCallEventKind_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleCallEventKind_lower(_ value: WaddleCallEventKind) -> RustBuffer {
     return FfiConverterTypeWaddleCallEventKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Typed outcome of `send_call_session_terminate_with_outcome`.
+ * Mirrors the wasm client's three-way classification so the app can
+ * still send the XEP-0353 `<finish/>` bookend after a terminate the
+ * server refused only because it already lost the call registry.
+ */
+
+public enum WaddleCallSessionTerminateOutcome: Equatable, Hashable {
+
+    /**
+     * The server acked the terminate with an `<iq type='result'/>`.
+     */
+    case ok
+    /**
+     * The server answered `forbidden` with the Waddle Jingle handler's
+     * "terminator is not a participant" text: the call registry entry
+     * is already gone (crashed peer, recovered session). Callers treat
+     * this like success for the message-level `<finish/>` bookend.
+     */
+    case orphaned
+    /**
+     * Invalid input, no live session, transport failure, or any other
+     * stanza error.
+     */
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleCallSessionTerminateOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleCallSessionTerminateOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleCallSessionTerminateOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleCallSessionTerminateOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ok
+
+        case 2: return .orphaned
+
+        case 3: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleCallSessionTerminateOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .ok:
+            writeInt(&buf, Int32(1))
+
+
+        case .orphaned:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lift(_ buf: RustBuffer) throws -> WaddleCallSessionTerminateOutcome {
+    return try FfiConverterTypeWaddleCallSessionTerminateOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleCallSessionTerminateOutcome_lower(_ value: WaddleCallSessionTerminateOutcome) -> RustBuffer {
+    return FfiConverterTypeWaddleCallSessionTerminateOutcome.lower(value)
 }
 
 
@@ -6704,6 +9648,11 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
     case Stanza(condition: String, text: String?
     )
     /**
+     * The server answered success but the payload did not match the
+     * expected typed shape (server-side bug or schema drift).
+     */
+    case MalformedResponse
+    /**
      * The websocket transport failed or closed mid-request.
      */
     case Transport
@@ -6711,6 +9660,12 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
      * The request timed out before the server replied.
      */
     case Timeout
+    /**
+     * The reply's stamped `from` does not match the queried entity
+     * (RFC 6120 §8.1.2.1 defense-in-depth); the payload was
+     * discarded rather than trusted.
+     */
+    case UntrustedReply
 
 
 
@@ -6746,8 +9701,10 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
             condition: try FfiConverterString.read(from: &buf),
             text: try FfiConverterOptionString.read(from: &buf)
             )
-        case 4: return .Transport
-        case 5: return .Timeout
+        case 4: return .MalformedResponse
+        case 5: return .Transport
+        case 6: return .Timeout
+        case 7: return .UntrustedReply
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6774,12 +9731,20 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
             FfiConverterOptionString.write(text, into: &buf)
 
 
-        case .Transport:
+        case .MalformedResponse:
             writeInt(&buf, Int32(4))
 
 
-        case .Timeout:
+        case .Transport:
             writeInt(&buf, Int32(5))
+
+
+        case .Timeout:
+            writeInt(&buf, Int32(6))
+
+
+        case .UntrustedReply:
+            writeInt(&buf, Int32(7))
 
         }
     }
@@ -6799,6 +9764,155 @@ public func FfiConverterTypeWaddleError_lift(_ buf: RustBuffer) throws -> Waddle
 public func FfiConverterTypeWaddleError_lower(_ value: WaddleError) -> RustBuffer {
     return FfiConverterTypeWaddleError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Transport of a XEP-0215 `<service transport='…'/>` entry.
+ */
+
+public enum WaddleExternalServiceTransport: Equatable, Hashable {
+
+    case udp
+    case tcp
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalServiceTransport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalServiceTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceTransport
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalServiceTransport {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .udp
+
+        case 2: return .tcp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExternalServiceTransport, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .udp:
+            writeInt(&buf, Int32(1))
+
+
+        case .tcp:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceTransport_lift(_ buf: RustBuffer) throws -> WaddleExternalServiceTransport {
+    return try FfiConverterTypeWaddleExternalServiceTransport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceTransport_lower(_ value: WaddleExternalServiceTransport) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalServiceTransport.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Service type of a XEP-0215 `<service type='…'/>` entry. `Turns` is
+ * TLS-protected TURN (XEP-0215 §3.6.5) — the shape Waddle's own server
+ * advertises.
+ */
+
+public enum WaddleExternalServiceType: Equatable, Hashable {
+
+    case stun
+    case turn
+    case turns
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExternalServiceType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExternalServiceType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExternalServiceType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .stun
+
+        case 2: return .turn
+
+        case 3: return .turns
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExternalServiceType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .stun:
+            writeInt(&buf, Int32(1))
+
+
+        case .turn:
+            writeInt(&buf, Int32(2))
+
+
+        case .turns:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceType_lift(_ buf: RustBuffer) throws -> WaddleExternalServiceType {
+    return try FfiConverterTypeWaddleExternalServiceType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExternalServiceType_lower(_ value: WaddleExternalServiceType) -> RustBuffer {
+    return FfiConverterTypeWaddleExternalServiceType.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -7585,6 +10699,76 @@ public func FfiConverterTypeWaddlePinAction_lower(_ value: WaddlePinAction) -> R
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * `urn:waddle:roomconfig:pinpermission` policy values.
+ */
+
+public enum WaddlePinPermission: Equatable, Hashable {
+
+    case adminsOnly
+    case anyone
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePinPermission: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePinPermission: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePinPermission
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePinPermission {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .adminsOnly
+
+        case 2: return .anyone
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePinPermission, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .adminsOnly:
+            writeInt(&buf, Int32(1))
+
+
+        case .anyone:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinPermission_lift(_ buf: RustBuffer) throws -> WaddlePinPermission {
+    return try FfiConverterTypeWaddlePinPermission.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePinPermission_lower(_ value: WaddlePinPermission) -> RustBuffer {
+    return FfiConverterTypeWaddlePinPermission.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Platform-discriminated provider credentials. Mirrors the upstream
  * `PushDeviceCredentials` enum exactly; UniFFI generates a Swift
  * associated-value enum that the Apple client populates per
@@ -8285,6 +11469,90 @@ public func FfiConverterTypeWaddleSetRoomNotificationModeOutcome_lower(_ value: 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Space pubsub roster role (`urn:waddle:admin:spaces:*`).
+ */
+
+public enum WaddleSpaceRole: Equatable, Hashable {
+
+    case owner
+    case admin
+    case member
+    case none
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleSpaceRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleSpaceRole: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleSpaceRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleSpaceRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .owner
+
+        case 2: return .admin
+
+        case 3: return .member
+
+        case 4: return .none
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleSpaceRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .owner:
+            writeInt(&buf, Int32(1))
+
+
+        case .admin:
+            writeInt(&buf, Int32(2))
+
+
+        case .member:
+            writeInt(&buf, Int32(3))
+
+
+        case .none:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSpaceRole_lift(_ buf: RustBuffer) throws -> WaddleSpaceRole {
+    return try FfiConverterTypeWaddleSpaceRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleSpaceRole_lower(_ value: WaddleSpaceRole) -> RustBuffer {
+    return FfiConverterTypeWaddleSpaceRole.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * RFC 6120 §8.3.2 stanza-error `type` attribute. Mirrors the client
  * crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
  * value so consumers can distinguish it from every defined type.
@@ -8520,6 +11788,30 @@ public func FfiConverterCallbackInterfaceWaddleEventListener_lower(_ v: WaddleEv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
     typealias SwiftType = UInt32?
 
@@ -8560,6 +11852,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9120,6 +12436,30 @@ fileprivate struct FfiConverterOptionTypeWaddleChatState: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleExternalServiceTransport: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExternalServiceTransport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleExternalServiceTransport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleExternalServiceTransport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
     typealias SwiftType = WaddleForumPostKind?
 
@@ -9240,6 +12580,30 @@ fileprivate struct FfiConverterOptionTypeWaddleNotifyMode: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddlePinPermission: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePinPermission?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddlePinPermission.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddlePinPermission.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleStanzaErrorType: FfiConverterRustBuffer {
     typealias SwiftType = WaddleStanzaErrorType?
 
@@ -9330,6 +12694,156 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminChannelAffiliationEntry]
+
+    public static func write(_ value: [WaddleAdminChannelAffiliationEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminChannelAffiliationEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminChannelAffiliationEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminChannelAffiliationEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminChannelAffiliationEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminChannelListEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminChannelListEntry]
+
+    public static func write(_ value: [WaddleAdminChannelListEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminChannelListEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminChannelListEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminChannelListEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminChannelListEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminChannelOccupantEntry]
+
+    public static func write(_ value: [WaddleAdminChannelOccupantEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminChannelOccupantEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminChannelOccupantEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminChannelOccupantEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminChannelOccupantEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminSpaceEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminSpaceEntry]
+
+    public static func write(_ value: [WaddleAdminSpaceEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminSpaceEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminSpaceEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminSpaceEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminSpaceEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminSpaceMemberEntry]
+
+    public static func write(_ value: [WaddleAdminSpaceMemberEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminSpaceMemberEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminSpaceMemberEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminSpaceMemberEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminSpaceMemberEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdminUserEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdminUserEntry]
+
+    public static func write(_ value: [WaddleAdminUserEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdminUserEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdminUserEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdminUserEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdminUserEntry.read(from: &buf))
         }
         return seq
     }
@@ -9455,6 +12969,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverter
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleEncryptedFileHash.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExternalService]
+
+    public static func write(_ value: [WaddleExternalService], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExternalService.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExternalService] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExternalService]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExternalService.read(from: &buf))
         }
         return seq
     }
@@ -9613,6 +13152,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleRoomMemberEntry]
+
+    public static func write(_ value: [WaddleRoomMemberEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleRoomMemberEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleRoomMemberEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleRoomMemberEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleRoomMemberEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleSharedFile]
 
@@ -9705,6 +13269,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustB
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleUploadHeader.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleUserSearchEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleUserSearchEntry]
+
+    public static func write(_ value: [WaddleUserSearchEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleUserSearchEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleUserSearchEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleUserSearchEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleUserSearchEntry.read(from: &buf))
         }
         return seq
     }
@@ -9806,10 +13395,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 16619) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason() != 11546) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 33747) {
@@ -9830,6 +13425,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 34869) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9837,6 +13435,57 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 27703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome() != 22694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations() != 45635) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create() != 38061) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete() != 34692) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick() != 20335) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list() != 63463) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants() != 52030) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation() != 26915) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update() != 6117) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create() != 38642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete() != 64827) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list() != 23143) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members() != 9963) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role() != 22959) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update() != 34191) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list() != 60110) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
@@ -9948,6 +13597,30 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room() != 54669) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room() != 25776) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config() != 2599) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant() != 31570) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members() != 46363) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users() != 32751) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation() != 44903) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {

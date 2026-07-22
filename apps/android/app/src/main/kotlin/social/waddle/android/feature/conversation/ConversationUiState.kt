@@ -37,6 +37,8 @@ data class ConversationUiState(
     /** `urn:waddle:pin:0`: pinned stanza ids (rooms only). */
     val pinnedIds: Set<String> = emptySet(),
     val canPin: Boolean = false,
+    /** XEP-0425: own occupant may moderate others' messages (rooms only). */
+    val canModerate: Boolean = false,
     /** Feed mode: thread id → reply count for the roots' chips. */
     val threadReplyCounts: Map<String, Int> = emptyMap(),
     /** Feed mode: loaded-history threads overview, newest first. */

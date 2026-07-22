@@ -17,8 +17,8 @@ pub use push_vapid::{
 
 pub use iq::{
     build_disco_info_iq, build_disco_items_iq, build_muc_admin_affiliation_list_iq,
-    build_muc_admin_affiliation_set_iq, build_pubsub_items_iq, build_roster_get_iq,
-    build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
+    build_muc_admin_affiliation_set_iq, build_muc_admin_role_set_iq, build_pubsub_items_iq,
+    build_roster_get_iq, build_upload_slot_iq, build_user_search_form_iq, build_user_search_iq,
     build_waddle_inbox_mark_read_iq, parse_muc_admin_affiliation_query, parse_roster_result,
     parse_user_search_form, parse_user_search_result,
 };
