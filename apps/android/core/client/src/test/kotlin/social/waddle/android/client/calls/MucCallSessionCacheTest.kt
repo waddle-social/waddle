@@ -198,6 +198,64 @@ class MucCallSessionCacheTest {
     }
 
     @Test
+    fun `leaveRetained keeps the debt flagged when a call claims the room mid-terminate`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        rememberSession(f)
+        f.client.mujiSessionTerminateDelaysMillis += 1_000L
+
+        val left = backgroundScope.async {
+            f.store.muc.leaveRetained(ROOM_JID, SELF_NICK, OWN_FULL, nowMillis = now + 1)
+        }
+        runCurrent()
+        // The leave presence is out and the stale terminate is in
+        // flight; a fresh call claims the room before it lands.
+        val begun = backgroundScope.async {
+            f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID)
+        }
+        runCurrent()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        // Mixer sessions are (room, identity)-scoped: the terminate may
+        // have raced onto the fresh session, so the debt stays recorded
+        // instead of being forgotten.
+        assertFalse(left.await())
+        val entry = f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)
+        assertTrue(entry?.terminatePending == true)
+        begun.cancel()
+    }
+
+    @Test
+    fun `leaveRetained stands down from the terminate when the room was claimed after the leave`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        rememberSession(f)
+        // Stall leaveRetained's leave-presence send: the fresh begin
+        // claims the slot while the send holds the presence mutex.
+        f.client.updateMujiPresenceDelaysMillis += 1_000L
+
+        val left = backgroundScope.async {
+            f.store.muc.leaveRetained(ROOM_JID, SELF_NICK, OWN_FULL, nowMillis = now + 1)
+        }
+        runCurrent()
+        val begun = backgroundScope.async {
+            f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID)
+        }
+        runCurrent()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        // The pre-terminate guard sees the claimed room: the stale
+        // terminate is never sent and the debt stays recorded.
+        assertFalse(left.await())
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.MujiSessionTerminate })
+        val entry = f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)
+        assertTrue(entry?.terminatePending == true)
+        begun.cancel()
+    }
+
+    @Test
     fun `a failed retained terminate marks the entry terminate-pending`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)

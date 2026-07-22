@@ -89,6 +89,12 @@ data class RetainedSessionView(
 data class SelfCallIdentity(
     val nick: String?,
     val fullJid: String?,
+    /**
+     * A locally-sent leave for this room's occupant slot has not
+     * echoed back yet: a racing re-stamp's active echo can re-add our
+     * nick for ~one RTT, which must not read as a retained call.
+     */
+    val leaveEchoPending: Boolean = false,
 )
 
 /**
@@ -120,6 +126,7 @@ fun shouldOfferRetainedLeave(
 ): Boolean {
     if (localCallInRoom(state, roomJid)) return false
     if (retained?.terminatePending == true) return true
+    if (self.leaveEchoPending) return false
     val nick = self.nick
     if (nick.isNullOrEmpty() || nick !in muji.nicks) return false
     return nickOwnerIsOurDeadResource(muji.owners[nick], self.fullJid, retained?.selfFullJid)

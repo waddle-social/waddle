@@ -69,6 +69,7 @@ fun ChannelScreen(
     val mucPresence = graph.sessionManager.callStore.mucCallPresence
     val participants by mucPresence.participants.collectAsStateWithLifecycle()
     val owners by mucPresence.owners.collectAsStateWithLifecycle()
+    val selfLeaveEchoPending by mucPresence.selfLeaveEchoPending.collectAsStateWithLifecycle()
     val roomMedia by mucPresence.media.collectAsStateWithLifecycle()
     val liveParticipants by graph.mucCallLiveParticipants.participants.collectAsStateWithLifecycle()
     val leavingRooms by graph.mucCallLiveParticipants.leavingRooms.collectAsStateWithLifecycle()
@@ -101,6 +102,8 @@ fun ChannelScreen(
         self = SelfCallIdentity(
             nick = session?.xmppLocalpart,
             fullJid = graph.sessionManager.ownFullJid(),
+            leaveEchoPending = session?.xmppLocalpart
+                ?.let { "$normalizedRoom/$it" in selfLeaveEchoPending } == true,
         ),
     )
 

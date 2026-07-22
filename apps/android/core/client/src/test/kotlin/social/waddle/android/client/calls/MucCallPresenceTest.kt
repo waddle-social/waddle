@@ -20,6 +20,44 @@ import org.junit.Test
 class MucCallPresenceTest {
     private val presence = MucCallPresence()
 
+    // ── Self-leave echo marker ───────────────────────────────────────────────
+
+    @Test
+    fun `a racing active echo does not settle the self-leave marker`() {
+        presence.markSelfLeaveEchoPending(ROOM_JID, "alice")
+
+        presence.applyMucCallPresence(mujiPresence("alice", active = true))
+
+        assertEquals(setOf("$ROOM_JID/alice"), presence.selfLeaveEchoPending.value)
+    }
+
+    @Test
+    fun `the leave echo settles the self-leave marker`() {
+        presence.markSelfLeaveEchoPending(ROOM_JID, "alice")
+
+        presence.applyMucCallPresence(mujiPresence("alice"))
+
+        assertTrue(presence.selfLeaveEchoPending.value.isEmpty())
+    }
+
+    @Test
+    fun `a successor attempt's preparing marker settles the self-leave marker`() {
+        presence.markSelfLeaveEchoPending(ROOM_JID, "alice")
+
+        presence.applyMucCallPresence(mujiPresence("alice", preparing = true))
+
+        assertTrue(presence.selfLeaveEchoPending.value.isEmpty())
+    }
+
+    @Test
+    fun `clear wipes pending self-leave markers`() {
+        presence.markSelfLeaveEchoPending(ROOM_JID, "alice")
+
+        presence.clear()
+
+        assertTrue(presence.selfLeaveEchoPending.value.isEmpty())
+    }
+
     // ── Membership rules ─────────────────────────────────────────────────────
 
     @Test

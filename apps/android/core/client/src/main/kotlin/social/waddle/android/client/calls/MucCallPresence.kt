@@ -92,6 +92,16 @@ class MucCallPresence internal constructor() {
     /** room → nicks self-reporting the `urn:waddle:in-call:0` muted marker. */
     val mutedNicks: StateFlow<Map<String, Set<String>>> = _mutedNicks.asStateFlow()
 
+    private val _selfLeaveEchoPending = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * `room/nick` keys whose locally-sent leave presence has not
+     * echoed back yet — while pending, a racing re-stamp's active echo
+     * re-adds our nick for ~one RTT, and UI ghost heuristics must not
+     * treat that transient as a retained call.
+     */
+    val selfLeaveEchoPending: StateFlow<Set<String>> = _selfLeaveEchoPending.asStateFlow()
+
     // Guarded by [lock]: raw per-room active/preparing sets keyed by
     // (nick, realJid) plus per-participant media, from which the public
     // flows above are re-projected after every mutation.
@@ -160,6 +170,14 @@ class MucCallPresence internal constructor() {
     ) {
         val roomJid = parsed.roomJid
         val nick = parsed.nick
+        // A locally-sent leave is settled by the room's next
+        // non-active presence for our occupant slot (the leave's own
+        // echo) or a successor attempt's preparing marker. A racing
+        // re-stamp's ACTIVE echo must NOT settle it — that echo is
+        // exactly the transient ghost the marker suppresses.
+        if (parsed.activeMedia == null || parsed.hasPreparing) {
+            removeSelfLeaveEchoPendingLocked(roomJid, nick)
+        }
         if (parsed.hasPreparing) {
             addPreparingLocked(roomJid, nick, parsed.realJid)
             echoWaiterKey(roomJid, nick, parsed.realJid).let { key ->
@@ -178,6 +196,26 @@ class MucCallPresence internal constructor() {
         } else if (parsed.shouldClear) {
             removeActiveLocked(roomJid, nick, parsed.realJid, includeAggregate = parsed.realJid == null)
             clearInCallFlagsLocked(roomJid, nick)
+        }
+    }
+
+    /**
+     * Record that a leave presence for our own occupant slot is on the
+     * wire; settled by [applyMucCallPresence] when the room's next
+     * non-active presence for the nick arrives.
+     */
+    fun markSelfLeaveEchoPending(roomJid: String, nick: String) {
+        val room = normalizeMucCallRoomJid(roomJid)
+        if (room.isEmpty() || nick.isEmpty()) return
+        synchronized(lock) {
+            _selfLeaveEchoPending.value = _selfLeaveEchoPending.value + selfLeaveKey(room, nick)
+        }
+    }
+
+    private fun removeSelfLeaveEchoPendingLocked(roomJid: String, nick: String) {
+        val key = selfLeaveKey(roomJid, nick)
+        if (key in _selfLeaveEchoPending.value) {
+            _selfLeaveEchoPending.value = _selfLeaveEchoPending.value - key
         }
     }
 
@@ -287,6 +325,7 @@ class MucCallPresence internal constructor() {
             _media.value = emptyMap()
             _raisedHands.value = emptyMap()
             _mutedNicks.value = emptyMap()
+            _selfLeaveEchoPending.value = emptySet()
             val waiters = prepareEchoWaiters.values.toList() + noOtherPreparingWaiters.values
             prepareEchoWaiters.clear()
             noOtherPreparingWaiters.clear()
@@ -314,6 +353,8 @@ class MucCallPresence internal constructor() {
 
     private fun echoWaiterKey(room: String, nick: String, realJid: String?): ParticipantWaiterKey =
         ParticipantWaiterKey(room, nick, fullJidIdentityKey(realJid))
+
+    private fun selfLeaveKey(room: String, nick: String): String = "$room/$nick"
 
     private fun participantKey(nick: String, realJid: String?): ParticipantKey =
         ParticipantKey(nick, fullJidIdentityKey(realJid))

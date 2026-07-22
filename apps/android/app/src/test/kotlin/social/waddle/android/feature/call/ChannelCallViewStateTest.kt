@@ -179,12 +179,17 @@ class ChannelCallViewStateTest {
         mujiNicks: List<String> = listOf("me", "alice"),
         selfNick: String? = "me",
         owners: Map<String, String?> = emptyMap(),
+        leaveEchoPending: Boolean = false,
     ): Boolean = shouldOfferRetainedLeave(
         state = state,
         roomJid = room,
         retained = retained,
         muji = RoomMujiView(nicks = mujiNicks, owners = owners),
-        self = SelfCallIdentity(nick = selfNick, fullJid = selfFullJid),
+        self = SelfCallIdentity(
+            nick = selfNick,
+            fullJid = selfFullJid,
+            leaveEchoPending = leaveEchoPending,
+        ),
     )
 
     @Test
@@ -230,6 +235,33 @@ class ChannelCallViewStateTest {
         assertEquals(
             true,
             offersRetainedLeave(retained = null, owners = mapOf("me" to selfFullJid)),
+        )
+    }
+
+    @Test
+    fun pendingSelfLeaveEchoSuppressesTheGhostReading() {
+        // Right after a normal hangUp, a racing re-stamp's active echo
+        // can re-add our nick for ~one RTT; that transient must not
+        // resurrect the destructive leave affordance.
+        assertEquals(
+            false,
+            offersRetainedLeave(
+                retained = null,
+                owners = mapOf("me" to selfFullJid),
+                leaveEchoPending = true,
+            ),
+        )
+    }
+
+    @Test
+    fun pendingSelfLeaveEchoDoesNotSuppressTheTerminatePendingArm() {
+        assertEquals(
+            true,
+            offersRetainedLeave(
+                retained = RetainedSessionView(terminatePending = true, selfFullJid = deadResourceJid),
+                mujiNicks = emptyList(),
+                leaveEchoPending = true,
+            ),
         )
     }
 

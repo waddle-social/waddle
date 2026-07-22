@@ -336,6 +336,12 @@ class MucCallEngine internal constructor(
             sessionCache.read(room, self, nowMillis) ?: sessionCache.retainedEntry(room, self, nowMillis)
         }
         val cleared = presenceSendMutex.withLock {
+            // Re-check under the lock: the suspending cache reads above
+            // are long enough for a fresh begin() to claim this room
+            // (the Join pill is visible alongside the ghost banner),
+            // and its marker must not be wiped — same stand-down as
+            // [leavePresence].
+            if (slotHoldsMucRoom(room)) return false
             signaling.updateMujiPresence(
                 MujiPresenceUpdate(
                     roomJid = room, nick = selfNick,
@@ -348,15 +354,30 @@ class MucCallEngine internal constructor(
             store.reportCallError("muji leave presence failed")
             return false
         }
+        presence.markSelfLeaveEchoPending(room, selfNick)
         presence.clearParticipant(room, selfNick, self.ifEmpty { null })
         if (cached == null) return true
-        return if (signaling.mujiSessionTerminate(cached.roomJid, cached.sid)) {
-            sessionCache.forget(cached.roomJid, cached.selfFullJid, cached.sid)
-            true
-        } else {
+        // Same (room, identity) guard as [retryPendingTerminates]: a
+        // fresh call claimed mid-flow keeps the entry flagged instead
+        // of firing the stale terminate onto the live session.
+        if (slotHoldsMucRoom(cached.roomJid)) {
+            sessionCache.markTerminatePending(cached.roomJid, cached.sid, cached.selfFullJid, nowMillis)
+            return false
+        }
+        if (!signaling.mujiSessionTerminate(cached.roomJid, cached.sid)) {
             sessionCache.markTerminatePending(cached.roomJid, cached.sid, cached.selfFullJid, nowMillis)
             store.reportCallError("muji session terminate failed")
+            return false
+        }
+        return if (slotHoldsMucRoom(cached.roomJid)) {
+            // Claimed while the terminate IQ was in flight: it may have
+            // raced onto the fresh session — keep the debt recorded so
+            // a later connect settles it once the room is free.
+            sessionCache.markTerminatePending(cached.roomJid, cached.sid, cached.selfFullJid, nowMillis)
             false
+        } else {
+            sessionCache.forget(cached.roomJid, cached.selfFullJid, cached.sid)
+            true
         }
     }
 
@@ -606,9 +627,16 @@ class MucCallEngine internal constructor(
             )
         }
         if (!cleared) store.reportCallError("muji leave presence failed")
+        presence.markSelfLeaveEchoPending(room, selfNick)
         presence.clearParticipant(room, selfNick, selfFullJid)
-        _selfHandRaised.value = false
-        _selfMuted.value = false
+        // The optimistic flags belong to whatever MUC attempt owns the
+        // slot NOW: a concurrently-begun different-room attempt already
+        // re-initialized them at claim time, and wiping them here would
+        // clobber its join-muted state.
+        if (!store.state.value.isMucCallPhase) {
+            _selfHandRaised.value = false
+            _selfMuted.value = false
+        }
     }
 
     private suspend fun terminate(room: String, sid: String, selfFullJid: String?) {
