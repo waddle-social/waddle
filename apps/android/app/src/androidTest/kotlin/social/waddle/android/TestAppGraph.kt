@@ -16,7 +16,9 @@ import social.waddle.android.client.auth.DevicePollResult
 import social.waddle.android.client.auth.DeviceStartResponse
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.testSessionInfo
+import social.waddle.android.feature.call.FakeCallMediaController
 import social.waddle.android.feature.login.LoginAuthGateway
+import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePresence
@@ -74,6 +76,7 @@ class TestAppGraph {
     val loginGateway = FakeLoginAuthGateway()
     val clientFactory = FakeClientFactory()
     val networkSignal = FakeNetworkSignal()
+    val callMedia = FakeCallMediaController()
 
     val graph = AppGraph(
         context = ApplicationProvider.getApplicationContext(),
@@ -83,6 +86,7 @@ class TestAppGraph {
         userStore = InMemoryPreferencesDataStore(),
         networkSignal = networkSignal,
         loginGatewayFactory = { loginGateway },
+        callMediaControllerFactory = { callMedia },
     )
 
     /** Flip the shell to SignedOut without touching the network. */
@@ -113,6 +117,11 @@ class TestAppGraph {
     /** Inject a live FFI presence (e.g. to seed MUC occupants). */
     fun emitPresence(presence: WaddlePresence) {
         clientFactory.emit(WaddleClientEvent.Presence(presence))
+    }
+
+    /** Inject an inbound XEP-0353/0166 call event. */
+    fun emitCallEvent(event: WaddleCallEvent) {
+        clientFactory.emit(WaddleClientEvent.Call(event))
     }
 
     /** The current attempt's fake client (records sends and queries). */

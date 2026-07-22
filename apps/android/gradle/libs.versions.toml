@@ -27,6 +27,10 @@ coreSplashscreen = "1.2.0"
 browser = "1.10.0"
 coil = "3.5.0"
 detekt = "1.23.8"
+# LiveKit media plane for A/V calls; 2.27.0 is the latest stable of the
+# 2.x line (Maven Central, 2026-07-13). Bundles libwebrtc — release
+# builds stay arm64-only via the existing abiFilters.
+livekit = "2.27.0"
 
 [libraries]
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation" }
@@ -65,6 +69,7 @@ compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-mani
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 detekt-formatting = { group = "io.gitlab.arturbosch.detekt", name = "detekt-formatting", version.ref = "detekt" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+livekit-android = { group = "io.livekit", name = "livekit-android", version.ref = "livekit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

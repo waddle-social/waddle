@@ -25,6 +25,8 @@ mod stanza;
 mod types;
 
 #[cfg(test)]
+mod calls_tests;
+#[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod community_admin_tests;

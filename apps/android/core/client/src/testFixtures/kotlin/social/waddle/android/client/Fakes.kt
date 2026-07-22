@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -30,12 +31,14 @@ import social.waddle.client.ffi.WaddleAdminSpacesUpdateArgs
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleBookmarkItem
+import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
+import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
@@ -129,6 +132,74 @@ data class SearchCall(
 )
 
 /**
+ * One recorded `sendCall*` wire verb, in send order, so call-engine
+ * tests can assert exact sequences (e.g. the tie-break branch's
+ * finish-migrated → proceed → session-terminate ordering).
+ */
+sealed interface RecordedCallVerb {
+    data class Propose(
+        val peerBareJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class Ringing(val peerBareJid: String, val sid: String) : RecordedCallVerb
+
+    data class Proceed(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Reject(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class RejectTieBreak(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Retract(val peerBareJid: String, val sid: String) : RecordedCallVerb
+
+    data class RetractTieBreak(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class Finish(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class FinishWithReason(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason,
+    ) : RecordedCallVerb
+
+    data class FinishMigrated(
+        val peerFullJid: String,
+        val oldSid: String,
+        val newSid: String,
+    ) : RecordedCallVerb
+
+    data class SessionInitiate(
+        val peerFullJid: String,
+        val initiatorFullJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class SessionAccept(
+        val peerFullJid: String,
+        val responderFullJid: String,
+        val sid: String,
+        val audio: Boolean,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class SessionTerminate(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason?,
+    ) : RecordedCallVerb
+
+    data class SessionTerminateWithOutcome(
+        val peerFullJid: String,
+        val sid: String,
+        val reason: WaddleJingleReason?,
+    ) : RecordedCallVerb
+}
+
+/**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
@@ -177,30 +248,107 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun discoverTopology(): WaddleTopology =
         WaddleTopology(spaces = emptyList(), channels = emptyList())
 
-    override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean = unused()
+    /** Every recorded `sendCall*` wire verb, in send order. */
+    val callVerbs = CopyOnWriteArrayList<RecordedCallVerb>()
+
+    /** Canned result for the bool-returning call verbs. */
+    @Volatile
+    var callVerbResult = true
+
+    /** Canned outcome for [sendCallSessionTerminateWithOutcome]. */
+    @Volatile
+    var callTerminateOutcome: WaddleCallSessionTerminateOutcome =
+        WaddleCallSessionTerminateOutcome.OK
+
+    /**
+     * Virtual-time stall before [sendCallSessionTerminateWithOutcome]
+     * answers — models the FFI's IQ timeout on a dead network.
+     */
+    @Volatile
+    var callTerminateDelayMillis = 0L
+
+    /**
+     * Virtual-time stall before [sendCallProceed] answers — lets tests
+     * land a concurrent action while a proceed is in flight.
+     */
+    @Volatile
+    var callProceedDelayMillis = 0L
+
+    /**
+     * Virtual-time stall before [sendCallRetractTieBreak] answers —
+     * lets tests land an inbound event mid-tie-break.
+     */
+    @Volatile
+    var callRetractTieBreakDelayMillis = 0L
+
+    /** Canned XEP-0215 services served by [fetchExternalServices]. */
+    @Volatile
+    var externalServices: List<WaddleExternalService> = emptyList()
+
+    override suspend fun sendCallFinish(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Finish(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallFinishWithReason(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason,
+    ): Boolean {
+        callVerbs += RecordedCallVerb.FinishWithReason(peerFullJid, sid, reason)
+        return callVerbResult
+    }
 
     override suspend fun sendCallFinishMigrated(
         peerFullJid: String,
         oldSid: String,
         newSid: String,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.FinishMigrated(peerFullJid, oldSid, newSid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallProceed(peerFullJid: String, sid: String): Boolean {
+        if (callProceedDelayMillis > 0) delay(callProceedDelayMillis)
+        callVerbs += RecordedCallVerb.Proceed(peerFullJid, sid)
+        return callVerbResult
+    }
 
     override suspend fun sendCallPropose(
         peerBareJid: String,
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.Propose(peerBareJid, sid, audio, video)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallReject(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallReject(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Reject(peerFullJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRejectTieBreak(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRejectTieBreak(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.RejectTieBreak(peerFullJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRetract(peerBareJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRetract(peerBareJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Retract(peerBareJid, sid)
+        return callVerbResult
+    }
 
-    override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean = unused()
+    override suspend fun sendCallRetractTieBreak(peerFullJid: String, sid: String): Boolean {
+        if (callRetractTieBreakDelayMillis > 0) delay(callRetractTieBreakDelayMillis)
+        callVerbs += RecordedCallVerb.RetractTieBreak(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallRinging(peerBareJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Ringing(peerBareJid, sid)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionAccept(
         peerFullJid: String,
@@ -208,7 +356,10 @@ class FakeWaddleClient : WaddleClientInterface {
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionAccept(peerFullJid, responderFullJid, sid, audio, video)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionInitiate(
         peerFullJid: String,
@@ -216,13 +367,31 @@ class FakeWaddleClient : WaddleClientInterface {
         sid: String,
         audio: Boolean,
         video: Boolean,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionInitiate(peerFullJid, initiatorFullJid, sid, audio, video)
+        return callVerbResult
+    }
 
     override suspend fun sendCallSessionTerminate(
         peerFullJid: String,
         sid: String,
         reason: WaddleJingleReason?,
-    ): Boolean = unused()
+    ): Boolean {
+        callVerbs += RecordedCallVerb.SessionTerminate(peerFullJid, sid, reason)
+        return callVerbResult
+    }
+
+    override suspend fun sendCallSessionTerminateWithOutcome(
+        peerFullJid: String,
+        sid: String,
+        reason: WaddleJingleReason?,
+    ): WaddleCallSessionTerminateOutcome {
+        if (callTerminateDelayMillis > 0) delay(callTerminateDelayMillis)
+        callVerbs += RecordedCallVerb.SessionTerminateWithOutcome(peerFullJid, sid, reason)
+        return callTerminateOutcome
+    }
+
+    override suspend fun fetchExternalServices(): List<WaddleExternalService> = externalServices
 
     override suspend fun discoverUploadService(): String? = unused()
 

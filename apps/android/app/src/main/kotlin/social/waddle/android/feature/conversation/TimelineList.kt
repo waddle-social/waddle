@@ -62,6 +62,13 @@ fun TimelineList(
         contentPadding = PaddingValues(vertical = 8.dp),
     ) {
         items(items = newestFirst, key = ::rowKey) { row ->
+            // Call anchors render as a dedicated compact row, never as
+            // a (possibly bodyless) message bubble.
+            val storedItem = (row as? ConversationRow.Stored)?.item
+            if (storedItem != null && (storedItem.callAnchor != null || storedItem.callEndedMarker != null)) {
+                CallTimelineRow(item = storedItem)
+                return@items
+            }
             MessageCard(
                 row = row,
                 onRetry = onRetry,

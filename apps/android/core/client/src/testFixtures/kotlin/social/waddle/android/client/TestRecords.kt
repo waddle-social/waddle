@@ -4,6 +4,8 @@ import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
+import social.waddle.client.ffi.WaddleCallThreadAnchor
+import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
@@ -58,6 +60,8 @@ fun testMessage(
     broadcastMention: String? = null,
     mentionUris: List<String> = emptyList(),
     references: List<WaddleReference> = emptyList(),
+    callThread: WaddleCallThreadAnchor? = null,
+    callThreadEnded: WaddleCallThreadEnded? = null,
 ): WaddleMessage = WaddleMessage(
     id = id,
     from = from,
@@ -94,13 +98,13 @@ fun testMessage(
     isSticker = false,
     linkPreviews = emptyList(),
     pinEvent = pinEvent,
-    callThreadEnded = null,
+    callThreadEnded = callThreadEnded,
     carbon = null,
     replyToId = null,
     replyToSender = null,
     replyFallbackStart = replyFallbackStart,
     replyFallbackEnd = replyFallbackEnd,
-    callThread = null,
+    callThread = callThread,
     sharedFiles = emptyList(),
     mdsDisplayed = mdsDisplayed,
 )

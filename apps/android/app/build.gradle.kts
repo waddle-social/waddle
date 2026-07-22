@@ -117,6 +117,9 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.core)
+    // A/V call media plane (WebRTC to the LiveKit SFU); signaling stays
+    // XMPP-native through :core:client.
+    implementation(libs.livekit.android)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

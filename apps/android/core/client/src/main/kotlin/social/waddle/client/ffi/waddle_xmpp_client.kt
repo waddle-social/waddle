@@ -673,9 +673,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
     ): Int
@@ -689,11 +693,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
     ): Int
@@ -848,9 +856,13 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(`ptr`:
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(`ptr`: Long,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(`ptr`: Long,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`oldSid`: RustBuffer.ByValue,`newSid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_proceed(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
@@ -864,11 +876,15 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retr
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retract_tie_break(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(`ptr`: Long,`peerBareJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_accept(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`responderFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`audio`: Byte,`video`: Byte,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_initiate(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`initiatorFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`audio`: Byte,`video`: Byte,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate_with_outcome(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_affiliations(`ptr`: Long,`args`: RustBuffer.ByValue,
 ): Long
@@ -1122,10 +1138,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services() != 57149) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish() != 12330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated() != 16619) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason() != 11546) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed() != 33747) {
@@ -1146,6 +1168,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 34869) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1153,6 +1178,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate() != 27703) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome() != 22694) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations() != 45635) {
@@ -1867,6 +1895,16 @@ public interface WaddleClientInterface {
     suspend fun `disconnect`()
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+    suspend fun `fetchExternalServices`(): List<WaddleExternalService>
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -1879,6 +1917,16 @@ public interface WaddleClientInterface {
      * `<migrated to='new-sid'/>`.
      */
     suspend fun `sendCallFinishMigrated`(`peerFullJid`: kotlin.String, `oldSid`: kotlin.String, `newSid`: kotlin.String): kotlin.Boolean
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    suspend fun `sendCallFinishWithReason`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason): kotlin.Boolean
 
     /**
      * Send a XEP-0353 §5.1.2 `<proceed/>` to the *full* JID of the
@@ -1920,6 +1968,15 @@ public interface WaddleClientInterface {
     suspend fun `sendCallRetractTieBreak`(`peerFullJid`: kotlin.String, `sid`: kotlin.String): kotlin.Boolean
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+    suspend fun `sendCallRinging`(`peerBareJid`: kotlin.String, `sid`: kotlin.String): kotlin.Boolean
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
     suspend fun `sendCallSessionAccept`(`peerFullJid`: kotlin.String, `responderFullJid`: kotlin.String, `sid`: kotlin.String, `audio`: kotlin.Boolean, `video`: kotlin.Boolean): kotlin.Boolean
@@ -1934,6 +1991,18 @@ public interface WaddleClientInterface {
      * Send a XEP-0166 §7.4 `session-terminate` IQ.
      */
     suspend fun `sendCallSessionTerminate`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason?): kotlin.Boolean
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+    suspend fun `sendCallSessionTerminateWithOutcome`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason?): WaddleCallSessionTerminateOutcome
 
     /**
      * `urn:waddle:admin:channels:affiliations:0`.
@@ -2479,6 +2548,35 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * XEP-0215 §3.2: fetch the external services (TURN/STUN) the
+     * user's own server advertises, as typed entries the app maps to
+     * WebRTC ICE servers for LiveKit's RTC configuration at connect
+     * time. The query is addressed to the authenticated user's server
+     * domain; an empty `<services/>` requests every advertised
+     * service type.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchExternalServices`() : List<WaddleExternalService> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_external_services(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleExternalService.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * Send a `<finish/>` Waddle JMI extension signaling clean
      * teardown after a call ended. Addressed to the peer's full JID
      * so the originating resource sees the finish notice.
@@ -2515,6 +2613,34 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_migrated(
                 uniffiHandle,
                 FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`oldSid`),FfiConverterString.lower(`newSid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Send a `<finish/>` carrying an explicit `<reason/>` — the
+     * XEP-0353-conformant way for a responder to abandon a session it
+     * already answered with `<proceed/>` (a `<reject/>` after proceed
+     * is a contradictory double answer; cf. the tie-break-2 example,
+     * where an accepted-but-incomplete session finishes with
+     * `<expired/>`). Addressed to the peer's full JID.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sendCallFinishWithReason`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_finish_with_reason(
+                uniffiHandle,
+                FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`sid`),FfiConverterTypeWaddleJingleReason.lower(`reason`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -2676,6 +2802,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
+     * initiator's server fans the responder's device-ring state out
+     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
+     * Device Rings"). Emitted when an inbound `<propose/>` lands and
+     * the ringing UI starts.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sendCallRinging`(`peerBareJid`: kotlin.String, `sid`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(
+                uniffiHandle,
+                FfiConverterString.lower(`peerBareJid`),FfiConverterString.lower(`sid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -2739,6 +2892,36 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
         // lift function
         { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Send a XEP-0166 §7.4 `session-terminate` IQ and report the
+     * typed outcome instead of a bare bool. `Orphaned` classifies the
+     * Waddle server's `forbidden` + "Jingle terminator is not a
+     * participant in this call" stanza error — the call registry
+     * entry is already gone, so the caller should still send the
+     * XEP-0353 `<finish/>` bookend that keeps both MAM archives
+     * consistent (wasm `send_call_session_terminate_with_outcome`
+     * parity).
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `sendCallSessionTerminateWithOutcome`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason?) : WaddleCallSessionTerminateOutcome {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate_with_outcome(
+                uniffiHandle,
+                FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`sid`),FfiConverterOptionalTypeWaddleJingleReason.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleCallSessionTerminateOutcome.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -6476,6 +6659,94 @@ public object FfiConverterTypeWaddleEncryptedFileHash: FfiConverterRustBuffer<Wa
 
 
 /**
+ * One external service (TURN/STUN) advertised by the user's server
+ * over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
+ * The app maps a list of these to WebRTC ICE servers for LiveKit's
+ * RTC configuration (RFC 7064/7065 URI mapping happens app-side, web
+ * `ice-servers.ts` parity). Credentials are present only on
+ * TURN/TURNS entries.
+ */
+data class WaddleExternalService (
+    var `serviceType`: WaddleExternalServiceType
+    ,
+    var `host`: kotlin.String
+    ,
+    /**
+     * RECOMMENDED but optional in XEP-0215; `None` means the ICE URI
+     * carries no explicit port and the scheme default applies.
+     */
+    var `port`: kotlin.UShort?
+    ,
+    var `transport`: WaddleExternalServiceTransport?
+    ,
+    var `username`: kotlin.String?
+    ,
+    var `password`: kotlin.String?
+    ,
+    /**
+     * RFC 3339 credential expiry (XEP-0215 §3.6.5 `expires`),
+     * serialized for the FFI boundary exactly like the wasm client's
+     * JSON transit shape.
+     */
+    var `expires`: kotlin.String?
+    ,
+    /**
+     * Whether credentials are required (XEP-0215 §3.6.5 `restricted`).
+     */
+    var `restricted`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExternalService: FfiConverterRustBuffer<WaddleExternalService> {
+    override fun read(buf: ByteBuffer): WaddleExternalService {
+        return WaddleExternalService(
+            FfiConverterTypeWaddleExternalServiceType.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalUShort.read(buf),
+            FfiConverterOptionalTypeWaddleExternalServiceTransport.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleExternalService) = (
+            FfiConverterTypeWaddleExternalServiceType.allocationSize(value.`serviceType`) +
+            FfiConverterString.allocationSize(value.`host`) +
+            FfiConverterOptionalUShort.allocationSize(value.`port`) +
+            FfiConverterOptionalTypeWaddleExternalServiceTransport.allocationSize(value.`transport`) +
+            FfiConverterOptionalString.allocationSize(value.`username`) +
+            FfiConverterOptionalString.allocationSize(value.`password`) +
+            FfiConverterOptionalString.allocationSize(value.`expires`) +
+            FfiConverterBoolean.allocationSize(value.`restricted`)
+    )
+
+    override fun write(value: WaddleExternalService, buf: ByteBuffer) {
+            FfiConverterTypeWaddleExternalServiceType.write(value.`serviceType`, buf)
+            FfiConverterString.write(value.`host`, buf)
+            FfiConverterOptionalUShort.write(value.`port`, buf)
+            FfiConverterOptionalTypeWaddleExternalServiceTransport.write(value.`transport`, buf)
+            FfiConverterOptionalString.write(value.`username`, buf)
+            FfiConverterOptionalString.write(value.`password`, buf)
+            FfiConverterOptionalString.write(value.`expires`, buf)
+            FfiConverterBoolean.write(value.`restricted`, buf)
+    }
+}
+
+
+
+/**
  * XEP-0428 fallback range identifying the quoted-prefix inside the body.
  * Offsets count Unicode scalar values and `end` is exclusive.
  */
@@ -9018,6 +9289,60 @@ public object FfiConverterTypeWaddleCallEventKind : FfiConverterRustBuffer<Waddl
 
 
 /**
+ * Typed outcome of `send_call_session_terminate_with_outcome`.
+ * Mirrors the wasm client's three-way classification so the app can
+ * still send the XEP-0353 `<finish/>` bookend after a terminate the
+ * server refused only because it already lost the call registry.
+ */
+
+enum class WaddleCallSessionTerminateOutcome {
+
+    /**
+     * The server acked the terminate with an `<iq type='result'/>`.
+     */
+    OK,
+    /**
+     * The server answered `forbidden` with the Waddle Jingle handler's
+     * "terminator is not a participant" text: the call registry entry
+     * is already gone (crashed peer, recovered session). Callers treat
+     * this like success for the message-level `<finish/>` bookend.
+     */
+    ORPHANED,
+    /**
+     * Invalid input, no live session, transport failure, or any other
+     * stanza error.
+     */
+    ERROR;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleCallSessionTerminateOutcome: FfiConverterRustBuffer<WaddleCallSessionTerminateOutcome> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleCallSessionTerminateOutcome.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleCallSessionTerminateOutcome) = 4UL
+
+    override fun write(value: WaddleCallSessionTerminateOutcome, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * XEP-0280 carbon direction of an unwrapped forwarded copy. Always
  * §11-verified by the runtime before it reaches this boundary.
  */
@@ -9501,6 +9826,17 @@ sealed class WaddleException: kotlin.Exception() {
             get() = ""
     }
 
+    /**
+     * The reply's stamped `from` does not match the queried entity
+     * (RFC 6120 §8.1.2.1 defense-in-depth); the payload was
+     * discarded rather than trusted.
+     */
+    class UntrustedReply(
+        ) : WaddleException() {
+        override val message
+            get() = ""
+    }
+
 
 
 
@@ -9529,6 +9865,7 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
             4 -> WaddleException.MalformedResponse()
             5 -> WaddleException.Transport()
             6 -> WaddleException.Timeout()
+            7 -> WaddleException.UntrustedReply()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -9558,6 +9895,10 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 4UL
             )
             is WaddleException.Timeout -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is WaddleException.UntrustedReply -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -9592,10 +9933,91 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 buf.putInt(6)
                 Unit
             }
+            is WaddleException.UntrustedReply -> {
+                buf.putInt(7)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
 }
+
+
+
+/**
+ * Transport of a XEP-0215 `<service transport='…'/>` entry.
+ */
+
+enum class WaddleExternalServiceTransport {
+
+    UDP,
+    TCP;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExternalServiceTransport: FfiConverterRustBuffer<WaddleExternalServiceTransport> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleExternalServiceTransport.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleExternalServiceTransport) = 4UL
+
+    override fun write(value: WaddleExternalServiceTransport, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Service type of a XEP-0215 `<service type='…'/>` entry. `Turns` is
+ * TLS-protected TURN (XEP-0215 §3.6.5) — the shape Waddle's own server
+ * advertises.
+ */
+
+enum class WaddleExternalServiceType {
+
+    STUN,
+    TURN,
+    TURNS;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleExternalServiceType: FfiConverterRustBuffer<WaddleExternalServiceType> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleExternalServiceType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleExternalServiceType) = 4UL
+
+    override fun write(value: WaddleExternalServiceType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -10765,6 +11187,38 @@ public object FfiConverterTypeWaddleEventListener: FfiConverterCallbackInterface
 /**
  * @suppress
  */
+public object FfiConverterOptionalUShort: FfiConverterRustBuffer<kotlin.UShort?> {
+    override fun read(buf: ByteBuffer): kotlin.UShort? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUShort.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UShort?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUShort.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UShort?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUShort.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
     override fun read(buf: ByteBuffer): kotlin.UInt? {
         if (buf.get().toInt() == 0) {
@@ -11565,6 +12019,38 @@ public object FfiConverterOptionalTypeWaddleChatState: FfiConverterRustBuffer<Wa
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleExternalServiceTransport: FfiConverterRustBuffer<WaddleExternalServiceTransport?> {
+    override fun read(buf: ByteBuffer): WaddleExternalServiceTransport? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleExternalServiceTransport.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleExternalServiceTransport?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleExternalServiceTransport.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleExternalServiceTransport?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleExternalServiceTransport.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleForumPostKind: FfiConverterRustBuffer<WaddleForumPostKind?> {
     override fun read(buf: ByteBuffer): WaddleForumPostKind? {
         if (buf.get().toInt() == 0) {
@@ -12175,6 +12661,34 @@ public object FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleEncryptedFileHash.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuffer<List<WaddleExternalService>> {
+    override fun read(buf: ByteBuffer): List<WaddleExternalService> {
+        val len = buf.getInt()
+        return List<WaddleExternalService>(len) {
+            FfiConverterTypeWaddleExternalService.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleExternalService>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleExternalService.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleExternalService>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleExternalService.write(it, buf)
         }
     }
 }

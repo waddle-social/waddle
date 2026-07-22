@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,7 +14,11 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.calls.CallState
+import social.waddle.android.client.calls.CallStore
+import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
@@ -83,8 +88,18 @@ class XmppSessionManager(
             router.emit(event)
         }
 
+    /**
+     * Single-slot DM call engine (reducer + XEP-0353/0166 side
+     * effects), fed from the router's serialized dispatch path.
+     */
+    val callStore: CallStore = CallStore(
+        signaling = ClientCallSignaling(activeSession),
+        ownBareJid = { activeSession.ownBareJid },
+        ownFullJid = { activeSession.ownFullJid },
+    )
+
     private val router: XmppEventRouter =
-        XmppEventRouter(activeSession, stores, resume, readState) { peer, timestamp ->
+        XmppEventRouter(activeSession, stores, resume, readState, callStore) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
 
@@ -127,14 +142,34 @@ class XmppSessionManager(
         sessionScope = scope
         _appState.value = WaddleAppState.Ready
         resume.start(scope)
+        callStore.start(scope)
         scope.launch { router.sweepChatStates() }
         scope.launch { loop.run(session) }
     }
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // Best-effort call teardown BEFORE the stream closes (web
+        // client.ts disconnect parity): the peer must get the
+        // retract/reject/terminate + XEP-0353 <finish/> bookend instead
+        // of ringing into a dead session until their timeout. Bounded:
+        // on a silently-dead network the terminate IQ only fails after
+        // the FFI's full 30 s timeout, and sign-out must not hold
+        // [lifecycleMutex] that long. Cancellation must propagate —
+        // swallowing it would run the teardown below inside an
+        // already-cancelled coroutine and abort it halfway.
+        if (callStore.state.value != CallState.Idle) {
+            try {
+                withTimeoutOrNull(LOGOUT_CALL_TEARDOWN_MILLIS) { callStore.hangUp() }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Best-effort: sign-out proceeds even if teardown fails.
+            }
+        }
         cancelSessionScope()
         activeSession.ownBareJid = null
+        activeSession.ownFullJid = null
         clearSessionState()
         sessionPrefs.clear()
         loop.resetToIdle()
@@ -328,6 +363,11 @@ class XmppSessionManager(
 
     private suspend fun onTerminalAuthFailure() {
         _appState.value = WaddleAppState.SignedOut
+        // A live call slot must not outlive the session: the shell is
+        // about to render the login screen with no in-app hang-up, and
+        // the app-scoped collectors (FGS, media, ring notification)
+        // tear down off this transition.
+        callStore.clear()
         persistQuietly { sessionPrefs.clear() }
         // Last statement on purpose: cancelling the session scope kills
         // this coroutine too, but also the parked snapshot persister that
@@ -362,6 +402,7 @@ class XmppSessionManager(
         stores.clear()
         readState.clearPending()
         resume.clear()
+        callStore.clear()
     }
 
     /**
@@ -388,5 +429,8 @@ class XmppSessionManager(
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = SessionCatchup.CATCHUP_DM_LIMIT
+
+        /** Sign-out budget for the pre-disconnect call hang-up. */
+        const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
     }
 }
