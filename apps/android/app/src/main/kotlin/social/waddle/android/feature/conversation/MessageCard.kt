@@ -503,22 +503,35 @@ private fun SharedFileContent(file: WaddleSharedFile) {
     } else {
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable { openSharedFile(context, uriHandler, scope, file) },
-        ) {
-            Icon(
-                Icons.Outlined.AttachFile,
-                contentDescription = stringResource(R.string.message_attachment),
-            )
-            Text(
-                text = file.name ?: file.url,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 4.dp),
-            )
+        var openFailed by remember(file.url) { mutableStateOf(false) }
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clickable {
+                    openFailed = false
+                    openSharedFile(context, uriHandler, scope, file) { openFailed = true }
+                },
+            ) {
+                Icon(
+                    Icons.Outlined.AttachFile,
+                    contentDescription = stringResource(R.string.message_attachment),
+                )
+                Text(
+                    text = file.name ?: file.url,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 4.dp),
+                )
+            }
+            if (openFailed) {
+                Text(
+                    text = stringResource(R.string.attachment_open_failed),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
 }
@@ -529,22 +542,28 @@ private fun SharedFileContent(file: WaddleSharedFile) {
  * throws when no activity handles the scheme). XEP-0448 files would
  * show an external viewer only ciphertext, so they route through the
  * download → verify → decrypt → FileProvider opener instead.
+ * [onFailure] fires when the open cannot complete (failed download,
+ * decrypt, or no viewer) so the row can show an inline error.
  */
 private fun openSharedFile(
     context: Context,
     uriHandler: UriHandler,
     scope: CoroutineScope,
     file: WaddleSharedFile,
+    onFailure: () -> Unit,
 ) {
     if (file.encrypted == null) {
-        runCatching { uriHandler.openUri(file.url) }
+        runCatching { uriHandler.openUri(file.url) }.onFailure { onFailure() }
         return
     }
     val opener = (context.applicationContext as? WaddleApplication)
         ?.graph
         ?.encryptedAttachmentOpener
-        ?: return
-    scope.launch { opener.open(file) }
+    if (opener == null) {
+        onFailure()
+        return
+    }
+    scope.launch { if (!opener.open(file)) onFailure() }
 }
 
 /** Full-screen image viewer (single image; tap anywhere to dismiss). */

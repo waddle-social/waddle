@@ -150,6 +150,7 @@ class XmppSessionManagerExtensionCommandsTest {
                     label = "Question",
                     fieldType = WaddleExtensionFieldType.TEXT_SINGLE,
                     required = true,
+                    blocked = false,
                     options = emptyList(),
                     values = emptyList(),
                 ),

@@ -1190,6 +1190,9 @@ pub struct WaddleExtensionCommandFormField {
     pub label: Option<String>,
     pub field_type: WaddleExtensionFieldType,
     pub required: bool,
+    /// Forbidden-field defense: `text-private` or secret-named fields
+    /// must never render an input or submit.
+    pub blocked: bool,
     pub options: Vec<WaddleExtensionFieldOption>,
     pub values: Vec<String>,
 }

@@ -70,11 +70,16 @@ export function parseCommandIqResponse(xml: string): ExtensionCommandResult {
       })),
     })),
   } : undefined;
+  // Always derive actions, even without an <actions/> element: per
+  // XEP-0050 "Command Actions", an executing response with no
+  // <actions/> implies complete (plus the always-allowed cancel), so
+  // single-stage commands stay inline instead of opening the palette.
+  const parsedActions = parseCommandActions(actions, status, !!actionsMatch);
   return {
     ...(status ? { status } : {}),
     ...(sessionId ? { sessionId } : {}),
     notes,
-    ...(actions ? { actions: parseCommandActions(actions, status, !!actionsMatch) } : {}),
+    ...(parsedActions ? { actions: parsedActions } : {}),
     ...(form ? { form } : {}),
   };
 }

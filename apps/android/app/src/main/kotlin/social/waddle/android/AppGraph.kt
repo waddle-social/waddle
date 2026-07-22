@@ -190,6 +190,10 @@ class AppGraph(
         callSessionController.start()
         callNotifier.start(applicationScope)
         startSignedOutCleanup()
+        // Decrypted XEP-0448 attachments never survive a process
+        // restart: their FileProvider grants are gone, so the
+        // plaintext on disk is only liability.
+        applicationScope.launch { encryptedAttachmentOpener.clearCache() }
         bootstrap.restore()
     }
 
@@ -210,6 +214,7 @@ class AppGraph(
             sessionManager.appState.collect { state ->
                 if (state == WaddleAppState.SignedOut) {
                     messageNotifier.clearAll()
+                    encryptedAttachmentOpener.clearCache()
                 }
             }
         }

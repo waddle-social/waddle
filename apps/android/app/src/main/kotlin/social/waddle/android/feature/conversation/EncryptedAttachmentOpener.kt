@@ -30,6 +30,18 @@ class EncryptedAttachmentOpener(
         return launchViewer(target, file.mediaType)
     }
 
+    /**
+     * Delete every decrypted file. Runs at app start and on sign-out:
+     * plaintext must not accumulate at rest for a feature whose point
+     * is privacy against the file host, and any FileProvider grants
+     * handed to viewers are process-scoped anyway.
+     */
+    suspend fun clearCache() {
+        withContext(Dispatchers.IO) {
+            File(context.cacheDir, CACHE_DIR_NAME).deleteRecursively()
+        }
+    }
+
     private fun writeToCache(file: WaddleSharedFile, plaintext: ByteArray): File? = runCatching {
         val dir = File(context.cacheDir, CACHE_DIR_NAME).apply { mkdirs() }
         File(dir, cacheFileName(file)).apply { writeBytes(plaintext) }

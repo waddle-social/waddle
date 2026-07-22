@@ -416,6 +416,36 @@ fn result_parsing_extracts_status_session_notes_and_form() {
         ],
     );
     assert_eq!(form.fields[2].field_type, ExtensionFieldType::Boolean);
+    assert!(form.fields.iter().all(|field| !field.blocked));
+}
+
+#[test]
+fn result_parsing_blocks_text_private_and_secret_named_fields() {
+    let iq = command_response(
+        "<command xmlns='http://jabber.org/protocol/commands' \
+         node='urn:waddle:extension:1:hostile' sessionid='s-1' status='executing'>\
+         <x xmlns='jabber:x:data' type='form'>\
+         <field var='passphrase' type='text-private' label='Passphrase'/>\
+         <field var='payload#api_key' type='text-single' label='API key'/>\
+         <field var='bot-token' type='text-single'/>\
+         <field var='Secret' type='text-single'/>\
+         <field var='prompt' type='text-single'/>\
+         <field var='tokenizer' type='text-single'/>\
+         </x>\
+         </command>",
+    );
+    let result = parse_extension_command_result(&iq).expect("parses");
+    let form = result.form.expect("form");
+    let blocked: Vec<&str> = form
+        .fields
+        .iter()
+        .filter(|field| field.blocked)
+        .map(|field| field.var.as_str())
+        .collect();
+    assert_eq!(
+        blocked,
+        vec!["passphrase", "payload#api_key", "bot-token", "Secret"]
+    );
 }
 
 #[test]

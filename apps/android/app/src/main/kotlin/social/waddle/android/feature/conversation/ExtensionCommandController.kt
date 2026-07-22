@@ -174,8 +174,17 @@ class ExtensionCommandController(
         if (form != null && ExtensionCommandAction.COMPLETE in form.actions) {
             var session = setFieldValues(form, invocation.fieldName, listOf(invocation.value))
             session = forceChannelOutputForSlashAi(stage.command, session, stage.roomJid)
-            _formSession.value = session
-            return submitSession(session, ExtensionCommandAction.COMPLETE, sendPublicMessage, stage.epoch)
+            // A forbidden field or an unfilled required field never
+            // submits silently: open the palette instead, where the
+            // blocked reason / required hint shows and submit is gated.
+            val safeToSubmit = extensionFormBlockedField(session.fields) == null &&
+                missingRequiredExtensionFields(session.fields).isEmpty()
+            if (safeToSubmit) {
+                _formSession.value = session
+                return submitSession(session, ExtensionCommandAction.COMPLETE, sendPublicMessage, stage.epoch)
+            }
+            finishStage(stage.command, stage.result, session)
+            return true
         }
         val prefilled = form?.let { setFieldValues(it, invocation.fieldName, listOf(invocation.value)) }
         finishStage(stage.command, stage.result, prefilled)
@@ -198,6 +207,19 @@ class ExtensionCommandController(
         epoch: Int,
     ): Boolean {
         val command = session.command
+        // Hard gate (the sheet also disables submit): a form carrying a
+        // forbidden field must never reach the wire with values, and
+        // required fields must be filled for any forward action.
+        if (action != ExtensionCommandAction.CANCEL && action != ExtensionCommandAction.PREV) {
+            extensionFormBlockedReason(session.fields)?.let { reason ->
+                failStage(command, reason)
+                return false
+            }
+            if (missingRequiredExtensionFields(session.fields).isNotEmpty()) {
+                failStage(command, REQUIRED_FIELDS_DETAIL)
+                return false
+            }
+        }
         setPhase(command.node, CommandPhase(CommandPhaseState.LOADING))
         sendPublicPromptIfRequested(command, session, action, sendPublicMessage)
         if (epoch != callEpoch) return false
@@ -400,6 +422,7 @@ class ExtensionCommandController(
         const val CANCELED_DETAIL = "Command canceled."
         const val INCOMPLETE_FORM_DETAIL =
             "Extension returned a form that this client cannot complete yet."
+        const val REQUIRED_FIELDS_DETAIL = "Complete required fields to continue."
 
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             val manager = graph.sessionManager

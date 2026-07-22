@@ -1,7 +1,9 @@
 package social.waddle.android.feature.conversation
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.ExtensionCommand
 import social.waddle.android.client.ExtensionCommandScope
@@ -121,5 +123,26 @@ class SlashTokenTest {
         val poll = command("poll", scope = ExtensionCommandScope.CHANNEL)
         assertNull(resolveSlashCommand("poll", listOf(poll), inMuc = false))
         assertEquals(poll, resolveSlashCommand("poll", listOf(poll), inMuc = true))
+    }
+
+    // ── shouldInterceptSlashSend ─────────────────────────────────────
+
+    @Test
+    fun `a bare slash sends as plain text`() {
+        assertFalse(shouldInterceptSlashSend(parseSlashTrigger("/"), dismissedPrefix = null))
+        assertFalse(shouldInterceptSlashSend(parseSlashTrigger("/ hello"), dismissedPrefix = null))
+    }
+
+    @Test
+    fun `a dismissed prefix sends as plain text`() {
+        assertFalse(shouldInterceptSlashSend(parseSlashTrigger("/poll"), dismissedPrefix = "poll"))
+        // Typing further re-arms interception for the new prefix.
+        assertTrue(shouldInterceptSlashSend(parseSlashTrigger("/polls"), dismissedPrefix = "poll"))
+    }
+
+    @Test
+    fun `a typed prefix intercepts the send`() {
+        assertTrue(shouldInterceptSlashSend(parseSlashTrigger("/poll Lunch?"), dismissedPrefix = null))
+        assertFalse(shouldInterceptSlashSend(trigger = null, dismissedPrefix = null))
     }
 }

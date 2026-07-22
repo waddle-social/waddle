@@ -29,6 +29,7 @@ object SlashCommandTestTags {
     const val DISMISS = "slash-command-dismiss"
     const val BLOCKED_HINT = "slash-command-blocked-hint"
     const val FORM_SHEET = "slash-command-form-sheet"
+    const val FORM_BLOCKED = "slash-command-form-blocked"
 
     fun item(node: String) = "slash-command-item:$node"
 }

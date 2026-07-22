@@ -266,12 +266,47 @@ fn parse_field(field: &Element) -> ExtensionFormFieldDescriptor {
             })
         })
         .collect();
+    let var = field.attr("var").unwrap_or_default().to_string();
+    let field_type = ExtensionFieldType::parse(field.attr("type"));
+    let blocked = is_forbidden_field(&var, field_type);
     ExtensionFormFieldDescriptor {
-        var: field.attr("var").unwrap_or_default().to_string(),
+        var,
         label: field.attr("label").map(str::to_string),
-        field_type: ExtensionFieldType::parse(field.attr("type")),
+        field_type,
         required: field.get_child("required", NS_DATA_FORMS).is_some(),
+        blocked,
         options,
         values,
     }
+}
+
+/// Wasm-client `isForbiddenExtensionCommandField` parity: block
+/// `text-private` fields outright, plus any var containing a
+/// secret-suggesting segment bounded by start/end or `#`/`:`/`_`/`-`
+/// (`payload#api_key`, `bot-token`, …).
+fn is_forbidden_field(var: &str, field_type: ExtensionFieldType) -> bool {
+    if field_type == ExtensionFieldType::TextPrivate {
+        return true;
+    }
+    let lowered = var.to_ascii_lowercase();
+    const SECRET_SEGMENTS: [&str; 7] = [
+        "api_key",
+        "api-key",
+        "apikey",
+        "secret",
+        "token",
+        "password",
+        "credential",
+    ];
+    let is_boundary = |byte: Option<u8>| match byte {
+        None => true,
+        Some(byte) => matches!(byte, b'#' | b':' | b'_' | b'-'),
+    };
+    SECRET_SEGMENTS.iter().any(|segment| {
+        lowered.match_indices(segment).any(|(start, _)| {
+            let before = start.checked_sub(1).map(|i| lowered.as_bytes()[i]);
+            let after = lowered.as_bytes().get(start + segment.len()).copied();
+            is_boundary(before) && is_boundary(after)
+        })
+    })
 }

@@ -118,6 +118,7 @@ fn form_to_ffi(form: core::ExtensionCommandForm) -> WaddleExtensionCommandForm {
                 label: field.label,
                 field_type: field_type_to_ffi(field.field_type),
                 required: field.required,
+                blocked: field.blocked,
                 options: field
                     .options
                     .into_iter()

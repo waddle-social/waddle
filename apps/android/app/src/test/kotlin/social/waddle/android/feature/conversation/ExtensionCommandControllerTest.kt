@@ -426,6 +426,125 @@ class ExtensionCommandControllerTest {
     }
 
     @Test
+    fun `inline submit with a forbidden field opens the palette instead of submitting`() =
+        runTest(dispatcher.scheduler) {
+            val wire = Wire()
+            val hostile = command(inlineField = "prompt")
+            wire.invokeAnswer = ExtensionCommandCall.Ok(
+                executingForm(
+                    listOf(
+                        textField("prompt"),
+                        ExtensionCommandField(
+                            name = "payload#api_key",
+                            label = "API key",
+                            type = ExtensionFieldType.TEXT_SINGLE,
+                            required = false,
+                            options = emptyList(),
+                            values = emptyList(),
+                            blocked = true,
+                        ),
+                    ),
+                ),
+            )
+            val controller = wire.controller()
+
+            val handled = controller.dispatch(
+                SlashInvocation.InlineSubmit(command = hostile, fieldName = "prompt", value = "hello"),
+                roomJid = null,
+                sendPublicMessage = noSend,
+            )
+
+            assertTrue(handled)
+            // Nothing reached the wire; the palette shows the blocked form.
+            assertTrue(wire.submitCalls.isEmpty())
+            val session = controller.formSession.value ?: error("palette form expected")
+            assertEquals(listOf("hello"), session.fields.single { it.name == "prompt" }.values)
+        }
+
+    @Test
+    fun `palette submit refuses while a forbidden field is present`() = runTest(dispatcher.scheduler) {
+        val wire = Wire()
+        val hostile = command()
+        val secret = ExtensionCommandField(
+            name = "password",
+            label = null,
+            type = ExtensionFieldType.TEXT_PRIVATE,
+            required = false,
+            options = emptyList(),
+            values = emptyList(),
+            blocked = true,
+        )
+        wire.invokeAnswer = ExtensionCommandCall.Ok(executingForm(listOf(textField("prompt"), secret)))
+        val controller = wire.controller()
+        controller.dispatch(
+            SlashInvocation.OpenPalette(command = hostile),
+            roomJid = null,
+            sendPublicMessage = noSend,
+        )
+
+        val handled = controller.submitForm(ExtensionCommandAction.COMPLETE, noSend)
+
+        assertFalse(handled)
+        assertTrue(wire.submitCalls.isEmpty())
+        assertEquals(
+            CommandPhase(
+                CommandPhaseState.ERROR,
+                "Extension command form contains a forbidden field: password.",
+            ),
+            controller.phases.value.getValue(hostile.node),
+        )
+    }
+
+    @Test
+    fun `inline submit with an empty required field opens the palette`() = runTest(dispatcher.scheduler) {
+        val wire = Wire()
+        val poll = command(inlineField = "question")
+        wire.invokeAnswer = ExtensionCommandCall.Ok(
+            executingForm(listOf(textField("question"), textField("visibility", required = true))),
+        )
+        val controller = wire.controller()
+
+        val handled = controller.dispatch(
+            SlashInvocation.InlineSubmit(command = poll, fieldName = "question", value = "Lunch?"),
+            roomJid = null,
+            sendPublicMessage = noSend,
+        )
+
+        assertTrue(handled)
+        assertTrue(wire.submitCalls.isEmpty())
+        val session = controller.formSession.value ?: error("palette form expected")
+        assertEquals(listOf("Lunch?"), session.fields.single { it.name == "question" }.values)
+    }
+
+    @Test
+    fun `palette submit refuses forward actions while required fields are empty`() =
+        runTest(dispatcher.scheduler) {
+            val wire = Wire()
+            val poll = command()
+            wire.invokeAnswer = ExtensionCommandCall.Ok(
+                executingForm(listOf(textField("question", required = true))),
+            )
+            val controller = wire.controller()
+            controller.dispatch(
+                SlashInvocation.OpenPalette(command = poll),
+                roomJid = null,
+                sendPublicMessage = noSend,
+            )
+
+            val handled = controller.submitForm(ExtensionCommandAction.COMPLETE, noSend)
+
+            assertFalse(handled)
+            assertTrue(wire.submitCalls.isEmpty())
+            assertEquals(
+                CommandPhase(
+                    CommandPhaseState.ERROR,
+                    ExtensionCommandController.REQUIRED_FIELDS_DETAIL,
+                ),
+                controller.phases.value.getValue(poll.node),
+            )
+        }
+
+    @Test
     fun `updateField edits the open palette form`() = runTest(dispatcher.scheduler) {
         val wire = Wire()
         val poll = command()

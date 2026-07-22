@@ -8214,6 +8214,12 @@ data class WaddleExtensionCommandFormField (
     ,
     var `required`: kotlin.Boolean
     ,
+    /**
+     * Forbidden-field defense: `text-private` or secret-named fields
+     * must never render an input or submit.
+     */
+    var `blocked`: kotlin.Boolean
+    ,
     var `options`: List<WaddleExtensionFieldOption>
     ,
     var `values`: List<kotlin.String>
@@ -8237,6 +8243,7 @@ public object FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustB
             FfiConverterOptionalString.read(buf),
             FfiConverterTypeWaddleExtensionFieldType.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterSequenceTypeWaddleExtensionFieldOption.read(buf),
             FfiConverterSequenceString.read(buf),
         )
@@ -8247,6 +8254,7 @@ public object FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustB
             FfiConverterOptionalString.allocationSize(value.`label`) +
             FfiConverterTypeWaddleExtensionFieldType.allocationSize(value.`fieldType`) +
             FfiConverterBoolean.allocationSize(value.`required`) +
+            FfiConverterBoolean.allocationSize(value.`blocked`) +
             FfiConverterSequenceTypeWaddleExtensionFieldOption.allocationSize(value.`options`) +
             FfiConverterSequenceString.allocationSize(value.`values`)
     )
@@ -8256,6 +8264,7 @@ public object FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustB
             FfiConverterOptionalString.write(value.`label`, buf)
             FfiConverterTypeWaddleExtensionFieldType.write(value.`fieldType`, buf)
             FfiConverterBoolean.write(value.`required`, buf)
+            FfiConverterBoolean.write(value.`blocked`, buf)
             FfiConverterSequenceTypeWaddleExtensionFieldOption.write(value.`options`, buf)
             FfiConverterSequenceString.write(value.`values`, buf)
     }

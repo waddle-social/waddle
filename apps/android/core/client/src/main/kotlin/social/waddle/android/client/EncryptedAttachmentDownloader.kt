@@ -52,17 +52,26 @@ class EncryptedAttachmentDownloader(private val httpClient: OkHttpClient) {
         val key = encryptedAttachmentCacheKey(url, encrypted)
         val task = inFlightLock.withLock {
             inFlight.getOrPut(key) {
-                scope.async { fetchAndDecryptNow(url, encrypted, declaredSize) }
+                // The task removes ITSELF from the map (web promise-map
+                // parity): removal must not depend on any awaiter's
+                // finally running, because Coil cancels awaiters on
+                // scroll while the shared download keeps going — a
+                // completed entry left behind would pin the decrypted
+                // plaintext in memory indefinitely.
+                scope.async {
+                    try {
+                        fetchAndDecryptNow(url, encrypted, declaredSize)
+                    } finally {
+                        inFlightLock.withLock { inFlight.remove(key) }
+                    }
+                }
             }
         }
-        return try {
-            task.await()
-        } finally {
-            inFlightLock.withLock {
-                if (inFlight[key] === task && task.isCompleted) inFlight.remove(key)
-            }
-        }
+        return task.await()
     }
+
+    /** Test seam: live in-flight entries (0 once downloads settle). */
+    internal suspend fun inFlightCountForTest(): Int = inFlightLock.withLock { inFlight.size }
 
     private fun fetchAndDecryptNow(
         url: String,

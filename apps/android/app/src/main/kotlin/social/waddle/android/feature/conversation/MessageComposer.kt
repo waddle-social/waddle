@@ -52,6 +52,8 @@ import social.waddle.android.client.MentionRef
  * clears only when the dispatch reports success, so a failure leaves
  * the slash draft armed for a retry — and an unresolved prefix blocks
  * the send with an inline hint (web `slashSubmitBlocked` parity).
+ * Two web-parity escapes send the draft as plain text instead: a bare
+ * `/` with no prefix, and a prefix whose popover the user dismissed.
  */
 @Composable
 fun MessageComposer(
@@ -295,7 +297,9 @@ fun MessageComposer(
                 IconButton(
                     onClick = {
                         val trigger = if (slashDispatch != null && editing == null) {
-                            parseSlashTrigger(draft.text)
+                            parseSlashTrigger(draft.text)?.takeIf { candidate ->
+                                shouldInterceptSlashSend(candidate, dismissedSlashPrefix)
+                            }
                         } else {
                             null
                         }

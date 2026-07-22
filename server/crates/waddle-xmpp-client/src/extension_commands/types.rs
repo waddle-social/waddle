@@ -130,6 +130,11 @@ pub struct ExtensionFormFieldDescriptor {
     pub label: Option<String>,
     pub field_type: ExtensionFieldType,
     pub required: bool,
+    /// Forbidden-field defense (wasm client
+    /// `isForbiddenExtensionCommandField`): `text-private` fields and
+    /// secret-named vars must never render an input or submit — a
+    /// third-party extension asking for credentials is hostile.
+    pub blocked: bool,
     pub options: Vec<ExtensionFormOption>,
     pub values: Vec<String>,
 }

@@ -85,6 +85,8 @@
     <string name="extension_form_back">Back</string>
     <string name="extension_form_cancel">Cancel</string>
     <string name="extension_form_required">%1$s *</string>
+    <string name="extension_form_required_hint">Complete required fields to continue.</string>
+    <string name="attachment_open_failed">Couldn\'t open attachment.</string>
     <string name="extension_command_completed">%1$s completed</string>
     <string name="extension_command_failed">%1$s failed</string>
     <string name="message_unknown_sender">Unknown</string>

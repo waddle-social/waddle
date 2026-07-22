@@ -1,7 +1,9 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
@@ -117,6 +119,44 @@ class EncryptedAttachmentDownloaderTest {
     }
 
     @Test
+    fun `orphaned downloads clean up after completing with no awaiter`() = runTest {
+        // Coil cancels image requests on scroll: the awaiting caller
+        // dies but the shared download keeps running on the
+        // downloader's own scope. Once it completes, the in-flight
+        // entry (holding the decrypted plaintext) must remove itself —
+        // a later fetch performs a fresh download instead of reading a
+        // plaintext pinned in memory.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headersDelay(250, TimeUnit.MILLISECONDS)
+                .body(Buffer().write(ciphertext))
+                .build(),
+        )
+        server.enqueue(ciphertextResponse())
+        val url = server.url("/blob.enc").toString()
+        val envelope = envelope(sources = listOf(url), hashValueB64 = sha256B64(ciphertext))
+
+        val awaiter = async(Dispatchers.IO) { downloader.fetchAndDecrypt(url, envelope, null) }
+        awaitCondition("download registered") { downloader.inFlightCountForTest() == 1 }
+        awaiter.cancel()
+        awaitCondition("orphaned entry removed") { downloader.inFlightCountForTest() == 0 }
+
+        assertArrayEquals(plaintext, downloader.fetchAndDecrypt(url, envelope, null))
+        assertEquals(2, server.requestCount)
+    }
+
+    private suspend fun awaitCondition(what: String, condition: suspend () -> Boolean) {
+        withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + CONDITION_TIMEOUT_MILLIS
+            while (!condition()) {
+                if (System.currentTimeMillis() >= deadline) error("timed out waiting for $what")
+                Thread.sleep(CONDITION_POLL_MILLIS)
+            }
+        }
+    }
+
+    @Test
     fun `a hash mismatch on every source yields null`() = runTest {
         server.enqueue(ciphertextResponse())
         val url = server.url("/blob.enc").toString()
@@ -128,5 +168,10 @@ class EncryptedAttachmentDownloaderTest {
                 declaredSize = null,
             ),
         )
+    }
+
+    private companion object {
+        const val CONDITION_TIMEOUT_MILLIS = 5_000L
+        const val CONDITION_POLL_MILLIS = 10L
     }
 }

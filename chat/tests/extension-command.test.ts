@@ -15,6 +15,7 @@ import {
   submitExtensionCommandForm,
   visibleExtensionCommandFields,
 } from "../src/lib/xmpp/extension-commands";
+import { parseCommandIqResponse } from "../src/lib/xmpp/extension-commands/xml";
 
 const launch: ExtensionLaunchDescriptor = {
   id: "vote-yes",
@@ -688,6 +689,25 @@ describe("extension command invocation", () => {
     expect(result.actions).toEqual({
       allowed: ["complete", "cancel"],
     });
+  });
+
+  test("wire responses without <actions/> imply complete plus cancel while executing", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form"><field var="prompt" type="text-single"><value/></field></x></command></iq>',
+    );
+
+    expect(result.status).toBe("executing");
+    expect(result.actions).toEqual({ allowed: ["complete", "cancel"] });
+  });
+
+  test("wire responses with completed status carry no implied actions", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" status="completed"/></iq>',
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.actions).toBeUndefined();
   });
 
   test("preserves XEP-0004 multi-value fields from command form values", () => {

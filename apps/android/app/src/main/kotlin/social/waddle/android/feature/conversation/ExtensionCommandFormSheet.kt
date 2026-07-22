@@ -25,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.client.ExtensionCommandAction
@@ -37,6 +39,11 @@ import social.waddle.android.client.ExtensionFieldType
  * skipped visually (they still submit); the action row offers exactly
  * the XEP-0050 actions the response advertised. Warning/error phases
  * (including server `<note/>` details) surface inside the sheet.
+ *
+ * Web-parity gating: a form containing a forbidden field disables all
+ * inputs and shows the blocked reason, and `next`/`complete` stay
+ * disabled while the form is blocked or any visible required field is
+ * empty (`cancel`/`prev` always work).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,14 +82,35 @@ fun ExtensionCommandFormSheet(
                     },
                 )
             }
+            val blockedReason = extensionFormBlockedReason(session.fields)
+            val missingRequired = missingRequiredExtensionFields(session.fields)
+            if (blockedReason != null) {
+                Text(
+                    text = blockedReason,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(SlashCommandTestTags.FORM_BLOCKED),
+                )
+            } else if (missingRequired.isNotEmpty()) {
+                Text(
+                    text = stringResource(R.string.extension_form_required_hint),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
             session.fields
                 .filterNot { it.type == ExtensionFieldType.HIDDEN || it.type == ExtensionFieldType.FIXED }
                 .forEach { field ->
-                    FormField(field = field, onFieldChange = onFieldChange)
+                    FormField(
+                        field = field,
+                        enabled = blockedReason == null,
+                        onFieldChange = onFieldChange,
+                    )
                 }
             ActionRow(
                 actions = session.actions,
                 busy = phase?.state == CommandPhaseState.LOADING,
+                submitAllowed = blockedReason == null && missingRequired.isEmpty(),
                 onAction = onAction,
             )
         }
@@ -92,6 +120,7 @@ fun ExtensionCommandFormSheet(
 @Composable
 private fun FormField(
     field: ExtensionCommandField,
+    enabled: Boolean,
     onFieldChange: (name: String, values: List<String>) -> Unit,
 ) {
     val label = fieldLabel(field)
@@ -109,6 +138,7 @@ private fun FormField(
                 val checked = field.values.firstOrNull() == "1" || field.values.firstOrNull() == "true"
                 Switch(
                     checked = checked,
+                    enabled = enabled,
                     onCheckedChange = { onFieldChange(field.name, listOf(if (it) "true" else "false")) },
                 )
             }
@@ -121,10 +151,13 @@ private fun FormField(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onFieldChange(field.name, listOf(option.value)) },
+                            .clickable(enabled = enabled) {
+                                onFieldChange(field.name, listOf(option.value))
+                            },
                     ) {
                         RadioButton(
                             selected = field.values.firstOrNull() == option.value,
+                            enabled = enabled,
                             onClick = { onFieldChange(field.name, listOf(option.value)) },
                         )
                         Text(
@@ -144,12 +177,13 @@ private fun FormField(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
+                            .clickable(enabled = enabled) {
                                 onFieldChange(field.name, toggleValue(field.values, option.value))
                             },
                     ) {
                         Checkbox(
                             checked = selected,
+                            enabled = enabled,
                             onCheckedChange = {
                                 onFieldChange(field.name, toggleValue(field.values, option.value))
                             },
@@ -166,6 +200,7 @@ private fun FormField(
             value = field.values.joinToString("\n"),
             onValueChange = { onFieldChange(field.name, it.split("\n")) },
             label = { Text(label) },
+            enabled = enabled,
             minLines = 3,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -173,6 +208,14 @@ private fun FormField(
             value = field.values.firstOrNull().orEmpty(),
             onValueChange = { onFieldChange(field.name, listOf(it)) },
             label = { Text(label) },
+            // text-private is always blocked (whole form disabled);
+            // masking is defense in depth should that ever regress.
+            visualTransformation = if (field.type == ExtensionFieldType.TEXT_PRIVATE) {
+                PasswordVisualTransformation()
+            } else {
+                VisualTransformation.None
+            },
+            enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -182,6 +225,7 @@ private fun FormField(
 private fun ActionRow(
     actions: List<ExtensionCommandAction>,
     busy: Boolean,
+    submitAllowed: Boolean,
     onAction: (ExtensionCommandAction) -> Unit,
 ) {
     Row(
@@ -200,12 +244,18 @@ private fun ActionRow(
             }
         }
         if (ExtensionCommandAction.NEXT in actions) {
-            OutlinedButton(onClick = { onAction(ExtensionCommandAction.NEXT) }, enabled = !busy) {
+            OutlinedButton(
+                onClick = { onAction(ExtensionCommandAction.NEXT) },
+                enabled = !busy && submitAllowed,
+            ) {
                 Text(stringResource(R.string.extension_form_next))
             }
         }
         if (ExtensionCommandAction.COMPLETE in actions) {
-            Button(onClick = { onAction(ExtensionCommandAction.COMPLETE) }, enabled = !busy) {
+            Button(
+                onClick = { onAction(ExtensionCommandAction.COMPLETE) },
+                enabled = !busy && submitAllowed,
+            ) {
                 Text(stringResource(R.string.extension_form_submit))
             }
         }

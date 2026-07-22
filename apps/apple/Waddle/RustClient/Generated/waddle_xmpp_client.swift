@@ -7002,6 +7002,11 @@ public struct WaddleExtensionCommandFormField: Equatable, Hashable {
     public var label: String?
     public var fieldType: WaddleExtensionFieldType
     public var required: Bool
+    /**
+     * Forbidden-field defense: `text-private` or secret-named fields
+     * must never render an input or submit.
+     */
+    public var blocked: Bool
     public var options: [WaddleExtensionFieldOption]
     public var values: [String]
 
@@ -7010,11 +7015,16 @@ public struct WaddleExtensionCommandFormField: Equatable, Hashable {
     public init(
         /**
          * The `var` attribute; empty only for `fixed` fields.
-         */`var`: String, label: String?, fieldType: WaddleExtensionFieldType, required: Bool, options: [WaddleExtensionFieldOption], values: [String]) {
+         */`var`: String, label: String?, fieldType: WaddleExtensionFieldType, required: Bool,
+        /**
+         * Forbidden-field defense: `text-private` or secret-named fields
+         * must never render an input or submit.
+         */blocked: Bool, options: [WaddleExtensionFieldOption], values: [String]) {
         self.`var` = `var`
         self.label = label
         self.fieldType = fieldType
         self.required = required
+        self.blocked = blocked
         self.options = options
         self.values = values
     }
@@ -7039,6 +7049,7 @@ public struct FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustB
                 label: FfiConverterOptionString.read(from: &buf),
                 fieldType: FfiConverterTypeWaddleExtensionFieldType.read(from: &buf),
                 required: FfiConverterBool.read(from: &buf),
+                blocked: FfiConverterBool.read(from: &buf),
                 options: FfiConverterSequenceTypeWaddleExtensionFieldOption.read(from: &buf),
                 values: FfiConverterSequenceString.read(from: &buf)
         )
@@ -7049,6 +7060,7 @@ public struct FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustB
         FfiConverterOptionString.write(value.label, into: &buf)
         FfiConverterTypeWaddleExtensionFieldType.write(value.fieldType, into: &buf)
         FfiConverterBool.write(value.required, into: &buf)
+        FfiConverterBool.write(value.blocked, into: &buf)
         FfiConverterSequenceTypeWaddleExtensionFieldOption.write(value.options, into: &buf)
         FfiConverterSequenceString.write(value.values, into: &buf)
     }

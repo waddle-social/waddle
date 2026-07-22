@@ -67,6 +67,12 @@ data class ExtensionCommandField(
     val required: Boolean,
     val options: List<ExtensionFieldOption>,
     val values: List<String>,
+    /**
+     * Forbidden-field defense (web `isForbiddenExtensionCommandField`
+     * parity, computed by the Rust parser): `text-private` fields and
+     * secret-named vars never render an input or submit.
+     */
+    val blocked: Boolean = false,
 )
 
 /** The XEP-0004 form of a command response. */
@@ -184,6 +190,7 @@ private fun WaddleExtensionCommandFormField.toDomain(): ExtensionCommandField = 
     required = required,
     options = options.map { ExtensionFieldOption(label = it.label, value = it.value) },
     values = values,
+    blocked = blocked,
 )
 
 private fun WaddleExtensionCommandNote.toDomain(): ExtensionCommandNote = ExtensionCommandNote(
