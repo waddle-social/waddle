@@ -208,18 +208,18 @@ class MembersViewModelTest {
         runCurrent()
         val viewModel = harness.viewModel()
         runCurrent()
-        harness.client.userSearchResults = listOf(
+        harness.client.directory.userSearchResults = listOf(
             WaddleUserSearchEntry(jid = "bob@waddle.test", username = "bob", displayName = null),
             WaddleUserSearchEntry(jid = "carol@waddle.test", username = "carol", displayName = "Carol"),
         )
 
         viewModel.onSearchQueryChanged("caro")
         runCurrent()
-        assertTrue(harness.client.searchUsersCalls.isEmpty())
+        assertTrue(harness.client.directory.searchUsersCalls.isEmpty())
         advanceTimeBy(250)
         runCurrent()
 
-        assertEquals(listOf("caro"), harness.client.searchUsersCalls.toList())
+        assertEquals(listOf("caro"), harness.client.directory.searchUsersCalls.toList())
         // bob is already a member — filtered out.
         assertEquals(
             listOf("carol@waddle.test"),

@@ -78,7 +78,21 @@ pub fn build_xep0050_command_request(
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
-    build_command_iq(service_jid, node, None, action, form)
+    let id = format!("adhoc-{}", next_id());
+    build_command_iq(service_jid, node, &id, None, action, form)
+}
+
+/// Like [`build_xep0050_command_request`], but with a caller-supplied
+/// IQ id. Use this when the caller owns response correlation (the FFI
+/// verbs stamp UUID ids).
+pub fn build_xep0050_command_request_with_id(
+    service_jid: &str,
+    node: &str,
+    iq_id: &str,
+    action: AdHocAction,
+    form: Option<DataForm>,
+) -> Element {
+    build_command_iq(service_jid, node, iq_id, None, action, form)
 }
 
 /// Build a SUBSEQUENT-stage IQ that carries the `sessionid` returned
@@ -92,17 +106,18 @@ pub fn build_xep0050_command_request_with_session(
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
-    build_command_iq(service_jid, node, Some(session_id), action, form)
+    let id = format!("adhoc-{}", next_id());
+    build_command_iq(service_jid, node, &id, Some(session_id), action, form)
 }
 
 fn build_command_iq(
     service_jid: &str,
     node: &str,
+    id: &str,
     session_id: Option<&str>,
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
-    let id = format!("adhoc-{}", next_id());
     let mut command = Element::builder("command", NS_COMMANDS)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
         .attr(
@@ -168,6 +183,22 @@ mod tests {
         assert_eq!(command.attr("action"), Some("execute"));
         assert_eq!(command.attr("sessionid"), None);
         assert!(command.get_child("x", NS_DATA_FORMS).is_none());
+    }
+
+    #[test]
+    fn build_command_request_with_id_uses_caller_iq_id() {
+        let iq = build_xep0050_command_request_with_id(
+            "waddle.test",
+            "urn:waddle:group-dm:create:0",
+            "iq-uuid-1",
+            AdHocAction::Execute,
+            None,
+        );
+        assert_eq!(iq.attr("id"), Some("iq-uuid-1"));
+        assert_eq!(iq.attr("type"), Some("set"));
+        let command = iq.get_child("command", NS_COMMANDS).expect("command");
+        assert_eq!(command.attr("action"), Some("execute"));
+        assert_eq!(command.attr("sessionid"), None);
     }
 
     #[test]

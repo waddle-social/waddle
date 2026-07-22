@@ -668,207 +668,219 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
     external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_supports_mds_publish_options(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_direct_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_update_muji_presence(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
-    ): Int
-    external fun ffi_waddle_xmpp_client_ffi_uniffi_contract_version(
-    ): Int
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_supports_mds_publish_options(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_direct_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_update_muji_presence(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
+): Int
+external fun ffi_waddle_xmpp_client_ffi_uniffi_contract_version(
+): Int
 
 
 }
@@ -957,6 +969,18 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_u
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(`ptr`: Long,`prefix`: RustBuffer.ByValue,`pageSize`: RustBuffer.ByValue,`afterCursor`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(`ptr`: Long,`name`: RustBuffer.ByValue,`memberJids`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviteeJid`: RustBuffer.ByValue,`fullHistory`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(`ptr`: Long,`onlyUnread`: Byte,`noMessages`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_mark_inbox_read(`ptr`: Long,`partnerJid`: RustBuffer.ByValue,`threadId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(`ptr`: Long,
 ): Long
@@ -1312,6 +1336,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 30554) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm() != 31049) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm() != 3394) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read() != 3970) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
@@ -1863,6 +1905,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8UL
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterDouble: FfiConverter<Double, Double> {
     override fun lift(value: Double): Double {
         return value
@@ -2287,6 +2352,57 @@ public interface WaddleClientInterface {
      * mechanism — the server re-checks every actual command.
      */
     suspend fun `isCommunityOwner`(): kotlin.Boolean
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+    suspend fun `createGroupDm`(`name`: kotlin.String, `memberJids`: List<kotlin.String>): kotlin.String
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+    suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean)
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+    suspend fun `leaveGroupDm`(`roomJid`: kotlin.String)
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+    suspend fun `renameGroupDm`(`roomJid`: kotlin.String, `name`: kotlin.String?)
+
+    /**
+     * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
+     * resolve once the server's closing `<fin/>` arrives.
+     *
+     * `only_unread` maps to `unread-only='true'`; `no_messages`
+     * inverts the XEP's `messages` attribute (pass `true` to elide
+     * the embedded MAM `<result/>` bodies — the cheap hydration
+     * shape the clients use on session-ready).
+     */
+    suspend fun `fetchInbox`(`onlyUnread`: kotlin.Boolean, `noMessages`: kotlin.Boolean): WaddleInboxResult
+
+    /**
+     * Mark one conversation (optionally one thread of it) read via
+     * the Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ. The server
+     * answers with a fresh unread state push, so callers only need
+     * to clear their local overlay optimistically.
+     */
+    suspend fun `markInboxRead`(`partnerJid`: kotlin.String, `threadId`: kotlin.String?)
 
     suspend fun `discoverTopology`(): WaddleTopology
 
@@ -3679,6 +3795,175 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createGroupDm`(`name`: kotlin.String, `memberJids`: List<kotlin.String>) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`name`),FfiConverterSequenceString.lower(`memberJids`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviteeJid`),FfiConverterBoolean.lower(`fullHistory`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `leaveGroupDm`(`roomJid`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `renameGroupDm`(`roomJid`: kotlin.String, `name`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterOptionalString.lower(`name`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
+     * resolve once the server's closing `<fin/>` arrives.
+     *
+     * `only_unread` maps to `unread-only='true'`; `no_messages`
+     * inverts the XEP's `messages` attribute (pass `true` to elide
+     * the embedded MAM `<result/>` bodies — the cheap hydration
+     * shape the clients use on session-ready).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchInbox`(`onlyUnread`: kotlin.Boolean, `noMessages`: kotlin.Boolean) : WaddleInboxResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(
+                uniffiHandle,
+                FfiConverterBoolean.lower(`onlyUnread`),FfiConverterBoolean.lower(`noMessages`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleInboxResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Mark one conversation (optionally one thread of it) read via
+     * the Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ. The server
+     * answers with a fresh unread state push, so callers only need
+     * to clear their local overlay optimistically.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `markInboxRead`(`partnerJid`: kotlin.String, `threadId`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_mark_inbox_read(
+                uniffiHandle,
+                FfiConverterString.lower(`partnerJid`),FfiConverterOptionalString.lower(`threadId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -7366,6 +7651,26 @@ data class WaddleChannel (
     var `position`: kotlin.Int
     ,
     var `spaceId`: kotlin.String
+    ,
+    /**
+     * XEP-0402: join this room automatically on session ready. The
+     * user's own bookmark wins; non-bookmarked catalog rooms default
+     * to `true` (web parity).
+     */
+    var `autojoin`: kotlin.Boolean
+    ,
+    /**
+     * `<conference name='…'>` from the user's XEP-0402 bookmark,
+     * when present.
+     */
+    var `bookmarkName`: kotlin.String?
+    ,
+    /**
+     * Room advertises `urn:waddle:group-dm:0`: joined like any
+     * autojoin room but surfaced on the DM list, never the channel
+     * list.
+     */
+    var `isGroupDm`: kotlin.Boolean
 
 ){
 
@@ -7389,6 +7694,9 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterString.read(buf),
             FfiConverterInt.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7399,7 +7707,10 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.allocationSize(value.`description`) +
             FfiConverterString.allocationSize(value.`channelType`) +
             FfiConverterInt.allocationSize(value.`position`) +
-            FfiConverterString.allocationSize(value.`spaceId`)
+            FfiConverterString.allocationSize(value.`spaceId`) +
+            FfiConverterBoolean.allocationSize(value.`autojoin`) +
+            FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
+            FfiConverterBoolean.allocationSize(value.`isGroupDm`)
     )
 
     override fun write(value: WaddleChannel, buf: ByteBuffer) {
@@ -7410,6 +7721,9 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterString.write(value.`channelType`, buf)
             FfiConverterInt.write(value.`position`, buf)
             FfiConverterString.write(value.`spaceId`, buf)
+            FfiConverterBoolean.write(value.`autojoin`, buf)
+            FfiConverterOptionalString.write(value.`bookmarkName`, buf)
+            FfiConverterBoolean.write(value.`isGroupDm`, buf)
     }
 }
 
@@ -7812,6 +8126,181 @@ public object FfiConverterTypeWaddleInCallPresenceFlags: FfiConverterRustBuffer<
     override fun write(value: WaddleInCallPresenceFlags, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`handRaised`, buf)
             FfiConverterBoolean.write(value.`muted`, buf)
+    }
+}
+
+
+
+/**
+ * One XEP-0430 inbox conversation: the `urn:xmpp:inbox:1` `<entry/>`
+ * merged with its Waddle `urn:waddle:inbox:0` `<metadata/>`. Surfaced
+ * both from `fetch_inbox` pages and from live `InboxPush` events.
+ */
+data class WaddleInboxEntry (
+    /**
+     * Conversation partner: contact bare JID (`kind == "direct"`) or
+     * room bare JID (`kind == "muc"`).
+     */
+    var `partner`: kotlin.String
+    ,
+    /**
+     * Conversation surface: `"direct"` or `"muc"` (the only values
+     * the wire parser admits; absent metadata defaults to `"direct"`,
+     * wasm parity).
+     */
+    var `kind`: kotlin.String
+    ,
+    /**
+     * XEP-0359 stanza id of the conversation's newest message.
+     * Always present on the wire; optional here so the raw parser
+     * shape crosses the boundary without lossy defaulting.
+     */
+    var `lastStanzaId`: kotlin.String?
+    ,
+    /**
+     * Waddle metadata `last-updated` (unix millis); pushes always
+     * carry it, query responses may omit metadata entirely.
+     */
+    var `lastUpdated`: kotlin.Long?
+    ,
+    /**
+     * Server-side unread count for this conversation.
+     */
+    var `unread`: kotlin.UInt
+    ,
+    /**
+     * Short plaintext preview of the newest message.
+     */
+    var `preview`: kotlin.String?
+    ,
+    /**
+     * Thread id when this entry describes one thread of a room.
+     */
+    var `threadId`: kotlin.String?
+    ,
+    var `threadTitle`: kotlin.String?
+    ,
+    var `replyCount`: kotlin.UInt?
+    ,
+    /**
+     * Author of the newest message, when the server includes it.
+     */
+    var `author`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleInboxEntry: FfiConverterRustBuffer<WaddleInboxEntry> {
+    override fun read(buf: ByteBuffer): WaddleInboxEntry {
+        return WaddleInboxEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleInboxEntry) = (
+            FfiConverterString.allocationSize(value.`partner`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalString.allocationSize(value.`lastStanzaId`) +
+            FfiConverterOptionalLong.allocationSize(value.`lastUpdated`) +
+            FfiConverterUInt.allocationSize(value.`unread`) +
+            FfiConverterOptionalString.allocationSize(value.`preview`) +
+            FfiConverterOptionalString.allocationSize(value.`threadId`) +
+            FfiConverterOptionalString.allocationSize(value.`threadTitle`) +
+            FfiConverterOptionalUInt.allocationSize(value.`replyCount`) +
+            FfiConverterOptionalString.allocationSize(value.`author`)
+    )
+
+    override fun write(value: WaddleInboxEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`partner`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalString.write(value.`lastStanzaId`, buf)
+            FfiConverterOptionalLong.write(value.`lastUpdated`, buf)
+            FfiConverterUInt.write(value.`unread`, buf)
+            FfiConverterOptionalString.write(value.`preview`, buf)
+            FfiConverterOptionalString.write(value.`threadId`, buf)
+            FfiConverterOptionalString.write(value.`threadTitle`, buf)
+            FfiConverterOptionalUInt.write(value.`replyCount`, buf)
+            FfiConverterOptionalString.write(value.`author`, buf)
+    }
+}
+
+
+
+/**
+ * Result of one streamed XEP-0430 `fetch_inbox` query: the folded
+ * entry stream plus the closing `<fin/>` counts.
+ */
+data class WaddleInboxResult (
+    /**
+     * `<fin total/>` — number of conversations matched.
+     */
+    var `total`: kotlin.UInt
+    ,
+    /**
+     * `<fin unread/>` — number of conversations with unread > 0.
+     */
+    var `unread`: kotlin.UInt
+    ,
+    /**
+     * `<fin all-unread/>` — sum of unread counts across the whole
+     * inbox (server-wide badge total), regardless of paging.
+     */
+    var `allUnread`: kotlin.UInt
+    ,
+    var `conversations`: List<WaddleInboxEntry>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleInboxResult: FfiConverterRustBuffer<WaddleInboxResult> {
+    override fun read(buf: ByteBuffer): WaddleInboxResult {
+        return WaddleInboxResult(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeWaddleInboxEntry.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleInboxResult) = (
+            FfiConverterUInt.allocationSize(value.`total`) +
+            FfiConverterUInt.allocationSize(value.`unread`) +
+            FfiConverterUInt.allocationSize(value.`allUnread`) +
+            FfiConverterSequenceTypeWaddleInboxEntry.allocationSize(value.`conversations`)
+    )
+
+    override fun write(value: WaddleInboxResult, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`total`, buf)
+            FfiConverterUInt.write(value.`unread`, buf)
+            FfiConverterUInt.write(value.`allUnread`, buf)
+            FfiConverterSequenceTypeWaddleInboxEntry.write(value.`conversations`, buf)
     }
 }
 
@@ -11143,6 +11632,21 @@ sealed class WaddleClientEvent {
     }
 
     /**
+     * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
+     * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
+     * query-response entries resolve the `fetch_inbox` verb and are
+     * never broadcast (wasm parity).
+     */
+    data class InboxPush(
+        val `entry`: social.waddle.client.ffi.WaddleInboxEntry) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    /**
      * XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
      * envelope and Jingle session control stanza addressed to the
      * bound resource. The Swift app surfaces it as the ringing UI,
@@ -11232,16 +11736,19 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             7 -> WaddleClientEvent.DeliveryFailed(
                 FfiConverterString.read(buf),
                 )
-            8 -> WaddleClientEvent.Call(
+            8 -> WaddleClientEvent.InboxPush(
+                FfiConverterTypeWaddleInboxEntry.read(buf),
+                )
+            9 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            9 -> WaddleClientEvent.ResumeStateChanged(
+            10 -> WaddleClientEvent.ResumeStateChanged(
                 FfiConverterOptionalTypeWaddleSmResumeState.read(buf),
                 )
-            10 -> WaddleClientEvent.AuthenticationFailed(
+            11 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            11 -> WaddleClientEvent.Error(
+            12 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -11294,6 +11801,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`stanzaId`)
+            )
+        }
+        is WaddleClientEvent.InboxPush -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleInboxEntry.allocationSize(value.`entry`)
             )
         }
         is WaddleClientEvent.Call -> {
@@ -11361,23 +11875,28 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterString.write(value.`stanzaId`, buf)
                 Unit
             }
-            is WaddleClientEvent.Call -> {
+            is WaddleClientEvent.InboxPush -> {
                 buf.putInt(8)
+                FfiConverterTypeWaddleInboxEntry.write(value.`entry`, buf)
+                Unit
+            }
+            is WaddleClientEvent.Call -> {
+                buf.putInt(9)
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
             is WaddleClientEvent.ResumeStateChanged -> {
-                buf.putInt(9)
+                buf.putInt(10)
                 FfiConverterOptionalTypeWaddleSmResumeState.write(value.`state`, buf)
                 Unit
             }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(10)
+                buf.putInt(11)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -13034,6 +13553,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
+    override fun read(buf: ByteBuffer): kotlin.Long? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterLong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Long?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterLong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterLong.write(value, buf)
         }
     }
 }
@@ -14706,6 +15257,34 @@ public object FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuf
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleExternalService.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleInboxEntry: FfiConverterRustBuffer<List<WaddleInboxEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleInboxEntry> {
+        val len = buf.getInt()
+        return List<WaddleInboxEntry>(len) {
+            FfiConverterTypeWaddleInboxEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleInboxEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleInboxEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleInboxEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleInboxEntry.write(it, buf)
         }
     }
 }

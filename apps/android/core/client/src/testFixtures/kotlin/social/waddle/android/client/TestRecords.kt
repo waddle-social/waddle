@@ -7,7 +7,10 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
+import social.waddle.client.ffi.WaddleChannel
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleInboxEntry
+import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMarkupSpan
@@ -26,6 +29,27 @@ import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleVCard4
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
+
+fun testChannel(
+    roomJid: String,
+    name: String = roomJid.substringBefore('@'),
+    spaceId: String = "standalone",
+    position: Int = 0,
+    autojoin: Boolean = true,
+    bookmarkName: String? = null,
+    isGroupDm: Boolean = false,
+): WaddleChannel = WaddleChannel(
+    id = "$spaceId::$roomJid",
+    roomJid = roomJid,
+    name = name,
+    description = null,
+    channelType = "text",
+    position = position,
+    spaceId = spaceId,
+    autojoin = autojoin,
+    bookmarkName = bookmarkName,
+    isGroupDm = isGroupDm,
+)
 
 fun testMamPage(
     messages: List<WaddleArchivedMessage> = emptyList(),
@@ -275,6 +299,42 @@ fun testAvatar(
     mimeType = mimeType,
     data = data,
     url = url,
+)
+
+fun testInboxEntry(
+    partner: String = "alice@waddle.test",
+    kind: String = "direct",
+    lastStanzaId: String? = "s1",
+    lastUpdated: Long? = 1_700_000_000L,
+    unread: UInt = 1u,
+    preview: String? = null,
+    threadId: String? = null,
+    threadTitle: String? = null,
+    replyCount: UInt? = null,
+    author: String? = null,
+): WaddleInboxEntry = WaddleInboxEntry(
+    partner = partner,
+    kind = kind,
+    lastStanzaId = lastStanzaId,
+    lastUpdated = lastUpdated,
+    unread = unread,
+    preview = preview,
+    threadId = threadId,
+    threadTitle = threadTitle,
+    replyCount = replyCount,
+    author = author,
+)
+
+fun testInboxResult(
+    conversations: List<WaddleInboxEntry> = emptyList(),
+    total: UInt = conversations.size.toUInt(),
+    unread: UInt = conversations.count { it.unread > 0u }.toUInt(),
+    allUnread: UInt = conversations.sumOf { it.unread },
+): WaddleInboxResult = WaddleInboxResult(
+    total = total,
+    unread = unread,
+    allUnread = allUnread,
+    conversations = conversations,
 )
 
 fun testResumeState(

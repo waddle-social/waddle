@@ -3,6 +3,10 @@ package social.waddle.android.feature.dm
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.GroupAdd
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -11,6 +15,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -35,6 +41,7 @@ fun DmScreen(
     name: String,
     onBack: () -> Unit,
     onOpenThread: (threadId: String) -> Unit,
+    onOpenGroupDm: (roomJid: String, name: String) -> Unit = { _, _ -> },
 ) {
     val graph = LocalAppGraph.current
     val viewModel: DmViewModel = viewModel(
@@ -44,6 +51,7 @@ fun DmScreen(
     val session by graph.currentSession.collectAsStateWithLifecycle()
     val contacts by graph.sessionManager.presenceStore.contacts.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    var newGroupOpen by remember { mutableStateOf(false) }
 
     // Capture permissions are requested BEFORE the XEP-0353 propose so
     // the responder's accept can go straight to media; a denial still
@@ -70,6 +78,19 @@ fun DmScreen(
         selfBareJid = session?.jid?.let(::bareJidOf),
         subtitle = dmPresenceSubtitle(contacts[peerJid]),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        extraTopBarActions = {
+            // "Start a group from this DM": the create sheet opens
+            // with the peer prefilled (web group-DM spawn parity).
+            IconButton(
+                onClick = { newGroupOpen = true },
+                modifier = Modifier.testTag(DmScreenTestTags.START_GROUP_ACTION),
+            ) {
+                Icon(
+                    Icons.Outlined.GroupAdd,
+                    contentDescription = stringResource(R.string.dm_start_group_action),
+                )
+            }
+        },
         onStartCall = { video ->
             pendingCallVideo = video
             callPermissionLauncher.launch(
@@ -81,6 +102,22 @@ fun DmScreen(
             )
         },
     )
+
+    if (newGroupOpen) {
+        NewGroupDmSheet(
+            initialMembers = mapOf(bareJidOf(peerJid) to name),
+            onDismiss = { newGroupOpen = false },
+            onCreated = { roomJid, groupName ->
+                newGroupOpen = false
+                onOpenGroupDm(roomJid, groupName)
+            },
+        )
+    }
+}
+
+/** Semantics tags shared with instrumented tests. */
+object DmScreenTestTags {
+    const val START_GROUP_ACTION = "dm-start-group-action"
 }
 
 /**

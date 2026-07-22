@@ -138,6 +138,21 @@ pub struct DiscoveredChannel {
     pub channel_type: DiscoveredChannelType,
     pub position: i32,
     pub space_id: SpaceNode,
+    /// Whether the client should join this room automatically on
+    /// session ready. Stamped from the user's XEP-0402 bookmark when
+    /// one exists; space bookmarks carry their own `autojoin` attr;
+    /// non-bookmarked catalog rooms default to `true` (web parity —
+    /// every publicly listed room is joined so its live traffic
+    /// flows).
+    pub autojoin: bool,
+    /// `<conference name='…'>` from the user's XEP-0402 bookmark,
+    /// when the room is bookmarked and the bookmark carries a name.
+    pub bookmark_name: Option<String>,
+    /// Whether the room's disco#info advertises the
+    /// `urn:waddle:group-dm:0` feature. Group DMs are joined like any
+    /// autojoin room (their live messages must flow) but belong on
+    /// the DM surface, not the channel list.
+    pub is_group_dm: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

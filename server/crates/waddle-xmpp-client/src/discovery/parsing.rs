@@ -237,18 +237,28 @@ pub fn parse_space_channels_result(
                         .map(|node| node.as_str().to_string())
                         .unwrap_or_else(|| id.clone())
                 });
-            Some((id, room_jid, name))
+            // XEP-0402 §2.2: an absent autojoin attr means `false`
+            // (web parity — `bookmark.autojoin ?? false`). The user's
+            // own PEP bookmark can still override this later in
+            // `discover_topology`.
+            let autojoin = matches!(conference.attr("autojoin"), Some("true") | Some("1"));
+            Some((id, room_jid, name, autojoin))
         })
         .enumerate()
-        .map(|(position, (id, room_jid, name))| DiscoveredChannel {
-            id,
-            room_jid,
-            name,
-            description: None,
-            channel_type: DiscoveredChannelType::Text,
-            position: position as i32,
-            space_id: space_id.clone(),
-        })
+        .map(
+            |(position, (id, room_jid, name, autojoin))| DiscoveredChannel {
+                id,
+                room_jid,
+                name,
+                description: None,
+                channel_type: DiscoveredChannelType::Text,
+                position: position as i32,
+                space_id: space_id.clone(),
+                autojoin,
+                bookmark_name: None,
+                is_group_dm: false,
+            },
+        )
         .collect();
 
     Some(channels)

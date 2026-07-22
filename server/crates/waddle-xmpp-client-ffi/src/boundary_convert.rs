@@ -39,6 +39,9 @@ pub(crate) fn topology_to_ffi(
                 channel_type: channel.channel_type.as_str().to_string(),
                 position: channel.position,
                 space_id: channel.space_id.as_str().to_string(),
+                autojoin: channel.autojoin,
+                bookmark_name: channel.bookmark_name,
+                is_group_dm: channel.is_group_dm,
             })
             .collect(),
     }

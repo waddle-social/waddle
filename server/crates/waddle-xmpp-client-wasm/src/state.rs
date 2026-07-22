@@ -248,12 +248,10 @@ impl DeferredWasmCommand {
     }
 }
 
-/// Result of one streamed XEP-0430 inbox query.
-#[derive(Debug, Clone)]
-pub(crate) struct InboxPage {
-    pub entries: Vec<waddle_xmpp_client::inbox::InboxStreamEntry>,
-    pub fin: waddle_xmpp_client::inbox::InboxFin,
-}
+/// Result of one streamed XEP-0430 inbox query — the shared type
+/// from the core crate, re-exported so driver/command plumbing keeps
+/// its `crate::state::InboxPage` paths.
+pub(crate) use waddle_xmpp_client::inbox::InboxPage;
 
 pub(crate) enum DriverEvent {
     Client(Box<ClientEvent>),

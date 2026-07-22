@@ -33,7 +33,7 @@ use waddle_xmpp_client::{ClientError, ClientHandle, ClientResult};
 /// Bound every fetch-style IQ round-trip:  itself has no
 /// request-level timeout, so a server that accepts but never answers
 /// would otherwise suspend the caller's `await` forever.
-const IQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const IQ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) async fn send_iq_with_timeout(
     handle: &ClientHandle,

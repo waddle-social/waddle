@@ -41,7 +41,7 @@ class CreateChannelDialogTest {
         }
         // The owner probe fires once the connection is Ready; the
         // canned answer must be in place before that.
-        harness.activeFakeClient().communityOwner = true
+        harness.activeFakeClient().directory.communityOwner = true
         harness.clientFactory.emit(WaddleClientEvent.Connected)
 
         composeRule.setContent {

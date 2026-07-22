@@ -70,6 +70,7 @@ class XmppSessionManager(
     val presenceStore = stores.presenceStore
     val dmStore = stores.dmStore
     val unreadStore = stores.unreadStore
+    val inboxStore = stores.inboxStore
     val chatStateStore = stores.chatStateStore
     val readCursorStore = stores.readCursorStore
     val pinStore = stores.pinStore
@@ -119,7 +120,8 @@ class XmppSessionManager(
     private val stickers = StickerVerbs(activeSession, stores)
     private val profile = ProfileVerbs(activeSession, stores)
 
-    private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
+    private val catchup =
+        SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
 
     private val loop = ConnectionLoop(
         clientFactory = clientFactory,
@@ -301,6 +303,14 @@ class XmppSessionManager(
         explicitTarget: DisplayedTarget? = null,
     ) = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
 
+    /**
+     * XEP-0430 server-side mark-read for one conversation (optionally
+     * one room thread). The displayed path co-fires this automatically;
+     * exposed for callers without a displayed target (thread reads).
+     */
+    suspend fun markInboxRead(conversationJid: String, threadId: String? = null) =
+        readState.markInboxRead(conversationJid, threadId)
+
     /** XEP-0085 typing notification: best-effort and live-session-only. */
     suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): VerbResult =
         verbs.sendChatState(conversationJid, isGroupchat, state)
@@ -353,6 +363,36 @@ class XmppSessionManager(
     /** XEP-0045 §10.9: destroy a room (owner only); refreshes topology. */
     suspend fun destroyRoom(roomJid: String, reason: String? = null): RoomAdminResult =
         roomAdmin.destroyRoom(roomJid, reason)
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a group DM (membership
+     * including self), refresh the topology so the bookmarked room is
+     * known, then join it as our own nick so live messages flow
+     * immediately.
+     */
+    suspend fun createGroupDm(name: String, memberJids: List<String>): CreateRoomResult {
+        val result = roomAdmin.createGroupDm(name, memberJids)
+        if (result is CreateRoomResult.Created) {
+            activeSession.ownBareJid?.let { own ->
+                joinRoom(result.roomJid, own.substringBefore('@'))
+            }
+        }
+        return result
+    }
+
+    /** `urn:waddle:group-dm:rename:0`: set (or clear) the display name. */
+    suspend fun renameGroupDm(roomJid: String, name: String?): RoomAdminResult =
+        roomAdmin.renameGroupDm(roomJid, name)
+
+    /** `urn:waddle:group-dm:leave:0`: leave; the room drops off the DM surface. */
+    suspend fun leaveGroupDm(roomJid: String): RoomAdminResult = roomAdmin.leaveGroupDm(roomJid)
+
+    /** XEP-0045 §7.8.2 mediated group-DM invite (history: from-join or full). */
+    suspend fun inviteToGroupDm(
+        roomJid: String,
+        inviteeJid: String,
+        fullHistory: Boolean = false,
+    ): RoomAdminResult = roomAdmin.inviteToGroupDm(roomJid, inviteeJid, fullHistory)
 
     /** XEP-0055 user directory search backing the add-member flow. */
     suspend fun searchUsers(query: String): List<WaddleUserSearchEntry>? = roomAdmin.searchUsers(query)
@@ -439,7 +479,8 @@ class XmppSessionManager(
         session: WaddleSessionInfo,
         freshStream: Boolean,
     ) {
-        attemptScope.launch { catchup.refreshTopology(client) }
+        // Topology discovery now heads the sequential ready pipeline:
+        // the bookmark-driven rejoin derives its join set from it.
         attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending

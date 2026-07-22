@@ -180,14 +180,14 @@ class XmppSessionManagerRoomAdminTest {
     fun `owner probe and users list pass through`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.communityOwner = true
+        harness.client.directory.communityOwner = true
 
         assertTrue(harness.manager.isCommunityOwner())
 
         harness.manager.adminUsersList(prefix = "al", pageSize = 50u)
         assertEquals(
             Triple("al", 50u as UInt?, null as String?),
-            harness.client.adminUsersListCalls.single(),
+            harness.client.directory.adminUsersListCalls.single(),
         )
     }
 

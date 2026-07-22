@@ -58,6 +58,7 @@ fn test_client() -> Arc<WaddleClient> {
         },
         listener: Arc::new(Box::new(RecordingListener::default()) as Box<dyn WaddleEventListener>),
         handle: tokio::sync::Mutex::new(None),
+        inbox_query_gate: tokio::sync::Mutex::new(()),
     })
 }
 

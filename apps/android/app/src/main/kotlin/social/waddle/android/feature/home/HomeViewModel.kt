@@ -20,8 +20,9 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.store.NotifySettingsEntry
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.client.ffi.WaddleChannel
 import social.waddle.client.ffi.WaddleNotifyMode
-import social.waddle.client.ffi.WaddleTopology
+import social.waddle.client.ffi.WaddleSpace
 
 data class ChannelListItem(
     val roomJid: String,
@@ -57,7 +58,14 @@ class HomeViewModel(
     }
 
     val uiState: StateFlow<HomeUiState> = combine(
-        sessionManager.roomStore.topology,
+        // Spaces come from the raw topology; the channel list uses the
+        // store's group-DM-free selector (group DMs surface on the DM
+        // list in stage 3, never here).
+        combine(
+            sessionManager.roomStore.topology,
+            sessionManager.roomStore.channels,
+            ::Pair,
+        ),
         sessionManager.unreadStore.counts,
         sessionManager.dmStore.peers,
         sessionManager.connectionState,
@@ -68,10 +76,15 @@ class HomeViewModel(
             sessionManager.callStore.mucCallPresence.participants,
             ::Pair,
         ),
-    ) { topology, counts, dmPeers, connection, (notifyEntries, callParticipants) ->
+    ) { (topology, channels), counts, dmPeers, connection, (notifyEntries, callParticipants) ->
+        // Group DMs live on the DM surface, so their unreads count into
+        // the drawer's Direct-messages badge alongside peer DMs.
+        val groupDmUnread = topology.channels
+            .filter { it.isGroupDm }
+            .sumOf { counts[it.roomJid] ?: 0 }
         HomeUiState(
-            sections = sectionsOf(topology, counts, notifyEntries, callParticipants),
-            dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 },
+            sections = sectionsOf(topology.spaces, channels, counts, notifyEntries, callParticipants),
+            dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 } + groupDmUnread,
             connectionState = connection,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())
@@ -132,7 +145,8 @@ class HomeViewModel(
     }
 
     private fun sectionsOf(
-        topology: WaddleTopology,
+        spaces: List<WaddleSpace>,
+        channels: List<WaddleChannel>,
         counts: Map<String, Int>,
         notifyEntries: Map<String, NotifySettingsEntry>,
         callParticipants: Map<String, Set<String>>,
@@ -152,8 +166,8 @@ class HomeViewModel(
             )
         }
 
-        val channelsBySpace = topology.channels.groupBy { it.spaceId }
-        val sections = topology.spaces.map { space ->
+        val channelsBySpace = channels.groupBy { it.spaceId }
+        val sections = spaces.map { space ->
             SpaceSection(
                 id = space.id,
                 name = space.name,
@@ -162,8 +176,8 @@ class HomeViewModel(
                     .map { channel -> itemOf(channel.roomJid, channel.name) },
             )
         }
-        val knownSpaces = topology.spaces.mapTo(HashSet()) { it.id }
-        val orphans = topology.channels
+        val knownSpaces = spaces.mapTo(HashSet()) { it.id }
+        val orphans = channels
             .filter { it.spaceId !in knownSpaces }
             .sortedBy { it.position }
             .map { channel -> itemOf(channel.roomJid, channel.name) }
