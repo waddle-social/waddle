@@ -620,7 +620,15 @@ class FakeWaddleClient : WaddleClientInterface {
         return vcard4
     }
 
+    /**
+     * Virtual-time stall inside [fetchUserPepProfile] — lets tests
+     * retire the session while a profile load is parked mid-flight.
+     */
+    @Volatile
+    var fetchPepProfileDelayMillis = 0L
+
     override suspend fun fetchUserPepProfile(jid: String): WaddlePepProfile {
+        if (fetchPepProfileDelayMillis > 0) delay(fetchPepProfileDelayMillis)
         fetchPepProfileCalls += jid
         return pepProfile
     }

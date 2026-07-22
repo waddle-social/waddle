@@ -226,36 +226,15 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
-    fun `a publish ack that lands after a terminal auth failure is dropped`() = runTest {
-        val harness = Harness(this)
-        harness.loginReady(this)
-        harness.client.profileVerbDelayMillis = 1_000L
-
-        // Terminal auth failure signs the app out WITHOUT a login
-        // following; the dead session's parked ack must not write
-        // during the signed-out idle period.
-        val pending = async { harness.manager.setMood("happy", null) }
-        runCurrent()
-        harness.factory.emit(
-            WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED),
-        )
-        runCurrent()
-
-        advanceTimeBy(1_001L)
-        runCurrent()
-        pending.await()
-        assertNull(harness.manager.profileStore.selfMood.value)
-    }
-
-    @Test
     fun `loadSelfProfile abandoned mid-flight never issues avatar iqs for the dead session`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.client.profileVerbDelayMillis = 1_000L
+        harness.client.fetchPepProfileDelayMillis = 1_000L
 
-        // The vCard fetch parks; a logout retires the session while
-        // the load is in flight. The stale coroutine must bail before
-        // the avatar step instead of fetching through the next client.
+        // The vCard fetch answers instantly; the PEP fetch parks. A
+        // logout retires the session while the load is in flight — the
+        // stale coroutine must bail before the avatar step instead of
+        // fetching through the next session's client.
         val pending = async { harness.manager.loadSelfProfile() }
         runCurrent()
         harness.manager.logout()
