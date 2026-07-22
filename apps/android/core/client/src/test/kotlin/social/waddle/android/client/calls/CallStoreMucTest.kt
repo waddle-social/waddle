@@ -385,6 +385,52 @@ class CallStoreMucTest {
         assertTrue(f.client.callVerbs.none { it == leavePresenceVerb })
     }
 
+    @Test
+    fun `a failed leave send never marks the self-leave echo pending`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        assertTrue(activateMucCall(f).await())
+        f.client.updateMujiPresenceFailure = RuntimeException("boom")
+
+        f.store.hangUp()
+        runCurrent()
+
+        // No echo will ever settle a failed leave: the marker must stay
+        // clear so the retained-leave recovery remains reachable for
+        // the durable ghost the failure leaves behind.
+        assertTrue(f.store.mucCallPresence.selfLeaveEchoPending.value.isEmpty())
+    }
+
+    @Test
+    fun `a stale raised hand never rides into a resumed call's re-stamp`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        assertTrue(activateMucCall(f).await())
+        assertTrue(f.store.muc.setHandRaised(true))
+        val otherRoom = "lounge@muc.waddle.test"
+        f.sessionCache.remember(
+            otherRoom, "c-b", OWN_FULL, audio,
+            mucJoin.copy(room = otherRoom),
+            nowMillis = 1_000L,
+        )
+        // Stall the teardown's leave so the resumed attempt claims the
+        // slot before the leave's flag-reset check runs (the reset is
+        // then skipped — resume's own claim-time init must zero it).
+        f.client.updateMujiPresenceDelaysMillis += 500L
+        val hungUp = backgroundScope.async { f.store.hangUp() }
+        runCurrent()
+        assertTrue(f.store.muc.resume(otherRoom, SELF_NICK, OWN_FULL, nowMillis = 1_001L))
+        advanceTimeBy(501)
+        runCurrent()
+        hungUp.await()
+
+        val restamp = f.client.callVerbs
+            .filterIsInstance<RecordedCallVerb.UpdateMujiPresence>()
+            .last { it.roomJid == otherRoom && it.active }
+        assertFalse(restamp.handRaised)
+        assertFalse(f.store.muc.selfHandRaised.value)
+    }
+
     // ── In-call flag re-stamps ───────────────────────────────────────────────
 
     @Test
