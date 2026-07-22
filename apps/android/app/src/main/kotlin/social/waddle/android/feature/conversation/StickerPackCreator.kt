@@ -53,6 +53,10 @@ class StickerPackCreator(
     ): CreateStickerPackResult {
         val packName = name.trim()
         if (packName.isEmpty() || images.isEmpty()) return CreateStickerPackResult.Failed
+        // The account this attempt belongs to: uploads are plain HTTP
+        // that keep running across a logout/relogin, and the publish
+        // must never land in ANOTHER account's PEP node.
+        val owner = sessionManager.ownFullJid() ?: return CreateStickerPackResult.NotConnected
         val items = mutableListOf<StickerItem>()
         images.forEachIndexed { index, input ->
             onProgress(index, images.size)
@@ -60,6 +64,7 @@ class StickerPackCreator(
             items += item
         }
         onProgress(images.size, images.size)
+        if (sessionManager.ownFullJid() != owner) return CreateStickerPackResult.NotConnected
         return when (sessionManager.publishStickerPack(packName, summary, items)) {
             VerbResult.Ok -> CreateStickerPackResult.Ok
             VerbResult.NotConnected -> CreateStickerPackResult.NotConnected

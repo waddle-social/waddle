@@ -4,9 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -50,10 +48,30 @@ class StickerPacksViewModel(
     /** The current create attempt as observable, recreation-safe state. */
     val createPhase: StateFlow<CreatePackPhase> = _createPhase.asStateFlow()
 
-    private val _removeFailures = MutableSharedFlow<VerbResult.Failure>(extraBufferCapacity = 4)
+    private val _removeFailure = MutableStateFlow<VerbResult.Failure?>(null)
 
-    /** Fired when a pack removal is refused (store untouched). */
-    val removeFailures: SharedFlow<VerbResult.Failure> = _removeFailures
+    /**
+     * The most recent refused removal, sticky until consumed: a
+     * subscriber-less window (sheet closed, rotation mid-IQ) must not
+     * silently drop the only signal that the pack is still there.
+     */
+    val removeFailure: StateFlow<VerbResult.Failure?> = _removeFailure.asStateFlow()
+
+    /** The failure was surfaced; clear it. */
+    fun consumeRemoveFailure() {
+        _removeFailure.value = null
+    }
+
+    /**
+     * Clear a terminal create phase so a reopened sheet starts fresh —
+     * a stale Failed banner over an empty form is last attempt's news.
+     * A Creating phase stays: the pipeline is still running.
+     */
+    fun resetCreatePhase() {
+        if (_createPhase.value !is CreatePackPhase.Creating) {
+            _createPhase.value = CreatePackPhase.Idle
+        }
+    }
 
     /** Launch one create attempt; a no-op while one is in flight. */
     fun createPack(name: String, summary: String?, images: List<StickerImageInput>) {
@@ -98,7 +116,7 @@ class StickerPacksViewModel(
             } catch (_: Throwable) {
                 VerbResult.Rejected
             }
-            if (result is VerbResult.Failure) _removeFailures.tryEmit(result)
+            if (result is VerbResult.Failure) _removeFailure.value = result
         }
     }
 

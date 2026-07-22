@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -122,20 +123,19 @@ class StickerPacksViewModelTest {
                 result
             },
         )
-        val failures = mutableListOf<VerbResult.Failure>()
-        val collector = launch { viewModel.removeFailures.collect { failures += it } }
-        runCurrent()
-
         viewModel.removePack("pack-1")
         runCurrent()
         assertEquals(listOf("pack-1"), removed)
-        assertTrue(failures.isEmpty())
+        assertNull(viewModel.removeFailure.value)
 
         result = VerbResult.Rejected
         viewModel.removePack("pack-2")
         runCurrent()
-        assertEquals(listOf<VerbResult.Failure>(VerbResult.Rejected), failures)
-        collector.cancel()
+        // Sticky until consumed: a subscriber-less window (sheet
+        // closed, rotation mid-IQ) must not drop the signal.
+        assertEquals(VerbResult.Rejected, viewModel.removeFailure.value)
+        viewModel.consumeRemoveFailure()
+        assertNull(viewModel.removeFailure.value)
     }
 
     @Test
@@ -144,14 +144,31 @@ class StickerPacksViewModelTest {
             create = { _, _, _, _ -> CreateStickerPackResult.Ok },
             remove = { throw IllegalStateException("boom") },
         )
-        val failures = mutableListOf<VerbResult.Failure>()
-        val collector = launch { viewModel.removeFailures.collect { failures += it } }
-        runCurrent()
-
         viewModel.removePack("pack-1")
         runCurrent()
 
-        assertEquals(listOf<VerbResult.Failure>(VerbResult.Rejected), failures)
-        collector.cancel()
+        assertEquals(VerbResult.Rejected, viewModel.removeFailure.value)
+    }
+
+    @Test
+    fun `resetCreatePhase clears a terminal failure but never a live attempt`() = runTest(dispatcher.scheduler) {
+        val gate = CompletableDeferred<CreateStickerPackResult>()
+        val viewModel = StickerPacksViewModel(
+            create = { _, _, _, _ -> gate.await() },
+            remove = { VerbResult.Ok },
+        )
+
+        viewModel.createPack("pack", null, emptyList())
+        runCurrent()
+        // Mid-flight: reset must not clobber the running attempt.
+        viewModel.resetCreatePhase()
+        assertTrue(viewModel.createPhase.value is CreatePackPhase.Creating)
+
+        gate.complete(CreateStickerPackResult.Failed)
+        runCurrent()
+        assertTrue(viewModel.createPhase.value is CreatePackPhase.Failed)
+        // A dismissed sheet consumes the stale banner.
+        viewModel.resetCreatePhase()
+        assertEquals(CreatePackPhase.Idle, viewModel.createPhase.value)
     }
 }

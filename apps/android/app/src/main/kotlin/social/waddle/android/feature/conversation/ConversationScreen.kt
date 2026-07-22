@@ -347,12 +347,20 @@ fun ConversationScreen(
         // VM-scoped (not composition-scoped): a removal keeps running —
         // and reconciles the store — even when the sheet closes or the
         // screen rotates right after the confirm.
+        val stickerSession by graph.currentSession.collectAsStateWithLifecycle()
+        // Account-scoped key (ProfileScreen precedent): the activity
+        // retains VM stores across logout/login, and account A's sticky
+        // phase or in-flight pipeline must not serve account B.
         val packsViewModel: StickerPacksViewModel = viewModel(
-            key = STICKER_PACKS_VIEW_MODEL_KEY,
+            key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
             factory = StickerPacksViewModel.factory(graph),
         )
-        LaunchedEffect(packsViewModel) {
-            packsViewModel.removeFailures.collect { snackbarHostState.showSnackbar(actionFailedText) }
+        val removeFailure by packsViewModel.removeFailure.collectAsStateWithLifecycle()
+        LaunchedEffect(removeFailure) {
+            if (removeFailure != null) {
+                packsViewModel.consumeRemoveFailure()
+                snackbarHostState.showSnackbar(actionFailedText)
+            }
         }
         StickerPickerSheet(
             packs = packs,
@@ -371,10 +379,12 @@ fun ConversationScreen(
 
     if (createStickerPackOpen) {
         val graph = LocalAppGraph.current
-        // Same instance as the picker branch (shared key): the create
-        // pipeline lives in the VM and survives sheet recreation.
+        val stickerSession by graph.currentSession.collectAsStateWithLifecycle()
+        // Same instance as the picker branch (shared account-scoped
+        // key): the create pipeline lives in the VM and survives sheet
+        // recreation.
         val packsViewModel: StickerPacksViewModel = viewModel(
-            key = STICKER_PACKS_VIEW_MODEL_KEY,
+            key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
             factory = StickerPacksViewModel.factory(graph),
         )
         val createPhase by packsViewModel.createPhase.collectAsStateWithLifecycle()
@@ -387,7 +397,12 @@ fun ConversationScreen(
                 // Back to the picker: the store already holds the new pack.
                 stickerPickerOpen = true
             },
-            onDismiss = { createStickerPackOpen = false },
+            onDismiss = {
+                // A terminal Failed phase is last attempt's news; a
+                // reopened sheet must start fresh.
+                packsViewModel.resetCreatePhase()
+                createStickerPackOpen = false
+            },
         )
     }
 
