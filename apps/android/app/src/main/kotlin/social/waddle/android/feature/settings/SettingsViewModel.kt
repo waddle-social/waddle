@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
@@ -16,7 +17,9 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.client.ffi.WaddleAvatar
 
 data class SettingsUiState(
     val username: String? = null,
@@ -40,6 +43,15 @@ class SettingsViewModel(
         jid = session?.jid,
         avatarUrl = session?.avatarUrl,
     )
+
+    /** The account's XMPP-published avatar; wins over the REST URL. */
+    val selfAvatar: StateFlow<WaddleAvatar?> = run {
+        val ownBareJid = session?.jid?.let(::bareJidOf)
+        sessionManager?.profileStore?.avatars
+            ?.map { avatars -> ownBareJid?.let(avatars::get) }
+            ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+            ?: MutableStateFlow(null)
+    }
 
     private val _isCommunityOwner = MutableStateFlow(false)
 

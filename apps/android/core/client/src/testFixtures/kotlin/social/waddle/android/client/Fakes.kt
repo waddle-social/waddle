@@ -46,6 +46,7 @@ import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddlePepProfile
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
@@ -59,8 +60,10 @@ import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleTopology
+import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
 import social.waddle.client.ffi.WaddleUserSearchEntry
+import social.waddle.client.ffi.WaddleVCard4
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -199,6 +202,42 @@ sealed interface RecordedCallVerb {
         val sid: String,
         val reason: WaddleJingleReason?,
     ) : RecordedCallVerb
+}
+
+/**
+ * One recorded profile-publishing wire verb (XEP-0292/0084/0107/0108/
+ * 0118), in send order, mirroring [RecordedCallVerb] for the call
+ * family.
+ */
+sealed interface RecordedProfileVerb {
+    data class PublishVcard4(val vcard: WaddleVCard4) : RecordedProfileVerb
+
+    /** Bytes are recorded by count (array equality is referential);
+     *  the raw payload lands in `FakeWaddleClient.publishedAvatarBytes`. */
+    data class PublishAvatar(
+        val byteCount: Int,
+        val mimeType: String,
+        val width: UInt,
+        val height: UInt,
+    ) : RecordedProfileVerb
+
+    data object DisableAvatar : RecordedProfileVerb
+
+    data class PublishMood(val kind: String, val text: String?) : RecordedProfileVerb
+
+    data object RetractMood : RecordedProfileVerb
+
+    data class PublishActivity(
+        val general: String,
+        val specific: String?,
+        val text: String?,
+    ) : RecordedProfileVerb
+
+    data class PublishTune(val tune: WaddleTune) : RecordedProfileVerb
+
+    data object RetractActivity : RecordedProfileVerb
+
+    data object RetractTune : RecordedProfileVerb
 }
 
 /**
@@ -433,7 +472,101 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun leaveRoom(roomJid: String, nick: String) = unused()
-    override suspend fun requestAvatar(jid: String): WaddleAvatar? = unused()
+
+    /** Every recorded profile-publishing wire verb, in send order. */
+    val profileVerbs = CopyOnWriteArrayList<RecordedProfileVerb>()
+
+    /** Thrown by every profile publish/retract verb when set (the FFI
+     *  signals refusal by throwing `WaddleException`). */
+    @Volatile
+    var profileVerbFailure: Throwable? = null
+
+    /** Canned vCard4 served by [fetchVcard4]; recorded jids. */
+    @Volatile
+    var vcard4: WaddleVCard4? = null
+
+    @Volatile
+    var fetchVcard4Failure: Throwable? = null
+
+    val fetchVcard4Calls = CopyOnWriteArrayList<String>()
+
+    /** Canned PEP status snapshot served by [fetchUserPepProfile]. */
+    @Volatile
+    var pepProfile: WaddlePepProfile = WaddlePepProfile(mood = null, activity = null, tune = null)
+
+    val fetchPepProfileCalls = CopyOnWriteArrayList<String>()
+
+    /** Canned XEP-0084 avatar served by [requestAvatar]; recorded jids. */
+    @Volatile
+    var avatar: WaddleAvatar? = null
+
+    val requestAvatarCalls = CopyOnWriteArrayList<String>()
+
+    /** Raw payload of the most recent [publishAvatar] call. */
+    @Volatile
+    var publishedAvatarBytes: ByteArray? = null
+
+    override suspend fun requestAvatar(jid: String): WaddleAvatar? {
+        requestAvatarCalls += jid
+        return avatar
+    }
+
+    override suspend fun fetchVcard4(jid: String): WaddleVCard4? {
+        fetchVcard4Calls += jid
+        fetchVcard4Failure?.let { throw it }
+        return vcard4
+    }
+
+    override suspend fun fetchUserPepProfile(jid: String): WaddlePepProfile {
+        fetchPepProfileCalls += jid
+        return pepProfile
+    }
+
+    override suspend fun publishVcard4(vcard: WaddleVCard4) {
+        profileVerbs += RecordedProfileVerb.PublishVcard4(vcard)
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt) {
+        publishedAvatarBytes = data
+        profileVerbs += RecordedProfileVerb.PublishAvatar(data.size, mimeType, width, height)
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun disableAvatar() {
+        profileVerbs += RecordedProfileVerb.DisableAvatar
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun publishMood(kind: String, text: String?) {
+        profileVerbs += RecordedProfileVerb.PublishMood(kind, text)
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun retractMood() {
+        profileVerbs += RecordedProfileVerb.RetractMood
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun publishActivity(general: String, specific: String?, text: String?) {
+        profileVerbs += RecordedProfileVerb.PublishActivity(general, specific, text)
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun retractActivity() {
+        profileVerbs += RecordedProfileVerb.RetractActivity
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun publishTune(tune: WaddleTune) {
+        profileVerbs += RecordedProfileVerb.PublishTune(tune)
+        profileVerbFailure?.let { throw it }
+    }
+
+    override suspend fun retractTune() {
+        profileVerbs += RecordedProfileVerb.RetractTune
+        profileVerbFailure?.let { throw it }
+    }
     override suspend fun requestUploadSlot(
         serviceJid: String,
         filename: String,

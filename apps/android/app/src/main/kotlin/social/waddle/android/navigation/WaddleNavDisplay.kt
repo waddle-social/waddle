@@ -13,6 +13,7 @@ import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.home.HomeScreen
 import social.waddle.android.feature.members.MembersScreen
+import social.waddle.android.feature.profile.ProfileScreen
 import social.waddle.android.feature.settings.SettingsScreen
 
 /**
@@ -102,7 +103,11 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                 SettingsScreen(
                     onBack = { backStack.popSafely() },
                     onOpenCommunityUsers = { backStack.add(WaddleNavKey.CommunityUsers) },
+                    onOpenProfile = { backStack.add(WaddleNavKey.Profile) },
                 )
+            }
+            entry<WaddleNavKey.Profile> {
+                ProfileScreen(onBack = { backStack.popSafely() })
             }
         },
     )

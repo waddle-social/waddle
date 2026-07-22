@@ -4,8 +4,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +29,7 @@ import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleAdminUsersPage
+import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
@@ -35,8 +38,10 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
+import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
 import social.waddle.client.ffi.WaddleUserSearchEntry
+import social.waddle.client.ffi.WaddleVCard4
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -72,6 +77,7 @@ class XmppSessionManager(
     val pinStore = stores.pinStore
     val notifySettingsStore = stores.notifySettingsStore
     val roomMembersStore = stores.roomMembersStore
+    val profileStore = stores.profileStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -109,6 +115,11 @@ class XmppSessionManager(
     private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
 
     private val roomAdmin = RoomAdminVerbs(activeSession, stores)
+
+    private val profile = ProfileVerbs(activeSession, stores)
+
+    /** The pending debounced XEP-0118 tune publish (see [setTune]). */
+    private var tunePublishJob: Job? = null
 
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
@@ -345,6 +356,60 @@ class XmppSessionManager(
         afterCursor: String? = null,
     ): WaddleAdminUsersPage? = roomAdmin.adminUsersList(prefix, pageSize, afterCursor)
 
+    /** Load the account's vCard4 + PEP status + avatar into [profileStore]. */
+    suspend fun loadSelfProfile(): VerbResult = profile.loadSelfProfile()
+
+    /** XEP-0292: optimistic vCard4 publish with rollback on failure. */
+    suspend fun publishProfile(vcard: WaddleVCard4): VerbResult = profile.publishProfile(vcard)
+
+    /** XEP-0084 §3: publish the account's avatar (cached on success). */
+    suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): VerbResult =
+        profile.publishAvatar(data, mimeType, width, height)
+
+    /** XEP-0084 §4.3: publish the "no avatar" item and drop the local one. */
+    suspend fun disableAvatar(): VerbResult = profile.disableAvatar()
+
+    /** XEP-0084 avatar fetch for any JID, honoring the §4.2 item-id cache. */
+    suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? =
+        profile.fetchAvatar(jid, knownId)
+
+    /** XEP-0107: publish a mood ([ProfileVerbs.setMood]). */
+    suspend fun setMood(kind: String, text: String? = null): VerbResult = profile.setMood(kind, text)
+
+    /** XEP-0107 §2.2: retract the mood. */
+    suspend fun clearMood(): VerbResult = profile.clearMood()
+
+    /** XEP-0108: publish an activity ([ProfileVerbs.setActivity]). */
+    suspend fun setActivity(general: String, specific: String? = null, text: String? = null): VerbResult =
+        profile.setActivity(general, specific, text)
+
+    /** XEP-0108: retract the activity. */
+    suspend fun clearActivity(): VerbResult = profile.clearActivity()
+
+    /**
+     * XEP-0118 tune publish, debounced by [TUNE_DEBOUNCE_MILLIS]
+     * (the spec's "SHOULD wait several seconds before publishing new
+     * tune information" against track-skipping). Each call replaces
+     * the pending publish; the result lands in [profileStore]'s
+     * `selfTune` once the debounced send succeeds. No live session →
+     * dropped, like other live-only signals.
+     */
+    fun setTune(tune: WaddleTune) {
+        val scope = sessionScope ?: return
+        tunePublishJob?.cancel()
+        tunePublishJob = scope.launch {
+            delay(TUNE_DEBOUNCE_MILLIS)
+            profile.publishTune(tune)
+        }
+    }
+
+    /** XEP-0118 §3.2: cancel any pending publish and retract the tune. */
+    suspend fun clearTune(): VerbResult {
+        tunePublishJob?.cancel()
+        tunePublishJob = null
+        return profile.clearTune()
+    }
+
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {
         loop.requestReconnect()
@@ -437,5 +502,8 @@ class XmppSessionManager(
 
         /** Sign-out budget for the pre-disconnect call hang-up. */
         const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
+
+        /** XEP-0118: "wait several seconds" before publishing a new tune. */
+        const val TUNE_DEBOUNCE_MILLIS = 3_000L
     }
 }

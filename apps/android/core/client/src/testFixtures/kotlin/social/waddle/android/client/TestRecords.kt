@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import social.waddle.client.ffi.WaddleArchivedMessage
+import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
@@ -20,6 +21,8 @@ import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleSmResumeState
+import social.waddle.client.ffi.WaddleTune
+import social.waddle.client.ffi.WaddleVCard4
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
 
@@ -219,6 +222,54 @@ fun testCallEvent(
     to = "me@waddle.test/waddle-android-abcdef01",
     sid = sid,
     kind = WaddleCallEventKind.Propose(WaddleCallMedia(audio = true, video = false)),
+)
+
+fun testVcard4(
+    fullName: String? = "Ice Puma",
+    nickname: String? = null,
+    pronouns: String? = null,
+    note: String? = null,
+    url: String? = null,
+    photoUri: String? = null,
+): WaddleVCard4 = WaddleVCard4(
+    fullName = fullName,
+    nickname = nickname,
+    pronouns = pronouns,
+    note = note,
+    url = url,
+    photoUri = photoUri,
+)
+
+fun testTune(
+    artist: String? = "The Beatles",
+    title: String? = "Come Together",
+    source: String? = null,
+    track: String? = null,
+    uri: String? = null,
+    lengthSeconds: UInt? = null,
+    rating: UByte? = null,
+): WaddleTune = WaddleTune(
+    artist = artist,
+    title = title,
+    source = source,
+    track = track,
+    uri = uri,
+    lengthSeconds = lengthSeconds,
+    rating = rating,
+)
+
+fun testAvatar(
+    jid: String = "alice@waddle.test",
+    id: String = "a1b2c3",
+    mimeType: String = "image/png",
+    data: ByteArray = byteArrayOf(1, 2, 3),
+    url: String? = null,
+): WaddleAvatar = WaddleAvatar(
+    jid = jid,
+    id = id,
+    mimeType = mimeType,
+    data = data,
+    url = url,
 )
 
 fun testResumeState(
