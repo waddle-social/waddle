@@ -1450,6 +1450,8 @@ fn build_outbound_message_with_shared_files() {
             size: Some(1234),
             width: None,
             height: None,
+            desc: None,
+            hashes: Vec::new(),
             disposition: SharedFileDisposition::Inline,
             encrypted: None,
         }],
@@ -1476,6 +1478,112 @@ fn build_outbound_message_with_shared_files() {
             .and_then(|sources| sources.get_child("url-data", NS_URL_DATA))
             .and_then(|url_data| url_data.attr("target")),
         Some("https://files.example.com/song.ogg")
+    );
+}
+
+#[test]
+fn build_outbound_message_with_sticker_marker_and_file_desc_hash() {
+    // XEP-0449 "Sending a sticker from a sticker pack": the message
+    // carries the fallback body, the XEP-0447 file-sharing payload
+    // whose <file/> includes the lang-less <desc/> and the XEP-0300
+    // hash from the pack item, plus <sticker pack='…'/>.
+    use crate::stickers::{HashAlgo, PackId, PackRef, StickerHash, StickerMarker, NS_HASHES};
+    const NS_STICKERS: &str = "urn:xmpp:stickers:0";
+    let options = SendMessageOptions {
+        shared_files: vec![SharedFile {
+            url: "https://download.montague.lit/sticker_marsey_kiss.png".to_string(),
+            name: None,
+            media_type: Some("image/png".to_string()),
+            size: Some(67016),
+            width: Some(512),
+            height: Some(512),
+            desc: Some("😘".to_string()),
+            hashes: vec![StickerHash {
+                algo: HashAlgo::Sha256,
+                value_b64: "gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=".to_string(),
+            }],
+            disposition: SharedFileDisposition::Inline,
+            encrypted: None,
+        }],
+        sticker: Some(StickerMarker {
+            pack: Some(PackRef {
+                id: PackId::new("EpRv28DHHzFrE4zd+xaNpVb4").expect("pack id"),
+                jid: None,
+                node: None,
+            }),
+        }),
+        ..Default::default()
+    };
+    let (_, stanza) =
+        build_outbound_message("juliet@shakespeare.lit", "chat", "😘", &options).expect("builds");
+
+    let sticker = stanza
+        .get_child("sticker", NS_STICKERS)
+        .expect("sticker marker present");
+    assert_eq!(sticker.attr("pack"), Some("EpRv28DHHzFrE4zd+xaNpVb4"));
+    assert_eq!(sticker.attr("jid"), None);
+    assert_eq!(sticker.attr("node"), None);
+
+    let file = stanza
+        .get_child("file-sharing", NS_SFS)
+        .and_then(|sharing| sharing.get_child("file", NS_FILE_METADATA))
+        .expect("file metadata");
+    assert_eq!(
+        file.get_child("desc", NS_FILE_METADATA).map(|e| e.text()),
+        Some("😘".to_string())
+    );
+    let hash = file.get_child("hash", NS_HASHES).expect("XEP-0300 hash");
+    assert_eq!(hash.attr("algo"), Some("sha-256"));
+    assert_eq!(hash.text(), "gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=");
+}
+
+#[test]
+fn build_outbound_message_without_sticker_option_has_no_marker() {
+    let options = SendMessageOptions::default();
+    let (_, stanza) =
+        build_outbound_message("juliet@shakespeare.lit", "chat", "hi", &options).expect("builds");
+    assert!(stanza.get_child("sticker", "urn:xmpp:stickers:0").is_none());
+}
+
+#[test]
+fn parse_message_reads_file_desc_and_hashes_into_shared_file() {
+    // Inbound XEP-0449 "Sending a sticker" wire shape (xep-0449.xml
+    // §send): the receiver surfaces the <desc/> fallback and the
+    // content hash on the typed SharedFile; is_sticker keys on the
+    // <sticker/> element exactly as before.
+    use crate::stickers::HashAlgo;
+    let xml = "<message xmlns='jabber:client' type='chat' from='romeo@montague.lit/pda' id='sharing-a-file'>\
+        <body>😘</body>\
+        <sticker xmlns='urn:xmpp:stickers:0'/>\
+        <file-sharing xmlns='urn:xmpp:sfs:0'>\
+            <file xmlns='urn:xmpp:file:metadata:0'>\
+                <media-type>image/png</media-type>\
+                <desc>😘</desc>\
+                <desc xml:lang='en'>kissy face</desc>\
+                <size>67016</size>\
+                <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=</hash>\
+                <hash xmlns='urn:xmpp:hashes:2' algo='sha-1'>ignored</hash>\
+            </file>\
+            <sources>\
+                <url-data xmlns='http://jabber.org/protocol/url-data' target='https://download.montague.lit/sticker_marsey_kiss.png'/>\
+            </sources>\
+        </file-sharing>\
+    </message>";
+    let element: Element = xml.parse().expect("valid xml");
+    let MessagingEvent::Message(parsed) = parse(&element).expect("parses") else {
+        panic!("expected message event");
+    };
+    assert!(parsed.is_sticker, "sticker classifier unchanged");
+    assert_eq!(parsed.shared_files.len(), 1);
+    let file = &parsed.shared_files[0];
+    // Only the lang-less desc is the mandated fallback.
+    assert_eq!(file.desc.as_deref(), Some("😘"));
+    // Unknown hash algorithms are dropped at the typed boundary.
+    assert_eq!(file.hashes.len(), 1);
+    assert_eq!(file.hashes[0].algo, HashAlgo::Sha256);
+    assert_eq!(
+        file.hashes[0].value_b64,
+        "gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY="
     );
 }
 
@@ -1512,6 +1620,8 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
             size: Some(2048),
             width: Some(800),
             height: Some(600),
+            desc: None,
+            hashes: Vec::new(),
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1584,6 +1694,8 @@ fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
             size: Some(2048),
             width: None,
             height: None,
+            desc: None,
+            hashes: Vec::new(),
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1627,6 +1739,8 @@ fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
             size: Some(2048),
             width: None,
             height: None,
+            desc: None,
+            hashes: Vec::new(),
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1666,6 +1780,8 @@ fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
             size: Some(2048),
             width: None,
             height: None,
+            desc: None,
+            hashes: Vec::new(),
             disposition: SharedFileDisposition::Inline,
             encrypted: Some(EncryptedFile {
                 cipher: Cipher::Aes256GcmNoPadding,
@@ -1835,6 +1951,8 @@ fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
         size: Some(99),
         width: None,
         height: None,
+        desc: None,
+        hashes: Vec::new(),
         disposition: SharedFileDisposition::Attachment,
         encrypted: Some(EncryptedFile {
             cipher: Cipher::Aes128GcmNoPadding,

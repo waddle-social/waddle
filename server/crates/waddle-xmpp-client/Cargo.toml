@@ -23,6 +23,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true, optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"], optional = true }

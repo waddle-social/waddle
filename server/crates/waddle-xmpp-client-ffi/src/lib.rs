@@ -24,6 +24,7 @@ mod push;
 mod room_admin;
 mod send_outcome;
 mod stanza;
+mod sticker_verbs;
 mod types;
 
 #[cfg(test)]
@@ -40,6 +41,8 @@ mod muji_tests;
 mod notify_settings_tests;
 #[cfg(test)]
 mod room_admin_tests;
+#[cfg(test)]
+mod sticker_verbs_tests;
 
 pub use community_admin::{
     WaddleAdminChannelAffiliationEntry, WaddleAdminChannelListEntry,

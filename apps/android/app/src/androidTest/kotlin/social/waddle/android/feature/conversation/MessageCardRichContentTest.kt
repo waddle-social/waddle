@@ -127,6 +127,8 @@ class MessageCardRichContentTest {
                         size = null,
                         width = null,
                         height = null,
+                        desc = null,
+                        hashes = emptyList(),
                         disposition = "inline",
                         encrypted = null,
                     ),

@@ -113,7 +113,8 @@ final class RustXmppClient: ObservableObject {
                 sharedFiles: [],
                 linkPreviewToken: nil,
                 requestDisplayedMarker: false,
-                mucPm: false
+                mucPm: false,
+                sticker: nil
             )
         }
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
@@ -131,7 +132,8 @@ final class RustXmppClient: ObservableObject {
             sharedFiles: [],
             linkPreviewToken: nil,
             requestDisplayedMarker: false,
-            mucPm: false
+            mucPm: false,
+            sticker: nil
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: body, options: options)
     }
@@ -282,6 +284,8 @@ final class RustXmppClient: ObservableObject {
             size: UInt64(size),
             width: nil,
             height: nil,
+            desc: nil,
+            hashes: [],
             disposition: inferredDisposition(for: mediaType),
             encrypted: nil
         )
@@ -296,7 +300,8 @@ final class RustXmppClient: ObservableObject {
             sharedFiles: [sharedFile],
             linkPreviewToken: nil,
             requestDisplayedMarker: false,
-            mucPm: false
+            mucPm: false,
+            sticker: nil
         )
         _ = await waddleClient.sendGroupchatMessage(roomJid: roomJID, body: fileURL, options: options)
     }

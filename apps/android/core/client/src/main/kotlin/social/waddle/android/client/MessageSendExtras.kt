@@ -109,6 +109,9 @@ internal fun preparedSend(
             // Web-parity: dimensions are not probed on send.
             width = null,
             height = null,
+            // XEP-0449 sticker metadata; plain attachments carry none.
+            desc = null,
+            hashes = emptyList(),
             // The generated FFI record keeps its String field (wire
             // contract); typed → wire happens only at this boundary.
             disposition = ref.disposition.wire,

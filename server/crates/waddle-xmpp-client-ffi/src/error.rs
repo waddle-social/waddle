@@ -16,6 +16,10 @@ pub enum WaddleError {
     /// A caller-supplied Jingle session id was empty or whitespace.
     #[error("invalid session id")]
     InvalidSessionId,
+    /// A caller-supplied argument (pack id, pack content, hash
+    /// algorithm) was empty, malformed, or unsupported.
+    #[error("invalid argument")]
+    InvalidArgument,
     /// The server answered with an RFC 6120 §8.3 stanza error.
     /// `condition` is the defined-condition element name (e.g.
     /// `forbidden`); `text` is the optional human-readable `<text/>`.

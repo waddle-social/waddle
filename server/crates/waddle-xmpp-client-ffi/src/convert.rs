@@ -10,6 +10,7 @@ use waddle_xmpp_client::{
     },
     pin::{PinEntry, PinEvent, PinEventAction, PinPreview},
     request::StanzaId,
+    stickers,
     xep::{
         call_thread::CallThreadEnded,
         reply::{FallbackRange, ReplyMarker},
@@ -27,10 +28,11 @@ use crate::{
     WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus,
     WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
-    WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType,
-    WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState,
-    WaddleStanzaErrorType, WaddleStanzaId,
+    WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction, WaddlePinEntry,
+    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference,
+    WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
+    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
+    WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -110,9 +112,163 @@ fn shared_file_to_ffi(file: waddle_xmpp_client::messaging::SharedFile) -> Waddle
         size: file.size,
         width: file.width,
         height: file.height,
+        desc: file.desc,
+        hashes: file.hashes.into_iter().map(sticker_hash_to_ffi).collect(),
         disposition: file.disposition.as_str().to_string(),
         encrypted: file.encrypted.map(encrypted_file_to_ffi),
     }
+}
+
+// ── Stickers (XEP-0449) ──────────────────────────────────────────────────────
+
+pub(super) fn sticker_hash_to_ffi(hash: stickers::StickerHash) -> WaddleStickerHash {
+    WaddleStickerHash {
+        algo: hash.algo.as_str().to_string(),
+        value_b64: hash.value_b64,
+    }
+}
+
+pub(super) fn sticker_hash_from_ffi(
+    hash: WaddleStickerHash,
+) -> Result<stickers::StickerHash, String> {
+    let algo = stickers::HashAlgo::from_attr(&hash.algo)
+        .ok_or_else(|| format!("unsupported hash algorithm '{}'", hash.algo))?;
+    if hash.value_b64.trim().is_empty() {
+        return Err("hash value must not be empty".to_string());
+    }
+    Ok(stickers::StickerHash {
+        algo,
+        value_b64: hash.value_b64,
+    })
+}
+
+fn pack_sticker_to_ffi(sticker: stickers::PackSticker) -> WaddlePackSticker {
+    WaddlePackSticker {
+        desc: sticker.desc,
+        media_type: sticker.media_type,
+        size: sticker.size,
+        width: sticker.dimensions.map(|d| d.width),
+        height: sticker.dimensions.map(|d| d.height),
+        hashes: sticker
+            .hashes
+            .into_iter()
+            .map(sticker_hash_to_ffi)
+            .collect(),
+        sources: sticker.sources,
+        suggests: sticker
+            .suggests
+            .into_iter()
+            .map(|suggest| suggest.text)
+            .collect(),
+    }
+}
+
+fn pack_sticker_from_ffi(sticker: WaddlePackSticker) -> Result<stickers::PackSticker, String> {
+    if sticker.desc.trim().is_empty() {
+        return Err("sticker desc (textual fallback) must not be empty".to_string());
+    }
+    let hashes = sticker
+        .hashes
+        .into_iter()
+        .map(sticker_hash_from_ffi)
+        .collect::<Result<Vec<_>, String>>()?;
+    if hashes.is_empty() {
+        return Err("sticker must carry at least one content hash".to_string());
+    }
+    if sticker.sources.iter().all(|url| url.trim().is_empty()) {
+        return Err("sticker must carry at least one source URL".to_string());
+    }
+    let dimensions = match (sticker.width, sticker.height) {
+        (Some(width), Some(height)) => Some(stickers::StickerDimensions { width, height }),
+        _ => None,
+    };
+    Ok(stickers::PackSticker {
+        desc: sticker.desc,
+        media_type: sticker.media_type,
+        size: sticker.size,
+        dimensions,
+        hashes,
+        sources: sticker
+            .sources
+            .into_iter()
+            .filter(|url| !url.trim().is_empty())
+            .collect(),
+        suggests: sticker
+            .suggests
+            .into_iter()
+            .map(stickers::StickerText::plain)
+            .collect(),
+    })
+}
+
+pub(super) fn sticker_pack_to_ffi(doc: stickers::StickerPackDoc) -> WaddleStickerPack {
+    WaddleStickerPack {
+        id: doc.id.to_string(),
+        // The picker surface wants one display string per field; the
+        // lang-less (or first) entry is the canonical one.
+        name: doc.name.into_iter().next().map(|entry| entry.text),
+        summary: doc.summary.into_iter().next().map(|entry| entry.text),
+        restricted: doc.restricted,
+        stickers: doc.stickers.into_iter().map(pack_sticker_to_ffi).collect(),
+    }
+}
+
+/// Convert an FFI pack into the typed document for publishing. The
+/// caller's `id` is IGNORED: the pubsub item id is recomputed from the
+/// pack content per XEP-0449 §"Sticker pack hash calculation".
+pub(super) fn sticker_pack_from_ffi(
+    pack: WaddleStickerPack,
+) -> Result<stickers::StickerPackDoc, String> {
+    let stickers_typed = pack
+        .stickers
+        .into_iter()
+        .map(pack_sticker_from_ffi)
+        .collect::<Result<Vec<_>, String>>()?;
+    if stickers_typed.is_empty() {
+        return Err("a sticker pack must contain at least one sticker".to_string());
+    }
+    let name: Vec<stickers::StickerText> = pack
+        .name
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .map(stickers::StickerText::plain)
+        .collect();
+    let summary: Vec<stickers::StickerText> = pack
+        .summary
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .map(stickers::StickerText::plain)
+        .collect();
+    let id = stickers::compute_pack_id(&name, &summary, &stickers_typed);
+    Ok(stickers::StickerPackDoc {
+        id,
+        name,
+        summary,
+        restricted: pack.restricted,
+        stickers: stickers_typed,
+        pack_hash: None,
+    })
+}
+
+fn sticker_marker_from_ffi(
+    sticker: crate::WaddleStickerRef,
+) -> Result<stickers::StickerMarker, String> {
+    let id = stickers::PackId::new(sticker.pack_id)
+        .ok_or_else(|| "sticker pack id must not be empty".to_string())?;
+    let jid = sticker
+        .pack_jid
+        .map(|jid| {
+            jid.parse::<jid::BareJid>()
+                .map_err(|e| format!("invalid sticker pack JID: {e}"))
+        })
+        .transpose()?;
+    Ok(stickers::StickerMarker {
+        pack: Some(stickers::PackRef {
+            id,
+            jid,
+            node: sticker.pack_node,
+        }),
+    })
 }
 
 fn encrypted_file_to_ffi(
@@ -891,6 +1047,11 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
                 file.media_type.as_deref(),
             );
             let encrypted = file.encrypted.map(encrypted_file_from_ffi).transpose()?;
+            let hashes = file
+                .hashes
+                .into_iter()
+                .map(sticker_hash_from_ffi)
+                .collect::<Result<Vec<_>, String>>()?;
             Ok(messaging::SharedFile {
                 url: file.url,
                 name: file.name,
@@ -898,6 +1059,8 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
                 size: file.size,
                 width: file.width,
                 height: file.height,
+                desc: file.desc,
+                hashes,
                 disposition,
                 encrypted,
             })
@@ -945,6 +1108,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
             .map(messaging::LinkPreviewToken::new)
             .transpose()
             .map_err(|err| err.to_string())?,
+        sticker: opts.sticker.map(sticker_marker_from_ffi).transpose()?,
     })
 }
 
@@ -1482,6 +1646,228 @@ mod tests {
         assert!(ffi.is_sticker);
         assert_eq!(ffi.shared_files.len(), 1);
         assert_eq!(ffi.shared_files[0].url, "https://cdn.waddle.test/crab.png");
+    }
+
+    #[test]
+    fn xep0449_file_desc_and_hashes_survive_inbound_to_ffi() {
+        // The picker renders the <desc/> emoji fallback and dedupes
+        // stickers by content hash, so both must cross the boundary.
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='bob@waddle.test/phone'>\
+               <body>\u{1F618}</body>\
+               <sticker xmlns='urn:xmpp:stickers:0'/>\
+               <file-sharing xmlns='urn:xmpp:sfs:0' disposition='inline'>\
+                 <file xmlns='urn:xmpp:file:metadata:0'>\
+                   <media-type>image/png</media-type>\
+                   <desc>\u{1F618}</desc>\
+                   <hash xmlns='urn:xmpp:hashes:2' algo='sha-256'>gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=</hash>\
+                 </file>\
+                 <sources>\
+                   <url-data xmlns='http://jabber.org/protocol/url-data' \
+                             target='https://cdn.waddle.test/kiss.png'/>\
+                 </sources>\
+               </file-sharing>\
+             </message>",
+        ));
+        assert!(ffi.is_sticker);
+        assert_eq!(ffi.shared_files.len(), 1);
+        let file = &ffi.shared_files[0];
+        assert_eq!(file.desc.as_deref(), Some("\u{1F618}"));
+        assert_eq!(
+            file.hashes,
+            vec![WaddleStickerHash {
+                algo: "sha-256".to_string(),
+                value_b64: "gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn send_options_map_sticker_ref_to_typed_marker() {
+        let opts = WaddleSendOptions {
+            sticker: Some(crate::WaddleStickerRef {
+                pack_id: "EpRv28DHHzFrE4zd+xaNpVb4".to_string(),
+                pack_jid: Some("romeo@montague.lit".to_string()),
+                pack_node: Some("generic/sticker/node".to_string()),
+            }),
+            ..WaddleSendOptions::default()
+        };
+        let mapped = send_options_from_ffi(opts).expect("options convert");
+        let marker = mapped.sticker.expect("sticker marker mapped");
+        let pack = marker.pack.expect("pack ref mapped");
+        assert_eq!(pack.id.as_str(), "EpRv28DHHzFrE4zd+xaNpVb4");
+        assert_eq!(
+            pack.jid.map(|jid| jid.to_string()),
+            Some("romeo@montague.lit".to_string())
+        );
+        assert_eq!(pack.node.as_deref(), Some("generic/sticker/node"));
+    }
+
+    #[test]
+    fn send_options_reject_malformed_sticker_refs_and_hashes() {
+        let empty_pack_id = WaddleSendOptions {
+            sticker: Some(crate::WaddleStickerRef {
+                pack_id: "  ".to_string(),
+                pack_jid: None,
+                pack_node: None,
+            }),
+            ..WaddleSendOptions::default()
+        };
+        assert!(send_options_from_ffi(empty_pack_id).is_err());
+
+        let bad_jid = WaddleSendOptions {
+            sticker: Some(crate::WaddleStickerRef {
+                pack_id: "pack-1".to_string(),
+                pack_jid: Some("not a jid".to_string()),
+                pack_node: None,
+            }),
+            ..WaddleSendOptions::default()
+        };
+        assert!(send_options_from_ffi(bad_jid).is_err());
+
+        // An unsupported hash algorithm on an outbound shared file
+        // must fail loudly instead of being silently dropped.
+        let bad_algo = WaddleSendOptions {
+            shared_files: vec![WaddleSharedFile {
+                url: "https://cdn.waddle.test/kiss.png".to_string(),
+                name: None,
+                media_type: Some("image/png".to_string()),
+                size: None,
+                width: None,
+                height: None,
+                desc: Some("\u{1F618}".to_string()),
+                hashes: vec![WaddleStickerHash {
+                    algo: "md5".to_string(),
+                    value_b64: "aGFzaA==".to_string(),
+                }],
+                disposition: "inline".to_string(),
+                encrypted: None,
+            }],
+            ..WaddleSendOptions::default()
+        };
+        assert!(send_options_from_ffi(bad_algo).is_err());
+    }
+
+    #[test]
+    fn send_options_map_shared_file_desc_and_hashes_to_typed() {
+        let opts = WaddleSendOptions {
+            shared_files: vec![WaddleSharedFile {
+                url: "https://cdn.waddle.test/kiss.png".to_string(),
+                name: None,
+                media_type: Some("image/png".to_string()),
+                size: Some(67016),
+                width: Some(512),
+                height: Some(512),
+                desc: Some("\u{1F618}".to_string()),
+                hashes: vec![WaddleStickerHash {
+                    algo: "sha-256".to_string(),
+                    value_b64: "gw+6xdCgOcvCYSKuQNrXH33lV9NMzuDf/s0huByCDsY=".to_string(),
+                }],
+                disposition: "inline".to_string(),
+                encrypted: None,
+            }],
+            ..WaddleSendOptions::default()
+        };
+        let mapped = send_options_from_ffi(opts).expect("options convert");
+        assert_eq!(mapped.shared_files.len(), 1);
+        let file = &mapped.shared_files[0];
+        assert_eq!(file.desc.as_deref(), Some("\u{1F618}"));
+        assert_eq!(file.hashes.len(), 1);
+        assert_eq!(file.hashes[0].algo, stickers::HashAlgo::Sha256);
+    }
+
+    #[test]
+    fn sticker_pack_round_trips_between_typed_and_ffi() {
+        let ffi = WaddleStickerPack {
+            id: "ignored-caller-id".to_string(),
+            name: Some("Marsey the Cat".to_string()),
+            summary: Some("kitten".to_string()),
+            restricted: true,
+            stickers: vec![WaddlePackSticker {
+                desc: "\u{1F44D}".to_string(),
+                media_type: Some("image/png".to_string()),
+                size: Some(71045),
+                width: Some(512),
+                height: Some(512),
+                hashes: vec![WaddleStickerHash {
+                    algo: "sha-256".to_string(),
+                    value_b64: "0AdP8lJOWJrugSKOIAqfEKqFatIpG5JBCjjxY253ojQ=".to_string(),
+                }],
+                sources: vec!["https://cdn.waddle.test/thumbsup.png".to_string()],
+                suggests: vec!["+1".to_string()],
+            }],
+        };
+        let doc = sticker_pack_from_ffi(ffi.clone()).expect("converts");
+        // The id is recomputed from content, never the caller's value.
+        assert_ne!(doc.id.as_str(), "ignored-caller-id");
+        assert_eq!(doc.id.as_str().len(), 24);
+        assert!(doc.restricted);
+        assert_eq!(doc.stickers.len(), 1);
+        assert_eq!(
+            doc.stickers[0].dimensions,
+            Some(stickers::StickerDimensions {
+                width: 512,
+                height: 512
+            })
+        );
+
+        let back = sticker_pack_to_ffi(doc.clone());
+        assert_eq!(back.id, doc.id.to_string());
+        assert_eq!(back.name, ffi.name);
+        assert_eq!(back.summary, ffi.summary);
+        assert_eq!(back.restricted, ffi.restricted);
+        assert_eq!(back.stickers, ffi.stickers);
+    }
+
+    #[test]
+    fn sticker_pack_from_ffi_rejects_packs_without_stickers_or_hashes() {
+        let empty = WaddleStickerPack {
+            id: String::new(),
+            name: None,
+            summary: None,
+            restricted: false,
+            stickers: vec![],
+        };
+        assert!(sticker_pack_from_ffi(empty).is_err());
+
+        let no_hash = WaddleStickerPack {
+            id: String::new(),
+            name: Some("n".to_string()),
+            summary: None,
+            restricted: false,
+            stickers: vec![WaddlePackSticker {
+                desc: "\u{1F44D}".to_string(),
+                media_type: None,
+                size: None,
+                width: None,
+                height: None,
+                hashes: vec![],
+                sources: vec!["https://cdn.waddle.test/a.png".to_string()],
+                suggests: vec![],
+            }],
+        };
+        assert!(sticker_pack_from_ffi(no_hash).is_err());
+
+        let no_source = WaddleStickerPack {
+            id: String::new(),
+            name: Some("n".to_string()),
+            summary: None,
+            restricted: false,
+            stickers: vec![WaddlePackSticker {
+                desc: "\u{1F44D}".to_string(),
+                media_type: None,
+                size: None,
+                width: None,
+                height: None,
+                hashes: vec![WaddleStickerHash {
+                    algo: "sha-256".to_string(),
+                    value_b64: "aGFzaA==".to_string(),
+                }],
+                sources: vec![],
+                suggests: vec![],
+            }],
+        };
+        assert!(sticker_pack_from_ffi(no_source).is_err());
     }
 
     #[test]

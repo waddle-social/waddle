@@ -104,7 +104,8 @@ extension AppModel {
                 sharedFiles: sharedFiles,
                 linkPreviewToken: nil,
                 requestDisplayedMarker: false,
-                mucPm: false
+                mucPm: false,
+                sticker: nil
             )
             : nil
 

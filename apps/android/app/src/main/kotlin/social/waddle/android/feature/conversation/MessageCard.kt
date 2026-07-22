@@ -599,6 +599,8 @@ private fun InlineImageBody(url: String) {
             size = null,
             width = null,
             height = null,
+            desc = null,
+            hashes = emptyList(),
             disposition = FileDisposition.INLINE.wire,
             encrypted = null,
         ),

@@ -59,6 +59,7 @@ import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
+import social.waddle.client.ffi.WaddleStickerPack
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
 import social.waddle.client.ffi.WaddleUserSearchEntry
@@ -835,6 +836,37 @@ class FakeWaddleClient : WaddleClientInterface {
     override suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup {
         linkPreviewLookupCalls += url to scopeJid
         return linkPreviewLookup
+    }
+
+    /** Canned XEP-0449 packs served by the sticker fetch verbs; recorded ops. */
+    @Volatile
+    var stickerPacks: List<WaddleStickerPack> = emptyList()
+    val stickerFetchCalls = CopyOnWriteArrayList<String?>()
+    val stickerPublishCalls = CopyOnWriteArrayList<WaddleStickerPack>()
+    val stickerRetractCalls = CopyOnWriteArrayList<String>()
+
+    override suspend fun fetchStickerPacks(ownerJid: String?): List<WaddleStickerPack> {
+        stickerFetchCalls += ownerJid
+        return stickerPacks
+    }
+
+    override suspend fun fetchStickerPack(
+        ownerJid: String,
+        node: String?,
+        packId: String,
+    ): WaddleStickerPack? {
+        stickerFetchCalls += ownerJid
+        return stickerPacks.firstOrNull { pack -> pack.id == packId }
+    }
+
+    override suspend fun publishStickerPack(pack: WaddleStickerPack): String {
+        stickerPublishCalls += pack
+        return pack.id
+    }
+
+    override suspend fun retractStickerPack(packId: String): Boolean {
+        stickerRetractCalls += packId
+        return true
     }
 
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
