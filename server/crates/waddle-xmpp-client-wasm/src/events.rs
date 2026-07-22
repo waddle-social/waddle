@@ -146,6 +146,13 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
                 }
             }
         }
+        // Emitted by the runtime alongside the Messaging event that
+        // carried the notification. The web client already receives
+        // retracts and attachment summaries through the
+        // `message.pubsub_events` → `on_pubsub_event` path above;
+        // re-dispatching these standalone variants would double-fire
+        // the JS callback, so they are intentionally consumed here.
+        ClientEvent::PubsubItemsRetracted(_) | ClientEvent::PubsubAttachmentSummary(_) => {}
         _ => {}
     }
 }

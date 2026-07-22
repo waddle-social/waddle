@@ -23,6 +23,7 @@ pub mod messaging;
 pub mod notification_settings;
 pub mod pep;
 pub mod pin;
+pub mod pubsub;
 pub mod pubsub_event;
 pub mod push;
 pub mod request;
@@ -97,8 +98,15 @@ pub use pep::{
     parse_pep_mood, parse_pep_tune, PepItem, UserActivity, UserMood, UserTune, NS_ACTIVITY,
     NS_MOOD, NS_TUNE,
 };
+pub use pubsub::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
+    build_pubsub_subscribe_iq, community_service_jid, parse_pubsub_items_result,
+    parse_pubsub_publish_result_item_id, PubsubAccessModel, PubsubPublishOptions, PubsubResultItem,
+    PubsubSendLastPublishedItem, NS_PUBSUB_PUBLISH_OPTIONS,
+};
 pub use pubsub_event::{
-    AttachmentSummaryEvent, PubsubEvent, PubsubEventItem, PubsubEventPayload, ReactionSummaryEvent,
+    AttachmentSummaryEvent, PubsubAttachmentSummaryUpdate, PubsubEvent, PubsubEventItem,
+    PubsubEventPayload, PubsubRetractedItems, ReactionSummaryEvent,
 };
 pub use request::{
     ClientRequest, PendingRequest, RequestCorrelation, RequestId, RequestKind, RequestTracker,

@@ -7,6 +7,7 @@ use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::{InboundCallEvent, MessagingEvent};
 use crate::pep::PepItem;
+use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
 use crate::state::{SessionBinding, SessionSnapshot};
@@ -38,6 +39,20 @@ pub enum ClientEvent {
     InboxStreamEntry(InboxStreamEntry),
     /// Typed PEP user-state event (mood, activity, tune).
     PepEvent(PepItem),
+    /// XEP-0060 §7.2.2.1 item retraction pushed from a pubsub/PEP
+    /// node. Emitted alongside the [`ClientEvent::Messaging`] event
+    /// that carried the notification. No consumer maps it yet: the
+    /// wasm dispatcher deliberately swallows it (web consumes the
+    /// message-attached `pubsub_events` instead) and the upcoming
+    /// community-surface FFI verbs will route it to Kotlin/Swift
+    /// listeners so they can drop retracted items without digging
+    /// through the message envelope.
+    PubsubItemsRetracted(PubsubRetractedItems),
+    /// XEP-0470 attachment-summary update pushed from a summary node.
+    /// Emitted alongside the [`ClientEvent::Messaging`] event that
+    /// carried the notification; same consumer story as
+    /// [`ClientEvent::PubsubItemsRetracted`].
+    PubsubAttachmentSummary(PubsubAttachmentSummaryUpdate),
     /// Transport-level delivery status for outbound message stanzas.
     MessageDelivery(MessageDeliveryEvent),
     /// XEP-0198 resume snapshot changed. Broadcast by the native driver

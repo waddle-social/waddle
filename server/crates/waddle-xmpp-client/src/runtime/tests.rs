@@ -75,6 +75,50 @@ fn app_stanza_routes_jmi_message_to_typed_call_event() {
 }
 
 #[test]
+fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element = "<message xmlns='jabber:client' type='headline' \
+            from='community.waddle.test' to='alice@example.com'>\
+        <event xmlns='http://jabber.org/protocol/pubsub#event'>\
+          <items node='urn:xmpp:pubsub-social-feed:stories:0'>\
+            <retract id='story-1'/>\
+            <item id='story-2'>\
+              <summary xmlns='urn:xmpp:pubsub-attachments:summary:1'>\
+                <reactions><reaction count='2'>👍</reaction></reactions>\
+              </summary>\
+            </item>\
+          </items>\
+        </event>\
+    </message>"
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    // The message event still carries the full pubsub_events list …
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message))
+            if message.pubsub_events.len() == 1
+    ));
+    // … and the two state transitions are also emitted standalone.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::PubsubItemsRetracted(retracted)
+            if retracted.node == "urn:xmpp:pubsub-social-feed:stories:0"
+                && retracted.item_ids == vec!["story-1".to_owned()]
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::PubsubAttachmentSummary(update)
+            if update.item_id.as_deref() == Some("story-2")
+                && update.summary.reactions.len() == 1
+                && update.summary.reactions[0].count == 2
+    )));
+    assert_eq!(events.len(), 3);
+}
+
+#[test]
 fn app_stanza_answers_client_caps_disco_info() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.snapshot.phase = SessionPhase::Established;

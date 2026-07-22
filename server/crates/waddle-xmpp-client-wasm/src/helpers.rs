@@ -65,6 +65,14 @@ pub(crate) fn bare_jid(jid: &str) -> String {
     jid.split('/').next().unwrap_or(jid).to_string()
 }
 
+/// Parse a JS-supplied pubsub service address (e.g. the
+/// `community.<domain>` component) into the typed bare JID the
+/// `waddle_xmpp_client::pubsub` builders require.
+pub(crate) fn service_bare_jid(jid: &str) -> Result<jid::BareJid, JsValue> {
+    jid.parse()
+        .map_err(|err| js_error(format!("invalid pubsub service JID: {err}")))
+}
+
 pub(crate) fn jid_domain(jid: &str) -> String {
     let bare = bare_jid(jid);
     bare.split('@')

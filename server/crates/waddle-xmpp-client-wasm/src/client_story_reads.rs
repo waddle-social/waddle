@@ -10,6 +10,10 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use waddle_xmpp_client::pubsub::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result, PubsubAccessModel,
+    PubsubPublishOptions, PubsubSendLastPublishedItem,
+};
 use waddle_xmpp_core::waddle_story_reads::{
     StoryId, StoryReads, NS_WADDLE_STORY_READS, PEP_ITEM_WADDLE_STORY_READS,
     PEP_NODE_WADDLE_STORY_READS,
@@ -17,11 +21,6 @@ use waddle_xmpp_core::waddle_story_reads::{
 use wasm_bindgen::prelude::*;
 
 use super::{js_error, send_iq_command, to_js_value, WaddleClient};
-use crate::NS_CLIENT;
-
-const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
-const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
-const NS_XDATA: &str = "jabber:x:data";
 
 /// JS-facing entry (id, RFC 3339 timestamp). `StoryId` is unwrapped at
 /// this boundary — the wasm/JS layer carries it as a plain string.
@@ -51,104 +50,47 @@ impl From<&StoryReads> for JsStoryReads {
     }
 }
 
-/// Build the `<publish-options>` precondition form. ALL FOUR fields are
+/// The `<publish-options>` precondition values. ALL FOUR fields are
 /// mandatory — omitting any of them lets a server auto-create the node
 /// with different defaults and silently leak read-state notifications.
-pub(crate) fn build_publish_options_form() -> Element {
-    let form = Element::builder("x", NS_XDATA)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
-        .append(hidden_field("FORM_TYPE", NS_PUBSUB_PUBLISH_OPTIONS))
-        .append(text_single_field("pubsub#persist_items", "true"))
-        .append(text_single_field("pubsub#access_model", "whitelist"))
-        .append(text_single_field(
-            "pubsub#send_last_published_item",
-            "never",
-        ))
-        .append(text_single_field("pubsub#max_items", "1"))
-        .build();
-    Element::builder("publish-options", NS_PUBSUB)
-        .append(form)
-        .build()
-}
-
-fn hidden_field(var: &str, value: &str) -> Element {
-    Element::builder("field", NS_XDATA)
-        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "hidden")
-        .append(Element::builder("value", NS_XDATA).append(value).build())
-        .build()
-}
-
-fn text_single_field(var: &str, value: &str) -> Element {
-    Element::builder("field", NS_XDATA)
-        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
-        .append(Element::builder("value", NS_XDATA).append(value).build())
-        .build()
+fn story_reads_publish_options() -> PubsubPublishOptions {
+    PubsubPublishOptions {
+        persist_items: Some(true),
+        access_model: Some(PubsubAccessModel::Whitelist),
+        send_last_published_item: Some(PubsubSendLastPublishedItem::Never),
+        max_items: Some(1),
+    }
 }
 
 pub(crate) fn build_story_reads_publish_iq(reads: &StoryReads) -> Element {
     let id = format!("story-reads-publish-{}", Uuid::new_v4());
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("id").to_owned(),
-            PEP_ITEM_WADDLE_STORY_READS,
-        )
-        .append(reads.build_element())
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PEP_NODE_WADDLE_STORY_READS,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .append(build_publish_options_form())
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        None,
+        PEP_NODE_WADDLE_STORY_READS,
+        Some(PEP_ITEM_WADDLE_STORY_READS),
+        reads.build_element(),
+        Some(&story_reads_publish_options()),
+    )
 }
 
 pub(crate) fn build_story_reads_fetch_iq() -> Element {
     let id = format!("story-reads-fetch-{}", Uuid::new_v4());
-    let items = Element::builder("items", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PEP_NODE_WADDLE_STORY_READS,
-        )
-        .attr(minidom::rxml::xml_ncname!("max_items").to_owned(), "1")
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .append(pubsub)
-        .build()
+    build_pubsub_items_iq(&id, None, PEP_NODE_WADDLE_STORY_READS, Some(1))
 }
 
 /// Parse the items result returned by `build_story_reads_fetch_iq()`.
 ///
 /// Returns an empty `StoryReads` if the node has no items or the result
-/// shape doesn't match expectations — read state is non-critical, so
-/// silently degrading to "nothing read" is better than surfacing an
-/// error the user can't act on.
+/// shape doesn't match expectations (including items without an ItemID
+/// — the read-state item is always published under the fixed `current`
+/// id) — read state is non-critical, so silently degrading to "nothing
+/// read" is better than surfacing an error the user can't act on.
 pub(crate) fn parse_story_reads_fetch_result(iq: &Element) -> StoryReads {
-    let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
-        return StoryReads::default();
-    };
-    let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
-        return StoryReads::default();
-    };
-    items
-        .children()
-        .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
+    parse_pubsub_items_result(iq)
+        .into_iter()
         .find_map(|item| {
-            item.children()
-                .find(|c| c.name() == "reads" && c.ns() == NS_WADDLE_STORY_READS)
+            item.payload("reads", NS_WADDLE_STORY_READS)
                 .and_then(|reads_el| StoryReads::parse(reads_el).ok())
         })
         .unwrap_or_default()
@@ -231,6 +173,10 @@ impl WaddleClient {
 mod tests {
     use super::*;
 
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+    const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
+    const NS_XDATA: &str = "jabber:x:data";
+
     #[test]
     fn publish_iq_carries_required_publish_options() {
         let reads = StoryReads::default();
@@ -294,6 +240,27 @@ mod tests {
         let iq: Element = "<iq xmlns='jabber:client' type='result' id='x'/>"
             .parse()
             .expect("valid");
+        let reads = parse_story_reads_fetch_result(&iq);
+        assert!(reads.is_empty());
+    }
+
+    #[test]
+    fn parse_fetch_ignores_items_without_ids() {
+        // The read-state item is always published under the fixed
+        // `current` id; an id-less item is not ours and degrades to
+        // "nothing read" rather than being trusted.
+        let xml = "<iq xmlns='jabber:client' type='result' id='x'>\
+            <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+              <items node='urn:waddle:story:reads:0'>\
+                <item>\
+                  <reads xmlns='urn:waddle:story:reads:0'>\
+                    <read id='story-a' at='2026-05-19T10:11:12Z'/>\
+                  </reads>\
+                </item>\
+              </items>\
+            </pubsub>\
+          </iq>";
+        let iq: Element = xml.parse().expect("valid");
         let reads = parse_story_reads_fetch_result(&iq);
         assert!(reads.is_empty());
     }

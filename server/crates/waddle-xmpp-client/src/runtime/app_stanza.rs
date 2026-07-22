@@ -105,11 +105,41 @@ impl XmppRuntime {
         }
 
         if let Some(ev) = messaging::parse(element) {
-            return vec![ClientEvent::Messaging(ev)];
+            let pubsub_events = pubsub_notification_events(&ev);
+            let mut events = vec![ClientEvent::Messaging(ev)];
+            events.extend(pubsub_events);
+            return events;
         }
 
         vec![ClientEvent::UnhandledStanza(element.clone())]
     }
+}
+
+/// Flatten the XEP-0060 notifications attached to a parsed message
+/// into standalone [`ClientEvent`]s: §7.2.2.1 item retractions and
+/// XEP-0470 attachment-summary updates. Emitted *alongside* the
+/// [`ClientEvent::Messaging`] event (which still carries the full
+/// `pubsub_events` list) so consumers that only care about these two
+/// state transitions need not unpack the message envelope.
+///
+/// Only the direct message path feeds this: carbon-unwrapped messages
+/// deliberately skip it because XEP-0280 carbons only cover
+/// chat-eligible messages — a pubsub service's headline notifications
+/// are never carbon-copied.
+fn pubsub_notification_events(event: &crate::messaging::MessagingEvent) -> Vec<ClientEvent> {
+    let crate::messaging::MessagingEvent::Message(message) = event else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for pubsub_event in &message.pubsub_events {
+        if let Some(retracted) = pubsub_event.retracted_items() {
+            events.push(ClientEvent::PubsubItemsRetracted(retracted));
+        }
+        for summary in pubsub_event.attachment_summaries() {
+            events.push(ClientEvent::PubsubAttachmentSummary(summary));
+        }
+    }
+    events
 }
 
 impl XmppRuntime {
