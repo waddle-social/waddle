@@ -15,6 +15,7 @@ mod community_admin;
 mod consistent_color;
 mod convert;
 mod error;
+mod extension_commands;
 mod jid_parts;
 mod messaging;
 mod messaging_verbs;
@@ -34,6 +35,8 @@ mod calls_tests;
 mod client_tests;
 #[cfg(test)]
 mod community_admin_tests;
+#[cfg(test)]
+mod extension_commands_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
 #[cfg(test)]

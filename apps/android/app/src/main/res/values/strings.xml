@@ -77,6 +77,16 @@
         <item quantity="other">%1$d replies</item>
     </plurals>
     <string name="composer_send">Send</string>
+    <string name="composer_slash_unknown">Unknown command %1$s</string>
+    <string name="slash_commands_title">Commands</string>
+    <string name="slash_commands_dismiss">Hide commands</string>
+    <string name="extension_form_submit">Submit</string>
+    <string name="extension_form_next">Next</string>
+    <string name="extension_form_back">Back</string>
+    <string name="extension_form_cancel">Cancel</string>
+    <string name="extension_form_required">%1$s *</string>
+    <string name="extension_command_completed">%1$s completed</string>
+    <string name="extension_command_failed">%1$s failed</string>
     <string name="message_unknown_sender">Unknown</string>
     <string name="message_author_me">You</string>
     <string name="message_sending">Sending…</string>

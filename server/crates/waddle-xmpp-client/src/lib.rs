@@ -12,6 +12,7 @@ pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod event;
+pub mod extension_commands;
 pub mod inbox;
 pub mod mam;
 pub mod mds;

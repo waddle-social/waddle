@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleAdhocAction
+import social.waddle.client.ffi.WaddleAdhocStatus
 import social.waddle.client.ffi.WaddleAdminChannelRef
 import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsArgs
 import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsPage
@@ -39,6 +41,9 @@ import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
+import social.waddle.client.ffi.WaddleExtensionCommand
+import social.waddle.client.ffi.WaddleExtensionCommandResult
+import social.waddle.client.ffi.WaddleExtensionFormField
 import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleJingleReason
@@ -370,12 +375,84 @@ class FakeNotifyVerbs {
     }
 }
 
+/** One recorded [FakeExtensionCommandVerbs.submit] call, in send order. */
+data class RecordedExtensionSubmit(
+    val serviceJid: String,
+    val node: String,
+    val sessionId: String?,
+    val fields: List<WaddleExtensionFormField>,
+    val action: WaddleAdhocAction,
+    val roomJid: String?,
+)
+
+/**
+ * `urn:waddle:extension:1` slash-command slice of [FakeWaddleClient]:
+ * canned discovery/invoke/submit answers, per-verb failure knobs, and
+ * recorded operations.
+ */
+class FakeExtensionCommandVerbs {
+    /** Canned command set served by [discover]. */
+    @Volatile
+    var commands: List<WaddleExtensionCommand> = emptyList()
+
+    /** Canned answers; default is a bare `completed` result. */
+    @Volatile
+    var invokeResult: WaddleExtensionCommandResult = completedResult()
+
+    @Volatile
+    var submitResult: WaddleExtensionCommandResult = completedResult()
+
+    /** Set to fail the discover/invoke/submit verbs (they throw). */
+    @Volatile
+    var discoverFailure: Throwable? = null
+
+    @Volatile
+    var invokeFailure: Throwable? = null
+
+    @Volatile
+    var submitFailure: Throwable? = null
+
+    @Volatile
+    var discoverCalls = 0
+    val invokeCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+    val submitCalls = CopyOnWriteArrayList<RecordedExtensionSubmit>()
+
+    fun discover(): List<WaddleExtensionCommand> {
+        discoverCalls += 1
+        discoverFailure?.let { throw it }
+        return commands
+    }
+
+    fun invoke(serviceJid: String, node: String, roomJid: String?): WaddleExtensionCommandResult {
+        invokeCalls += Triple(serviceJid, node, roomJid)
+        invokeFailure?.let { throw it }
+        return invokeResult
+    }
+
+    fun submit(call: RecordedExtensionSubmit): WaddleExtensionCommandResult {
+        submitCalls += call
+        submitFailure?.let { throw it }
+        return submitResult
+    }
+
+    private companion object {
+        fun completedResult() = WaddleExtensionCommandResult(
+            status = WaddleAdhocStatus.COMPLETED,
+            sessionId = null,
+            actions = emptyList(),
+            form = null,
+            notes = emptyList(),
+        )
+    }
+}
+
 /**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
  * dispatcher. Cohesive verb families live in sliced-out fakes
- * ([FakeStickerVerbs], [FakeNotifyVerbs]) that this class delegates to.
+ * ([FakeStickerVerbs], [FakeNotifyVerbs],
+ * [FakeExtensionCommandVerbs]) that this class delegates to.
  */
 class FakeWaddleClient : WaddleClientInterface {
     @Volatile
@@ -1189,6 +1266,29 @@ class FakeWaddleClient : WaddleClientInterface {
         mode: WaddleNotifyMode,
         richPayloadOptIn: Boolean,
     ): WaddleSetDmNotificationModeOutcome = notify.setDmMode(dmJid, mode, richPayloadOptIn)
+
+    /** Extension-command verbs, sliced out into [FakeExtensionCommandVerbs]. */
+    val extensionCommands = FakeExtensionCommandVerbs()
+
+    override suspend fun discoverExtensionCommands(): List<WaddleExtensionCommand> =
+        extensionCommands.discover()
+
+    override suspend fun invokeExtensionCommand(
+        serviceJid: String,
+        node: String,
+        roomJid: String?,
+    ): WaddleExtensionCommandResult = extensionCommands.invoke(serviceJid, node, roomJid)
+
+    override suspend fun submitExtensionCommandForm(
+        serviceJid: String,
+        node: String,
+        sessionId: String?,
+        fields: List<WaddleExtensionFormField>,
+        action: WaddleAdhocAction,
+        roomJid: String?,
+    ): WaddleExtensionCommandResult = extensionCommands.submit(
+        RecordedExtensionSubmit(serviceJid, node, sessionId, fields, action, roomJid),
+    )
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()

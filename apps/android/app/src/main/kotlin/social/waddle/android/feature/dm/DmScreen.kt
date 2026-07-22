@@ -22,6 +22,8 @@ import social.waddle.android.client.IdleAge
 import social.waddle.android.client.idleAgeOf
 import social.waddle.android.client.presenceShowsIdle
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.SlashCommandHost
+import social.waddle.android.feature.conversation.rememberExtensionCommandController
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
@@ -70,6 +72,10 @@ fun DmScreen(
         selfBareJid = session?.jid?.let(::bareJidOf),
         subtitle = dmPresenceSubtitle(contacts[peerJid]),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        slashCommandHost = SlashCommandHost(
+            controller = rememberExtensionCommandController(graph),
+            roomJid = null,
+        ),
         onStartCall = { video ->
             pendingCallVideo = video
             callPermissionLauncher.launch(

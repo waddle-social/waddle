@@ -1059,6 +1059,128 @@ impl From<WaddlePushDeviceCredentials> for waddle_xmpp_client::push::PushDeviceC
     }
 }
 
+// ── Extension commands (urn:waddle:extension:1 over XEP-0050) ────────────────
+
+/// `waddle#command_scope` — where a command may be offered.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleExtensionCommandScope {
+    /// Offered everywhere (DMs and rooms).
+    Global,
+    /// Offered only inside MUC rooms.
+    Channel,
+}
+
+/// One discovered extension command with its composer metadata.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionCommand {
+    pub service_jid: String,
+    pub node: String,
+    pub name: String,
+    pub scope: WaddleExtensionCommandScope,
+    /// Slash trigger (without the leading `/`), e.g. `poll`.
+    pub composer_prefix: Option<String>,
+    /// Form field the composer may fill inline from trailing text.
+    pub inline_field: Option<String>,
+    /// Whether a bare `/prefix` executes without opening the palette.
+    pub composer_execute: bool,
+}
+
+/// XEP-0050 §3 `action` attribute.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleAdhocAction {
+    Execute,
+    Cancel,
+    Next,
+    Prev,
+    Complete,
+}
+
+/// XEP-0050 §3 `status` attribute on responses.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleAdhocStatus {
+    Executing,
+    Completed,
+    Canceled,
+}
+
+/// XEP-0004 §3.3 field types. Unknown or absent wire types map to
+/// `TextSingle` per the XEP's default.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleExtensionFieldType {
+    Boolean,
+    Fixed,
+    Hidden,
+    JidMulti,
+    JidSingle,
+    ListMulti,
+    ListSingle,
+    TextMulti,
+    TextPrivate,
+    TextSingle,
+}
+
+/// One `<option/>` of a list field.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionFieldOption {
+    pub label: Option<String>,
+    pub value: String,
+}
+
+/// One `<field/>` of a command-response form.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionCommandFormField {
+    /// The `var` attribute; empty only for `fixed` fields.
+    pub var: String,
+    pub label: Option<String>,
+    pub field_type: WaddleExtensionFieldType,
+    pub required: bool,
+    pub options: Vec<WaddleExtensionFieldOption>,
+    pub values: Vec<String>,
+}
+
+/// The XEP-0004 form of a command response.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionCommandForm {
+    pub title: Option<String>,
+    pub instructions: Option<String>,
+    pub fields: Vec<WaddleExtensionCommandFormField>,
+}
+
+/// XEP-0050 §3 `<note/>` severity; unknown types map to `Info`.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleExtensionNoteType {
+    Info,
+    Warn,
+    Error,
+}
+
+/// One `<note/>` diagnostic from a command response.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionCommandNote {
+    pub note_type: WaddleExtensionNoteType,
+    pub value: String,
+}
+
+/// A parsed extension command response.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionCommandResult {
+    pub status: WaddleAdhocStatus,
+    /// XEP-0050 `sessionid`, threaded verbatim into follow-up
+    /// submissions.
+    pub session_id: Option<String>,
+    /// Actions the service allows for the next stage.
+    pub actions: Vec<WaddleAdhocAction>,
+    pub form: Option<WaddleExtensionCommandForm>,
+    pub notes: Vec<WaddleExtensionCommandNote>,
+}
+
+/// One submitted field value pair (`var` → `<value/>` children).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleExtensionFormField {
+    pub var: String,
+    pub values: Vec<String>,
+}
+
 // ── Callback interface ───────────────────────────────────────────────────────
 
 /// Single typed event stream surfaced to the app. New event kinds are

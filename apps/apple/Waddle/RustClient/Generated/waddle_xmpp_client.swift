@@ -819,6 +819,27 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      */
     func isCommunityOwner() async  -> Bool
 
+    /**
+     * Discover the extension service and its XEP-0050 command list,
+     * hydrated with per-command composer metadata (scope, slash
+     * prefix, inline field, direct-execute). Cache-free: callers
+     * cache per session.
+     */
+    func discoverExtensionCommands() async throws  -> [WaddleExtensionCommand]
+
+    /**
+     * XEP-0050 §2.4: start an extension command with `execute`. In a
+     * room, `room_jid` travels as the `waddle#room_jid` submit field.
+     */
+    func invokeExtensionCommand(serviceJid: String, node: String, roomJid: String?) async throws  -> WaddleExtensionCommandResult
+
+    /**
+     * XEP-0050 §3: submit a stage of an extension command session.
+     * `session_id` is threaded verbatim from the previous response;
+     * `cancel`/`prev` submissions never carry a form.
+     */
+    func submitExtensionCommandForm(serviceJid: String, node: String, sessionId: String?, fields: [WaddleExtensionFormField], action: WaddleAdhocAction, roomJid: String?) async throws  -> WaddleExtensionCommandResult
+
     func discoverTopology() async  -> WaddleTopology
 
     func discoverUploadService() async  -> String?
@@ -2064,6 +2085,72 @@ open func isCommunityOwner()async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * Discover the extension service and its XEP-0050 command list,
+     * hydrated with per-command composer metadata (scope, slash
+     * prefix, inline field, direct-execute). Cache-free: callers
+     * cache per session.
+     */
+open func discoverExtensionCommands()async throws  -> [WaddleExtensionCommand]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_extension_commands(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleExtensionCommand.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0050 §2.4: start an extension command with `execute`. In a
+     * room, `room_jid` travels as the `waddle#room_jid` submit field.
+     */
+open func invokeExtensionCommand(serviceJid: String, node: String, roomJid: String?)async throws  -> WaddleExtensionCommandResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invoke_extension_command(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(serviceJid),FfiConverterString.lower(node),FfiConverterOptionString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleExtensionCommandResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0050 §3: submit a stage of an extension command session.
+     * `session_id` is threaded verbatim from the previous response;
+     * `cancel`/`prev` submissions never carry a form.
+     */
+open func submitExtensionCommandForm(serviceJid: String, node: String, sessionId: String?, fields: [WaddleExtensionFormField], action: WaddleAdhocAction, roomJid: String?)async throws  -> WaddleExtensionCommandResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_extension_command_form(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(serviceJid),FfiConverterString.lower(node),FfiConverterOptionString.lower(sessionId),FfiConverterSequenceTypeWaddleExtensionFormField.lower(fields),FfiConverterTypeWaddleAdhocAction_lower(action),FfiConverterOptionString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleExtensionCommandResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -6501,6 +6588,495 @@ public func FfiConverterTypeWaddleEncryptedFileHash_lower(_ value: WaddleEncrypt
 
 
 /**
+ * One discovered extension command with its composer metadata.
+ */
+public struct WaddleExtensionCommand: Equatable, Hashable {
+    public var serviceJid: String
+    public var node: String
+    public var name: String
+    public var scope: WaddleExtensionCommandScope
+    /**
+     * Slash trigger (without the leading `/`), e.g. `poll`.
+     */
+    public var composerPrefix: String?
+    /**
+     * Form field the composer may fill inline from trailing text.
+     */
+    public var inlineField: String?
+    /**
+     * Whether a bare `/prefix` executes without opening the palette.
+     */
+    public var composerExecute: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(serviceJid: String, node: String, name: String, scope: WaddleExtensionCommandScope,
+        /**
+         * Slash trigger (without the leading `/`), e.g. `poll`.
+         */composerPrefix: String?,
+        /**
+         * Form field the composer may fill inline from trailing text.
+         */inlineField: String?,
+        /**
+         * Whether a bare `/prefix` executes without opening the palette.
+         */composerExecute: Bool) {
+        self.serviceJid = serviceJid
+        self.node = node
+        self.name = name
+        self.scope = scope
+        self.composerPrefix = composerPrefix
+        self.inlineField = inlineField
+        self.composerExecute = composerExecute
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommand: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommand: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommand {
+        return
+            try WaddleExtensionCommand(
+                serviceJid: FfiConverterString.read(from: &buf),
+                node: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                scope: FfiConverterTypeWaddleExtensionCommandScope.read(from: &buf),
+                composerPrefix: FfiConverterOptionString.read(from: &buf),
+                inlineField: FfiConverterOptionString.read(from: &buf),
+                composerExecute: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionCommand, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.serviceJid, into: &buf)
+        FfiConverterString.write(value.node, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterTypeWaddleExtensionCommandScope.write(value.scope, into: &buf)
+        FfiConverterOptionString.write(value.composerPrefix, into: &buf)
+        FfiConverterOptionString.write(value.inlineField, into: &buf)
+        FfiConverterBool.write(value.composerExecute, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommand_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommand {
+    return try FfiConverterTypeWaddleExtensionCommand.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommand_lower(_ value: WaddleExtensionCommand) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommand.lower(value)
+}
+
+
+/**
+ * The XEP-0004 form of a command response.
+ */
+public struct WaddleExtensionCommandForm: Equatable, Hashable {
+    public var title: String?
+    public var instructions: String?
+    public var fields: [WaddleExtensionCommandFormField]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String?, instructions: String?, fields: [WaddleExtensionCommandFormField]) {
+        self.title = title
+        self.instructions = instructions
+        self.fields = fields
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommandForm: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommandForm: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommandForm {
+        return
+            try WaddleExtensionCommandForm(
+                title: FfiConverterOptionString.read(from: &buf),
+                instructions: FfiConverterOptionString.read(from: &buf),
+                fields: FfiConverterSequenceTypeWaddleExtensionCommandFormField.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionCommandForm, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.instructions, into: &buf)
+        FfiConverterSequenceTypeWaddleExtensionCommandFormField.write(value.fields, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandForm_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommandForm {
+    return try FfiConverterTypeWaddleExtensionCommandForm.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandForm_lower(_ value: WaddleExtensionCommandForm) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommandForm.lower(value)
+}
+
+
+/**
+ * One `<field/>` of a command-response form.
+ */
+public struct WaddleExtensionCommandFormField: Equatable, Hashable {
+    /**
+     * The `var` attribute; empty only for `fixed` fields.
+     */
+    public var `var`: String
+    public var label: String?
+    public var fieldType: WaddleExtensionFieldType
+    public var required: Bool
+    public var options: [WaddleExtensionFieldOption]
+    public var values: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The `var` attribute; empty only for `fixed` fields.
+         */`var`: String, label: String?, fieldType: WaddleExtensionFieldType, required: Bool, options: [WaddleExtensionFieldOption], values: [String]) {
+        self.`var` = `var`
+        self.label = label
+        self.fieldType = fieldType
+        self.required = required
+        self.options = options
+        self.values = values
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommandFormField: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommandFormField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommandFormField {
+        return
+            try WaddleExtensionCommandFormField(
+                `var`: FfiConverterString.read(from: &buf),
+                label: FfiConverterOptionString.read(from: &buf),
+                fieldType: FfiConverterTypeWaddleExtensionFieldType.read(from: &buf),
+                required: FfiConverterBool.read(from: &buf),
+                options: FfiConverterSequenceTypeWaddleExtensionFieldOption.read(from: &buf),
+                values: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionCommandFormField, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.`var`, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterTypeWaddleExtensionFieldType.write(value.fieldType, into: &buf)
+        FfiConverterBool.write(value.required, into: &buf)
+        FfiConverterSequenceTypeWaddleExtensionFieldOption.write(value.options, into: &buf)
+        FfiConverterSequenceString.write(value.values, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandFormField_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommandFormField {
+    return try FfiConverterTypeWaddleExtensionCommandFormField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandFormField_lower(_ value: WaddleExtensionCommandFormField) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommandFormField.lower(value)
+}
+
+
+/**
+ * One `<note/>` diagnostic from a command response.
+ */
+public struct WaddleExtensionCommandNote: Equatable, Hashable {
+    public var noteType: WaddleExtensionNoteType
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(noteType: WaddleExtensionNoteType, value: String) {
+        self.noteType = noteType
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommandNote: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommandNote: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommandNote {
+        return
+            try WaddleExtensionCommandNote(
+                noteType: FfiConverterTypeWaddleExtensionNoteType.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionCommandNote, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleExtensionNoteType.write(value.noteType, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandNote_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommandNote {
+    return try FfiConverterTypeWaddleExtensionCommandNote.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandNote_lower(_ value: WaddleExtensionCommandNote) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommandNote.lower(value)
+}
+
+
+/**
+ * A parsed extension command response.
+ */
+public struct WaddleExtensionCommandResult: Equatable, Hashable {
+    public var status: WaddleAdhocStatus
+    /**
+     * XEP-0050 `sessionid`, threaded verbatim into follow-up
+     * submissions.
+     */
+    public var sessionId: String?
+    /**
+     * Actions the service allows for the next stage.
+     */
+    public var actions: [WaddleAdhocAction]
+    public var form: WaddleExtensionCommandForm?
+    public var notes: [WaddleExtensionCommandNote]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(status: WaddleAdhocStatus,
+        /**
+         * XEP-0050 `sessionid`, threaded verbatim into follow-up
+         * submissions.
+         */sessionId: String?,
+        /**
+         * Actions the service allows for the next stage.
+         */actions: [WaddleAdhocAction], form: WaddleExtensionCommandForm?, notes: [WaddleExtensionCommandNote]) {
+        self.status = status
+        self.sessionId = sessionId
+        self.actions = actions
+        self.form = form
+        self.notes = notes
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommandResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommandResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommandResult {
+        return
+            try WaddleExtensionCommandResult(
+                status: FfiConverterTypeWaddleAdhocStatus.read(from: &buf),
+                sessionId: FfiConverterOptionString.read(from: &buf),
+                actions: FfiConverterSequenceTypeWaddleAdhocAction.read(from: &buf),
+                form: FfiConverterOptionTypeWaddleExtensionCommandForm.read(from: &buf),
+                notes: FfiConverterSequenceTypeWaddleExtensionCommandNote.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionCommandResult, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleAdhocStatus.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.sessionId, into: &buf)
+        FfiConverterSequenceTypeWaddleAdhocAction.write(value.actions, into: &buf)
+        FfiConverterOptionTypeWaddleExtensionCommandForm.write(value.form, into: &buf)
+        FfiConverterSequenceTypeWaddleExtensionCommandNote.write(value.notes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandResult_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommandResult {
+    return try FfiConverterTypeWaddleExtensionCommandResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandResult_lower(_ value: WaddleExtensionCommandResult) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommandResult.lower(value)
+}
+
+
+/**
+ * One `<option/>` of a list field.
+ */
+public struct WaddleExtensionFieldOption: Equatable, Hashable {
+    public var label: String?
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String?, value: String) {
+        self.label = label
+        self.value = value
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionFieldOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionFieldOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionFieldOption {
+        return
+            try WaddleExtensionFieldOption(
+                label: FfiConverterOptionString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionFieldOption, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFieldOption_lift(_ buf: RustBuffer) throws -> WaddleExtensionFieldOption {
+    return try FfiConverterTypeWaddleExtensionFieldOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFieldOption_lower(_ value: WaddleExtensionFieldOption) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionFieldOption.lower(value)
+}
+
+
+/**
+ * One submitted field value pair (`var` → `<value/>` children).
+ */
+public struct WaddleExtensionFormField: Equatable, Hashable {
+    public var `var`: String
+    public var values: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(`var`: String, values: [String]) {
+        self.`var` = `var`
+        self.values = values
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionFormField: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionFormField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionFormField {
+        return
+            try WaddleExtensionFormField(
+                `var`: FfiConverterString.read(from: &buf),
+                values: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleExtensionFormField, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.`var`, into: &buf)
+        FfiConverterSequenceString.write(value.values, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFormField_lift(_ buf: RustBuffer) throws -> WaddleExtensionFormField {
+    return try FfiConverterTypeWaddleExtensionFormField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFormField_lower(_ value: WaddleExtensionFormField) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionFormField.lower(value)
+}
+
+
+/**
  * One external service (TURN/STUN) advertised by the user's server
  * over `urn:xmpp:extdisco:2`, surfaced by `fetch_external_services`.
  * The app maps a list of these to WebRTC ICE servers for LiveKit's
@@ -10382,6 +10958,174 @@ public func FfiConverterTypeWaddleVCard4_lower(_ value: WaddleVCard4) -> RustBuf
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * XEP-0050 §3 `action` attribute.
+ */
+
+public enum WaddleAdhocAction: Equatable, Hashable {
+
+    case execute
+    case cancel
+    case next
+    case prev
+    case complete
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdhocAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdhocAction: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAdhocAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdhocAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .execute
+
+        case 2: return .cancel
+
+        case 3: return .next
+
+        case 4: return .prev
+
+        case 5: return .complete
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleAdhocAction, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .execute:
+            writeInt(&buf, Int32(1))
+
+
+        case .cancel:
+            writeInt(&buf, Int32(2))
+
+
+        case .next:
+            writeInt(&buf, Int32(3))
+
+
+        case .prev:
+            writeInt(&buf, Int32(4))
+
+
+        case .complete:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdhocAction_lift(_ buf: RustBuffer) throws -> WaddleAdhocAction {
+    return try FfiConverterTypeWaddleAdhocAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdhocAction_lower(_ value: WaddleAdhocAction) -> RustBuffer {
+    return FfiConverterTypeWaddleAdhocAction.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0050 §3 `status` attribute on responses.
+ */
+
+public enum WaddleAdhocStatus: Equatable, Hashable {
+
+    case executing
+    case completed
+    case canceled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAdhocStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAdhocStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAdhocStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAdhocStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .executing
+
+        case 2: return .completed
+
+        case 3: return .canceled
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleAdhocStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .executing:
+            writeInt(&buf, Int32(1))
+
+
+        case .completed:
+            writeInt(&buf, Int32(2))
+
+
+        case .canceled:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdhocStatus_lift(_ buf: RustBuffer) throws -> WaddleAdhocStatus {
+    return try FfiConverterTypeWaddleAdhocStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAdhocStatus_lower(_ value: WaddleAdhocStatus) -> RustBuffer {
+    return FfiConverterTypeWaddleAdhocStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Variants of an inbound A/V call event. Matches the wire shapes
  * `messaging::call::CallEventKind` already parses for the wasm
  * chat client — flattened for UniFFI (no nested struct payloads
@@ -11196,6 +11940,286 @@ public func FfiConverterTypeWaddleError_lift(_ buf: RustBuffer) throws -> Waddle
 public func FfiConverterTypeWaddleError_lower(_ value: WaddleError) -> RustBuffer {
     return FfiConverterTypeWaddleError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * `waddle#command_scope` — where a command may be offered.
+ */
+
+public enum WaddleExtensionCommandScope: Equatable, Hashable {
+
+    /**
+     * Offered everywhere (DMs and rooms).
+     */
+    case global
+    /**
+     * Offered only inside MUC rooms.
+     */
+    case channel
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionCommandScope: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionCommandScope: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExtensionCommandScope
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionCommandScope {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .global
+
+        case 2: return .channel
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExtensionCommandScope, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .global:
+            writeInt(&buf, Int32(1))
+
+
+        case .channel:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandScope_lift(_ buf: RustBuffer) throws -> WaddleExtensionCommandScope {
+    return try FfiConverterTypeWaddleExtensionCommandScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionCommandScope_lower(_ value: WaddleExtensionCommandScope) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionCommandScope.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0004 §3.3 field types. Unknown or absent wire types map to
+ * `TextSingle` per the XEP's default.
+ */
+
+public enum WaddleExtensionFieldType: Equatable, Hashable {
+
+    case boolean
+    case fixed
+    case hidden
+    case jidMulti
+    case jidSingle
+    case listMulti
+    case listSingle
+    case textMulti
+    case textPrivate
+    case textSingle
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionFieldType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionFieldType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExtensionFieldType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionFieldType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .boolean
+
+        case 2: return .fixed
+
+        case 3: return .hidden
+
+        case 4: return .jidMulti
+
+        case 5: return .jidSingle
+
+        case 6: return .listMulti
+
+        case 7: return .listSingle
+
+        case 8: return .textMulti
+
+        case 9: return .textPrivate
+
+        case 10: return .textSingle
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExtensionFieldType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .boolean:
+            writeInt(&buf, Int32(1))
+
+
+        case .fixed:
+            writeInt(&buf, Int32(2))
+
+
+        case .hidden:
+            writeInt(&buf, Int32(3))
+
+
+        case .jidMulti:
+            writeInt(&buf, Int32(4))
+
+
+        case .jidSingle:
+            writeInt(&buf, Int32(5))
+
+
+        case .listMulti:
+            writeInt(&buf, Int32(6))
+
+
+        case .listSingle:
+            writeInt(&buf, Int32(7))
+
+
+        case .textMulti:
+            writeInt(&buf, Int32(8))
+
+
+        case .textPrivate:
+            writeInt(&buf, Int32(9))
+
+
+        case .textSingle:
+            writeInt(&buf, Int32(10))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFieldType_lift(_ buf: RustBuffer) throws -> WaddleExtensionFieldType {
+    return try FfiConverterTypeWaddleExtensionFieldType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionFieldType_lower(_ value: WaddleExtensionFieldType) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionFieldType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * XEP-0050 §3 `<note/>` severity; unknown types map to `Info`.
+ */
+
+public enum WaddleExtensionNoteType: Equatable, Hashable {
+
+    case info
+    case warn
+    case error
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleExtensionNoteType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleExtensionNoteType: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExtensionNoteType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleExtensionNoteType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .info
+
+        case 2: return .warn
+
+        case 3: return .error
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleExtensionNoteType, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .info:
+            writeInt(&buf, Int32(1))
+
+
+        case .warn:
+            writeInt(&buf, Int32(2))
+
+
+        case .error:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionNoteType_lift(_ buf: RustBuffer) throws -> WaddleExtensionNoteType {
+    return try FfiConverterTypeWaddleExtensionNoteType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleExtensionNoteType_lower(_ value: WaddleExtensionNoteType) -> RustBuffer {
+    return FfiConverterTypeWaddleExtensionNoteType.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -13532,6 +14556,30 @@ fileprivate struct FfiConverterOptionTypeWaddleEncryptedFile: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleExtensionCommandForm: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleExtensionCommandForm?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleExtensionCommandForm.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleExtensionCommandForm.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBuffer {
     typealias SwiftType = WaddleFallbackRange?
 
@@ -14601,6 +15649,131 @@ fileprivate struct FfiConverterSequenceTypeWaddleEncryptedFileHash: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleExtensionCommand: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExtensionCommand]
+
+    public static func write(_ value: [WaddleExtensionCommand], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExtensionCommand.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExtensionCommand] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExtensionCommand]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExtensionCommand.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleExtensionCommandFormField: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExtensionCommandFormField]
+
+    public static func write(_ value: [WaddleExtensionCommandFormField], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExtensionCommandFormField.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExtensionCommandFormField] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExtensionCommandFormField]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExtensionCommandFormField.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleExtensionCommandNote: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExtensionCommandNote]
+
+    public static func write(_ value: [WaddleExtensionCommandNote], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExtensionCommandNote.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExtensionCommandNote] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExtensionCommandNote]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExtensionCommandNote.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleExtensionFieldOption: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExtensionFieldOption]
+
+    public static func write(_ value: [WaddleExtensionFieldOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExtensionFieldOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExtensionFieldOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExtensionFieldOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExtensionFieldOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleExtensionFormField: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleExtensionFormField]
+
+    public static func write(_ value: [WaddleExtensionFormField], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleExtensionFormField.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleExtensionFormField] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleExtensionFormField]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleExtensionFormField.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleExternalService]
 
@@ -14997,6 +16170,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleUserSearchEntry: FfiConverterRu
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleAdhocAction: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleAdhocAction]
+
+    public static func write(_ value: [WaddleAdhocAction], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleAdhocAction.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleAdhocAction] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleAdhocAction]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleAdhocAction.read(from: &buf))
+        }
+        return seq
+    }
+}
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
 
@@ -15185,6 +16383,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_extension_commands() != 25241) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invoke_extension_command() != 62127) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_extension_command_form() != 46111) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
