@@ -13,7 +13,10 @@ pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod extension_commands;
+pub mod group_dm;
 pub mod inbox;
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub mod inbox_ext;
 pub mod mam;
 pub mod mds;
 pub mod messaging;
@@ -65,6 +68,8 @@ pub use event::{
     ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamErrorCondition,
     StreamErrorDetail, StreamManagementEvent,
 };
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub use inbox_ext::InboxExt;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use mam::MamExt;
 pub use mam::{

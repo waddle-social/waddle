@@ -40,6 +40,20 @@ class DmStore {
         }
     }
 
+    /**
+     * Move [peerJid] to the front of the recency list (inserting when
+     * unknown) — the XEP-0430 inbox reconcile path, where the server's
+     * `last-updated` recency outranks the persisted last-seen seed.
+     */
+    fun touch(peerJid: String) {
+        synchronized(lock) {
+            val peer = bareJid(peerJid)
+            recency.remove(peer)
+            recency.add(peer)
+            publish()
+        }
+    }
+
     fun clear() {
         synchronized(lock) {
             recency.clear()

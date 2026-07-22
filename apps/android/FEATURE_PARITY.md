@@ -28,7 +28,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | Channel (MUC) messaging | 0045 | ✅ | ✅ | `app/src/main/kotlin/social/waddle/android/feature/channel/ChannelScreen.kt` |
 | 1:1 direct messages | — | ✅ | ✅ | `app/src/main/kotlin/social/waddle/android/feature/dm/DmScreen.kt` |
-| Group DMs (multi-party) | 0045 | ✅ | ❌ | Web: `chat/src/lib/xmpp/group-dm.ts`; Android has only 1:1 DM + MUC |
+| Group DMs (multi-party) | 0045 | ✅ | ✅ | Android: DM-surface listing (`DmListScreen.kt`) plus create/rename/invite/leave in `GroupDmScreen.kt`/`NewGroupDmSheet.kt` over the group-dm FFI commands |
 | History (MAM) | 0313 | ✅ | ✅ | Android: `fetch_room_history`/`fetch_dm_history` FFI verbs |
 | Message search (MAM full-text) | 0313 | ✅ | ✅ | Android: `search_room_history`/`search_dm_history` FFI verbs + `feature/search/MessageSearchSheet.kt`, entry in the conversation top bar |
 | Corrections | 0308 | ✅ | ✅ | Edit action in `MessageActionSheet.kt` |
@@ -50,9 +50,9 @@ compares user-facing capability per area, verified against both codebases as of
 | @-mentions | 0372 | ✅ | ✅ | Composer autocomplete (`MentionPopover`/`MentionSpanTracker`) sends 0372 references; rendered + self-mention highlight in `RichMessageBody.kt` |
 | Mention/nick colors | 0392 | ✅ | ✅ | Shared Rust hue via `consistent_color_hue` FFI; `theme/ConsistentColor.kt` |
 | Per-conversation notify modes / mute | 0492 | ✅ | ✅ | Android: `NotifySettingsStore.kt` + notify sheet in the conversation top bar; `NotificationPolicy.kt` enforces never/on-mention/always |
-| Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
-| Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
-| Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
+| Bookmarks | 0402 | ✅ | ✅ | Autojoin-driven room sync merged in the Rust core (`discovery/bookmarks.rs`), feeding `RoomStore.kt`; bookmark publishing + `+notify` deferred as web parity |
+| Inbox / unread overview | 0430 | ✅ | ✅ | Server-authoritative unread over the inbox FFI with local overlay (`InboxStore.kt` + `UnreadStore.kt`); thread entries stored, thread-inbox UI deferred |
+| Slash commands | — | ✅ | ✅ | Dynamic XEP-0050 extension discovery (`urn:waddle:extension:1` disco forms) — tokenizer + popover + dispatch + XEP-0004 form sheet, incl. the AI inline/output special-casing |
 | Room create / configure | 0045 | ✅ | ✅ | Android: create-channel dialog (owner-gated) + owner settings sheet over `create_room`/`fetch_room_config`/`submit_room_config`/`destroy_room` (§10 GET-merge-SET in Rust). Space intents deferred (need XEP-0060 spaces-node builders) |
 
 ## Presence & profile
@@ -80,7 +80,7 @@ compares user-facing capability per area, verified against both codebases as of
 | --- | --- | --- | --- | --- |
 | File/HTTP upload + attachments | 0363, 0446, 0447 | ✅ | ✅ | Android: `AttachmentUploader.kt`, slot request via FFI |
 | Inline image display | 0447 | ✅ | ✅ | Android renders via Coil in `MessageCard.kt` |
-| Encrypted file attachments | 0448 | ✅ | ❌ | Web: `chat/src/lib/xmpp/encrypted-attachments.ts`; Android uploads plaintext (no OMEMO) |
+| Encrypted file attachments | 0448 | ✅ | ✅ | Decrypt-on-display (Coil fetcher, sha-256 verify, source fallback) + unconditional encrypt-on-upload; plaintext-hash REQUIRED fix landed in the shared Rust builder + web |
 | Rich text editor / markup | 0394 | ✅ | ✅ | Rendered via `RichBody.kt`/`RichMessageBody.kt`; composer converts markdown at send (`ComposerMarkdown.kt`) |
 | Markdown rendering | — | ✅ | ✅ | Neither client renders markdown from received bodies (0394-only); Android converts typed markdown at send |
 | Link previews | urn:waddle:link-preview:0 | ✅ | ✅ | Cards in `LinkPreviewCard.kt`; composer lookup token via `lookup_link_preview` FFI |
@@ -126,8 +126,5 @@ compares user-facing capability per area, verified against both codebases as of
 
 Remaining gaps, in priority order:
 
-1. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-2. **Inbox sync (0430)** — the Rust client parses `urn:waddle:inbox:0`; expose it over the FFI and feed `UnreadStore`.
-3. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
-4. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload.
-5. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+1. **Community surfaces** — feed (0472), stories (0501), events, extensions UI; lowest urgency, largest scope.
+2. Deferred follow-ups: XEP-0153 avatar hash publish, sticker import-from-received, generic XEP-0050 command palette + extensions toolbar, thread-inbox UI, XEP-0402 publishing/`+notify`.

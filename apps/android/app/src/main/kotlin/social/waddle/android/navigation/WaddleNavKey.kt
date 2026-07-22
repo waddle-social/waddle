@@ -22,6 +22,10 @@ sealed interface WaddleNavKey : NavKey {
     @Serializable
     data object DmList : WaddleNavKey
 
+    /** Group DM: a hidden members-only MUC surfaced on the DM list. */
+    @Serializable
+    data class GroupDm(val roomJid: String, val name: String) : WaddleNavKey
+
     @Serializable
     data class Thread(
         val conversationJid: String,

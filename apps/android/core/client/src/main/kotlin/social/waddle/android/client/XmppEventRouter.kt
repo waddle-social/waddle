@@ -11,8 +11,10 @@ import kotlinx.coroutines.flow.map
 import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ResumePersistence
+import social.waddle.android.client.store.InboxKind
 import social.waddle.android.client.store.SessionStores
 import social.waddle.android.client.store.isTimelineMutation
+import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMessage
 
 /**
@@ -53,6 +55,11 @@ internal class XmppEventRouter(
             }
             is XmppEvent.RoomPins ->
                 stores.pinStore.seed(event.roomJid, event.entries, event.fetchedAtVersion)
+            is XmppEvent.InboxEntries -> {
+                routeInboxHydrate(event.entries)
+                event.applied?.complete()
+            }
+            is XmppEvent.InboxPush -> routeInboxEntry(event.entry)
             is XmppEvent.Presence -> {
                 stores.presenceStore.onPresence(event.presence)
                 // XEP-0272 Muji bookkeeping rides the same serialized
@@ -126,7 +133,12 @@ internal class XmppEventRouter(
         val isThreadReply = message.thread != null &&
             message.thread !in rootIds &&
             message.callThread == null
-        if (newlyInserted && !isThreadReply) {
+        // A message the server inbox already accounted (its push/page
+        // named this stanza as the conversation's newest) must not
+        // ALSO increment locally — the absolute count in that push
+        // covered it (web `wasUnreadAccountedByInbox` parity).
+        val accountedByInbox = stores.inboxStore.wasUnreadAccounted(key.jid, rootIds)
+        if (newlyInserted && !isThreadReply && !accountedByInbox) {
             stores.unreadStore.onLiveMessage(key.jid, key.isMine)
         }
         resume.recordCursor(
@@ -134,6 +146,33 @@ internal class XmppEventRouter(
             stanzaId = message.stanzaId ?: message.originId ?: message.id,
             timestamp = message.timestamp,
         )
+    }
+
+    /**
+     * XEP-0430 hydrate page: reconcile every entry, oldest-first by
+     * `last-updated` so the most recently active DM ends up at the
+     * front of the recency list after the per-entry touches.
+     */
+    private fun routeInboxHydrate(entries: List<WaddleInboxEntry>) {
+        entries
+            .sortedBy { it.lastUpdated ?: Long.MIN_VALUE }
+            .forEach(::routeInboxEntry)
+    }
+
+    /**
+     * One server-authoritative inbox entry (hydrate row or live
+     * push): the store reconciles it (freshness guard + read-clear
+     * barrier), then the reconciled absolute count replaces any local
+     * unread overlay — unless the conversation is on screen, whose
+     * badge the local read path owns. Thread entries only update the
+     * inbox store (no thread unread UI yet); direct entries also
+     * refresh DM-list recency.
+     */
+    private fun routeInboxEntry(entry: WaddleInboxEntry) {
+        val applied = stores.inboxStore.applyEntry(entry) ?: return
+        if (applied.threadId != null) return
+        stores.unreadStore.setUnlessActive(applied.partner, applied.unread)
+        if (applied.kind == InboxKind.DIRECT) stores.dmStore.touch(applied.partner)
     }
 
     private fun routeMamResult(event: XmppEvent.MamResult) {

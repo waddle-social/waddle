@@ -2,6 +2,7 @@ use jid::Jid;
 use minidom::Element;
 
 use waddle_xmpp_client::{
+    inbox::{InboxStreamEntry, InboxStreamEntrySource},
     mds::MdsCatchupEntry,
     messaging::{
         self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
@@ -24,15 +25,15 @@ use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
     WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
     WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
-    WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus,
-    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
-    WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction, WaddlePinEntry,
-    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference,
-    WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
-    WaddleSmResumeState, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
-    WaddleStickerPack,
+    WaddleForumPostKind, WaddleInboxEntry, WaddleJingleReason, WaddleLinkPreview,
+    WaddleLinkPreviewImage, WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview,
+    WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo,
+    WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry,
+    WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker,
+    WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
+    WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
+    WaddleSendOptions, WaddleSharedFile, WaddleSmResumeState, WaddleStanzaErrorType,
+    WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -88,7 +89,35 @@ pub(super) fn dispatch_event(
                 condition: sasl_condition_to_ffi(failure.condition),
             });
         }
+        // Only live pushes broadcast: query-response entries are
+        // folded into the pending `fetch_inbox` page by the
+        // `InboxExt` reducer and must never double-surface as
+        // events (wasm driver parity).
+        ClientEvent::InboxStreamEntry(entry) if entry.source == InboxStreamEntrySource::Push => {
+            listener.on_event(WaddleClientEvent::InboxPush {
+                entry: inbox_entry_to_ffi(entry),
+            });
+        }
         _ => {}
+    }
+}
+
+/// XEP-0430 entry + Waddle metadata → FFI record. Absent `kind`
+/// metadata defaults to `"direct"` exactly like the wasm
+/// `inbox_entry_to_js` conversion; every other field crosses without
+/// defaulting.
+pub(crate) fn inbox_entry_to_ffi(entry: InboxStreamEntry) -> WaddleInboxEntry {
+    WaddleInboxEntry {
+        partner: entry.partner,
+        kind: entry.kind.unwrap_or_else(|| "direct".to_string()),
+        last_stanza_id: Some(entry.last_stanza_id),
+        last_updated: entry.last_updated,
+        unread: entry.unread,
+        preview: entry.preview,
+        thread_id: entry.thread_id,
+        thread_title: entry.thread_title,
+        reply_count: entry.reply_count,
+        author: entry.author,
     }
 }
 

@@ -11,6 +11,7 @@ import social.waddle.android.feature.channel.ChannelScreen
 import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
+import social.waddle.android.feature.dm.GroupDmScreen
 import social.waddle.android.feature.home.HomeScreen
 import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.profile.ProfileScreen
@@ -81,6 +82,28 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             ),
                         )
                     },
+                    onOpenGroupDm = { roomJid, name ->
+                        backStack.add(WaddleNavKey.GroupDm(roomJid = roomJid, name = name))
+                    },
+                )
+            }
+            entry<WaddleNavKey.GroupDm> { key ->
+                GroupDmScreen(
+                    roomJid = key.roomJid,
+                    name = key.name,
+                    onBack = { backStack.popSafely() },
+                    onOpenThread = { threadId ->
+                        backStack.add(
+                            WaddleNavKey.Thread(
+                                conversationJid = key.roomJid,
+                                isGroupchat = true,
+                                threadId = threadId,
+                            ),
+                        )
+                    },
+                    onOpenMembers = {
+                        backStack.add(WaddleNavKey.Members(roomJid = key.roomJid, name = key.name))
+                    },
                 )
             }
             entry<WaddleNavKey.Thread> { key ->
@@ -95,6 +118,9 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                 DmListScreen(
                     onOpenDm = { peerJid, name ->
                         backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name))
+                    },
+                    onOpenGroupDm = { roomJid, name ->
+                        backStack.add(WaddleNavKey.GroupDm(roomJid = roomJid, name = name))
                     },
                     onBack = { backStack.popSafely() },
                 )

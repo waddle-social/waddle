@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
+import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePinEntry
@@ -63,6 +64,25 @@ sealed interface XmppEvent {
         /** PinStore event version captured before the fetch started. */
         val fetchedAtVersion: Long,
     ) : XmppEvent
+
+    /**
+     * XEP-0430 inbox page from the session-ready hydrate, injected
+     * into the event stream so the server-authoritative unread
+     * reconciles serialize with live-message increments. [applied]
+     * (when present) is completed by the consumer after application —
+     * the ready pipeline joins it so later steps order after the
+     * hydrated counts.
+     */
+    data class InboxEntries(
+        val entries: List<WaddleInboxEntry>,
+        val applied: kotlinx.coroutines.CompletableJob? = null,
+    ) : XmppEvent
+
+    /**
+     * Live `urn:waddle:inbox:0` push: the server's authoritative
+     * unread state for one conversation changed (FFI `InboxPush`).
+     */
+    data class InboxPush(val entry: WaddleInboxEntry) : XmppEvent
 
     /**
      * A sibling device's XEP-0490 cursor covered everything unread in

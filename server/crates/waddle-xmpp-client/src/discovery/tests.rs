@@ -314,6 +314,42 @@ fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
     assert_eq!(channels[0].channel_type, DiscoveredChannelType::Text);
     assert_eq!(channels[0].position, 0);
     assert_eq!(channels[0].space_id.as_str(), "general");
+    // The space bookmark's own autojoin attr is honoured (web parity);
+    // user-PEP stamping and group-DM detection happen later.
+    assert!(channels[0].autojoin);
+    assert!(channels[0].bookmark_name.is_none());
+    assert!(!channels[0].is_group_dm);
+}
+
+#[test]
+fn space_channel_autojoin_defaults_to_false_when_attr_absent() {
+    // XEP-0402 §2.2 default (web parity: `bookmark.autojoin ?? false`).
+    let space_id = SpaceNode::new("general").expect("space node");
+    let iq = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(
+            Element::builder("pubsub", PUBSUB_NS)
+                .append(
+                    Element::builder("items", PUBSUB_NS)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "general")
+                        .append(
+                            Element::builder("item", PUBSUB_NS)
+                                .attr(
+                                    minidom::rxml::xml_ncname!("id").to_owned(),
+                                    "quiet@muc.example.com",
+                                )
+                                .append(Element::builder("conference", BOOKMARKS_NS).build())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let channels = parse_space_channels_result(&iq, &space_id).expect("channels");
+    assert_eq!(channels.len(), 1);
+    assert!(!channels[0].autojoin);
 }
 
 #[test]
@@ -869,3 +905,296 @@ fn parse_disco_data_form_ignores_form_type_when_x_type_missing() {
 // XEP-0357 wire-shape coverage moved to
 // `crate::xep::xep0357::tests::enable_iq_with_no_publish_options_carries_no_form_or_provider_fields`
 // where it lives alongside the typed builder.
+
+// ── XEP-0402 bookmark merge (discover_topology step 3) ───────────────
+
+mod bookmark_merge {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use futures::executor::block_on;
+
+    use super::super::bookmarks::{
+        bookmark_only_channel, fetch_user_bookmarks, merge_bookmarks_into_channels, stamp_bookmark,
+    };
+    use super::*;
+    use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
+    use crate::push::CommandDriver;
+    use crate::xep::xep0402::BookmarkItem;
+
+    struct MockDriver {
+        responses: RefCell<VecDeque<ClientResult<Element>>>,
+        sent: RefCell<Vec<Element>>,
+    }
+
+    impl MockDriver {
+        fn new(responses: Vec<ClientResult<Element>>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+                sent: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandDriver for MockDriver {
+        async fn send_iq(&self, iq: Element) -> ClientResult<Element> {
+            self.sent.borrow_mut().push(iq);
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .expect("mock response queued")
+        }
+    }
+
+    fn stanza_error() -> ClientError {
+        ClientError::StanzaError(StanzaError {
+            error_type: StanzaErrorType::Cancel,
+            condition: "item-not-found".to_string(),
+            text: None,
+            application_condition: None,
+        })
+    }
+
+    fn bookmark(jid: &str, name: Option<&str>, autojoin: bool) -> BookmarkItem {
+        BookmarkItem {
+            jid: jid.parse().expect("bookmark jid"),
+            name: name.map(str::to_string),
+            autojoin,
+            nick: None,
+            password: None,
+            extensions: Vec::new(),
+        }
+    }
+
+    fn catalog_channel(jid: &str) -> DiscoveredChannel {
+        let room_jid: BareJid = jid.parse().expect("room jid");
+        DiscoveredChannel {
+            id: format!("{}::{}", STANDALONE_SPACE_ID, room_jid),
+            room_jid,
+            name: "Catalog".to_string(),
+            description: None,
+            channel_type: DiscoveredChannelType::Text,
+            position: 0,
+            space_id: standalone(),
+            autojoin: true,
+            bookmark_name: None,
+            is_group_dm: false,
+        }
+    }
+
+    fn standalone() -> SpaceNode {
+        SpaceNode::new(STANDALONE_SPACE_ID).expect("standalone id")
+    }
+
+    fn bookmarks_response(items: Vec<BookmarkItem>) -> Element {
+        let mut items_builder = Element::builder("items", PUBSUB_NS)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), BOOKMARKS_NS);
+        for item in items {
+            items_builder = items_builder.append(
+                Element::builder("item", PUBSUB_NS)
+                    .attr(
+                        minidom::rxml::xml_ncname!("id").to_owned(),
+                        item.jid.to_string(),
+                    )
+                    .append(item.build_conference_element())
+                    .build(),
+            );
+        }
+        Element::builder("iq", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(
+                Element::builder("pubsub", PUBSUB_NS)
+                    .append(items_builder.build())
+                    .build(),
+            )
+            .build()
+    }
+
+    fn disco_info_response(features: &[&str]) -> Element {
+        let mut query = Element::builder("query", DISCO_INFO_NS);
+        for feature in features {
+            query = query.append(
+                Element::builder("feature", DISCO_INFO_NS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), *feature)
+                    .build(),
+            );
+        }
+        Element::builder("iq", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .append(query.build())
+            .build()
+    }
+
+    fn muc_info() -> DiscoInfoResult {
+        DiscoInfoResult {
+            jid: "room@muc.waddle.test".to_string(),
+            node: None,
+            identities: vec![],
+            features: vec![MUC_NS.to_string()],
+            forms: vec![],
+        }
+    }
+
+    #[test]
+    fn failed_bookmarks_fetch_degrades_to_empty_list() {
+        // Web parity: the whole pubsub fetch sits in a bare
+        // `try/catch` — any failure means "no bookmarks", never a
+        // failed topology load.
+        let driver = MockDriver::new(vec![Err(stanza_error())]);
+        assert!(block_on(fetch_user_bookmarks(&driver)).is_empty());
+    }
+
+    #[test]
+    fn fetch_parses_own_pep_bookmark_items() {
+        let driver = MockDriver::new(vec![Ok(bookmarks_response(vec![bookmark(
+            "chat@muc.waddle.test",
+            Some("Chat"),
+            true,
+        )]))]);
+        let items = block_on(fetch_user_bookmarks(&driver));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].jid.to_string(), "chat@muc.waddle.test");
+        // The fetch IQ must omit `to=` so the server routes it to the
+        // account's own PEP service (XEP-0163 §3.5).
+        assert!(driver.sent.borrow()[0].attr("to").is_none());
+    }
+
+    #[test]
+    fn bookmark_stamps_autojoin_and_name_onto_catalog_channel() {
+        let mut channels = vec![catalog_channel("chat@muc.waddle.test")];
+        let driver = MockDriver::new(vec![]);
+        let appended = block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            vec![bookmark("chat@muc.waddle.test", Some("Named"), false)],
+            &standalone(),
+        ));
+        assert_eq!(appended, 0);
+        // The bookmark's explicit autojoin=false wins over the
+        // catalog default of true.
+        assert!(!channels[0].autojoin);
+        assert_eq!(channels[0].bookmark_name.as_deref(), Some("Named"));
+        // No disco#info round-trip for a room the catalog already has.
+        assert!(driver.sent.borrow().is_empty());
+    }
+
+    #[test]
+    fn non_bookmarked_catalog_channel_keeps_autojoin_default() {
+        let mut channels = vec![catalog_channel("chat@muc.waddle.test")];
+        let driver = MockDriver::new(vec![]);
+        block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            Vec::new(),
+            &standalone(),
+        ));
+        assert!(channels[0].autojoin);
+        assert!(channels[0].bookmark_name.is_none());
+    }
+
+    #[test]
+    fn bookmark_only_room_kept_when_disco_confirms_muc() {
+        let mut channels = vec![catalog_channel("chat@muc.waddle.test")];
+        let driver = MockDriver::new(vec![Ok(disco_info_response(&[MUC_NS]))]);
+        let appended = block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            vec![bookmark("secret@muc.waddle.test", Some("Secret"), true)],
+            &standalone(),
+        ));
+        assert_eq!(appended, 1);
+        assert_eq!(channels.len(), 2);
+        let added = &channels[1];
+        assert_eq!(added.room_jid.to_string(), "secret@muc.waddle.test");
+        assert_eq!(added.name, "Secret");
+        assert_eq!(added.bookmark_name.as_deref(), Some("Secret"));
+        assert!(added.autojoin);
+        assert!(!added.is_group_dm);
+        assert_eq!(added.space_id.as_str(), STANDALONE_SPACE_ID);
+        assert_eq!(added.channel_type, DiscoveredChannelType::Text);
+    }
+
+    #[test]
+    fn bookmark_only_room_dropped_without_muc_feature() {
+        // A stale bookmark for a destroyed or non-MUC entity must not
+        // surface a phantom channel.
+        let mut channels = Vec::new();
+        let driver = MockDriver::new(vec![Ok(disco_info_response(&["urn:xmpp:mam:2"]))]);
+        let appended = block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            vec![bookmark("gone@muc.waddle.test", None, true)],
+            &standalone(),
+        ));
+        assert_eq!(appended, 0);
+        assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn bookmark_only_room_dropped_when_disco_info_fails() {
+        let mut channels = Vec::new();
+        let driver = MockDriver::new(vec![Err(stanza_error())]);
+        let appended = block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            vec![bookmark("gone@muc.waddle.test", None, true)],
+            &standalone(),
+        ));
+        assert_eq!(appended, 0);
+        assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn bookmark_only_group_dm_carries_the_flag() {
+        let mut channels = Vec::new();
+        let driver = MockDriver::new(vec![Ok(disco_info_response(&[
+            MUC_NS,
+            WADDLE_GROUP_DM_FEATURE_NS,
+        ]))]);
+        let appended = block_on(merge_bookmarks_into_channels(
+            &driver,
+            &mut channels,
+            vec![bookmark("gdm@muc.waddle.test", Some("Trio"), true)],
+            &standalone(),
+        ));
+        assert_eq!(appended, 1);
+        assert!(channels[0].is_group_dm);
+        assert!(channels[0].autojoin);
+    }
+
+    #[test]
+    fn bookmark_only_channel_reads_waddle_channel_type_metadata() {
+        let info = DiscoInfoResult {
+            forms: vec![DiscoDataForm {
+                form_type: Some(WADDLE_ROOM_METADATA_FORM_TYPE.to_string()),
+                fields: vec![DiscoDataField {
+                    var: "waddle#channel_type".to_string(),
+                    values: vec!["forum".to_string()],
+                }],
+            }],
+            ..muc_info()
+        };
+        let channel = bookmark_only_channel(
+            &bookmark("forum@muc.waddle.test", None, false),
+            &info,
+            &standalone(),
+            3,
+        )
+        .expect("kept");
+        assert_eq!(channel.channel_type, DiscoveredChannelType::Forum);
+        assert_eq!(channel.position, 3);
+        // No bookmark name: fall back to the room localpart.
+        assert_eq!(channel.name, "forum");
+        assert!(!channel.autojoin);
+    }
+
+    #[test]
+    fn stamp_bookmark_overwrites_previous_bookmark_state() {
+        let mut channel = catalog_channel("chat@muc.waddle.test");
+        channel.autojoin = false;
+        channel.bookmark_name = Some("Old".to_string());
+        stamp_bookmark(&mut channel, &bookmark("chat@muc.waddle.test", None, true));
+        assert!(channel.autojoin);
+        assert!(channel.bookmark_name.is_none());
+    }
+}

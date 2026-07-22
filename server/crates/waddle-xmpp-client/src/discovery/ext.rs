@@ -14,7 +14,9 @@ use super::types::{
     DiscoInfoResult, DiscoItem, DiscoveredChannel, DiscoveredChannelType,
     DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, SpaceNode, UploadSlot,
 };
-use super::{STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
+use super::{
+    STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_GROUP_DM_FEATURE_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
+};
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -237,6 +239,7 @@ impl DiscoveryExt for ClientHandle {
                     )
                     .filter(|description| !description.trim().is_empty())
                     .map(str::to_string);
+                channel.is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
             }
         }
         Ok(channels)
@@ -345,6 +348,7 @@ impl DiscoveryExt for ClientHandle {
                 }
                 let mut channel_type = DiscoveredChannelType::Text;
                 let mut description = None;
+                let mut is_group_dm = false;
                 if let Ok(info) = self.discover_info(&room.jid, None).await {
                     if let Some(parsed_type) = info
                         .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
@@ -359,6 +363,7 @@ impl DiscoveryExt for ClientHandle {
                         )
                         .filter(|description| !description.trim().is_empty())
                         .map(str::to_string);
+                    is_group_dm = info.has_feature(WADDLE_GROUP_DM_FEATURE_NS);
                 }
                 let name = room
                     .name
@@ -378,12 +383,32 @@ impl DiscoveryExt for ClientHandle {
                     channel_type,
                     position: offset as i32,
                     space_id: standalone_space_id.clone(),
+                    // Non-bookmarked catalog rooms default to
+                    // autojoin (web parity); the user's XEP-0402
+                    // bookmark below can override this.
+                    autojoin: true,
+                    bookmark_name: None,
+                    is_group_dm,
                 });
                 standalone_count += 1;
             }
         }
 
-        if standalone_count > 0 {
+        // (3) XEP-0402: the user's own-PEP bookmarks stamp
+        // autojoin/name onto catalog rooms and append bookmark-only
+        // rooms (kept only when disco#info confirms MUC). A failed
+        // bookmarks fetch yields an empty list, degrading to the
+        // catalog-only result (web parity).
+        let bookmarks = super::bookmarks::fetch_user_bookmarks(self).await;
+        let appended = super::bookmarks::merge_bookmarks_into_channels(
+            self,
+            &mut channels,
+            bookmarks,
+            &standalone_space_id,
+        )
+        .await;
+
+        if standalone_count + appended > 0 {
             spaces.push(DiscoveredSpace {
                 id: standalone_space_id,
                 service_jid: services.muc.clone(),

@@ -57,6 +57,16 @@ pub struct InboxFin {
     pub rsm_count: Option<u32>,
 }
 
+/// Result of one streamed XEP-0430 inbox query: the correlated
+/// `<entry/>` stream folded together with the closing `<fin/>`.
+/// Shared by the native `inbox_ext::InboxExt` handle extension
+/// (cfg-gated) and the wasm driver's pending-query reducer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InboxPage {
+    pub entries: Vec<InboxStreamEntry>,
+    pub fin: InboxFin,
+}
+
 /// Parse one streamed inbox `<message/>` into a typed entry.
 ///
 /// Returns `None` for messages that carry neither a direct

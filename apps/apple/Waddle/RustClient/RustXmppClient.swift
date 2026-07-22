@@ -359,6 +359,13 @@ private final class _EventListener: WaddleEventListener {
             continuation.yield(.messageDeliveryFailed(stanzaID: stanzaId))
         case let .call(callEvent):
             onCall(event: callEvent)
+        case let .inboxPush(entry):
+            // XEP-0430 live unread push. The Apple client does not
+            // consume server-side inbox sync yet (Android/web only);
+            // logged so the stream stays observable until it does.
+            logger.debug(
+                "RustXmppClient: inbox push for \(entry.partner, privacy: .private) (unread \(entry.unread))"
+            )
         case let .authenticationFailed(condition):
             // Terminal for the presented token — surfaced through the
             // existing error path; AppModel classifies and re-authenticates.

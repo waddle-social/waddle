@@ -419,6 +419,51 @@ pub struct WaddleMdsDisplayedEntry {
     pub stanza_id_by: String,
 }
 
+/// One XEP-0430 inbox conversation: the `urn:xmpp:inbox:1` `<entry/>`
+/// merged with its Waddle `urn:waddle:inbox:0` `<metadata/>`. Surfaced
+/// both from `fetch_inbox` pages and from live `InboxPush` events.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleInboxEntry {
+    /// Conversation partner: contact bare JID (`kind == "direct"`) or
+    /// room bare JID (`kind == "muc"`).
+    pub partner: String,
+    /// Conversation surface: `"direct"` or `"muc"` (the only values
+    /// the wire parser admits; absent metadata defaults to `"direct"`,
+    /// wasm parity).
+    pub kind: String,
+    /// XEP-0359 stanza id of the conversation's newest message.
+    /// Always present on the wire; optional here so the raw parser
+    /// shape crosses the boundary without lossy defaulting.
+    pub last_stanza_id: Option<String>,
+    /// Waddle metadata `last-updated` (unix millis); pushes always
+    /// carry it, query responses may omit metadata entirely.
+    pub last_updated: Option<i64>,
+    /// Server-side unread count for this conversation.
+    pub unread: u32,
+    /// Short plaintext preview of the newest message.
+    pub preview: Option<String>,
+    /// Thread id when this entry describes one thread of a room.
+    pub thread_id: Option<String>,
+    pub thread_title: Option<String>,
+    pub reply_count: Option<u32>,
+    /// Author of the newest message, when the server includes it.
+    pub author: Option<String>,
+}
+
+/// Result of one streamed XEP-0430 `fetch_inbox` query: the folded
+/// entry stream plus the closing `<fin/>` counts.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleInboxResult {
+    /// `<fin total/>` — number of conversations matched.
+    pub total: u32,
+    /// `<fin unread/>` — number of conversations with unread > 0.
+    pub unread: u32,
+    /// `<fin all-unread/>` — sum of unread counts across the whole
+    /// inbox (server-wide badge total), regardless of paging.
+    pub all_unread: u32,
+    pub conversations: Vec<WaddleInboxEntry>,
+}
+
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleArchivedMessage {
     pub mam_id: String,
@@ -595,6 +640,17 @@ pub struct WaddleChannel {
     pub channel_type: String,
     pub position: i32,
     pub space_id: String,
+    /// XEP-0402: join this room automatically on session ready. The
+    /// user's own bookmark wins; non-bookmarked catalog rooms default
+    /// to `true` (web parity).
+    pub autojoin: bool,
+    /// `<conference name='…'>` from the user's XEP-0402 bookmark,
+    /// when present.
+    pub bookmark_name: Option<String>,
+    /// Room advertises `urn:waddle:group-dm:0`: joined like any
+    /// autojoin room but surfaced on the DM list, never the channel
+    /// list.
+    pub is_group_dm: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -1202,6 +1258,11 @@ pub enum WaddleClientEvent {
     DeliveryAcked { stanza_id: String },
     /// XEP-0198: transport-level delivery failure for this id.
     DeliveryFailed { stanza_id: String },
+    /// Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
+    /// a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
+    /// query-response entries resolve the `fetch_inbox` verb and are
+    /// never broadcast (wasm parity).
+    InboxPush { entry: WaddleInboxEntry },
     /// XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
     /// envelope and Jingle session control stanza addressed to the
     /// bound resource. The Swift app surfaces it as the ringing UI,

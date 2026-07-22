@@ -59,6 +59,7 @@ class HomeViewModelTest {
         name: String,
         position: Int,
         spaceId: String,
+        isGroupDm: Boolean = false,
     ) = WaddleChannel(
         id = id,
         roomJid = roomJid,
@@ -67,6 +68,9 @@ class HomeViewModelTest {
         channelType = "text",
         position = position,
         spaceId = spaceId,
+        autojoin = true,
+        bookmarkName = null,
+        isGroupDm = isGroupDm,
     )
 
     private fun space(id: String, name: String) = WaddleSpace(
@@ -139,6 +143,39 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `group dm rooms never appear in channel sections`() = runTest {
+        val harness = Harness(this)
+        harness.manager.roomStore.setTopology(
+            WaddleTopology(
+                spaces = listOf(space("s1", "Waddle HQ")),
+                channels = listOf(
+                    channel("c1", "general@muc.waddle.test", "general", position = 1, spaceId = "s1"),
+                    // Autojoin group DM: joined for live traffic, but it
+                    // belongs on the DM surface (stage 3), not here.
+                    channel(
+                        "g1",
+                        "gdm@muc.waddle.test",
+                        "trio",
+                        position = 2,
+                        spaceId = "standalone",
+                        isGroupDm = true,
+                    ),
+                ),
+            ),
+        )
+
+        harness.viewModel.uiState.test {
+            skipItems(1)
+            runCurrent()
+            val sections = awaitItem().sections
+            assertEquals(
+                listOf("general@muc.waddle.test"),
+                sections.flatMap { section -> section.channels.map { it.roomJid } },
+            )
+        }
+    }
+
+    @Test
     fun `no orphan section appears when every channel has its space`() = runTest {
         val harness = Harness(this)
         harness.manager.roomStore.setTopology(
@@ -171,6 +208,35 @@ class HomeViewModelTest {
             skipItems(1)
             runCurrent()
             assertEquals(3, awaitItem().dmUnreadCount)
+        }
+    }
+
+    @Test
+    fun `dm unread count includes group dm rooms from the dm surface`() = runTest {
+        val harness = Harness(this)
+        harness.manager.dmStore.seed(listOf("alice@waddle.test"))
+        harness.manager.roomStore.setTopology(
+            WaddleTopology(
+                spaces = emptyList(),
+                channels = listOf(
+                    social.waddle.android.client.testChannel(
+                        "gdm-1@muc.waddle.test",
+                        name = "Alice, Bob",
+                        isGroupDm = true,
+                    ),
+                    social.waddle.android.client.testChannel("general@muc.waddle.test"),
+                ),
+            ),
+        )
+        harness.manager.unreadStore.onLiveMessage("alice@waddle.test", isMine = false)
+        harness.manager.unreadStore.onLiveMessage("gdm-1@muc.waddle.test", isMine = false)
+        // Regular channel unread still stays off the DM badge.
+        harness.manager.unreadStore.onLiveMessage("general@muc.waddle.test", isMine = false)
+
+        harness.viewModel.uiState.test {
+            skipItems(1)
+            runCurrent()
+            assertEquals(2, awaitItem().dmUnreadCount)
         }
     }
 

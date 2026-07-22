@@ -125,9 +125,16 @@ private fun ReadyShell(
                 if (backStack.lastOrNull() != key) {
                     backStack.add(key)
                 }
-                if (key is WaddleNavKey.Channel) {
+                // MUC destinations (channels AND group DMs) join ahead
+                // of the screen so the timeline is live on arrival.
+                val mucRoomJid = when (key) {
+                    is WaddleNavKey.Channel -> key.roomJid
+                    is WaddleNavKey.GroupDm -> key.roomJid
+                    else -> null
+                }
+                if (mucRoomJid != null) {
                     graph.sessionManager.joinRoom(
-                        roomJid = key.roomJid,
+                        roomJid = mucRoomJid,
                         nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                     )
                 }

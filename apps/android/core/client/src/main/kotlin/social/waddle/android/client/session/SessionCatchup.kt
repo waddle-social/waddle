@@ -1,15 +1,18 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import social.waddle.android.client.ConversationVerbs
 import social.waddle.android.client.OutboundMessenger
 import social.waddle.android.client.ReadStateCoordinator
+import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.persistQuietly
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleClientInterface
+import social.waddle.client.ffi.WaddleTopology
 
 /**
  * What happens after `SessionReady`: room topology discovery and the
@@ -23,15 +26,28 @@ internal class SessionCatchup(
     private val verbs: ConversationVerbs,
     private val messenger: OutboundMessenger,
     private val readState: ReadStateCoordinator,
+    private val activeSession: ActiveSession,
 ) {
-    suspend fun refreshTopology(client: WaddleClientInterface) {
-        runCatching { stores.roomStore.setTopology(client.discoverTopology()) }
+    /**
+     * Discover the spaces/channels topology into [SessionStores.roomStore]
+     * and hand it back so the rejoin step can derive the XEP-0402
+     * autojoin join set. Best-effort: a failed discovery returns `null`
+     * and the rejoin degrades to the persisted-intent rooms only.
+     */
+    private suspend fun refreshTopology(client: WaddleClientInterface): WaddleTopology? = try {
+        client.discoverTopology().also { stores.roomStore.setTopology(it) }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        null
     }
 
     /**
-     * One sequential pipeline, deliberately not parallel: queued
-     * groupchat sends need the rejoin's join presence first, and the
-     * bounded catch-up must not race the replay or hammer the server.
+     * One sequential pipeline, deliberately not parallel: the rejoin's
+     * join set is derived from the freshly discovered topology's
+     * bookmark autojoin flags, queued groupchat sends need the rejoin's
+     * join presence first, and the bounded catch-up must not race the
+     * replay or hammer the server.
      */
     suspend fun onSessionReady(
         client: WaddleClientInterface,
@@ -42,8 +58,13 @@ internal class SessionCatchup(
         // can raise IOException, and an escaped throw on this root
         // coroutine would kill the process ("never throw" contract).
         persistQuietly {
-            rejoinPersistedRooms(client, session)
+            val topology = refreshTopology(client)
+            rejoinRooms(client, session, topology)
             messenger.drainOutboundQueue()
+            // Every ready session, resumed streams included (web
+            // parity): the inbox is the server-authoritative unread
+            // baseline the live pushes then patch.
+            hydrateInbox(client)
             if (freshStream) {
                 catchUpConversations()
                 hydrateNotifySettings(client)
@@ -53,6 +74,32 @@ internal class SessionCatchup(
             readState.bootstrapMdsDisplayed(client)
             readState.drainPendingDisplayed()
         }
+    }
+
+    /**
+     * XEP-0430 hydrate (web session-ready parity): fetch the server's
+     * authoritative per-conversation unread state and INJECT the page
+     * into the serialized event stream (the MDS handshake pattern) so
+     * absolute-set reconciles never interleave with live increments.
+     * `noMessages = true` deviates from the web's default deliberately:
+     * the FFI page carries no message bodies, so the embedded MAM
+     * `<result/>` payloads the web consumes would be dead weight here.
+     * Best-effort: a failed fetch keeps the previous counts.
+     */
+    private suspend fun hydrateInbox(client: WaddleClientInterface) {
+        val result = try {
+            client.fetchInbox(onlyUnread = false, noMessages = true)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return
+        }
+        if (result.conversations.isEmpty()) return
+        val applied = Job()
+        activeSession.bridge?.submit(XmppEvent.InboxEntries(result.conversations, applied))
+        // Bare join (bootstrapMdsDisplayed parity): swallowing a
+        // cancellation here would resume a cancelled pipeline.
+        applied.join()
     }
 
     /**
@@ -77,20 +124,36 @@ internal class SessionCatchup(
     }
 
     /**
-     * Re-issues MUC join presence for every persisted room on each fresh
-     * session. Room join state does not survive a non-resumed stream, so
-     * without this a reconnect silently stops live channel traffic. The
-     * duplicate join presence on a resumed stream is benign (XEP-0045
-     * treats re-joining an occupied nick from the same full JID as a
-     * presence update).
+     * Re-issues MUC join presence on each ready session. Room join
+     * state does not survive a non-resumed stream, so without this a
+     * reconnect silently stops live channel traffic. The duplicate join
+     * presence on a resumed stream is benign (XEP-0045 treats re-joining
+     * an occupied nick from the same full JID as a presence update).
+     *
+     * Bookmark-driven join set (web autojoin fan-out parity): every
+     * topology channel whose XEP-0402 `autojoin` flag is set — group
+     * DMs INCLUDED, their live messages must flow even though stage 3
+     * surfaces them on the DM list instead of the channel list — union
+     * the persisted-intent rooms from [SessionPrefs.joinedRooms] (the
+     * pre-refresh overlay for rooms joined this session). A failed
+     * topology discovery (`topology == null`) degrades to the persisted
+     * set only. Successful joins are marked in the room store so the
+     * MAM catch-up and screens see them; the prefs stay user-intent
+     * only and are NOT widened with autojoin rooms.
      */
-    private suspend fun rejoinPersistedRooms(
+    private suspend fun rejoinRooms(
         client: WaddleClientInterface,
         session: WaddleSessionInfo,
+        topology: WaddleTopology?,
     ) {
-        for (roomJid in sessionPrefs.joinedRooms.first()) {
+        val autojoinRooms = topology?.channels.orEmpty()
+            .filter { it.autojoin }
+            .map { it.roomJid }
+        val joinSet = autojoinRooms.toSet() + sessionPrefs.joinedRooms.first()
+        for (roomJid in joinSet) {
             try {
                 client.joinRoom(roomJid, session.xmppLocalpart)
+                stores.roomStore.markJoined(roomJid)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {

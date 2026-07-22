@@ -107,6 +107,27 @@
     <!-- DMs -->
     <string name="dm_list_title">Direct messages</string>
     <string name="dm_list_empty">No direct messages yet.</string>
+    <string name="dm_list_new_group_action">New group DM</string>
+    <string name="dm_list_group_subtitle">Group DM</string>
+    <string name="dm_start_group_action">Start a group DM</string>
+
+    <!-- Group DMs -->
+    <string name="new_group_dm_title">New group DM</string>
+    <string name="new_group_dm_name_label">Name</string>
+    <string name="new_group_dm_name_placeholder">Alice, Bob</string>
+    <string name="new_group_dm_search_hint">Add people — search users</string>
+    <string name="new_group_dm_create">Create</string>
+    <string name="new_group_dm_remove_member">Remove</string>
+    <string name="new_group_dm_min_members">Choose at least two people.</string>
+    <string name="group_dm_more_actions">Group options</string>
+    <string name="group_dm_rename_action">Rename group</string>
+    <string name="group_dm_rename_title">Rename group DM</string>
+    <string name="group_dm_add_member_action">Add member</string>
+    <string name="group_dm_add_member_title">Add to group DM</string>
+    <string name="group_dm_full_history_toggle">Share full history</string>
+    <string name="group_dm_leave_action">Leave group</string>
+    <string name="group_dm_leave_confirm_title">Leave group DM?</string>
+    <string name="group_dm_leave_confirm_body">You will leave “%1$s”. You can only rejoin if a member adds you back.</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
