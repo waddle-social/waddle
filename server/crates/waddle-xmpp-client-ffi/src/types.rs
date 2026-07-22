@@ -642,6 +642,12 @@ pub struct WaddleSharedFile {
     pub size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// XEP-0446 lang-less `<desc/>` textual fallback. Mandatory on
+    /// XEP-0449 sticker files (usually the sticker's emoji).
+    pub desc: Option<String>,
+    /// XEP-0446 / XEP-0300 plaintext content hashes inside `<file/>`.
+    /// Distinct from the XEP-0448 ciphertext hashes on `encrypted`.
+    pub hashes: Vec<WaddleStickerHash>,
     pub disposition: String,
     /// XEP-0448 envelope when the bytes at `url` are ciphertext rather than
     /// the plaintext file. Recipients MUST use these values to decrypt before
@@ -711,6 +717,64 @@ pub struct WaddleThreadTarget {
     pub parent: Option<String>,
 }
 
+// ── Stickers (XEP-0449) ──────────────────────────────────────────────────────
+
+/// One XEP-0300 `urn:xmpp:hashes:2` hash value. `algo` is the wire
+/// algorithm name (only `sha-256` is accepted by the typed layer in
+/// v1; anything else is rejected on conversion).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleStickerHash {
+    pub algo: String,
+    pub value_b64: String,
+}
+
+/// One sticker inside a XEP-0449 pack. Mirrors
+/// `waddle_xmpp_client::stickers::PackSticker` with the typed
+/// dimensions pair flattened to optional width/height and suggest
+/// entries flattened to their texts.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddlePackSticker {
+    /// Mandatory lang-less textual fallback (usually emoji).
+    pub desc: String,
+    pub media_type: Option<String>,
+    pub size: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// ≥1 per XEP-0449; all stickers in a pack share one algorithm.
+    pub hashes: Vec<WaddleStickerHash>,
+    /// XEP-0447 source URLs the image can be fetched from.
+    pub sources: Vec<String>,
+    /// XEP-0449 `<suggest/>` texts clients may replace with the sticker.
+    pub suggests: Vec<String>,
+}
+
+/// A XEP-0449 sticker pack (one pubsub item on the
+/// `urn:xmpp:stickers:0` node; the item id is the pack id derived from
+/// the pack hash).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleStickerPack {
+    /// Pack id = first 24 Base64 chars of the pack hash. On publish
+    /// the id is recomputed from the pack content server-side of this
+    /// FFI — the caller's value is display state, never trusted.
+    pub id: String,
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    /// `<restricted/>`: the pack may not be imported by other users.
+    pub restricted: bool,
+    pub stickers: Vec<WaddlePackSticker>,
+}
+
+/// Reference to the source pack of an outbound sticker send
+/// (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
+/// `pack_node` locate packs hosted outside the sender's own PEP
+/// `urn:xmpp:stickers:0` node.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleStickerRef {
+    pub pack_id: String,
+    pub pack_jid: Option<String>,
+    pub pack_node: Option<String>,
+}
+
 /// Options bag attached to an outbound chat or groupchat send.
 #[derive(uniffi::Record, Clone, Default)]
 pub struct WaddleSendOptions {
@@ -731,6 +795,9 @@ pub struct WaddleSendOptions {
     /// the sender's other clients can classify the sent-carbon copy
     /// without knowing the room.
     pub muc_pm: bool,
+    /// XEP-0449: mark this send as a sticker referencing its source
+    /// pack. The sticker image itself travels in `shared_files`.
+    pub sticker: Option<WaddleStickerRef>,
 }
 
 /// Typed outcome for outbound message sends. The old FFI surface

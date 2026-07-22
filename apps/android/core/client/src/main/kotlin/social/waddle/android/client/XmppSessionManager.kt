@@ -75,6 +75,7 @@ class XmppSessionManager(
     val pinStore = stores.pinStore
     val notifySettingsStore = stores.notifySettingsStore
     val roomMembersStore = stores.roomMembersStore
+    val stickerPackStore = stores.stickerPackStore
     val profileStore = stores.profileStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
@@ -115,6 +116,7 @@ class XmppSessionManager(
 
     private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
+    private val stickers = StickerVerbs(activeSession, stores)
     private val profile = ProfileVerbs(activeSession, stores)
 
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
@@ -364,6 +366,19 @@ class XmppSessionManager(
         pageSize: UInt? = null,
         afterCursor: String? = null,
     ): WaddleAdminUsersPage? = roomAdmin.adminUsersList(prefix, pageSize, afterCursor)
+
+    /** XEP-0449: load the own PEP sticker packs into [stickerPackStore]. */
+    suspend fun loadStickerPacks() = stickers.loadStickerPacks()
+
+    /** XEP-0449: publish a new own sticker pack (id derived FFI-side). */
+    suspend fun publishStickerPack(
+        name: String,
+        summary: String?,
+        items: List<StickerItem>,
+    ): VerbResult = stickers.publishPack(name, summary, items)
+
+    /** XEP-0449: retract an own sticker pack. */
+    suspend fun removeStickerPack(packId: String): VerbResult = stickers.removePack(packId)
 
     /** Load the account's vCard4 + PEP status + avatar into [profileStore]. */
     suspend fun loadSelfProfile(): VerbResult = profile.loadSelfProfile()

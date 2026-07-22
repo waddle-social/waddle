@@ -16,7 +16,9 @@ pub enum WaddleError {
     /// A caller-supplied argument failed validation before any stanza
     /// was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
     /// general (both become XML element names on the wire), an empty
-    /// avatar image, or an all-empty tune payload. Nothing was sent.
+    /// avatar image, an all-empty tune payload, or an XEP-0449 sticker
+    /// pack whose id, content, or hash algorithm is empty, malformed,
+    /// or unsupported. Nothing was sent.
     #[error("invalid argument")]
     InvalidArgument,
     /// A caller-supplied Jingle session id was empty or whitespace.

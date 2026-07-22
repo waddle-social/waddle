@@ -855,6 +855,14 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
@@ -1067,6 +1075,14 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(`
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_packs(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticker_pack(`ptr`: Long,`pack`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_sticker_pack(`ptr`: Long,`packId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
@@ -1473,6 +1489,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs() != 18633) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_sticker_pack() != 16031) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
@@ -2686,6 +2714,44 @@ public interface WaddleClientInterface {
      * unedited settings round-trip verbatim.
      */
     suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch)
+
+    /**
+     * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
+     * (XEP-0060 items-by-id). `node: None` defaults to the PEP
+     * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
+     * pubsub node per the `<sticker jid/node>` reference attributes.
+     * A missing pack (or empty node) yields `Ok(None)`.
+     */
+    suspend fun `fetchStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String): WaddleStickerPack?
+
+    /**
+     * XEP-0449: fetch every sticker pack published on the
+     * `urn:xmpp:stickers:0` PEP node. `owner_jid: None` fetches the
+     * account's own packs; `Some(jid)` fetches another user's
+     * (readable because the node's access model is `open`). An
+     * `item-not-found` reply — no pack ever published — is the normal
+     * first-run state and returns an empty list.
+     */
+    suspend fun `fetchStickerPacks`(`ownerJid`: kotlin.String?): List<WaddleStickerPack>
+
+    /**
+     * XEP-0449: publish (create or update/import) a sticker pack on
+     * the account's own PEP node. The pubsub item id is recomputed
+     * from the pack content per §"Sticker pack hash calculation" —
+     * the caller-supplied `pack.id` is ignored — and the id actually
+     * published is returned.
+     */
+    suspend fun `publishStickerPack`(`pack`: WaddleStickerPack): kotlin.String
+
+    /**
+     * XEP-0449: retract (delete) one pack from the account's own PEP
+     * node. Idempotent: an `item-not-found` reply (the pack is
+     * already gone) is success, so a retry after an interrupted
+     * retract self-heals. Returns `false` on invalid input, no live
+     * session, or any other stanza error (with an `Error` event
+     * carrying the diagnostic).
+     */
+    suspend fun `retractStickerPack`(`packId`: kotlin.String): kotlin.Boolean
 
     companion object
 }
@@ -5150,6 +5216,119 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
         // Error FFI converter
         WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
+     * (XEP-0060 items-by-id). `node: None` defaults to the PEP
+     * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
+     * pubsub node per the `<sticker jid/node>` reference attributes.
+     * A missing pack (or empty node) yields `Ok(None)`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStickerPack`(`ownerJid`: kotlin.String, `node`: kotlin.String?, `packId`: kotlin.String) : WaddleStickerPack? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(
+                uniffiHandle,
+                FfiConverterString.lower(`ownerJid`),FfiConverterOptionalString.lower(`node`),FfiConverterString.lower(`packId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleStickerPack.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0449: fetch every sticker pack published on the
+     * `urn:xmpp:stickers:0` PEP node. `owner_jid: None` fetches the
+     * account's own packs; `Some(jid)` fetches another user's
+     * (readable because the node's access model is `open`). An
+     * `item-not-found` reply — no pack ever published — is the normal
+     * first-run state and returns an empty list.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStickerPacks`(`ownerJid`: kotlin.String?) : List<WaddleStickerPack> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_packs(
+                uniffiHandle,
+                FfiConverterOptionalString.lower(`ownerJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleStickerPack.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0449: publish (create or update/import) a sticker pack on
+     * the account's own PEP node. The pubsub item id is recomputed
+     * from the pack content per §"Sticker pack hash calculation" —
+     * the caller-supplied `pack.id` is ignored — and the id actually
+     * published is returned.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishStickerPack`(`pack`: WaddleStickerPack) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticker_pack(
+                uniffiHandle,
+                FfiConverterTypeWaddleStickerPack.lower(`pack`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0449: retract (delete) one pack from the account's own PEP
+     * node. Idempotent: an `item-not-found` reply (the pack is
+     * already gone) is success, so a retry after an interrupted
+     * retract self-heals. Returns `false` on invalid input, no live
+     * session, or any other stanza error (with an `Error` event
+     * carrying the diagnostic).
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `retractStickerPack`(`packId`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_sticker_pack(
+                uniffiHandle,
+                FfiConverterString.lower(`packId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -8705,6 +8884,92 @@ public object FfiConverterTypeWaddleMujiPresence: FfiConverterRustBuffer<WaddleM
 
 
 /**
+ * One sticker inside a XEP-0449 pack. Mirrors
+ * `waddle_xmpp_client::stickers::PackSticker` with the typed
+ * dimensions pair flattened to optional width/height and suggest
+ * entries flattened to their texts.
+ */
+data class WaddlePackSticker (
+    /**
+     * Mandatory lang-less textual fallback (usually emoji).
+     */
+    var `desc`: kotlin.String
+    ,
+    var `mediaType`: kotlin.String?
+    ,
+    var `size`: kotlin.ULong?
+    ,
+    var `width`: kotlin.UInt?
+    ,
+    var `height`: kotlin.UInt?
+    ,
+    /**
+     * ≥1 per XEP-0449; all stickers in a pack share one algorithm.
+     */
+    var `hashes`: List<WaddleStickerHash>
+    ,
+    /**
+     * XEP-0447 source URLs the image can be fetched from.
+     */
+    var `sources`: List<kotlin.String>
+    ,
+    /**
+     * XEP-0449 `<suggest/>` texts clients may replace with the sticker.
+     */
+    var `suggests`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddlePackSticker: FfiConverterRustBuffer<WaddlePackSticker> {
+    override fun read(buf: ByteBuffer): WaddlePackSticker {
+        return WaddlePackSticker(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterSequenceTypeWaddleStickerHash.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddlePackSticker) = (
+            FfiConverterString.allocationSize(value.`desc`) +
+            FfiConverterOptionalString.allocationSize(value.`mediaType`) +
+            FfiConverterOptionalULong.allocationSize(value.`size`) +
+            FfiConverterOptionalUInt.allocationSize(value.`width`) +
+            FfiConverterOptionalUInt.allocationSize(value.`height`) +
+            FfiConverterSequenceTypeWaddleStickerHash.allocationSize(value.`hashes`) +
+            FfiConverterSequenceString.allocationSize(value.`sources`) +
+            FfiConverterSequenceString.allocationSize(value.`suggests`)
+    )
+
+    override fun write(value: WaddlePackSticker, buf: ByteBuffer) {
+            FfiConverterString.write(value.`desc`, buf)
+            FfiConverterOptionalString.write(value.`mediaType`, buf)
+            FfiConverterOptionalULong.write(value.`size`, buf)
+            FfiConverterOptionalUInt.write(value.`width`, buf)
+            FfiConverterOptionalUInt.write(value.`height`, buf)
+            FfiConverterSequenceTypeWaddleStickerHash.write(value.`hashes`, buf)
+            FfiConverterSequenceString.write(value.`sources`, buf)
+            FfiConverterSequenceString.write(value.`suggests`, buf)
+    }
+}
+
+
+
+/**
  * Snapshot of a user's mood/activity/tune PEP nodes, fetched via
  * three XEP-0060 items requests (wasm `fetch_user_pep_profile`
  * parity). A node that is absent, empty, or answers with a stanza
@@ -9528,6 +9793,12 @@ data class WaddleSendOptions (
      * without knowing the room.
      */
     var `mucPm`: kotlin.Boolean
+    ,
+    /**
+     * XEP-0449: mark this send as a sticker referencing its source
+     * pack. The sticker image itself travels in `shared_files`.
+     */
+    var `sticker`: WaddleStickerRef?
 
 ){
 
@@ -9555,6 +9826,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeWaddleStickerRef.read(buf),
         )
     }
 
@@ -9569,7 +9841,8 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterSequenceTypeWaddleSharedFile.allocationSize(value.`sharedFiles`) +
             FfiConverterOptionalString.allocationSize(value.`linkPreviewToken`) +
             FfiConverterBoolean.allocationSize(value.`requestDisplayedMarker`) +
-            FfiConverterBoolean.allocationSize(value.`mucPm`)
+            FfiConverterBoolean.allocationSize(value.`mucPm`) +
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`sticker`)
     )
 
     override fun write(value: WaddleSendOptions, buf: ByteBuffer) {
@@ -9584,6 +9857,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterOptionalString.write(value.`linkPreviewToken`, buf)
             FfiConverterBoolean.write(value.`requestDisplayedMarker`, buf)
             FfiConverterBoolean.write(value.`mucPm`, buf)
+            FfiConverterOptionalTypeWaddleStickerRef.write(value.`sticker`, buf)
     }
 }
 
@@ -9604,6 +9878,18 @@ data class WaddleSharedFile (
     var `width`: kotlin.UInt?
     ,
     var `height`: kotlin.UInt?
+    ,
+    /**
+     * XEP-0446 lang-less `<desc/>` textual fallback. Mandatory on
+     * XEP-0449 sticker files (usually the sticker's emoji).
+     */
+    var `desc`: kotlin.String?
+    ,
+    /**
+     * XEP-0446 / XEP-0300 plaintext content hashes inside `<file/>`.
+     * Distinct from the XEP-0448 ciphertext hashes on `encrypted`.
+     */
+    var `hashes`: List<WaddleStickerHash>
     ,
     var `disposition`: kotlin.String
     ,
@@ -9635,6 +9921,8 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeWaddleStickerHash.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalTypeWaddleEncryptedFile.read(buf),
         )
@@ -9647,6 +9935,8 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
             FfiConverterOptionalULong.allocationSize(value.`size`) +
             FfiConverterOptionalUInt.allocationSize(value.`width`) +
             FfiConverterOptionalUInt.allocationSize(value.`height`) +
+            FfiConverterOptionalString.allocationSize(value.`desc`) +
+            FfiConverterSequenceTypeWaddleStickerHash.allocationSize(value.`hashes`) +
             FfiConverterString.allocationSize(value.`disposition`) +
             FfiConverterOptionalTypeWaddleEncryptedFile.allocationSize(value.`encrypted`)
     )
@@ -9658,6 +9948,8 @@ public object FfiConverterTypeWaddleSharedFile: FfiConverterRustBuffer<WaddleSha
             FfiConverterOptionalULong.write(value.`size`, buf)
             FfiConverterOptionalUInt.write(value.`width`, buf)
             FfiConverterOptionalUInt.write(value.`height`, buf)
+            FfiConverterOptionalString.write(value.`desc`, buf)
+            FfiConverterSequenceTypeWaddleStickerHash.write(value.`hashes`, buf)
             FfiConverterString.write(value.`disposition`, buf)
             FfiConverterOptionalTypeWaddleEncryptedFile.write(value.`encrypted`, buf)
     }
@@ -9832,6 +10124,164 @@ public object FfiConverterTypeWaddleStanzaId: FfiConverterRustBuffer<WaddleStanz
     override fun write(value: WaddleStanzaId, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`by`, buf)
+    }
+}
+
+
+
+/**
+ * One XEP-0300 `urn:xmpp:hashes:2` hash value. `algo` is the wire
+ * algorithm name (only `sha-256` is accepted by the typed layer in
+ * v1; anything else is rejected on conversion).
+ */
+data class WaddleStickerHash (
+    var `algo`: kotlin.String
+    ,
+    var `valueB64`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStickerHash: FfiConverterRustBuffer<WaddleStickerHash> {
+    override fun read(buf: ByteBuffer): WaddleStickerHash {
+        return WaddleStickerHash(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStickerHash) = (
+            FfiConverterString.allocationSize(value.`algo`) +
+            FfiConverterString.allocationSize(value.`valueB64`)
+    )
+
+    override fun write(value: WaddleStickerHash, buf: ByteBuffer) {
+            FfiConverterString.write(value.`algo`, buf)
+            FfiConverterString.write(value.`valueB64`, buf)
+    }
+}
+
+
+
+/**
+ * A XEP-0449 sticker pack (one pubsub item on the
+ * `urn:xmpp:stickers:0` node; the item id is the pack id derived from
+ * the pack hash).
+ */
+data class WaddleStickerPack (
+    /**
+     * Pack id = first 24 Base64 chars of the pack hash. On publish
+     * the id is recomputed from the pack content server-side of this
+     * FFI — the caller's value is display state, never trusted.
+     */
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String?
+    ,
+    var `summary`: kotlin.String?
+    ,
+    /**
+     * `<restricted/>`: the pack may not be imported by other users.
+     */
+    var `restricted`: kotlin.Boolean
+    ,
+    var `stickers`: List<WaddlePackSticker>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStickerPack: FfiConverterRustBuffer<WaddleStickerPack> {
+    override fun read(buf: ByteBuffer): WaddleStickerPack {
+        return WaddleStickerPack(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeWaddlePackSticker.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStickerPack) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`summary`) +
+            FfiConverterBoolean.allocationSize(value.`restricted`) +
+            FfiConverterSequenceTypeWaddlePackSticker.allocationSize(value.`stickers`)
+    )
+
+    override fun write(value: WaddleStickerPack, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`summary`, buf)
+            FfiConverterBoolean.write(value.`restricted`, buf)
+            FfiConverterSequenceTypeWaddlePackSticker.write(value.`stickers`, buf)
+    }
+}
+
+
+
+/**
+ * Reference to the source pack of an outbound sticker send
+ * (XEP-0449 §"Sending a sticker from a sticker pack"). `pack_jid` /
+ * `pack_node` locate packs hosted outside the sender's own PEP
+ * `urn:xmpp:stickers:0` node.
+ */
+data class WaddleStickerRef (
+    var `packId`: kotlin.String
+    ,
+    var `packJid`: kotlin.String?
+    ,
+    var `packNode`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStickerRef: FfiConverterRustBuffer<WaddleStickerRef> {
+    override fun read(buf: ByteBuffer): WaddleStickerRef {
+        return WaddleStickerRef(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleStickerRef) = (
+            FfiConverterString.allocationSize(value.`packId`) +
+            FfiConverterOptionalString.allocationSize(value.`packJid`) +
+            FfiConverterOptionalString.allocationSize(value.`packNode`)
+    )
+
+    override fun write(value: WaddleStickerRef, buf: ByteBuffer) {
+            FfiConverterString.write(value.`packId`, buf)
+            FfiConverterOptionalString.write(value.`packJid`, buf)
+            FfiConverterOptionalString.write(value.`packNode`, buf)
     }
 }
 
@@ -10972,7 +11422,9 @@ sealed class WaddleException: kotlin.Exception() {
      * A caller-supplied argument failed validation before any stanza
      * was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
      * general (both become XML element names on the wire), an empty
-     * avatar image, or an all-empty tune payload. Nothing was sent.
+     * avatar image, an all-empty tune payload, or an XEP-0449 sticker
+     * pack whose id, content, or hash algorithm is empty, malformed,
+     * or unsupported. Nothing was sent.
      */
     class InvalidArgument(
         ) : WaddleException() {
@@ -13328,6 +13780,70 @@ public object FfiConverterOptionalTypeWaddleSmResumeState: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleStickerPack: FfiConverterRustBuffer<WaddleStickerPack?> {
+    override fun read(buf: ByteBuffer): WaddleStickerPack? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleStickerPack.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleStickerPack?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleStickerPack.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleStickerPack?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleStickerPack.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWaddleStickerRef: FfiConverterRustBuffer<WaddleStickerRef?> {
+    override fun read(buf: ByteBuffer): WaddleStickerRef? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleStickerRef.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleStickerRef?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleStickerRef.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleStickerRef?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleStickerRef.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleThreadTarget: FfiConverterRustBuffer<WaddleThreadTarget?> {
     override fun read(buf: ByteBuffer): WaddleThreadTarget? {
         if (buf.get().toInt() == 0) {
@@ -14284,6 +14800,34 @@ public object FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverterRustB
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddlePackSticker: FfiConverterRustBuffer<List<WaddlePackSticker>> {
+    override fun read(buf: ByteBuffer): List<WaddlePackSticker> {
+        val len = buf.getInt()
+        return List<WaddlePackSticker>(len) {
+            FfiConverterTypeWaddlePackSticker.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddlePackSticker>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddlePackSticker.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddlePackSticker>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddlePackSticker.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddlePinEntry: FfiConverterRustBuffer<List<WaddlePinEntry>> {
     override fun read(buf: ByteBuffer): List<WaddlePinEntry> {
         val len = buf.getInt()
@@ -14470,6 +15014,62 @@ public object FfiConverterSequenceTypeWaddleStanzaId: FfiConverterRustBuffer<Lis
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleStanzaId.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleStickerHash: FfiConverterRustBuffer<List<WaddleStickerHash>> {
+    override fun read(buf: ByteBuffer): List<WaddleStickerHash> {
+        val len = buf.getInt()
+        return List<WaddleStickerHash>(len) {
+            FfiConverterTypeWaddleStickerHash.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleStickerHash>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleStickerHash.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleStickerHash>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleStickerHash.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleStickerPack: FfiConverterRustBuffer<List<WaddleStickerPack>> {
+    override fun read(buf: ByteBuffer): List<WaddleStickerPack> {
+        val len = buf.getInt()
+        return List<WaddleStickerPack>(len) {
+            FfiConverterTypeWaddleStickerPack.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleStickerPack>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleStickerPack.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleStickerPack>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleStickerPack.write(it, buf)
         }
     }
 }

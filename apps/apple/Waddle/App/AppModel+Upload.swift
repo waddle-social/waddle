@@ -106,6 +106,8 @@ extension AppModel {
             size: UInt64(data.count),
             width: nil,
             height: nil,
+            desc: nil,
+            hashes: [],
             disposition: sharedFileDisposition(for: mediaType),
             encrypted: nil
         )

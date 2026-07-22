@@ -61,6 +61,7 @@ import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
+import social.waddle.client.ffi.WaddleStickerPack
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
@@ -262,10 +263,119 @@ sealed interface RecordedProfileVerb {
 }
 
 /**
+ * XEP-0449 sticker-verb slice of [FakeWaddleClient]: canned packs,
+ * per-verb failure knobs, and recorded operations.
+ */
+class FakeStickerVerbs {
+    /** Canned packs served by both fetch verbs. */
+    @Volatile
+    var packs: List<WaddleStickerPack> = emptyList()
+
+    val fetchCalls = CopyOnWriteArrayList<String?>()
+    val publishCalls = CopyOnWriteArrayList<WaddleStickerPack>()
+    val retractCalls = CopyOnWriteArrayList<String>()
+
+    /** Set to fail the fetch/publish/retract verbs (they throw). */
+    @Volatile
+    var fetchFailure: Throwable? = null
+
+    @Volatile
+    var publishFailure: Throwable? = null
+
+    @Volatile
+    var retractFailure: Throwable? = null
+
+    /** Server-derived pack id echoed by [publish]. */
+    @Volatile
+    var publishedId: String = "published-pack-id"
+
+    /** Canned retract answer (false = the FFI's refusal shape). */
+    @Volatile
+    var retractResult = true
+
+    fun fetchAll(ownerJid: String?): List<WaddleStickerPack> {
+        fetchCalls += ownerJid
+        fetchFailure?.let { throw it }
+        return packs
+    }
+
+    fun fetchOne(ownerJid: String, packId: String): WaddleStickerPack? {
+        fetchCalls += ownerJid
+        fetchFailure?.let { throw it }
+        return packs.firstOrNull { pack -> pack.id == packId }
+    }
+
+    fun publish(pack: WaddleStickerPack): String {
+        publishCalls += pack
+        publishFailure?.let { throw it }
+        return publishedId
+    }
+
+    fun retract(packId: String): Boolean {
+        retractCalls += packId
+        retractFailure?.let { throw it }
+        return retractResult
+    }
+}
+
+/**
+ * XEP-0492 notify-mode slice of [FakeWaddleClient]: recorded set
+ * calls plus canned outcomes mirroring the sparse DM carrier.
+ */
+class FakeNotifyVerbs {
+    /** Recorded (jid, mode, richPayloadOptIn) set calls. */
+    val roomCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
+    val dmCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
+
+    /** Canned outcome overrides; `null` echoes the request as `Ok`. */
+    @Volatile
+    var roomOutcome: WaddleSetRoomNotificationModeOutcome? = null
+
+    /** `null` mirrors the sparse DM carrier: default mode → `Removed`. */
+    @Volatile
+    var dmOutcome: WaddleSetDmNotificationModeOutcome? = null
+
+    fun setRoomMode(
+        roomJid: String,
+        mode: WaddleNotifyMode,
+        name: String?,
+        richPayloadOptIn: Boolean,
+    ): WaddleSetRoomNotificationModeOutcome {
+        roomCalls += Triple(roomJid, mode, richPayloadOptIn)
+        return roomOutcome ?: WaddleSetRoomNotificationModeOutcome.Ok(
+            WaddleBookmarkItem(
+                jid = roomJid,
+                name = name,
+                autojoin = false,
+                notifyMode = mode,
+                richPayloadOptIn = richPayloadOptIn,
+            ),
+        )
+    }
+
+    fun setDmMode(
+        dmJid: String,
+        mode: WaddleNotifyMode,
+        richPayloadOptIn: Boolean,
+    ): WaddleSetDmNotificationModeOutcome {
+        dmCalls += Triple(dmJid, mode, richPayloadOptIn)
+        dmOutcome?.let { return it }
+        return if (mode == WaddleNotifyMode.ALWAYS && !richPayloadOptIn) {
+            WaddleSetDmNotificationModeOutcome.Removed(dmJid)
+        } else {
+            WaddleSetDmNotificationModeOutcome.Ok(
+                WaddleDmBookmarkItem(jid = dmJid, notifyMode = mode, richPayloadOptIn = richPayloadOptIn),
+            )
+        }
+    }
+}
+
+/**
  * Connect/disconnect no-op; everything unused by the manager rejects.
  * Recorders are concurrency-safe: instrumentation tests poll them from
  * the test thread while the session manager mutates them on its own
- * dispatcher.
+ * dispatcher. Cohesive verb families live in sliced-out fakes
+ * ([FakeStickerVerbs], [FakeNotifyVerbs]) that this class delegates to.
  */
 class FakeWaddleClient : WaddleClientInterface {
     @Volatile
@@ -1008,6 +1118,22 @@ class FakeWaddleClient : WaddleClientInterface {
         return linkPreviewLookup
     }
 
+    /** XEP-0449 sticker verbs, sliced out into [FakeStickerVerbs]. */
+    val stickers = FakeStickerVerbs()
+
+    override suspend fun fetchStickerPacks(ownerJid: String?): List<WaddleStickerPack> =
+        stickers.fetchAll(ownerJid)
+
+    override suspend fun fetchStickerPack(
+        ownerJid: String,
+        node: String?,
+        packId: String,
+    ): WaddleStickerPack? = stickers.fetchOne(ownerJid, packId)
+
+    override suspend fun publishStickerPack(pack: WaddleStickerPack): String = stickers.publish(pack)
+
+    override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
+
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
     @Volatile
     var roomPins: List<WaddlePinEntry> = emptyList()
@@ -1048,51 +1174,21 @@ class FakeWaddleClient : WaddleClientInterface {
         return dmBookmarks
     }
 
-    /** Recorded (jid, mode, richPayloadOptIn) XEP-0492 set calls. */
-    val roomNotifyCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
-    val dmNotifyCalls = CopyOnWriteArrayList<Triple<String, WaddleNotifyMode, Boolean>>()
-
-    /** Canned outcome overrides; `null` echoes the request as `Ok`. */
-    @Volatile
-    var roomNotifyOutcome: WaddleSetRoomNotificationModeOutcome? = null
-
-    /** `null` mirrors the sparse DM carrier: default mode → `Removed`. */
-    @Volatile
-    var dmNotifyOutcome: WaddleSetDmNotificationModeOutcome? = null
+    /** XEP-0492 notify-mode verbs, sliced out into [FakeNotifyVerbs]. */
+    val notify = FakeNotifyVerbs()
 
     override suspend fun setRoomNotificationMode(
         roomJid: String,
         mode: WaddleNotifyMode,
         name: String?,
         richPayloadOptIn: Boolean,
-    ): WaddleSetRoomNotificationModeOutcome {
-        roomNotifyCalls += Triple(roomJid, mode, richPayloadOptIn)
-        return roomNotifyOutcome ?: WaddleSetRoomNotificationModeOutcome.Ok(
-            WaddleBookmarkItem(
-                jid = roomJid,
-                name = name,
-                autojoin = false,
-                notifyMode = mode,
-                richPayloadOptIn = richPayloadOptIn,
-            ),
-        )
-    }
+    ): WaddleSetRoomNotificationModeOutcome = notify.setRoomMode(roomJid, mode, name, richPayloadOptIn)
 
     override suspend fun setDmNotificationMode(
         dmJid: String,
         mode: WaddleNotifyMode,
         richPayloadOptIn: Boolean,
-    ): WaddleSetDmNotificationModeOutcome {
-        dmNotifyCalls += Triple(dmJid, mode, richPayloadOptIn)
-        dmNotifyOutcome?.let { return it }
-        return if (mode == WaddleNotifyMode.ALWAYS && !richPayloadOptIn) {
-            WaddleSetDmNotificationModeOutcome.Removed(dmJid)
-        } else {
-            WaddleSetDmNotificationModeOutcome.Ok(
-                WaddleDmBookmarkItem(jid = dmJid, notifyMode = mode, richPayloadOptIn = richPayloadOptIn),
-            )
-        }
-    }
+    ): WaddleSetDmNotificationModeOutcome = notify.setDmMode(dmJid, mode, richPayloadOptIn)
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()

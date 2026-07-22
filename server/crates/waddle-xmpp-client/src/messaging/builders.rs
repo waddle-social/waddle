@@ -519,6 +519,11 @@ pub fn build_outbound_message(
     for file in &options.shared_files {
         builder = builder.append(build_file_sharing_element(file)?);
     }
+    // XEP-0449: mark the message as a sticker. The marker travels
+    // alongside the XEP-0447 file-sharing payload built above.
+    if let Some(sticker) = options.sticker.as_ref() {
+        builder = builder.append(crate::stickers::build_sticker_marker_element(sticker));
+    }
     if let Some(token) = options.link_preview_token.as_ref() {
         builder = builder.append(
             Element::builder("preview-request", NS_WADDLE_LINK_PREVIEW)
@@ -585,6 +590,19 @@ pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
                 .append(height.to_string())
                 .build(),
         );
+    }
+    // XEP-0446 lang-less textual fallback — mandatory for XEP-0449
+    // sticker files so non-supporting clients render the emoji.
+    if let Some(desc) = file.desc.as_deref() {
+        metadata.append_child(
+            Element::builder("desc", NS_FILE_METADATA)
+                .append(desc)
+                .build(),
+        );
+    }
+    // XEP-0300 content hashes of the plaintext file (XEP-0446 §hash).
+    for hash in &file.hashes {
+        metadata.append_child(crate::stickers::build_hash_element(hash));
     }
     file_sharing.append_child(metadata);
 

@@ -84,7 +84,7 @@ compares user-facing capability per area, verified against both codebases as of
 | Rich text editor / markup | 0394 | ✅ | ✅ | Rendered via `RichBody.kt`/`RichMessageBody.kt`; composer converts markdown at send (`ComposerMarkdown.kt`) |
 | Markdown rendering | — | ✅ | ✅ | Neither client renders markdown from received bodies (0394-only); Android converts typed markdown at send |
 | Link previews | urn:waddle:link-preview:0 | ✅ | ✅ | Cards in `LinkPreviewCard.kt`; composer lookup token via `lookup_link_preview` FFI |
-| Stickers | 0449 | ✅ | 🟡 | Inline sticker image (112dp, body = alt text); no picker on either client |
+| Stickers | 0449 | ✅ | ✅ | Android exceeds web parity: inline sticker image (112dp, body = alt text) plus picker (`StickerPickerSheet.kt`), sticker sends, and user-created packs (`CreateStickerPackSheet.kt` → 0363 upload → PEP publish over the FFI); web renders only |
 | GIF picker | — | ✅ | ✅ | `GifPickerSheet.kt` over the server-origin `/api/giphy` proxy contract |
 
 ## Calls
@@ -126,9 +126,8 @@ compares user-facing capability per area, verified against both codebases as of
 
 Remaining gaps, in priority order:
 
-1. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
-2. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-3. **Inbox sync (0430)** — the Rust client parses `urn:waddle:inbox:0`; expose it over the FFI and feed `UnreadStore`.
-4. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
-5. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload.
-6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+1. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
+2. **Inbox sync (0430)** — the Rust client parses `urn:waddle:inbox:0`; expose it over the FFI and feed `UnreadStore`.
+3. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
+4. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload.
+5. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.

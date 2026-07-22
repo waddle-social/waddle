@@ -20,6 +20,9 @@ import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.SendResult
+import social.waddle.android.client.StickerHash
+import social.waddle.android.client.StickerItem
+import social.waddle.android.client.StickerSendRef
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.store.TimelineStore
@@ -223,6 +226,59 @@ class ConversationViewModelTest {
         val rows = viewModel.uiState.value.rows
         assertEquals("echo replaces the pending row", 1, rows.size)
         assertTrue(rows.single() is ConversationRow.Stored)
+    }
+
+    @Test
+    fun `sendSticker sends the desc body with the sticker extras`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.sendSticker(
+            StickerItem(
+                desc = "🐧",
+                mediaType = "image/webp",
+                sizeBytes = 1234L,
+                width = 512,
+                height = 256,
+                hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "aGFzaA==")),
+                sources = listOf("https://upload.waddle.test/penguin.webp"),
+            ),
+            packId = "pack-1",
+        )
+        runCurrent()
+
+        assertEquals(listOf("🐧"), io.sent)
+        val sticker = io.sentExtras.single()?.sticker
+        assertEquals(
+            StickerSendRef(
+                packId = "pack-1",
+                desc = "🐧",
+                url = "https://upload.waddle.test/penguin.webp",
+                mediaType = "image/webp",
+                sizeBytes = 1234L,
+                width = 512,
+                height = 256,
+                hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "aGFzaA==")),
+            ),
+            sticker,
+        )
+        // The optimistic row shows the desc while the echo is pending.
+        assertTrue(viewModel.uiState.value.rows.single() is ConversationRow.Unconfirmed)
+    }
+
+    @Test
+    fun `sendSticker without a source or desc never dispatches`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.sendSticker(StickerItem(desc = "🐧", sources = emptyList()), packId = "pack-1")
+        viewModel.sendSticker(
+            StickerItem(desc = " ", sources = listOf("https://upload.waddle.test/x.webp")),
+            packId = "pack-1",
+        )
+        runCurrent()
+
+        assertTrue(io.sent.isEmpty())
     }
 
     @Test

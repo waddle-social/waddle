@@ -3,7 +3,9 @@ package social.waddle.android.client
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.client.ffi.WaddleReferenceType
+import social.waddle.client.ffi.WaddleStickerHash
 
 class MessageSendExtrasTest {
     @Test
@@ -144,6 +146,63 @@ class MessageSendExtrasTest {
         val start = wireBody.offsetByCodePoints(0, reference.begin.toInt())
         val stop = wireBody.offsetByCodePoints(0, reference.end.toInt())
         assertEquals("@bob", wireBody.substring(start, stop))
+    }
+
+    @Test
+    fun `sticker maps to the pack ref and an inline shared file with desc and hashes`() {
+        val (body, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "🐧",
+            extras = MessageSendExtras(
+                sticker = StickerSendRef(
+                    packId = "pack-1",
+                    desc = "🐧",
+                    url = "https://upload.waddle.test/penguin.webp",
+                    mediaType = "image/webp",
+                    sizeBytes = 1234L,
+                    width = 512,
+                    height = 256,
+                    hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "aGFzaA==")),
+                ),
+            ),
+        )
+
+        assertEquals("🐧", body)
+        assertEquals("pack-1", options.sticker?.packId)
+        assertNull("own PEP packs carry no external locator", options.sticker?.packJid)
+        assertNull(options.sticker?.packNode)
+        val file = options.sharedFiles.single()
+        assertEquals("https://upload.waddle.test/penguin.webp", file.url)
+        assertEquals("🐧", file.desc)
+        assertEquals("image/webp", file.mediaType)
+        assertEquals(1234uL, file.size)
+        assertEquals(512u, file.width)
+        assertEquals(256u, file.height)
+        assertEquals(FileDisposition.INLINE.wire, file.disposition)
+        assertEquals(listOf(WaddleStickerHash(algo = "sha-256", valueB64 = "aGFzaA==")), file.hashes)
+        assertNull(file.encrypted)
+    }
+
+    @Test
+    fun `sticker file appends after regular shared files`() {
+        val (_, options) = preparedSend(
+            stanzaId = "sid-1",
+            body = "🐧",
+            extras = MessageSendExtras(
+                sharedFiles = listOf(SharedFileRef(url = "https://upload.waddle.test/doc.pdf")),
+                sticker = StickerSendRef(
+                    packId = "pack-1",
+                    desc = "🐧",
+                    url = "https://upload.waddle.test/penguin.webp",
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf("https://upload.waddle.test/doc.pdf", "https://upload.waddle.test/penguin.webp"),
+            options.sharedFiles.map { it.url },
+        )
+        assertEquals("pack-1", options.sticker?.packId)
     }
 
     @Test

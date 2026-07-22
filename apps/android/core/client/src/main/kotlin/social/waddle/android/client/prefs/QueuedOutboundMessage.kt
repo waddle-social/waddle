@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import social.waddle.android.client.FileDisposition
 import social.waddle.android.client.MarkupRef
 import social.waddle.android.client.MentionRef
+import social.waddle.android.client.StickerSendRef
 
 /**
  * A completed XEP-0363 upload attached to an outbound send (XEP-0447
@@ -58,4 +59,6 @@ data class QueuedOutboundMessage(
     val mentions: List<MentionRef> = emptyList(),
     /** XEP-0394 markup spans (see `MessageSendExtras.markup`). */
     val markup: List<MarkupRef> = emptyList(),
+    /** XEP-0449 sticker ref (pack item + upload URL are durable). */
+    val sticker: StickerSendRef? = null,
 )

@@ -327,6 +327,8 @@ impl NodeConfig {
             config = config.normalize_xep0402_bookmarks();
         } else if node == super::pep::PEP_NODE_MDS_DISPLAYED {
             config = Self::mds_displayed();
+        } else if node == super::pep::PEP_NODE_STICKERS {
+            config = Self::stickers_defaults();
         } else if node == super::pep::PEP_NODE_VCARD4 {
             config = Self::vcard4_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DND {
@@ -476,6 +478,40 @@ impl NodeConfig {
             publish_model: PublishModel::Publishers,
             node_type: None,
             max_items: 1,
+            persist_items: true,
+            deliver_payloads: true,
+            notify_retract: false,
+            notify_delete: false,
+            send_last_published_item: SendLastPublishedItem::Never,
+        }
+    }
+
+    /// XEP-0449 sticker-pack PEP node defaults.
+    ///
+    /// One pubsub item per sticker pack (item id = the pack id derived
+    /// from the pack hash), so the node needs many persistent items —
+    /// but a FINITE cap, not `u32::MAX`: an unbounded `max_items`
+    /// disables eviction entirely (see `enforce_max_items_tx`), letting
+    /// an authenticated client grow its own sticker node without limit.
+    /// It shares the XEP-0402 bookmarks node's `PEP_BOOKMARK_MAX_ITEMS`
+    /// anti-DoS cap, which is far larger than any realistic pack
+    /// collection while still finite.
+    ///
+    /// `access_model = open` per XEP-0449 ("The pubsub node's access
+    /// model SHOULD be set to 'open', so that other users can fetch
+    /// sticker packs"). `send_last_published_item = never`: peers fetch
+    /// packs on demand via `<items/>` GET; a multi-kilobyte pack payload
+    /// must not ride the roster presence fan-out. `notify_retract` /
+    /// `notify_delete` are `false` because the server does not emit the
+    /// XEP-0060 §7.2.2 / §9.1.5 retract/delete events on the wire —
+    /// advertising them as `true` would lie to subscribers; the user's
+    /// other resources resync packs via `<items/>` GET.
+    pub fn stickers_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Open,
+            publish_model: PublishModel::Publishers,
+            node_type: None,
+            max_items: PEP_BOOKMARK_MAX_ITEMS,
             persist_items: true,
             deliver_payloads: true,
             notify_retract: false,
@@ -718,6 +754,45 @@ mod tests {
         assert_eq!(private.max_items, u32::MAX);
         assert!(private.persist_items);
         assert!(private.notify_retract);
+    }
+
+    #[test]
+    fn stickers_pep_config_is_open_with_bounded_retention() {
+        // XEP-0449: the auto-create path on a publish to
+        // `urn:xmpp:stickers:0` MUST land Open — with the generic
+        // `pep_default()` (`access_model = presence`) non-roster peers
+        // could never fetch a referenced pack even though the XEP says
+        // the node SHOULD be open. One item per pack means many
+        // persistent items, but with the finite bookmarks anti-DoS cap
+        // so eviction still runs.
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_STICKERS);
+        assert_eq!(config.access_model, AccessModel::Open);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert_ne!(
+            config.max_items,
+            u32::MAX,
+            "sticker node must NOT be unbounded — eviction would never run"
+        );
+        assert!(config.persist_items);
+        assert!(config.deliver_payloads);
+        assert!(!config.notify_retract);
+        assert!(!config.notify_delete);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+    }
+
+    #[test]
+    fn stickers_defaults_helper_matches_pep_for_node() {
+        // `stickers_defaults()` is the single source of truth the
+        // publish-handler reconcile path compares existing-node configs
+        // against, so `pep_for_node` MUST return the same value.
+        assert_eq!(
+            NodeConfig::pep_for_node(super::super::pep::PEP_NODE_STICKERS),
+            NodeConfig::stickers_defaults()
+        );
     }
 
     #[test]

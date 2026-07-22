@@ -202,3 +202,47 @@ fn xep0449_empty_pack_is_empty() {
     assert!(pack.is_empty());
     assert_eq!(pack.len(), 0);
 }
+
+// ── PEP sticker-pack node configuration ──────────────────────────────
+
+mod pep_node {
+    use waddle_xmpp_core::pubsub::node::{
+        AccessModel, NodeConfig, PublishModel, SendLastPublishedItem, PEP_BOOKMARK_MAX_ITEMS,
+    };
+    use waddle_xmpp_core::pubsub::pep::{PepHandler, PEP_NODE_STICKERS};
+
+    #[test]
+    fn xep0449_pep_node_constant_matches_registrar_namespace() {
+        // XEP-0449: the PEP node id IS the payload namespace. The core
+        // constant and the wire-layer constant must never drift.
+        assert_eq!(PEP_NODE_STICKERS, super::NS_STICKERS);
+    }
+
+    #[test]
+    fn xep0449_sticker_node_is_well_known_with_open_access() {
+        assert!(PepHandler::is_well_known_node(PEP_NODE_STICKERS));
+        assert_eq!(
+            PepHandler::default_access_model_for_node(PEP_NODE_STICKERS),
+            AccessModel::Open
+        );
+    }
+
+    #[test]
+    fn xep0449_pep_for_node_yields_sticker_defaults() {
+        // The auto-create path on a publish to `urn:xmpp:stickers:0`
+        // must land the XEP-0449 shape: open reads (other users fetch
+        // referenced packs), owner-only writes, many persistent items
+        // under the finite bookmarks anti-DoS cap, and no presence
+        // fan-out of multi-kilobyte pack payloads.
+        let config = NodeConfig::pep_for_node(PEP_NODE_STICKERS);
+        assert_eq!(config, NodeConfig::stickers_defaults());
+        assert_eq!(config.access_model, AccessModel::Open);
+        assert_eq!(config.publish_model, PublishModel::Publishers);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert!(config.persist_items);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+    }
+}

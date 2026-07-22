@@ -34,6 +34,7 @@ import social.waddle.android.feature.call.CallSessionController
 import social.waddle.android.feature.call.LiveKitCallMediaController
 import social.waddle.android.feature.call.MucCallLiveParticipantsStore
 import social.waddle.android.feature.conversation.AttachmentUploader
+import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
 import social.waddle.android.service.CallNotifier
@@ -123,6 +124,13 @@ class AppGraph(
     )
 
     val attachmentUploader: AttachmentUploader = AttachmentUploader(
+        contentResolver = appContext.contentResolver,
+        httpClient = okHttpClient,
+        sessionManager = sessionManager,
+    )
+
+    /** XEP-0449 create-pack pipeline (downscale → slot upload → publish). */
+    val stickerPackCreator: StickerPackCreator = StickerPackCreator(
         contentResolver = appContext.contentResolver,
         httpClient = okHttpClient,
         sessionManager = sessionManager,

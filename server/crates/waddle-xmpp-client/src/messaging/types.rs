@@ -74,6 +74,13 @@ pub struct SharedFile {
     pub size: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// XEP-0446 lang-less `<desc/>` textual fallback. Mandatory on
+    /// XEP-0449 sticker files (usually an emoji); optional elsewhere.
+    pub desc: Option<String>,
+    /// XEP-0446 / XEP-0300 `urn:xmpp:hashes:2` content hashes inside
+    /// `<file/>`. Distinct from the XEP-0448 ciphertext hashes carried
+    /// on `encrypted`.
+    pub hashes: Vec<crate::stickers::StickerHash>,
     pub disposition: SharedFileDisposition,
     /// XEP-0448 encryption envelope, when the bytes at `url` are ciphertext
     /// rather than the plaintext file. Recipients MUST use these values to
@@ -809,6 +816,10 @@ pub struct SendMessageOptions {
     /// user's other clients can classify the sent-carbon copy as a MUC PM
     /// without knowing the room.
     pub muc_pm: bool,
+    /// XEP-0449 `<sticker/>` marker: this message sends a sticker. The
+    /// attached `shared_files` entry carries the sticker image; the
+    /// marker optionally references the source pack.
+    pub sticker: Option<crate::stickers::StickerMarker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

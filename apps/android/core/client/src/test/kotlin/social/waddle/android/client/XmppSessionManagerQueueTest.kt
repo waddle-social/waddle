@@ -88,6 +88,45 @@ class XmppSessionManagerQueueTest {
     }
 
     @Test
+    fun `queued sticker send replays with its full sticker wire shape`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+
+        harness.manager.sendChatMessage(
+            peerJid = "alice@waddle.test",
+            body = "🐧",
+            extras = MessageSendExtras(
+                sticker = StickerSendRef(
+                    packId = "pack-1",
+                    desc = "🐧",
+                    url = "https://upload.waddle.test/penguin.webp",
+                    mediaType = "image/webp",
+                    hashes = listOf(StickerHash(algo = "sha-256", valueB64 = "aGFzaA==")),
+                ),
+            ),
+        )
+        assertEquals(
+            "the sticker ref survives queue persistence",
+            "pack-1",
+            harness.prefs.outboundQueue.first().single().sticker?.packId,
+        )
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val options = harness.factory.clients.single().sendOptions.single()
+        assertEquals("pack-1", options?.sticker?.packId)
+        val file = options?.sharedFiles?.single()
+        assertEquals("🐧", file?.desc)
+        assertEquals("image/webp", file?.mediaType)
+        assertEquals("aGFzaA==", file?.hashes?.single()?.valueB64)
+        assertTrue(harness.prefs.outboundQueue.first().isEmpty())
+
+        harness.manager.logout()
+    }
+
+    @Test
     fun `drain stops on a session-shaped failure and keeps the remainder`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())

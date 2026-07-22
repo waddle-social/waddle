@@ -90,7 +90,8 @@ extension AppModel {
                 sharedFiles: sharedFiles,
                 linkPreviewToken: nil,
                 requestDisplayedMarker: false,
-                mucPm: false
+                mucPm: false,
+                sticker: nil
             )
         await rustClient.sendDirectMessage(peerJID: targetPeerJID, body: wireBody, options: options)
         updateDmConversation(
