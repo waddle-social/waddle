@@ -80,6 +80,27 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
+    fun `publishProfile without a live client bails before the optimistic write`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        // No Connected emission: the session has no live client — the
+        // verb must refuse WITHOUT touching the store (an optimistic
+        // write captured in login's bump-to-clear window could
+        // resurrect the old account's vCard on rollback).
+        harness.manager.profileStore.setSelfVcard(testVcard4(fullName = "Seeded"))
+
+        assertEquals(
+            VerbResult.NotConnected,
+            harness.manager.publishProfile(testVcard4(fullName = "Draft")),
+        )
+
+        assertEquals("Seeded", harness.manager.profileStore.selfVcard.value?.fullName)
+        assertTrue(harness.client.profileVerbs.isEmpty())
+        harness.manager.logout()
+    }
+
+    @Test
     fun `publishProfile applies optimistically and keeps the value on success`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
