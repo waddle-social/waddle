@@ -47,7 +47,11 @@ class CallForegroundService : Service() {
             stateJob = scope.launch {
                 graph.sessionManager.callStore.state.collectLatest { state ->
                     when {
-                        state is CallState.Outgoing || state is CallState.Active ->
+                        // MucPending is the group-call twin of Outgoing:
+                        // signaling-only setup that must survive
+                        // backgrounding until media connects on Active.
+                        state is CallState.Outgoing || state is CallState.Active ||
+                            state is CallState.MucPending ->
                             promoteToForeground(state)
                         // Accept in flight: keep the service up so the
                         // mic capture starting on Active is covered.
@@ -102,6 +106,7 @@ class CallForegroundService : Service() {
             is CallState.Outgoing -> state.media.video
             is CallState.Active -> state.media.video
             is CallState.Incoming -> state.media.video
+            is CallState.MucPending -> state.media.video
             else -> false
         }
         if (video && hasPermission(Manifest.permission.CAMERA)) {
@@ -145,10 +150,12 @@ class CallForegroundService : Service() {
             .setContentTitle(peerName)
             .setContentText(
                 getString(
-                    if (state is CallState.Outgoing) {
-                        R.string.call_status_calling
-                    } else {
-                        R.string.call_status_in_progress
+                    when (state) {
+                        is CallState.Outgoing -> R.string.call_status_calling
+                        // Group-call setup: the Jingle handshake with
+                        // the mixer is still pending.
+                        is CallState.MucPending -> R.string.call_status_connecting
+                        else -> R.string.call_status_in_progress
                     },
                 ),
             )

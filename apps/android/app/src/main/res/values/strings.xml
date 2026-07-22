@@ -248,4 +248,13 @@
     <string name="call_row_started">%1$s started a call</string>
     <string name="call_row_video_started">%1$s started a video call</string>
     <string name="call_row_ended">Call ended · %1$s</string>
+    <string name="call_in_call_count">%1$d in call</string>
+    <string name="call_action_join">Join</string>
+    <string name="call_join_busy">In another call</string>
+    <string name="call_channel_ongoing">In call · %1$d</string>
+    <string name="call_action_raise_hand">Raise hand</string>
+    <string name="call_action_lower_hand">Lower hand</string>
+    <string name="call_roster_hand_raised">Hand raised</string>
+    <string name="call_roster_muted">Muted</string>
+    <string name="home_channel_call_badge">Active call</string>
 </resources>

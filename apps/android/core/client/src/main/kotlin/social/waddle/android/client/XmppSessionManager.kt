@@ -130,6 +130,13 @@ class XmppSessionManager(
     /** Every domain event, after store fan-out; drops oldest under burst. */
     val events: SharedFlow<XmppEvent> = router.events
 
+    /**
+     * The live attempt's bound FULL JID (account bare JID + resource) —
+     * the identity the XEP-0272 group-call verbs key preparation echoes
+     * and the session cache on; `null` before the first connect.
+     */
+    fun ownFullJid(): String? = activeSession.ownFullJid
+
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()

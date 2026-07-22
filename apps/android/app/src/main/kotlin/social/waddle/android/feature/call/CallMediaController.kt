@@ -32,6 +32,15 @@ interface CallMediaController {
     val localVideo: StateFlow<VideoTrackHandle?>
 
     /**
+     * The SFU room's REMOTE participant identities (LiveKit identities
+     * are full JIDs), seeded when the connection turns Connected and
+     * updated on participant connect/disconnect events; empty while no
+     * room is connected. Source of the group-call live-roster
+     * projection (web muc-call-live-participants.ts).
+     */
+    val remoteParticipantIdentities: StateFlow<List<String>>
+
+    /**
      * Validate the join grant and connect. [media] names the tracks to
      * publish (audio and/or video); [iceServers] is the XEP-0215
      * advertisement mapped by [iceServerConfigsFrom] — empty means "no

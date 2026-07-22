@@ -86,6 +86,8 @@ fun ConversationScreen(
     extraTopBarActions: @Composable () -> Unit = {},
     /** DM-only call entry points; `null` (channels, threads) hides them. */
     onStartCall: ((video: Boolean) -> Unit)? = null,
+    /** Host slot rendered above the timeline (channel call banner). */
+    aboveTimeline: @Composable () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -222,6 +224,7 @@ fun ConversationScreen(
                 .fillMaxSize()
                 .imePadding(),
         ) {
+            aboveTimeline()
             TimelineList(
                 rows = state.rows,
                 isLoadingOlder = state.isLoadingOlder,
