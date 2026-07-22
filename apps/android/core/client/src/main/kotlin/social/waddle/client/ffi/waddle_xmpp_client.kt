@@ -668,203 +668,211 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
     external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_supports_mds_publish_options(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_direct_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_update_muji_presence(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
-    ): Int
-    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
-    ): Int
-    external fun ffi_waddle_xmpp_client_ffi_uniffi_contract_version(
-    ): Int
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_external_services(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_migrated(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_finish_with_reason(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_proceed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_propose(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_reject_tie_break(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_initiate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_join_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_groupchat_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_presence(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_supports_mds_publish_options(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_direct_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_update_muji_presence(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_bookmarks(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_dm_notification_mode(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
+): Int
+external fun ffi_waddle_xmpp_client_ffi_uniffi_contract_version(
+): Int
 
 
 }
@@ -953,6 +961,14 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_u
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(`ptr`: Long,`prefix`: RustBuffer.ByValue,`pageSize`: RustBuffer.ByValue,`afterCursor`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(`ptr`: Long,`name`: RustBuffer.ByValue,`memberJids`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviteeJid`: RustBuffer.ByValue,`fullHistory`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(`ptr`: Long,`onlyUnread`: Byte,`noMessages`: Byte,
 ): Long
@@ -1304,6 +1320,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 30554) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm() != 31049) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm() != 3394) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {
@@ -2296,6 +2324,38 @@ public interface WaddleClientInterface {
      * mechanism — the server re-checks every actual command.
      */
     suspend fun `isCommunityOwner`(): kotlin.Boolean
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+    suspend fun `createGroupDm`(`name`: kotlin.String, `memberJids`: List<kotlin.String>): kotlin.String
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+    suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean)
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+    suspend fun `leaveGroupDm`(`roomJid`: kotlin.String)
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+    suspend fun `renameGroupDm`(`roomJid`: kotlin.String, `name`: kotlin.String?)
 
     /**
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
@@ -3669,6 +3729,117 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createGroupDm`(`name`: kotlin.String, `memberJids`: List<kotlin.String>) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`name`),FfiConverterSequenceString.lower(`memberJids`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviteeJid`),FfiConverterBoolean.lower(`fullHistory`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `leaveGroupDm`(`roomJid`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `renameGroupDm`(`roomJid`: kotlin.String, `name`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterOptionalString.lower(`name`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 

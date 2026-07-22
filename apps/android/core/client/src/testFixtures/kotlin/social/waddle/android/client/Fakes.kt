@@ -320,6 +320,20 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun discoverTopology(): WaddleTopology = topology.discoverTopology()
 
+    /** Group-DM fake state: verb recorders and failure knobs. */
+    val groupDm = FakeGroupDmState()
+
+    override suspend fun createGroupDm(name: String, memberJids: List<String>): String =
+        groupDm.createGroupDm(name, memberJids)
+
+    override suspend fun renameGroupDm(roomJid: String, name: String?) =
+        groupDm.renameGroupDm(roomJid, name)
+
+    override suspend fun leaveGroupDm(roomJid: String) = groupDm.leaveGroupDm(roomJid)
+
+    override suspend fun inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Boolean) =
+        groupDm.inviteToGroupDm(roomJid, inviteeJid, fullHistory)
+
     /** Every recorded `sendCall*` wire verb, in send order. */
     val callVerbs = CopyOnWriteArrayList<RecordedCallVerb>()
 
@@ -888,36 +902,19 @@ class FakeWaddleClient : WaddleClientInterface {
         destroyRoomFailure?.let { throw it }
     }
 
-    /** Canned XEP-0055 hits; recorded queries. */
-    @Volatile
-    var userSearchResults: List<WaddleUserSearchEntry> = emptyList()
-    val searchUsersCalls = CopyOnWriteArrayList<String>()
+    /** Directory fake state: XEP-0055 search + community-admin gate. */
+    val directory = FakeDirectoryState()
 
-    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> {
-        searchUsersCalls += query
-        return userSearchResults
-    }
+    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> =
+        directory.searchUsers(query)
 
-    /** Canned owner-probe answer + V1 users page. */
-    @Volatile
-    var communityOwner = false
-
-    @Volatile
-    var adminUsersPage: WaddleAdminUsersPage = WaddleAdminUsersPage(entries = emptyList(), nextCursor = null)
-
-    /** Recorded (prefix, pageSize, afterCursor) users-list queries. */
-    val adminUsersListCalls = CopyOnWriteArrayList<Triple<String?, UInt?, String?>>()
-
-    override suspend fun isCommunityOwner(): Boolean = communityOwner
+    override suspend fun isCommunityOwner(): Boolean = directory.communityOwner
 
     override suspend fun adminUsersList(
         prefix: String?,
         pageSize: UInt?,
         afterCursor: String?,
-    ): WaddleAdminUsersPage {
-        adminUsersListCalls += Triple(prefix, pageSize, afterCursor)
-        return adminUsersPage
-    }
+    ): WaddleAdminUsersPage = directory.adminUsersList(prefix, pageSize, afterCursor)
 
     override suspend fun adminSpacesList(args: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage = unused()
     override suspend fun adminSpacesCreate(args: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef = unused()

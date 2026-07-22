@@ -63,7 +63,7 @@ class SettingsCommunityAdminGateTest {
             harness.clientFactory.clients.isNotEmpty()
         }
         // Canned owner answer must be in place before the Ready probe.
-        harness.activeFakeClient().communityOwner = true
+        harness.activeFakeClient().directory.communityOwner = true
         harness.clientFactory.emit(WaddleClientEvent.Connected)
         renderSettings()
 

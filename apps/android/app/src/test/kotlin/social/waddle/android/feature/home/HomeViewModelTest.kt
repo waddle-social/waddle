@@ -212,6 +212,35 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `dm unread count includes group dm rooms from the dm surface`() = runTest {
+        val harness = Harness(this)
+        harness.manager.dmStore.seed(listOf("alice@waddle.test"))
+        harness.manager.roomStore.setTopology(
+            WaddleTopology(
+                spaces = emptyList(),
+                channels = listOf(
+                    social.waddle.android.client.testChannel(
+                        "gdm-1@muc.waddle.test",
+                        name = "Alice, Bob",
+                        isGroupDm = true,
+                    ),
+                    social.waddle.android.client.testChannel("general@muc.waddle.test"),
+                ),
+            ),
+        )
+        harness.manager.unreadStore.onLiveMessage("alice@waddle.test", isMine = false)
+        harness.manager.unreadStore.onLiveMessage("gdm-1@muc.waddle.test", isMine = false)
+        // Regular channel unread still stays off the DM badge.
+        harness.manager.unreadStore.onLiveMessage("general@muc.waddle.test", isMine = false)
+
+        harness.viewModel.uiState.test {
+            skipItems(1)
+            runCurrent()
+            assertEquals(2, awaitItem().dmUnreadCount)
+        }
+    }
+
+    @Test
     fun `connection state passes through to the ui state`() = runTest {
         val harness = Harness(this)
 

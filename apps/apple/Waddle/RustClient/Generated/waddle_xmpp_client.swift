@@ -836,6 +836,38 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func isCommunityOwner() async  -> Bool
 
     /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+    func createGroupDm(name: String, memberJids: [String]) async throws  -> String
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+    func inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Bool) async throws
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+    func leaveGroupDm(roomJid: String) async throws
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+    func renameGroupDm(roomJid: String, name: String?) async throws
+
+    /**
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
      * resolve once the server's closing `<fin/>` arrives.
      *
@@ -2061,6 +2093,98 @@ open func isCommunityOwner()async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group-DM room. `member_jids` must include the caller; the
+     * server requires at least two distinct JIDs. Returns the bare
+     * JID of the new room.
+     */
+open func createGroupDm(name: String, memberJids: [String])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(name),FfiConverterSequenceString.lower(memberJids)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
+     * group DM. `full_history` requests the full-archive grant via
+     * the Waddle history-access extension; `false` omits the child
+     * and the server applies its from-join default. Fire-and-forget
+     * at the stanza level: the server answers refusals with a typed
+     * message error, delivered through the regular event stream.
+     */
+open func inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(inviteeJid),FfiConverterBool.lower(fullHistory)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
+     * retracts the caller's bookmark, so the room drops out of the
+     * next topology refresh.
+     */
+open func leaveGroupDm(roomJid: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * `urn:waddle:group-dm:rename:0`: set (or, with `None`, clear)
+     * the group-DM display name. The server rewrites every member's
+     * bookmark, so a later topology refresh picks up the new name.
+     */
+open func renameGroupDm(roomJid: String, name: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterOptionString.lower(name)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -14995,6 +15119,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 30554) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm() != 31049) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm() != 3394) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {

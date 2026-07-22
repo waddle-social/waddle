@@ -77,9 +77,14 @@ class HomeViewModel(
             ::Pair,
         ),
     ) { (topology, channels), counts, dmPeers, connection, (notifyEntries, callParticipants) ->
+        // Group DMs live on the DM surface, so their unreads count into
+        // the drawer's Direct-messages badge alongside peer DMs.
+        val groupDmUnread = topology.channels
+            .filter { it.isGroupDm }
+            .sumOf { counts[it.roomJid] ?: 0 }
         HomeUiState(
             sections = sectionsOf(topology.spaces, channels, counts, notifyEntries, callParticipants),
-            dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 },
+            dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 } + groupDmUnread,
             connectionState = connection,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())

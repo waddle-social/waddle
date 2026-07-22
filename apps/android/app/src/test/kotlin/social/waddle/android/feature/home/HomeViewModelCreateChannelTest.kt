@@ -68,7 +68,7 @@ class HomeViewModelCreateChannelTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-        harness.client.communityOwner = true
+        harness.client.directory.communityOwner = true
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
 

@@ -361,7 +361,7 @@ impl WaddleClient {
             .map_err(|e| client_error_to_waddle(&e))
     }
 
-    fn server_domain(&self) -> String {
+    pub(crate) fn server_domain(&self) -> String {
         jid_domain(&self.config.jid).to_string()
     }
 }

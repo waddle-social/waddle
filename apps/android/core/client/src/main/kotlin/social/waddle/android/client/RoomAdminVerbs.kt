@@ -134,6 +134,81 @@ internal class RoomAdminVerbs(
         return result
     }
 
+    /**
+     * `urn:waddle:group-dm:create:0`: create a hidden members-only
+     * group DM. [memberJids] is the full membership including the
+     * caller (server dedups; at least two distinct JIDs). On success
+     * the topology is re-discovered so the room lands in the store via
+     * its server-written bookmark before the caller joins it.
+     */
+    suspend fun createGroupDm(name: String, memberJids: List<String>): CreateRoomResult {
+        val client = activeSession.client ?: return CreateRoomResult.NotConnected
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return CreateRoomResult.InvalidName
+        val roomJid = try {
+            client.createGroupDm(trimmed, memberJids.map(::bareJid))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: WaddleException) {
+            return when (error) {
+                is WaddleException.NotConnected -> CreateRoomResult.NotConnected
+                is WaddleException.Stanza ->
+                    if (error.condition in PERMISSION_CONDITIONS) {
+                        CreateRoomResult.NotPermitted
+                    } else {
+                        CreateRoomResult.Rejected
+                    }
+                else -> CreateRoomResult.Rejected
+            }
+        } catch (_: Throwable) {
+            return CreateRoomResult.Rejected
+        }
+        refreshTopology()
+        return CreateRoomResult.Created(roomJid)
+    }
+
+    /**
+     * `urn:waddle:group-dm:rename:0` (IQ to the room; `null`/blank
+     * clears the custom name). The server rewrites every member's
+     * bookmark, so the topology refresh picks the new name up for the
+     * DM surface.
+     */
+    suspend fun renameGroupDm(roomJid: String, name: String?): RoomAdminResult {
+        val result = adminCall { client ->
+            client.renameGroupDm(bareJid(roomJid), name?.trim()?.takeIf { it.isNotEmpty() })
+        }
+        if (result == RoomAdminResult.Ok) refreshTopology()
+        return result
+    }
+
+    /**
+     * `urn:waddle:group-dm:leave:0` (IQ to the server domain). On Ok
+     * the server has retracted our bookmark: mark the room left and
+     * refresh the topology so it drops off the DM surface.
+     */
+    suspend fun leaveGroupDm(roomJid: String): RoomAdminResult {
+        val result = adminCall { client -> client.leaveGroupDm(bareJid(roomJid)) }
+        if (result == RoomAdminResult.Ok) {
+            stores.roomStore.markLeft(roomJid)
+            refreshTopology()
+        }
+        return result
+    }
+
+    /**
+     * XEP-0045 §7.8.2 mediated invite adding [inviteeJid] to a group
+     * DM; [fullHistory] requests the full-archive grant via the Waddle
+     * history-access extension (the server downgrades ineligible
+     * requests to from-join).
+     */
+    suspend fun inviteToGroupDm(
+        roomJid: String,
+        inviteeJid: String,
+        fullHistory: Boolean,
+    ): RoomAdminResult = adminCall { client ->
+        client.inviteToGroupDm(bareJid(roomJid), bareJid(inviteeJid), fullHistory)
+    }
+
     /** Re-discover the space/channel topology into the room store. */
     suspend fun refreshTopology() {
         activeSession.fetch { client -> client.discoverTopology() }
