@@ -81,7 +81,14 @@ pub fn build_xep0050_command_request(
     // xmpp_parsers DataForm round-trips through minidom::Element via
     // AsXml. The conversion is infallible for serialization.
     let id = format!("adhoc-{}", next_id());
-    build_command_iq(service_jid, node, &id, None, action, form.map(Element::from))
+    build_command_iq(
+        service_jid,
+        node,
+        &id,
+        None,
+        action,
+        form.map(Element::from),
+    )
 }
 
 /// Like [`build_xep0050_command_request`], but with a caller-supplied
@@ -94,7 +101,14 @@ pub fn build_xep0050_command_request_with_id(
     action: AdHocAction,
     form: Option<DataForm>,
 ) -> Element {
-    build_command_iq(service_jid, node, iq_id, None, action, form.map(Element::from))
+    build_command_iq(
+        service_jid,
+        node,
+        iq_id,
+        None,
+        action,
+        form.map(Element::from),
+    )
 }
 
 /// Build a SUBSEQUENT-stage IQ that carries the `sessionid` returned
