@@ -133,8 +133,15 @@ class StickerPacksViewModelTest {
         // Sticky until consumed: a subscriber-less window (sheet
         // closed, rotation mid-IQ) must not drop the signal.
         assertEquals(VerbResult.Rejected, viewModel.removeFailure.value)
-        viewModel.consumeRemoveFailure()
+        viewModel.consumeRemoveFailure(VerbResult.Rejected)
         assertNull(viewModel.removeFailure.value)
+        // Compare-and-set: consuming a failure that is NOT the current
+        // one leaves a fresher failure in place.
+        result = VerbResult.NotConnected
+        viewModel.removePack("pack-3")
+        runCurrent()
+        viewModel.consumeRemoveFailure(VerbResult.Rejected)
+        assertEquals(VerbResult.NotConnected, viewModel.removeFailure.value)
     }
 
     @Test

@@ -57,9 +57,12 @@ class StickerPacksViewModel(
      */
     val removeFailure: StateFlow<VerbResult.Failure?> = _removeFailure.asStateFlow()
 
-    /** The failure was surfaced; clear it. */
-    fun consumeRemoveFailure() {
-        _removeFailure.value = null
+    /**
+     * The SHOWN failure was surfaced; clear it — compare-and-set so a
+     * DIFFERENT failure landing mid-display survives and re-emits.
+     */
+    fun consumeRemoveFailure(shown: VerbResult.Failure) {
+        _removeFailure.compareAndSet(shown, null)
     }
 
     /**

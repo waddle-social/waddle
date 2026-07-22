@@ -49,8 +49,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.filterNotNull
 import social.waddle.android.LocalAppGraph
@@ -356,15 +359,20 @@ fun ConversationScreen(
             key = "$STICKER_PACKS_VIEW_MODEL_KEY:${stickerSession?.jid.orEmpty()}",
             factory = StickerPacksViewModel.factory(graph),
         )
-        // Keyed on the VM, not the value: consuming inside a
-        // value-keyed effect restarts it and cancels showSnackbar
-        // mid-suspend (Material3 clears the entry in its finally).
-        // Consume AFTER showing — a rotation mid-display re-shows
-        // once, which beats losing the signal.
-        LaunchedEffect(packsViewModel) {
-            packsViewModel.removeFailure.filterNotNull().collect {
-                snackbarHostState.showSnackbar(actionFailedText)
-                packsViewModel.consumeRemoveFailure()
+        // Keyed on the VM, not the value (a value-keyed effect would
+        // restart on consume and cancel showSnackbar mid-suspend), and
+        // lifecycle-gated so a failure landing while STOPPED stays
+        // sticky instead of being shown invisibly and consumed.
+        // Consume AFTER showing, compare-and-set against the shown
+        // value — a rotation mid-display re-shows once, and a distinct
+        // failure landing mid-show survives.
+        val stickerLifecycle = LocalLifecycleOwner.current
+        LaunchedEffect(packsViewModel, stickerLifecycle) {
+            stickerLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                packsViewModel.removeFailure.filterNotNull().collect { shown ->
+                    snackbarHostState.showSnackbar(actionFailedText)
+                    packsViewModel.consumeRemoveFailure(shown)
+                }
             }
         }
         StickerPickerSheet(
