@@ -368,6 +368,146 @@ fn request_avatar_falls_back_to_vcard_extval() {
     );
 }
 
+// ── Publish builders (XEP-0084 §3) ───────────────────────────────────────────
+
+/// Walk a publish IQ down to its `<item>` and assert the envelope targets
+/// `node`. Returns the item element for payload-level assertions.
+fn publish_item<'a>(iq: &'a Element, node: &str) -> &'a Element {
+    assert_eq!(iq.name(), "iq");
+    assert_eq!(iq.attr("type"), Some("set"));
+    assert_eq!(iq.attr("to"), None);
+    let publish = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .expect("publish");
+    assert_eq!(publish.attr("node"), Some(node));
+    publish.get_child("item", NS_PUBSUB).expect("item")
+}
+
+#[test]
+fn compute_avatar_item_id_matches_sha1_vectors() {
+    // FIPS 180-1 "abc" vector + the empty-input digest.
+    assert_eq!(
+        compute_avatar_item_id(b"abc"),
+        "a9993e364706816aba3e25717850c26c9cd0d89d"
+    );
+    assert_eq!(
+        compute_avatar_item_id(b""),
+        "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+    );
+}
+
+#[test]
+fn build_publish_avatar_data_iq_carries_base64_at_sha1_item_id() {
+    let data = b"hello".as_slice();
+    let item_id = compute_avatar_item_id(data);
+    let iq = build_publish_avatar_data_iq(&item_id, data);
+    let item = publish_item(&iq, NS_AVATAR_DATA);
+    assert_eq!(item.attr("id"), Some(item_id.as_str()));
+    let payload = item.get_child("data", NS_AVATAR_DATA).expect("data");
+    assert_eq!(payload.text(), "aGVsbG8=");
+}
+
+#[test]
+fn build_publish_avatar_metadata_iq_sets_required_info_attrs() {
+    let info = AvatarPublishInfo {
+        bytes: 5,
+        id: "a9993e364706816aba3e25717850c26c9cd0d89d".to_string(),
+        mime_type: "image/png".to_string(),
+        width: Some(64),
+        height: Some(48),
+    };
+    let iq = build_publish_avatar_metadata_iq(&info);
+    let item = publish_item(&iq, NS_AVATAR_METADATA);
+    assert_eq!(item.attr("id"), Some(info.id.as_str()));
+    let metadata = item
+        .get_child("metadata", NS_AVATAR_METADATA)
+        .expect("metadata");
+    let info_elem = metadata
+        .get_child("info", NS_AVATAR_METADATA)
+        .expect("info");
+    assert_eq!(info_elem.attr("bytes"), Some("5"));
+    assert_eq!(info_elem.attr("id"), Some(info.id.as_str()));
+    assert_eq!(info_elem.attr("type"), Some("image/png"));
+    assert_eq!(info_elem.attr("width"), Some("64"));
+    assert_eq!(info_elem.attr("height"), Some("48"));
+}
+
+#[test]
+fn build_publish_avatar_metadata_iq_omits_unknown_dimensions() {
+    let info = AvatarPublishInfo {
+        bytes: 5,
+        id: "cafef00d".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        width: None,
+        height: None,
+    };
+    let iq = build_publish_avatar_metadata_iq(&info);
+    let item = publish_item(&iq, NS_AVATAR_METADATA);
+    let info_elem = item
+        .get_child("metadata", NS_AVATAR_METADATA)
+        .and_then(|metadata| metadata.get_child("info", NS_AVATAR_METADATA))
+        .expect("info");
+    assert_eq!(info_elem.attr("width"), None);
+    assert_eq!(info_elem.attr("height"), None);
+}
+
+#[test]
+fn build_disable_avatar_iq_publishes_empty_metadata_at_current() {
+    let iq = build_disable_avatar_iq();
+    let item = publish_item(&iq, NS_AVATAR_METADATA);
+    assert_eq!(item.attr("id"), Some(AVATAR_REMOVE_ITEM_ID));
+    let metadata = item
+        .get_child("metadata", NS_AVATAR_METADATA)
+        .expect("metadata");
+    assert_eq!(metadata.children().count(), 0);
+}
+
+#[test]
+fn metadata_publish_round_trips_through_fetch_parser() {
+    let data = b"round-trip".as_slice();
+    let info = AvatarPublishInfo {
+        bytes: u32::try_from(data.len()).expect("fits"),
+        id: compute_avatar_item_id(data),
+        mime_type: "image/png".to_string(),
+        width: Some(32),
+        height: Some(32),
+    };
+    // Rewrap the published payload in an items response and confirm the
+    // fetch-side parser reads back exactly what was published.
+    let iq = build_publish_avatar_metadata_iq(&info);
+    let metadata = publish_item(&iq, NS_AVATAR_METADATA)
+        .get_child("metadata", NS_AVATAR_METADATA)
+        .expect("metadata")
+        .clone();
+    let item = Element::builder("item", NS_PUBSUB)
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            info.id.as_str(),
+        )
+        .append(metadata)
+        .build();
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            NS_AVATAR_METADATA,
+        )
+        .append(item)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
+    let response = Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "abc")
+        .append(pubsub)
+        .build();
+    let parsed = parse_metadata_response(&response).expect("info");
+    assert_eq!(parsed.id, info.id);
+    assert_eq!(parsed.mime_type, info.mime_type);
+    assert_eq!(parsed.bytes, Some(u64::from(info.bytes)));
+    assert_eq!(parsed.width, Some(32));
+    assert_eq!(parsed.height, Some(32));
+}
+
 #[test]
 fn request_avatar_rejects_plaintext_vcard_extval() {
     let jid: BareJid = "alice@example.com".parse().unwrap();

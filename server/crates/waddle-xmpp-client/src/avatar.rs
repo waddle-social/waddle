@@ -9,13 +9,22 @@
 //!
 //! Typed payloads only — JIDs use [`BareJid`], errors use [`ClientError`], and
 //! the raw image bytes / URL live in [`Avatar`].
+//!
+//! Publishing (XEP-0084 §3) is builder-only here: callers compute the SHA-1
+//! item id with [`compute_avatar_item_id`], publish the data item first via
+//! [`build_publish_avatar_data_iq`], and only then the metadata item via
+//! [`build_publish_avatar_metadata_iq`] — the §3.2 data-before-metadata order
+//! is enforced by the calling boundary (FFI/wasm), which owns the IQ acks.
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use jid::BareJid;
 use minidom::Element;
+use sha1::{Digest, Sha1};
 use std::future::Future;
 use url::Url;
 use uuid::Uuid;
+
+use crate::pep::build_pep_publish_iq_with_item_id;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -29,6 +38,11 @@ pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 pub const NS_VCARD_TEMP: &str = "vcard-temp";
 
 const NS_CLIENT: &str = "jabber:client";
+
+/// XEP-0084 §4.3 removal convention: the empty `<metadata/>` "no avatar"
+/// item is published under this fixed item id (mirrors the server's
+/// `AVATAR_METADATA_REMOVE_ITEM_ID`).
+pub const AVATAR_REMOVE_ITEM_ID: &str = "current";
 
 /// Metadata advertised on the `urn:xmpp:avatar:metadata` PEP node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +146,94 @@ pub fn build_vcard_request_iq(to: &BareJid) -> Element {
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(vcard)
         .build()
+}
+
+// ── Publish builders (XEP-0084 §3) ───────────────────────────────────────────
+
+/// Metadata for an avatar about to be published. Unlike the fetch-side
+/// [`AvatarInfo`], the attributes XEP-0084 §4.2.1 marks REQUIRED on
+/// `<info/>` (`bytes`, `id`, `type`) are non-optional here so a publish
+/// can never omit them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarPublishInfo {
+    /// Image size in bytes (REQUIRED).
+    pub bytes: u32,
+    /// SHA-1 hash of the image bytes, hex-encoded — also the item id (REQUIRED).
+    pub id: String,
+    /// MIME type, e.g. `image/png` (REQUIRED).
+    pub mime_type: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Compute the XEP-0084 §3.1 pubsub item id: the SHA-1 hash of the raw
+/// image bytes, lowercase hex-encoded.
+pub fn compute_avatar_item_id(data: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(40), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// Build the §3.2 avatar-data publish IQ: `<data/>` carries the RFC 4648
+/// §4 base64 of the raw image bytes, published at `item_id` (the SHA-1
+/// hex of those bytes, from [`compute_avatar_item_id`]).
+pub fn build_publish_avatar_data_iq(item_id: &str, data: &[u8]) -> Element {
+    let id = format!("avatar-publish-data-{}", Uuid::new_v4());
+    let payload = Element::builder("data", NS_AVATAR_DATA)
+        .append(BASE64_STANDARD.encode(data))
+        .build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_DATA, item_id, payload)
+}
+
+/// Build the §3.3 avatar-metadata publish IQ: `<metadata><info/></metadata>`
+/// with the REQUIRED `bytes`/`id`/`type` attributes plus `width`/`height`
+/// when known, published at the same SHA-1 item id as the data item.
+pub fn build_publish_avatar_metadata_iq(info: &AvatarPublishInfo) -> Element {
+    let id = format!("avatar-publish-meta-{}", Uuid::new_v4());
+    let mut info_builder = Element::builder("info", NS_AVATAR_METADATA)
+        .attr(
+            minidom::rxml::xml_ncname!("bytes").to_owned(),
+            info.bytes.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            info.id.as_str(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("type").to_owned(),
+            info.mime_type.as_str(),
+        );
+    if let Some(width) = info.width {
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("width").to_owned(),
+            width.to_string(),
+        );
+    }
+    if let Some(height) = info.height {
+        info_builder = info_builder.attr(
+            minidom::rxml::xml_ncname!("height").to_owned(),
+            height.to_string(),
+        );
+    }
+    let payload = Element::builder("metadata", NS_AVATAR_METADATA)
+        .append(info_builder.build())
+        .build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_METADATA, &info.id, payload)
+}
+
+/// Build the §4.3 "no avatar" IQ: publish an EMPTY `<metadata/>` at the
+/// fixed [`AVATAR_REMOVE_ITEM_ID`] so subscribers drop their cached avatar.
+pub fn build_disable_avatar_iq() -> Element {
+    let id = format!("avatar-disable-{}", Uuid::new_v4());
+    let payload = Element::builder("metadata", NS_AVATAR_METADATA).build();
+    build_pep_publish_iq_with_item_id(&id, NS_AVATAR_METADATA, AVATAR_REMOVE_ITEM_ID, payload)
 }
 
 // ── Response parsers ─────────────────────────────────────────────────────────

@@ -13,6 +13,12 @@ pub enum WaddleError {
     /// A caller-supplied JID failed to parse.
     #[error("invalid JID")]
     InvalidJid,
+    /// A caller-supplied argument failed validation before any stanza
+    /// was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
+    /// general (both become XML element names on the wire), an empty
+    /// avatar image, or an all-empty tune payload. Nothing was sent.
+    #[error("invalid argument")]
+    InvalidArgument,
     /// The server answered with an RFC 6120 §8.3 stanza error.
     /// `condition` is the defined-condition element name (e.g.
     /// `forbidden`); `text` is the optional human-readable `<text/>`.

@@ -93,6 +93,36 @@ fn parse_tune_cleared() {
 }
 
 #[test]
+fn build_pep_publish_iq_uses_current_item_id() {
+    let iq = build_pep_publish_iq("iq-1", NS_MOOD, build_mood_clear_element());
+    let item = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .and_then(|publish| publish.get_child("item", NS_PUBSUB))
+        .expect("item");
+    assert_eq!(item.attr("id"), Some("current"));
+}
+
+#[test]
+fn build_pep_publish_iq_with_item_id_uses_custom_item_id() {
+    let iq = build_pep_publish_iq_with_item_id(
+        "iq-2",
+        "urn:xmpp:avatar:data",
+        "cafef00d",
+        Element::builder("data", "urn:xmpp:avatar:data").build(),
+    );
+    assert_eq!(iq.attr("type"), Some("set"));
+    assert_eq!(iq.attr("id"), Some("iq-2"));
+    let publish = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+        .expect("publish");
+    assert_eq!(publish.attr("node"), Some("urn:xmpp:avatar:data"));
+    let item = publish.get_child("item", NS_PUBSUB).expect("item");
+    assert_eq!(item.attr("id"), Some("cafef00d"));
+}
+
+#[test]
 fn build_publish_mood_iq_structure() {
     let iq = build_publish_mood_iq("content", Some("steady"));
     let mood = iq

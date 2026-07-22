@@ -179,7 +179,7 @@ pub(crate) fn patch_from_ffi(patch: WaddleRoomConfigPatch) -> RoomConfigPatch {
 }
 
 impl WaddleClient {
-    fn require_bare_jid(&self, value: &str) -> Result<BareJid, WaddleError> {
+    pub(crate) fn require_bare_jid(&self, value: &str) -> Result<BareJid, WaddleError> {
         value
             .parse::<BareJid>()
             .map_err(|_| WaddleError::InvalidJid)

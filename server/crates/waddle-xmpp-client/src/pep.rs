@@ -251,6 +251,18 @@ pub fn build_tune_clear_element() -> Element {
 }
 
 pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
+    build_pep_publish_iq_with_item_id(id, node, "current", payload)
+}
+
+/// PEP publish envelope with an explicit pubsub item id, for nodes whose
+/// item id is content-addressed rather than the singleton `current` —
+/// XEP-0084 §3.1 mandates the SHA-1 of the image bytes as the item id.
+pub fn build_pep_publish_iq_with_item_id(
+    id: &str,
+    node: &str,
+    item_id: &str,
+    payload: Element,
+) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
@@ -261,7 +273,7 @@ pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
                         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
                         .append(
                             Element::builder("item", NS_PUBSUB)
-                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
+                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
                                 .append(payload)
                                 .build(),
                         )

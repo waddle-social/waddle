@@ -803,6 +803,28 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_notifications(
@@ -987,6 +1009,28 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_boo
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_dm_notification_mode(`ptr`: Long,`dmJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_notification_mode(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`richPayloadOptIn`: Byte,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep_profile(`ptr`: Long,`jid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_vcard4(`ptr`: Long,`jid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(`ptr`: Long,`general`: RustBuffer.ByValue,`specific`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_avatar(`ptr`: Long,`data`: RustBuffer.ByValue,`mimeType`: RustBuffer.ByValue,`width`: Int,`height`: Int,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_mood(`ptr`: Long,`kind`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_tune(`ptr`: Long,`tune`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_vcard4(`ptr`: Long,`vcard`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_activity(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_mood(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_tune(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_device(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`deviceId`: RustBuffer.ByValue,
 ): Long
@@ -1341,6 +1385,39 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 55115) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 47928) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 7919) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 10801) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4() != 36728) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity() != 9675) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood() != 55847) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune() != 62956) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1609,6 +1686,33 @@ private class AndroidSystemCleanable(
     private val cleanable: java.lang.ref.Cleaner.Cleanable,
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUByte: FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte {
+        return value.toUByte()
+    }
+
+    fun lift(value: Int): UByte {
+        return value.toUByte()
+    }
+
+    override fun read(buf: ByteBuffer): UByte {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: UByte): Byte {
+        return value.toByte()
+    }
+
+    override fun allocationSize(value: UByte) = 1UL
+
+    override fun write(value: UByte, buf: ByteBuffer) {
+        buf.put(value.toByte())
+    }
 }
 
 /**
@@ -2343,6 +2447,79 @@ public interface WaddleClientInterface {
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
      */
     suspend fun `setRoomNotificationMode`(`roomJid`: kotlin.String, `mode`: WaddleNotifyMode, `name`: kotlin.String?, `richPayloadOptIn`: kotlin.Boolean): WaddleSetRoomNotificationModeOutcome
+
+    /**
+     * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
+     * item so subscribers drop their cached avatar.
+     */
+    suspend fun `disableAvatar`()
+
+    /**
+     * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
+     * `fetch_user_pep_profile` parity): each node is queried with a
+     * XEP-0060 items request, and per-node failures (absent node,
+     * stanza error, empty payload) degrade to `None` rather than
+     * failing the whole snapshot.
+     */
+    suspend fun `fetchUserPepProfile`(`jid`: kotlin.String): WaddlePepProfile
+
+    /**
+     * XEP-0292: fetch `jid`'s vCard4 from its `urn:xmpp:vcard4` PEP
+     * node. `Ok(None)` when the node is absent, empty, or answers
+     * with a stanza error (wasm `fetch_vcard4` parity).
+     */
+    suspend fun `fetchVcard4`(`jid`: kotlin.String): WaddleVCard4?
+
+    /**
+     * XEP-0108: publish a user activity. `general` (and `specific`
+     * when present) must be defined category element names.
+     */
+    suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?)
+
+    /**
+     * XEP-0084 §3: publish `data` as the account's avatar — the
+     * base64 data item first, then (after the server ack) the
+     * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
+     * for `width` / `height` when the dimensions are unknown.
+     */
+    suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt)
+
+    /**
+     * XEP-0107: publish a user mood. `kind` must be a defined mood
+     * element name (e.g. `happy`).
+     */
+    suspend fun `publishMood`(`kind`: kotlin.String, `text`: kotlin.String?)
+
+    /**
+     * XEP-0118: publish a user tune. At least one field must be set —
+     * an all-empty tune is the §3.2 *stop* shape, which is
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     */
+    suspend fun `publishTune`(`tune`: WaddleTune)
+
+    /**
+     * XEP-0292: publish the account's own vCard4 at item id
+     * `current`. Empty (`None`) properties are omitted on the wire.
+     */
+    suspend fun `publishVcard4`(`vcard`: WaddleVCard4)
+
+    /**
+     * XEP-0108: retract the activity by publishing the empty
+     * `<activity/>` payload.
+     */
+    suspend fun `retractActivity`()
+
+    /**
+     * XEP-0107 §2.2: retract the mood by publishing the empty
+     * `<mood/>` payload.
+     */
+    suspend fun `retractMood`()
+
+    /**
+     * XEP-0118 §3.2: stop publishing a tune via the empty `<tune/>`
+     * payload.
+     */
+    suspend fun `retractTune`()
 
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -4188,6 +4365,297 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
+     * item so subscribers drop their cached avatar.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `disableAvatar`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
+     * `fetch_user_pep_profile` parity): each node is queried with a
+     * XEP-0060 items request, and per-node failures (absent node,
+     * stanza error, empty payload) degrade to `None` rather than
+     * failing the whole snapshot.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchUserPepProfile`(`jid`: kotlin.String) : WaddlePepProfile {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep_profile(
+                uniffiHandle,
+                FfiConverterString.lower(`jid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddlePepProfile.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0292: fetch `jid`'s vCard4 from its `urn:xmpp:vcard4` PEP
+     * node. `Ok(None)` when the node is absent, empty, or answers
+     * with a stanza error (wasm `fetch_vcard4` parity).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchVcard4`(`jid`: kotlin.String) : WaddleVCard4? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_vcard4(
+                uniffiHandle,
+                FfiConverterString.lower(`jid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddleVCard4.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0108: publish a user activity. `general` (and `specific`
+     * when present) must be defined category element names.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(
+                uniffiHandle,
+                FfiConverterString.lower(`general`),FfiConverterOptionalString.lower(`specific`),FfiConverterOptionalString.lower(`text`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0084 §3: publish `data` as the account's avatar — the
+     * base64 data item first, then (after the server ack) the
+     * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
+     * for `width` / `height` when the dimensions are unknown.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_avatar(
+                uniffiHandle,
+                FfiConverterByteArray.lower(`data`),FfiConverterString.lower(`mimeType`),FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0107: publish a user mood. `kind` must be a defined mood
+     * element name (e.g. `happy`).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishMood`(`kind`: kotlin.String, `text`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_mood(
+                uniffiHandle,
+                FfiConverterString.lower(`kind`),FfiConverterOptionalString.lower(`text`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0118: publish a user tune. At least one field must be set —
+     * an all-empty tune is the §3.2 *stop* shape, which is
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishTune`(`tune`: WaddleTune) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_tune(
+                uniffiHandle,
+                FfiConverterTypeWaddleTune.lower(`tune`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0292: publish the account's own vCard4 at item id
+     * `current`. Empty (`None`) properties are omitted on the wire.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `publishVcard4`(`vcard`: WaddleVCard4) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_vcard4(
+                uniffiHandle,
+                FfiConverterTypeWaddleVCard4.lower(`vcard`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0108: retract the activity by publishing the empty
+     * `<activity/>` payload.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `retractActivity`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_activity(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0107 §2.2: retract the mood by publishing the empty
+     * `<mood/>` payload.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `retractMood`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_mood(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0118 §3.2: stop publishing a tune via the empty `<tune/>`
+     * payload.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `retractTune`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_tune(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -4549,6 +5017,53 @@ public object FfiConverterTypeWaddleClient: FfiConverter<WaddleClient, Long> {
 
     override fun write(value: WaddleClient, buf: ByteBuffer) {
         buf.putLong(lower(value))
+    }
+}
+
+
+
+/**
+ * XEP-0108 user activity: `general` / `specific` are the defined
+ * category element names (e.g. `working` / `coding`).
+ */
+data class WaddleActivity (
+    var `general`: kotlin.String
+    ,
+    var `specific`: kotlin.String?
+    ,
+    var `text`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleActivity: FfiConverterRustBuffer<WaddleActivity> {
+    override fun read(buf: ByteBuffer): WaddleActivity {
+        return WaddleActivity(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleActivity) = (
+            FfiConverterString.allocationSize(value.`general`) +
+            FfiConverterOptionalString.allocationSize(value.`specific`) +
+            FfiConverterOptionalString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: WaddleActivity, buf: ByteBuffer) {
+            FfiConverterString.write(value.`general`, buf)
+            FfiConverterOptionalString.write(value.`specific`, buf)
+            FfiConverterOptionalString.write(value.`text`, buf)
     }
 }
 
@@ -7822,6 +8337,48 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
 
 
 /**
+ * XEP-0107 user mood: `kind` is the defined mood element name
+ * (e.g. `happy`), `text` the optional free-form annotation.
+ */
+data class WaddleMood (
+    var `kind`: kotlin.String
+    ,
+    var `text`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMood: FfiConverterRustBuffer<WaddleMood> {
+    override fun read(buf: ByteBuffer): WaddleMood {
+        return WaddleMood(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMood) = (
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterOptionalString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: WaddleMood, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterOptionalString.write(value.`text`, buf)
+    }
+}
+
+
+
+/**
  * Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
  * extension (XEP-0272).
  */
@@ -7883,6 +8440,55 @@ public object FfiConverterTypeWaddleMujiPresence: FfiConverterRustBuffer<WaddleM
             FfiConverterBoolean.write(value.`active`, buf)
             FfiConverterBoolean.write(value.`audio`, buf)
             FfiConverterBoolean.write(value.`video`, buf)
+    }
+}
+
+
+
+/**
+ * Snapshot of a user's mood/activity/tune PEP nodes, fetched via
+ * three XEP-0060 items requests (wasm `fetch_user_pep_profile`
+ * parity). A node that is absent, empty, or answers with a stanza
+ * error surfaces as `None`.
+ */
+data class WaddlePepProfile (
+    var `mood`: WaddleMood?
+    ,
+    var `activity`: WaddleActivity?
+    ,
+    var `tune`: WaddleTune?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddlePepProfile: FfiConverterRustBuffer<WaddlePepProfile> {
+    override fun read(buf: ByteBuffer): WaddlePepProfile {
+        return WaddlePepProfile(
+            FfiConverterOptionalTypeWaddleMood.read(buf),
+            FfiConverterOptionalTypeWaddleActivity.read(buf),
+            FfiConverterOptionalTypeWaddleTune.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddlePepProfile) = (
+            FfiConverterOptionalTypeWaddleMood.allocationSize(value.`mood`) +
+            FfiConverterOptionalTypeWaddleActivity.allocationSize(value.`activity`) +
+            FfiConverterOptionalTypeWaddleTune.allocationSize(value.`tune`)
+    )
+
+    override fun write(value: WaddlePepProfile, buf: ByteBuffer) {
+            FfiConverterOptionalTypeWaddleMood.write(value.`mood`, buf)
+            FfiConverterOptionalTypeWaddleActivity.write(value.`activity`, buf)
+            FfiConverterOptionalTypeWaddleTune.write(value.`tune`, buf)
     }
 }
 
@@ -9052,6 +9658,73 @@ public object FfiConverterTypeWaddleTopology: FfiConverterRustBuffer<WaddleTopol
 
 
 /**
+ * XEP-0118 user tune. `rating` is 1–10 per §3.1; out-of-range values
+ * are clamped into that interval before publishing.
+ */
+data class WaddleTune (
+    var `artist`: kotlin.String?
+    ,
+    var `title`: kotlin.String?
+    ,
+    var `source`: kotlin.String?
+    ,
+    var `track`: kotlin.String?
+    ,
+    var `uri`: kotlin.String?
+    ,
+    var `lengthSeconds`: kotlin.UInt?
+    ,
+    var `rating`: kotlin.UByte?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleTune: FfiConverterRustBuffer<WaddleTune> {
+    override fun read(buf: ByteBuffer): WaddleTune {
+        return WaddleTune(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleTune) = (
+            FfiConverterOptionalString.allocationSize(value.`artist`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterOptionalString.allocationSize(value.`source`) +
+            FfiConverterOptionalString.allocationSize(value.`track`) +
+            FfiConverterOptionalString.allocationSize(value.`uri`) +
+            FfiConverterOptionalUInt.allocationSize(value.`lengthSeconds`) +
+            FfiConverterOptionalUByte.allocationSize(value.`rating`)
+    )
+
+    override fun write(value: WaddleTune, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`artist`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterOptionalString.write(value.`source`, buf)
+            FfiConverterOptionalString.write(value.`track`, buf)
+            FfiConverterOptionalString.write(value.`uri`, buf)
+            FfiConverterOptionalUInt.write(value.`lengthSeconds`, buf)
+            FfiConverterOptionalUByte.write(value.`rating`, buf)
+    }
+}
+
+
+
+/**
  * Header the client must include when uploading to a XEP-0363 slot.
  */
 data class WaddleUploadHeader (
@@ -9182,6 +9855,68 @@ public object FfiConverterTypeWaddleUserSearchEntry: FfiConverterRustBuffer<Wadd
             FfiConverterString.write(value.`jid`, buf)
             FfiConverterString.write(value.`username`, buf)
             FfiConverterOptionalString.write(value.`displayName`, buf)
+    }
+}
+
+
+
+/**
+ * XEP-0292 vCard4 profile fields (the subset the profile editor
+ * surfaces). `None` means the property is absent on the wire.
+ */
+data class WaddleVCard4 (
+    var `fullName`: kotlin.String?
+    ,
+    var `nickname`: kotlin.String?
+    ,
+    var `pronouns`: kotlin.String?
+    ,
+    var `note`: kotlin.String?
+    ,
+    var `url`: kotlin.String?
+    ,
+    var `photoUri`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleVCard4: FfiConverterRustBuffer<WaddleVCard4> {
+    override fun read(buf: ByteBuffer): WaddleVCard4 {
+        return WaddleVCard4(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleVCard4) = (
+            FfiConverterOptionalString.allocationSize(value.`fullName`) +
+            FfiConverterOptionalString.allocationSize(value.`nickname`) +
+            FfiConverterOptionalString.allocationSize(value.`pronouns`) +
+            FfiConverterOptionalString.allocationSize(value.`note`) +
+            FfiConverterOptionalString.allocationSize(value.`url`) +
+            FfiConverterOptionalString.allocationSize(value.`photoUri`)
+    )
+
+    override fun write(value: WaddleVCard4, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`fullName`, buf)
+            FfiConverterOptionalString.write(value.`nickname`, buf)
+            FfiConverterOptionalString.write(value.`pronouns`, buf)
+            FfiConverterOptionalString.write(value.`note`, buf)
+            FfiConverterOptionalString.write(value.`url`, buf)
+            FfiConverterOptionalString.write(value.`photoUri`, buf)
     }
 }
 
@@ -9975,6 +10710,18 @@ sealed class WaddleException: kotlin.Exception() {
     }
 
     /**
+     * A caller-supplied argument failed validation before any stanza
+     * was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
+     * general (both become XML element names on the wire), an empty
+     * avatar image, or an all-empty tune payload. Nothing was sent.
+     */
+    class InvalidArgument(
+        ) : WaddleException() {
+        override val message
+            get() = ""
+    }
+
+    /**
      * The server answered with an RFC 6120 §8.3 stanza error.
      * `condition` is the defined-condition element name (e.g.
      * `forbidden`); `text` is the optional human-readable `<text/>`.
@@ -10049,14 +10796,15 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
         return when(buf.getInt()) {
             1 -> WaddleException.NotConnected()
             2 -> WaddleException.InvalidJid()
-            3 -> WaddleException.Stanza(
+            3 -> WaddleException.InvalidArgument()
+            4 -> WaddleException.Stanza(
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            4 -> WaddleException.MalformedResponse()
-            5 -> WaddleException.Transport()
-            6 -> WaddleException.Timeout()
-            7 -> WaddleException.UntrustedReply()
+            5 -> WaddleException.MalformedResponse()
+            6 -> WaddleException.Transport()
+            7 -> WaddleException.Timeout()
+            8 -> WaddleException.UntrustedReply()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -10068,6 +10816,10 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 4UL
             )
             is WaddleException.InvalidJid -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is WaddleException.InvalidArgument -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
@@ -10106,26 +10858,30 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 buf.putInt(2)
                 Unit
             }
-            is WaddleException.Stanza -> {
+            is WaddleException.InvalidArgument -> {
                 buf.putInt(3)
+                Unit
+            }
+            is WaddleException.Stanza -> {
+                buf.putInt(4)
                 FfiConverterString.write(value.`condition`, buf)
                 FfiConverterOptionalString.write(value.`text`, buf)
                 Unit
             }
             is WaddleException.MalformedResponse -> {
-                buf.putInt(4)
-                Unit
-            }
-            is WaddleException.Transport -> {
                 buf.putInt(5)
                 Unit
             }
-            is WaddleException.Timeout -> {
+            is WaddleException.Transport -> {
                 buf.putInt(6)
                 Unit
             }
-            is WaddleException.UntrustedReply -> {
+            is WaddleException.Timeout -> {
                 buf.putInt(7)
+                Unit
+            }
+            is WaddleException.UntrustedReply -> {
+                buf.putInt(8)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -11431,6 +12187,38 @@ public object FfiConverterTypeWaddleEventListener: FfiConverterCallbackInterface
 /**
  * @suppress
  */
+public object FfiConverterOptionalUByte: FfiConverterRustBuffer<kotlin.UByte?> {
+    override fun read(buf: ByteBuffer): kotlin.UByte? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUByte.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UByte?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUByte.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UByte?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUByte.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalUShort: FfiConverterRustBuffer<kotlin.UShort?> {
     override fun read(buf: ByteBuffer): kotlin.UShort? {
         if (buf.get().toInt() == 0) {
@@ -11581,6 +12369,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWaddleActivity: FfiConverterRustBuffer<WaddleActivity?> {
+    override fun read(buf: ByteBuffer): WaddleActivity? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleActivity.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleActivity?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleActivity.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleActivity?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleActivity.write(value, buf)
         }
     }
 }
@@ -11943,6 +12763,38 @@ public object FfiConverterOptionalTypeWaddleLinkPreviewVideo: FfiConverterRustBu
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleMood: FfiConverterRustBuffer<WaddleMood?> {
+    override fun read(buf: ByteBuffer): WaddleMood? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleMood.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleMood?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleMood.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleMood?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleMood.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleMujiPresence: FfiConverterRustBuffer<WaddleMujiPresence?> {
     override fun read(buf: ByteBuffer): WaddleMujiPresence? {
         if (buf.get().toInt() == 0) {
@@ -12199,6 +13051,38 @@ public object FfiConverterOptionalTypeWaddleThreadTarget: FfiConverterRustBuffer
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleTune: FfiConverterRustBuffer<WaddleTune?> {
+    override fun read(buf: ByteBuffer): WaddleTune? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleTune.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleTune?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleTune.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleTune?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleTune.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleUploadSlot: FfiConverterRustBuffer<WaddleUploadSlot?> {
     override fun read(buf: ByteBuffer): WaddleUploadSlot? {
         if (buf.get().toInt() == 0) {
@@ -12221,6 +13105,38 @@ public object FfiConverterOptionalTypeWaddleUploadSlot: FfiConverterRustBuffer<W
         } else {
             buf.put(1)
             FfiConverterTypeWaddleUploadSlot.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWaddleVCard4: FfiConverterRustBuffer<WaddleVCard4?> {
+    override fun read(buf: ByteBuffer): WaddleVCard4? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleVCard4.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleVCard4?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleVCard4.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleVCard4?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleVCard4.write(value, buf)
         }
     }
 }
