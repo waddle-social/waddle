@@ -18,11 +18,8 @@ import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Search
-<<<<<<< HEAD
-import androidx.compose.material3.AlertDialog
-=======
 import androidx.compose.material.icons.outlined.Videocam
->>>>>>> origin/main
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -81,13 +78,10 @@ fun ConversationScreen(
     searchTarget: MessageSearchTarget? = null,
     /** Own bare JID for the self-mention row highlight (XEP-0372). */
     selfBareJid: String? = null,
-<<<<<<< HEAD
     /** Extra host-specific top-bar actions (room members/settings). */
     extraTopBarActions: @Composable () -> Unit = {},
-=======
     /** DM-only call entry points; `null` (channels, threads) hides them. */
     onStartCall: ((video: Boolean) -> Unit)? = null,
->>>>>>> origin/main
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -149,9 +143,7 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
-<<<<<<< HEAD
                     extraTopBarActions()
-=======
                     if (onStartCall != null) {
                         IconButton(
                             onClick = { onStartCall(false) },
@@ -172,7 +164,6 @@ fun ConversationScreen(
                             )
                         }
                     }
->>>>>>> origin/main
                     if (onOpenThread != null && state.threads.isNotEmpty()) {
                         IconButton(onClick = { threadsOverviewOpen = true }) {
                             Icon(

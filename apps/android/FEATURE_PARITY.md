@@ -132,13 +132,8 @@ In flight in the current improvement sweep:
 
 Biggest remaining gaps after that, in priority order:
 
-<<<<<<< HEAD
-1. **Voice/video calls** — the FFI signaling layer is complete; Android needs a call UI and media stack. Largest single capability gap.
-=======
 1. **Muji group calls (XEP-0272)** — DM calls shipped; the group-call presence flow, mixer session-initiate, and in-call roster remain.
-2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), hats display, ad-hoc commands.
->>>>>>> origin/main
-3. **Rich content rendering** — markup spans (0394), markdown, link previews, sticker/GIF pickers; most of the data already arrives typed over FFI.
-4. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
-5. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+2. **Rich content rendering** — markup spans (0394), markdown, link previews, sticker/GIF pickers; most of the data already arrives typed over FFI.
+3. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
+4. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
+5. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
