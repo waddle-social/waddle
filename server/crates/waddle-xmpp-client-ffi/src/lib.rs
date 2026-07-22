@@ -23,6 +23,8 @@ mod stanza;
 mod types;
 
 #[cfg(test)]
+mod calls_tests;
+#[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;

@@ -26,8 +26,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import social.waddle.android.client.WaddleAppState
+import social.waddle.android.feature.call.CallOverlayHost
 import social.waddle.android.feature.login.LoginScreen
 import social.waddle.android.navigation.WaddleNavDisplay
 import social.waddle.android.navigation.WaddleNavKey
@@ -41,6 +43,8 @@ import social.waddle.android.navigation.conversationNavKeyFor
 fun AppShell(
     pendingConversationJid: StateFlow<String?>,
     onConversationConsumed: () -> Unit,
+    pendingCallAnswer: StateFlow<Boolean> = MutableStateFlow(false),
+    onCallAnswerConsumed: () -> Unit = {},
 ) {
     val graph = LocalAppGraph.current
     val appState by graph.appState.collectAsStateWithLifecycle()
@@ -58,6 +62,8 @@ fun AppShell(
             WaddleAppState.Ready -> ReadyShell(
                 pendingConversationJid = pendingConversationJid,
                 onConversationConsumed = onConversationConsumed,
+                pendingCallAnswer = pendingCallAnswer,
+                onCallAnswerConsumed = onCallAnswerConsumed,
             )
         }
     }
@@ -100,30 +106,40 @@ private fun RestoreErrorScreen(detail: String, onRetry: () -> Unit) {
 private fun ReadyShell(
     pendingConversationJid: StateFlow<String?>,
     onConversationConsumed: () -> Unit,
+    pendingCallAnswer: StateFlow<Boolean>,
+    onCallAnswerConsumed: () -> Unit,
 ) {
     val graph = LocalAppGraph.current
     RequestNotificationPermissionOnce()
 
-    WaddleNavDisplay { backStack ->
-        val pendingJid by pendingConversationJid.collectAsStateWithLifecycle()
-        LaunchedEffect(pendingJid) {
-            val jid = pendingJid ?: return@LaunchedEffect
-            val key = conversationNavKeyFor(
-                topology = graph.sessionManager.roomStore.topology.value,
-                joinedRooms = graph.sessionManager.roomStore.joinedRooms.value,
-                conversationJid = jid,
-            )
-            if (backStack.lastOrNull() != key) {
-                backStack.add(key)
-            }
-            if (key is WaddleNavKey.Channel) {
-                graph.sessionManager.joinRoom(
-                    roomJid = key.roomJid,
-                    nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+    Box(modifier = Modifier.fillMaxSize()) {
+        WaddleNavDisplay { backStack ->
+            val pendingJid by pendingConversationJid.collectAsStateWithLifecycle()
+            LaunchedEffect(pendingJid) {
+                val jid = pendingJid ?: return@LaunchedEffect
+                val key = conversationNavKeyFor(
+                    topology = graph.sessionManager.roomStore.topology.value,
+                    joinedRooms = graph.sessionManager.roomStore.joinedRooms.value,
+                    conversationJid = jid,
                 )
+                if (backStack.lastOrNull() != key) {
+                    backStack.add(key)
+                }
+                if (key is WaddleNavKey.Channel) {
+                    graph.sessionManager.joinRoom(
+                        roomJid = key.roomJid,
+                        nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                    )
+                }
+                onConversationConsumed()
             }
-            onConversationConsumed()
         }
+        // Call surfaces layer over whatever screen is open: the ring,
+        // the in-call screen, or the minimized banner.
+        CallOverlayHost(
+            pendingCallAnswer = pendingCallAnswer,
+            onCallAnswerConsumed = onCallAnswerConsumed,
+        )
     }
 }
 

@@ -91,7 +91,7 @@ compares user-facing capability per area, verified against both codebases as of
 
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
-| Voice/video calls | 0166, 0353, 0272 | ✅ | ❌ | Web uses LiveKit SFU (`chat/src/lib/calls/engine.ts`); full signaling exists in FFI (`calls.rs`) but Android only hides call anchors from the feed |
+| Voice/video calls | 0166, 0353, 0272 | ✅ | 🟡 | DM audio + video calls shipped (CallStore reducer port, LiveKit media, CallStyle notifications, in-call UI, timeline call rows); Muji group calls (0272) pending |
 | Call extras (backgrounds, noise filter) | — | ✅ | ❌ | Web-only: MediaPipe background effects, AI noise filter |
 
 ## Social & community
@@ -132,7 +132,7 @@ In flight in the current improvement sweep:
 
 Biggest remaining gaps after that, in priority order:
 
-1. **Voice/video calls** — the FFI signaling layer is complete; Android needs a call UI and media stack. Largest single capability gap.
+1. **Muji group calls (XEP-0272)** — DM calls shipped; the group-call presence flow, mixer session-initiate, and in-call roster remain.
 2. **Room lifecycle + moderation UI** — room create/config, affiliation management (kick/ban), hats display, ad-hoc commands.
 3. **Rich content rendering** — markup spans (0394), markdown, link previews, sticker/GIF pickers; most of the data already arrives typed over FFI.
 4. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
