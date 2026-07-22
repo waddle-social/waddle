@@ -30,11 +30,11 @@ compares user-facing capability per area, verified against both codebases as of
 | 1:1 direct messages | — | ✅ | ✅ | `app/src/main/kotlin/social/waddle/android/feature/dm/DmScreen.kt` |
 | Group DMs (multi-party) | 0045 | ✅ | ❌ | Web: `chat/src/lib/xmpp/group-dm.ts`; Android has only 1:1 DM + MUC |
 | History (MAM) | 0313 | ✅ | ✅ | Android: `fetch_room_history`/`fetch_dm_history` FFI verbs |
-| Message search (MAM full-text) | 0313 | ✅ | ❌ | Web: `chat/src/components/chat/MessageSearchPanel.vue`; no Android UI or FFI query — in flight |
+| Message search (MAM full-text) | 0313 | ✅ | ✅ | Android: `search_room_history`/`search_dm_history` FFI verbs + `feature/search/MessageSearchSheet.kt`, entry in the conversation top bar |
 | Corrections | 0308 | ✅ | ✅ | Edit action in `MessageActionSheet.kt` |
 | Retraction | 0424 | ✅ | ✅ | `send_retraction` FFI verb |
 | Reactions | 0444 | ✅ | ✅ | Emoji reactions on both |
-| Replies | 0461 | ✅ | ✅ | Android sends 0461 reply metadata; no explicit 0428 fallback body |
+| Replies | 0461 | ✅ | ✅ | Android sends 0461 reply metadata with the XEP-0428 fallback prefix (`buildReplyFallbackPrefix`, web parity) |
 | Threads | 0201 | ✅ | ✅ | Android has dedicated `ThreadScreen.kt`, thread overview list, per-message reply counts |
 | Delivery acks / receipts | 0184, 0198 | ✅ | ✅ | Ack-driven delivery states on both |
 | Offline outbound queue | — | ✅ | ✅ | Android: `core/client/.../client/OutboundQueue.kt` |
@@ -47,9 +47,9 @@ compares user-facing capability per area, verified against both codebases as of
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
 | Pinned messages | urn:waddle:pin:0 | ✅ | ✅ | Android has pin/unpin actions + `PinStore.kt`; web adds `PinnedPanel.vue` |
-| @-mentions | 0372 | ✅ | 🟡 | FFI carries `references`/`mention_uris`; no Android compose or render UI — in flight |
+| @-mentions | 0372 | ✅ | ✅ | Composer autocomplete (`MentionPopover`/`MentionSpanTracker`) sends 0372 references; rendered + self-mention highlight in `RichMessageBody.kt` |
 | Mention/nick colors | 0392 | ✅ | ✅ | Shared Rust hue via `consistent_color_hue` FFI; `theme/ConsistentColor.kt` |
-| Per-conversation notify modes / mute | 0492 | ✅ | ❌ | Web: `chat/src/lib/notify-settings.ts`; in flight for Android |
+| Per-conversation notify modes / mute | 0492 | ✅ | ✅ | Android: `NotifySettingsStore.kt` + notify sheet in the conversation top bar; `NotificationPolicy.kt` enforces never/on-mention/always |
 | Bookmarks | 0402 | ✅ | ❌ | Android channel list comes from Waddle `discover_topology`, not 0402 |
 | Inbox / unread overview | 0430 | ✅ | 🟡 | Android computes unread locally (`UnreadStore.kt`) from live traffic; no 0430 sync |
 | Slash commands | — | ✅ | ❌ | Web: `chat/src/lib/slash-dispatch.ts` |
@@ -124,13 +124,7 @@ compares user-facing capability per area, verified against both codebases as of
 
 ## Planned next
 
-In flight in the current improvement sweep:
-
-1. **Message search** (MAM full-text) — query FFI verb + search UI.
-2. **@-mentions** (0372) — composer autocomplete + highlight rendering; FFI payloads already flow.
-3. **Per-conversation notify modes / mute** (0492) — settings surface + notification filtering.
-
-Biggest remaining gaps after that, in priority order:
+Remaining gaps, in priority order:
 
 1. **Muji group calls (XEP-0272)** — DM calls shipped; the group-call presence flow, mixer session-initiate, and in-call roster remain.
 2. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
