@@ -15,6 +15,7 @@ mod community_admin;
 mod consistent_color;
 mod convert;
 mod error;
+mod inbox_verbs;
 mod jid_parts;
 mod messaging;
 mod messaging_verbs;
@@ -33,6 +34,8 @@ mod calls_tests;
 mod client_tests;
 #[cfg(test)]
 mod community_admin_tests;
+#[cfg(test)]
+mod inbox_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
 #[cfg(test)]
@@ -84,6 +87,11 @@ pub struct WaddleClient {
     // generates FfiConverter for Box<dyn Trait>, not Arc<dyn Trait>).
     listener: Arc<Box<dyn WaddleEventListener>>,
     handle: Mutex<Option<ClientHandle>>,
+    /// Serializes XEP-0430 inbox queries: `messages='false'`
+    /// responses carry no MAM `queryid`, so entry correlation relies
+    /// on a single in-flight query — the invariant the wasm driver
+    /// enforces by deferring overlapping `SendInboxQuery` commands.
+    inbox_query_gate: Mutex<()>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -94,6 +102,7 @@ impl WaddleClient {
             config,
             listener: Arc::new(listener),
             handle: Mutex::new(None),
+            inbox_query_gate: Mutex::new(()),
         })
     }
 

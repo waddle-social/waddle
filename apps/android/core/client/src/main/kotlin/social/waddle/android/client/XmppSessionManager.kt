@@ -70,6 +70,7 @@ class XmppSessionManager(
     val presenceStore = stores.presenceStore
     val dmStore = stores.dmStore
     val unreadStore = stores.unreadStore
+    val inboxStore = stores.inboxStore
     val chatStateStore = stores.chatStateStore
     val readCursorStore = stores.readCursorStore
     val pinStore = stores.pinStore
@@ -117,7 +118,8 @@ class XmppSessionManager(
 
     private val profile = ProfileVerbs(activeSession, stores)
 
-    private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
+    private val catchup =
+        SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
 
     private val loop = ConnectionLoop(
         clientFactory = clientFactory,
@@ -298,6 +300,14 @@ class XmppSessionManager(
         isGroupchat: Boolean,
         explicitTarget: DisplayedTarget? = null,
     ) = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
+
+    /**
+     * XEP-0430 server-side mark-read for one conversation (optionally
+     * one room thread). The displayed path co-fires this automatically;
+     * exposed for callers without a displayed target (thread reads).
+     */
+    suspend fun markInboxRead(conversationJid: String, threadId: String? = null) =
+        readState.markInboxRead(conversationJid, threadId)
 
     /** XEP-0085 typing notification: best-effort and live-session-only. */
     suspend fun sendChatState(conversationJid: String, isGroupchat: Boolean, state: WaddleChatState): VerbResult =

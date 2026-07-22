@@ -8,6 +8,8 @@ import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleInboxEntry
+import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMarkupSpan
@@ -275,6 +277,42 @@ fun testAvatar(
     mimeType = mimeType,
     data = data,
     url = url,
+)
+
+fun testInboxEntry(
+    partner: String = "alice@waddle.test",
+    kind: String = "direct",
+    lastStanzaId: String? = "s1",
+    lastUpdated: Long? = 1_700_000_000L,
+    unread: UInt = 1u,
+    preview: String? = null,
+    threadId: String? = null,
+    threadTitle: String? = null,
+    replyCount: UInt? = null,
+    author: String? = null,
+): WaddleInboxEntry = WaddleInboxEntry(
+    partner = partner,
+    kind = kind,
+    lastStanzaId = lastStanzaId,
+    lastUpdated = lastUpdated,
+    unread = unread,
+    preview = preview,
+    threadId = threadId,
+    threadTitle = threadTitle,
+    replyCount = replyCount,
+    author = author,
+)
+
+fun testInboxResult(
+    conversations: List<WaddleInboxEntry> = emptyList(),
+    total: UInt = conversations.size.toUInt(),
+    unread: UInt = conversations.count { it.unread > 0u }.toUInt(),
+    allUnread: UInt = conversations.sumOf { it.unread },
+): WaddleInboxResult = WaddleInboxResult(
+    total = total,
+    unread = unread,
+    allUnread = allUnread,
+    conversations = conversations,
 )
 
 fun testResumeState(

@@ -1,10 +1,12 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import social.waddle.android.client.ConversationVerbs
 import social.waddle.android.client.OutboundMessenger
 import social.waddle.android.client.ReadStateCoordinator
+import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.persistQuietly
 import social.waddle.android.client.prefs.SessionPrefs
@@ -23,6 +25,7 @@ internal class SessionCatchup(
     private val verbs: ConversationVerbs,
     private val messenger: OutboundMessenger,
     private val readState: ReadStateCoordinator,
+    private val activeSession: ActiveSession,
 ) {
     suspend fun refreshTopology(client: WaddleClientInterface) {
         runCatching { stores.roomStore.setTopology(client.discoverTopology()) }
@@ -44,6 +47,10 @@ internal class SessionCatchup(
         persistQuietly {
             rejoinPersistedRooms(client, session)
             messenger.drainOutboundQueue()
+            // Every ready session, resumed streams included (web
+            // parity): the inbox is the server-authoritative unread
+            // baseline the live pushes then patch.
+            hydrateInbox(client)
             if (freshStream) {
                 catchUpConversations()
                 hydrateNotifySettings(client)
@@ -53,6 +60,32 @@ internal class SessionCatchup(
             readState.bootstrapMdsDisplayed(client)
             readState.drainPendingDisplayed()
         }
+    }
+
+    /**
+     * XEP-0430 hydrate (web session-ready parity): fetch the server's
+     * authoritative per-conversation unread state and INJECT the page
+     * into the serialized event stream (the MDS handshake pattern) so
+     * absolute-set reconciles never interleave with live increments.
+     * `noMessages = true` deviates from the web's default deliberately:
+     * the FFI page carries no message bodies, so the embedded MAM
+     * `<result/>` payloads the web consumes would be dead weight here.
+     * Best-effort: a failed fetch keeps the previous counts.
+     */
+    private suspend fun hydrateInbox(client: WaddleClientInterface) {
+        val result = try {
+            client.fetchInbox(onlyUnread = false, noMessages = true)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return
+        }
+        if (result.conversations.isEmpty()) return
+        val applied = Job()
+        activeSession.bridge?.submit(XmppEvent.InboxEntries(result.conversations, applied))
+        // Bare join (bootstrapMdsDisplayed parity): swallowing a
+        // cancellation here would resume a cancelled pipeline.
+        applied.join()
     }
 
     /**

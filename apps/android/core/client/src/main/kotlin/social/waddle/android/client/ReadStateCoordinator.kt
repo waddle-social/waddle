@@ -75,7 +75,13 @@ internal class ReadStateCoordinator(
         // a parked replay racing a fresh arrival would otherwise wipe
         // the badge for a message the user has never seen (the tap-time
         // clear already happened in the receiver).
-        if (explicitTarget == null) stores.unreadStore.clear(conversation)
+        if (explicitTarget == null) {
+            stores.unreadStore.clear(conversation)
+            // Arm the inbox read-clear barrier at the same moment: a
+            // racing XEP-0430 push still naming the read message must
+            // not resurrect the badge the user is looking at.
+            stores.inboxStore.markReadLocally(conversation)
+        }
         val explicitExpectation = explicitTarget?.let {
             expectedCursorFor(items, conversation, it.markerId) ?: return
         }
@@ -106,6 +112,36 @@ internal class ReadStateCoordinator(
                 if (explicitTarget != null) explicitExpectation?.cursor else cursorBefore
             stores.readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
         }
+        // Co-fire the `urn:waddle:inbox:0` mark-read alongside the
+        // displayed dispatch (web read-activity parity): the server
+        // zeroes its authoritative unread and answers with a fresh
+        // push; the barrier above clamps a racing stale one.
+        fireInboxMarkRead(client, conversation, threadId = null)
+    }
+
+    /**
+     * Server-side inbox mark-read for one conversation (optionally
+     * one room thread): arms the local read-clear barrier, then tells
+     * the server. No live session → the local barrier still applies
+     * and the next hydrate restores whatever the server last knew.
+     */
+    suspend fun markInboxRead(conversationJid: String, threadId: String? = null) {
+        val conversation = bareJid(conversationJid)
+        if (threadId == null) stores.unreadStore.clear(conversation)
+        val client = activeSession.client ?: run {
+            stores.inboxStore.markReadLocally(conversation, threadId)
+            return
+        }
+        fireInboxMarkRead(client, conversation, threadId)
+    }
+
+    private suspend fun fireInboxMarkRead(
+        client: WaddleClientInterface,
+        conversation: String,
+        threadId: String?,
+    ) {
+        stores.inboxStore.markReadLocally(conversation, threadId)
+        runCatching { client.markInboxRead(conversation, threadId) }
     }
 
     /**

@@ -505,6 +505,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
     typealias FfiType = Double
     typealias SwiftType = Double
@@ -818,6 +834,25 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * mechanism — the server re-checks every actual command.
      */
     func isCommunityOwner() async  -> Bool
+
+    /**
+     * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
+     * resolve once the server's closing `<fin/>` arrives.
+     *
+     * `only_unread` maps to `unread-only='true'`; `no_messages`
+     * inverts the XEP's `messages` attribute (pass `true` to elide
+     * the embedded MAM `<result/>` bodies — the cheap hydration
+     * shape the clients use on session-ready).
+     */
+    func fetchInbox(onlyUnread: Bool, noMessages: Bool) async throws  -> WaddleInboxResult
+
+    /**
+     * Mark one conversation (optionally one thread of it) read via
+     * the Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ. The server
+     * answers with a fresh unread state push, so callers only need
+     * to clear their local overlay optimistically.
+     */
+    func markInboxRead(partnerJid: String, threadId: String?) async throws
 
     func discoverTopology() async  -> WaddleTopology
 
@@ -2026,6 +2061,55 @@ open func isCommunityOwner()async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
+     * resolve once the server's closing `<fin/>` arrives.
+     *
+     * `only_unread` maps to `unread-only='true'`; `no_messages`
+     * inverts the XEP's `messages` attribute (pass `true` to elide
+     * the embedded MAM `<result/>` bodies — the cheap hydration
+     * shape the clients use on session-ready).
+     */
+open func fetchInbox(onlyUnread: Bool, noMessages: Bool)async throws  -> WaddleInboxResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(
+                    self.uniffiCloneHandle(),
+                    FfiConverterBool.lower(onlyUnread),FfiConverterBool.lower(noMessages)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleInboxResult_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Mark one conversation (optionally one thread of it) read via
+     * the Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ. The server
+     * answers with a fresh unread state push, so callers only need
+     * to clear their local overlay optimistically.
+     */
+open func markInboxRead(partnerJid: String, threadId: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_mark_inbox_read(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(partnerJid),FfiConverterOptionString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -6591,6 +6675,243 @@ public func FfiConverterTypeWaddleInCallPresenceFlags_lower(_ value: WaddleInCal
 
 
 /**
+ * One XEP-0430 inbox conversation: the `urn:xmpp:inbox:1` `<entry/>`
+ * merged with its Waddle `urn:waddle:inbox:0` `<metadata/>`. Surfaced
+ * both from `fetch_inbox` pages and from live `InboxPush` events.
+ */
+public struct WaddleInboxEntry: Equatable, Hashable {
+    /**
+     * Conversation partner: contact bare JID (`kind == "direct"`) or
+     * room bare JID (`kind == "muc"`).
+     */
+    public var partner: String
+    /**
+     * Conversation surface: `"direct"` or `"muc"` (the only values
+     * the wire parser admits; absent metadata defaults to `"direct"`,
+     * wasm parity).
+     */
+    public var kind: String
+    /**
+     * XEP-0359 stanza id of the conversation's newest message.
+     * Always present on the wire; optional here so the raw parser
+     * shape crosses the boundary without lossy defaulting.
+     */
+    public var lastStanzaId: String?
+    /**
+     * Waddle metadata `last-updated` (unix millis); pushes always
+     * carry it, query responses may omit metadata entirely.
+     */
+    public var lastUpdated: Int64?
+    /**
+     * Server-side unread count for this conversation.
+     */
+    public var unread: UInt32
+    /**
+     * Short plaintext preview of the newest message.
+     */
+    public var preview: String?
+    /**
+     * Thread id when this entry describes one thread of a room.
+     */
+    public var threadId: String?
+    public var threadTitle: String?
+    public var replyCount: UInt32?
+    /**
+     * Author of the newest message, when the server includes it.
+     */
+    public var author: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Conversation partner: contact bare JID (`kind == "direct"`) or
+         * room bare JID (`kind == "muc"`).
+         */partner: String,
+        /**
+         * Conversation surface: `"direct"` or `"muc"` (the only values
+         * the wire parser admits; absent metadata defaults to `"direct"`,
+         * wasm parity).
+         */kind: String,
+        /**
+         * XEP-0359 stanza id of the conversation's newest message.
+         * Always present on the wire; optional here so the raw parser
+         * shape crosses the boundary without lossy defaulting.
+         */lastStanzaId: String?,
+        /**
+         * Waddle metadata `last-updated` (unix millis); pushes always
+         * carry it, query responses may omit metadata entirely.
+         */lastUpdated: Int64?,
+        /**
+         * Server-side unread count for this conversation.
+         */unread: UInt32,
+        /**
+         * Short plaintext preview of the newest message.
+         */preview: String?,
+        /**
+         * Thread id when this entry describes one thread of a room.
+         */threadId: String?, threadTitle: String?, replyCount: UInt32?,
+        /**
+         * Author of the newest message, when the server includes it.
+         */author: String?) {
+        self.partner = partner
+        self.kind = kind
+        self.lastStanzaId = lastStanzaId
+        self.lastUpdated = lastUpdated
+        self.unread = unread
+        self.preview = preview
+        self.threadId = threadId
+        self.threadTitle = threadTitle
+        self.replyCount = replyCount
+        self.author = author
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInboxEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInboxEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInboxEntry {
+        return
+            try WaddleInboxEntry(
+                partner: FfiConverterString.read(from: &buf),
+                kind: FfiConverterString.read(from: &buf),
+                lastStanzaId: FfiConverterOptionString.read(from: &buf),
+                lastUpdated: FfiConverterOptionInt64.read(from: &buf),
+                unread: FfiConverterUInt32.read(from: &buf),
+                preview: FfiConverterOptionString.read(from: &buf),
+                threadId: FfiConverterOptionString.read(from: &buf),
+                threadTitle: FfiConverterOptionString.read(from: &buf),
+                replyCount: FfiConverterOptionUInt32.read(from: &buf),
+                author: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleInboxEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.partner, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.lastStanzaId, into: &buf)
+        FfiConverterOptionInt64.write(value.lastUpdated, into: &buf)
+        FfiConverterUInt32.write(value.unread, into: &buf)
+        FfiConverterOptionString.write(value.preview, into: &buf)
+        FfiConverterOptionString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.threadTitle, into: &buf)
+        FfiConverterOptionUInt32.write(value.replyCount, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxEntry_lift(_ buf: RustBuffer) throws -> WaddleInboxEntry {
+    return try FfiConverterTypeWaddleInboxEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxEntry_lower(_ value: WaddleInboxEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleInboxEntry.lower(value)
+}
+
+
+/**
+ * Result of one streamed XEP-0430 `fetch_inbox` query: the folded
+ * entry stream plus the closing `<fin/>` counts.
+ */
+public struct WaddleInboxResult: Equatable, Hashable {
+    /**
+     * `<fin total/>` — number of conversations matched.
+     */
+    public var total: UInt32
+    /**
+     * `<fin unread/>` — number of conversations with unread > 0.
+     */
+    public var unread: UInt32
+    /**
+     * `<fin all-unread/>` — sum of unread counts across the whole
+     * inbox (server-wide badge total), regardless of paging.
+     */
+    public var allUnread: UInt32
+    public var conversations: [WaddleInboxEntry]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `<fin total/>` — number of conversations matched.
+         */total: UInt32,
+        /**
+         * `<fin unread/>` — number of conversations with unread > 0.
+         */unread: UInt32,
+        /**
+         * `<fin all-unread/>` — sum of unread counts across the whole
+         * inbox (server-wide badge total), regardless of paging.
+         */allUnread: UInt32, conversations: [WaddleInboxEntry]) {
+        self.total = total
+        self.unread = unread
+        self.allUnread = allUnread
+        self.conversations = conversations
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInboxResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInboxResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInboxResult {
+        return
+            try WaddleInboxResult(
+                total: FfiConverterUInt32.read(from: &buf),
+                unread: FfiConverterUInt32.read(from: &buf),
+                allUnread: FfiConverterUInt32.read(from: &buf),
+                conversations: FfiConverterSequenceTypeWaddleInboxEntry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleInboxResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.total, into: &buf)
+        FfiConverterUInt32.write(value.unread, into: &buf)
+        FfiConverterUInt32.write(value.allUnread, into: &buf)
+        FfiConverterSequenceTypeWaddleInboxEntry.write(value.conversations, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxResult_lift(_ buf: RustBuffer) throws -> WaddleInboxResult {
+    return try FfiConverterTypeWaddleInboxResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxResult_lower(_ value: WaddleInboxResult) -> RustBuffer {
+    return FfiConverterTypeWaddleInboxResult.lower(value)
+}
+
+
+/**
  * Parsed JID components, validated per RFC 7622 by the shared `jid` crate.
  *
  * Exposed so native clients reuse the workspace JID parser instead of
@@ -10378,6 +10699,14 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case deliveryFailed(stanzaId: String
     )
     /**
+     * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
+     * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
+     * query-response entries resolve the `fetch_inbox` verb and are
+     * never broadcast (wasm parity).
+     */
+    case inboxPush(entry: WaddleInboxEntry
+    )
+    /**
      * XEP-0353 / XEP-0166 inbound call event. Fires for every JMI
      * envelope and Jingle session control stanza addressed to the
      * bound resource. The Swift app surfaces it as the ringing UI,
@@ -10446,16 +10775,19 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 7: return .deliveryFailed(stanzaId: try FfiConverterString.read(from: &buf)
         )
 
-        case 8: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 8: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
         )
 
-        case 9: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
+        case 9: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 10: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 10: return .resumeStateChanged(state: try FfiConverterOptionTypeWaddleSmResumeState.read(from: &buf)
         )
 
-        case 11: return .error(description: try FfiConverterString.read(from: &buf)
+        case 11: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 12: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -10499,23 +10831,28 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterString.write(stanzaId, into: &buf)
 
 
-        case let .call(event):
+        case let .inboxPush(entry):
             writeInt(&buf, Int32(8))
+            FfiConverterTypeWaddleInboxEntry.write(entry, into: &buf)
+
+
+        case let .call(event):
+            writeInt(&buf, Int32(9))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
         case let .resumeStateChanged(state):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(10))
             FfiConverterOptionTypeWaddleSmResumeState.write(state, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -12823,6 +13160,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
     typealias SwiftType = Bool?
 
@@ -14085,6 +14446,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleInboxEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleInboxEntry]
+
+    public static func write(_ value: [WaddleInboxEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleInboxEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleInboxEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleInboxEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleInboxEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleLinkPreview: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleLinkPreview]
 
@@ -14569,6 +14955,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read() != 3970) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {

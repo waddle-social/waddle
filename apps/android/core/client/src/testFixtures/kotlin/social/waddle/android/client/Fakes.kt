@@ -41,6 +41,7 @@ import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
 import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
+import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleLinkPreviewLookupStatus
@@ -113,10 +114,17 @@ class FakeClientFactory : ClientFactory {
     @Volatile
     private var listener: WaddleEventListener? = null
 
+    /** Applied to every new [FakeWaddleClient] before the attempt sees it. */
+    @Volatile
+    var onCreate: (FakeWaddleClient) -> Unit = {}
+
     override fun create(config: WaddleConfig, listener: WaddleEventListener): WaddleClientInterface {
         this.listener = listener
         configs += config
-        return FakeWaddleClient().also { clients += it }
+        return FakeWaddleClient().also {
+            onCreate(it)
+            clients += it
+        }
     }
 
     /**
@@ -996,6 +1004,15 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun supportsMdsPublishOptions(): Boolean = mdsPublishOptionsSupported
+
+    /** XEP-0430 fake verb state: canned page, recorded calls, knobs. */
+    val inbox = FakeInboxState()
+
+    override suspend fun fetchInbox(onlyUnread: Boolean, noMessages: Boolean): WaddleInboxResult =
+        inbox.fetchInbox(onlyUnread, noMessages)
+
+    override suspend fun markInboxRead(partnerJid: String, threadId: String?) =
+        inbox.markInboxRead(partnerJid, threadId)
 
     /** Canned lookup outcome served by [lookupLinkPreview]; recorded calls. */
     @Volatile
