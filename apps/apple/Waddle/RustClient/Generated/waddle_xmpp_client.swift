@@ -425,6 +425,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -816,12 +832,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func leaveRoom(roomJid: String, nick: String) async
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
-    func requestAvatar(jid: String) async  -> WaddleAvatar?
+    func requestAvatar(jid: String, knownIds: [String]) async  -> WaddleAvatarResult?
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
@@ -1048,6 +1067,84 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * toggles the Waddle rich XEP-0357 push-summary opt-in (#719).
      */
     func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name: String?, richPayloadOptIn: Bool) async throws  -> WaddleSetRoomNotificationModeOutcome
+
+    /**
+     * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
+     * item so subscribers drop their cached avatar.
+     */
+    func disableAvatar() async throws
+
+    /**
+     * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
+     * `fetch_user_pep_profile` parity): each node is queried with a
+     * XEP-0060 items request, and per-node failures (absent node,
+     * stanza error, empty payload) degrade to `None` rather than
+     * failing the whole snapshot.
+     */
+    func fetchUserPepProfile(jid: String) async throws  -> WaddlePepProfile
+
+    /**
+     * XEP-0292: fetch `jid`'s vCard4 from its `urn:xmpp:vcard4` PEP
+     * node. `Ok(None)` when the node is absent, empty, or answers
+     * with a stanza error (wasm `fetch_vcard4` parity).
+     */
+    func fetchVcard4(jid: String) async throws  -> WaddleVCard4?
+
+    /**
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
+     */
+    func publishActivity(general: String, specific: String?, text: String?) async throws
+
+    /**
+     * XEP-0084 §3: publish `data` as the account's avatar — the
+     * base64 data item first, then (after the server ack) the
+     * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
+     * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
+     */
+    func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws
+
+    /**
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
+     */
+    func publishMood(kind: String, text: String?) async throws
+
+    /**
+     * XEP-0118: publish a user tune. At least one field must be set —
+     * an all-empty tune is the §3.2 *stop* shape, which is
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
+     */
+    func publishTune(tune: WaddleTune) async throws
+
+    /**
+     * XEP-0292: publish the account's own vCard4 at item id
+     * `current`. Empty (`None`) properties are omitted on the wire.
+     */
+    func publishVcard4(vcard: WaddleVCard4) async throws
+
+    /**
+     * XEP-0108: retract the activity by publishing the empty
+     * `<activity/>` payload.
+     */
+    func retractActivity() async throws
+
+    /**
+     * XEP-0107 §2.2: retract the mood by publishing the empty
+     * `<mood/>` payload.
+     */
+    func retractMood() async throws
+
+    /**
+     * XEP-0118 §3.2: stop publishing a tune via the empty `<tune/>`
+     * payload.
+     */
+    func retractTune() async throws
 
     /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
@@ -2041,24 +2138,27 @@ open func leaveRoom(roomJid: String, nick: String)async   {
 }
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
-open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
+open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarResult?  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(jid)
+                    FfiConverterString.lower(jid),FfiConverterSequenceString.lower(knownIds)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleAvatar.lift,
+            liftFunc: FfiConverterOptionTypeWaddleAvatarResult.lift,
             errorHandler: nil
 
         )
@@ -2745,6 +2845,249 @@ open func setRoomNotificationMode(roomJid: String, mode: WaddleNotifyMode, name:
 }
 
     /**
+     * XEP-0084 §4.3: publish the empty `<metadata/>` "no avatar"
+     * item so subscribers drop their cached avatar.
+     */
+open func disableAvatar()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_avatar(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Fetch `jid`'s mood/activity/tune PEP nodes in one call (wasm
+     * `fetch_user_pep_profile` parity): each node is queried with a
+     * XEP-0060 items request, and per-node failures (absent node,
+     * stanza error, empty payload) degrade to `None` rather than
+     * failing the whole snapshot.
+     */
+open func fetchUserPepProfile(jid: String)async throws  -> WaddlePepProfile  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep_profile(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(jid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddlePepProfile_lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0292: fetch `jid`'s vCard4 from its `urn:xmpp:vcard4` PEP
+     * node. `Ok(None)` when the node is absent, empty, or answers
+     * with a stanza error (wasm `fetch_vcard4` parity).
+     */
+open func fetchVcard4(jid: String)async throws  -> WaddleVCard4?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_vcard4(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(jid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeWaddleVCard4.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
+     */
+open func publishActivity(general: String, specific: String?, text: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(general),FfiConverterOptionString.lower(specific),FfiConverterOptionString.lower(text)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0084 §3: publish `data` as the account's avatar — the
+     * base64 data item first, then (after the server ack) the
+     * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
+     * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
+     */
+open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_avatar(
+                    self.uniffiCloneHandle(),
+                    FfiConverterData.lower(data),FfiConverterString.lower(mimeType),FfiConverterUInt32.lower(width),FfiConverterUInt32.lower(height)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
+     */
+open func publishMood(kind: String, text: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_mood(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(kind),FfiConverterOptionString.lower(text)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0118: publish a user tune. At least one field must be set —
+     * an all-empty tune is the §3.2 *stop* shape, which is
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
+     */
+open func publishTune(tune: WaddleTune)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_tune(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleTune_lower(tune)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0292: publish the account's own vCard4 at item id
+     * `current`. Empty (`None`) properties are omitted on the wire.
+     */
+open func publishVcard4(vcard: WaddleVCard4)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_vcard4(
+                    self.uniffiCloneHandle(),
+                    FfiConverterTypeWaddleVCard4_lower(vcard)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0108: retract the activity by publishing the empty
+     * `<activity/>` payload.
+     */
+open func retractActivity()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_activity(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0107 §2.2: retract the mood by publishing the empty
+     * `<mood/>` payload.
+     */
+open func retractMood()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_mood(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0118 §3.2: stop publishing a tune via the empty `<tune/>`
+     * payload.
+     */
+open func retractTune()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_tune(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
      * XEP-0050 `disable-device` ad-hoc command on `push.<domain>`.
      * Per-device scope — `device_id` is the value returned by the
      * preceding [`register_push_device`] call. Sibling devices on
@@ -3074,6 +3417,68 @@ public func FfiConverterTypeWaddleClient_lower(_ value: WaddleClient) -> UInt64 
 }
 
 
+
+
+/**
+ * XEP-0108 user activity: `general` / `specific` are the defined
+ * category element names (e.g. `working` / `coding`).
+ */
+public struct WaddleActivity: Equatable, Hashable {
+    public var general: String
+    public var specific: String?
+    public var text: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(general: String, specific: String?, text: String?) {
+        self.general = general
+        self.specific = specific
+        self.text = text
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleActivity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleActivity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleActivity {
+        return
+            try WaddleActivity(
+                general: FfiConverterString.read(from: &buf),
+                specific: FfiConverterOptionString.read(from: &buf),
+                text: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleActivity, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.general, into: &buf)
+        FfiConverterOptionString.write(value.specific, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleActivity_lift(_ buf: RustBuffer) throws -> WaddleActivity {
+    return try FfiConverterTypeWaddleActivity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleActivity_lower(_ value: WaddleActivity) -> RustBuffer {
+    return FfiConverterTypeWaddleActivity.lower(value)
+}
 
 
 public struct WaddleAdminChannelAffiliationEntry: Equatable, Hashable {
@@ -5125,6 +5530,67 @@ public func FfiConverterTypeWaddleAvatar_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleAvatar_lower(_ value: WaddleAvatar) -> RustBuffer {
     return FfiConverterTypeWaddleAvatar.lower(value)
+}
+
+
+/**
+ * Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+ * resolved; `avatar` is `None` exactly when that id was in the
+ * caller's known set — the data IQ was skipped (XEP-0084 §4.2 "MUST
+ * NOT retrieve the image data") and the caller serves its cached
+ * bytes for `id` instead.
+ */
+public struct WaddleAvatarResult: Equatable, Hashable {
+    public var id: String
+    public var avatar: WaddleAvatar?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, avatar: WaddleAvatar?) {
+        self.id = id
+        self.avatar = avatar
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAvatarResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAvatarResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAvatarResult {
+        return
+            try WaddleAvatarResult(
+                id: FfiConverterString.read(from: &buf),
+                avatar: FfiConverterOptionTypeWaddleAvatar.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAvatarResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionTypeWaddleAvatar.write(value.avatar, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAvatarResult_lift(_ buf: RustBuffer) throws -> WaddleAvatarResult {
+    return try FfiConverterTypeWaddleAvatarResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAvatarResult_lower(_ value: WaddleAvatarResult) -> RustBuffer {
+    return FfiConverterTypeWaddleAvatarResult.lower(value)
 }
 
 
@@ -7333,6 +7799,64 @@ public func FfiConverterTypeWaddleMessage_lower(_ value: WaddleMessage) -> RustB
 
 
 /**
+ * XEP-0107 user mood: `kind` is the defined mood element name
+ * (e.g. `happy`), `text` the optional free-form annotation.
+ */
+public struct WaddleMood: Equatable, Hashable {
+    public var kind: String
+    public var text: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, text: String?) {
+        self.kind = kind
+        self.text = text
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMood: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMood: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMood {
+        return
+            try WaddleMood(
+                kind: FfiConverterString.read(from: &buf),
+                text: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMood, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMood_lift(_ buf: RustBuffer) throws -> WaddleMood {
+    return try FfiConverterTypeWaddleMood.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMood_lower(_ value: WaddleMood) -> RustBuffer {
+    return FfiConverterTypeWaddleMood.lower(value)
+}
+
+
+/**
  * Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
  * extension (XEP-0272).
  */
@@ -7425,6 +7949,70 @@ public func FfiConverterTypeWaddleMujiPresence_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeWaddleMujiPresence_lower(_ value: WaddleMujiPresence) -> RustBuffer {
     return FfiConverterTypeWaddleMujiPresence.lower(value)
+}
+
+
+/**
+ * Snapshot of a user's mood/activity/tune PEP nodes, fetched via
+ * three XEP-0060 items requests (wasm `fetch_user_pep_profile`
+ * parity). A node that is absent, empty, or answers with a stanza
+ * error surfaces as `None`.
+ */
+public struct WaddlePepProfile: Equatable, Hashable {
+    public var mood: WaddleMood?
+    public var activity: WaddleActivity?
+    public var tune: WaddleTune?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mood: WaddleMood?, activity: WaddleActivity?, tune: WaddleTune?) {
+        self.mood = mood
+        self.activity = activity
+        self.tune = tune
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePepProfile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePepProfile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePepProfile {
+        return
+            try WaddlePepProfile(
+                mood: FfiConverterOptionTypeWaddleMood.read(from: &buf),
+                activity: FfiConverterOptionTypeWaddleActivity.read(from: &buf),
+                tune: FfiConverterOptionTypeWaddleTune.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddlePepProfile, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeWaddleMood.write(value.mood, into: &buf)
+        FfiConverterOptionTypeWaddleActivity.write(value.activity, into: &buf)
+        FfiConverterOptionTypeWaddleTune.write(value.tune, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePepProfile_lift(_ buf: RustBuffer) throws -> WaddlePepProfile {
+    return try FfiConverterTypeWaddlePepProfile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePepProfile_lower(_ value: WaddlePepProfile) -> RustBuffer {
+    return FfiConverterTypeWaddlePepProfile.lower(value)
 }
 
 
@@ -8965,6 +9553,84 @@ public func FfiConverterTypeWaddleTopology_lower(_ value: WaddleTopology) -> Rus
 
 
 /**
+ * XEP-0118 user tune. `rating` is 1–10 per §3.1; out-of-range values
+ * are clamped into that interval before publishing.
+ */
+public struct WaddleTune: Equatable, Hashable {
+    public var artist: String?
+    public var title: String?
+    public var source: String?
+    public var track: String?
+    public var uri: String?
+    public var lengthSeconds: UInt32?
+    public var rating: UInt8?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(artist: String?, title: String?, source: String?, track: String?, uri: String?, lengthSeconds: UInt32?, rating: UInt8?) {
+        self.artist = artist
+        self.title = title
+        self.source = source
+        self.track = track
+        self.uri = uri
+        self.lengthSeconds = lengthSeconds
+        self.rating = rating
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleTune: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleTune: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleTune {
+        return
+            try WaddleTune(
+                artist: FfiConverterOptionString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                source: FfiConverterOptionString.read(from: &buf),
+                track: FfiConverterOptionString.read(from: &buf),
+                uri: FfiConverterOptionString.read(from: &buf),
+                lengthSeconds: FfiConverterOptionUInt32.read(from: &buf),
+                rating: FfiConverterOptionUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleTune, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.artist, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.source, into: &buf)
+        FfiConverterOptionString.write(value.track, into: &buf)
+        FfiConverterOptionString.write(value.uri, into: &buf)
+        FfiConverterOptionUInt32.write(value.lengthSeconds, into: &buf)
+        FfiConverterOptionUInt8.write(value.rating, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleTune_lift(_ buf: RustBuffer) throws -> WaddleTune {
+    return try FfiConverterTypeWaddleTune.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleTune_lower(_ value: WaddleTune) -> RustBuffer {
+    return FfiConverterTypeWaddleTune.lower(value)
+}
+
+
+/**
  * Header the client must include when uploading to a XEP-0363 slot.
  */
 public struct WaddleUploadHeader: Equatable, Hashable {
@@ -9146,6 +9812,80 @@ public func FfiConverterTypeWaddleUserSearchEntry_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeWaddleUserSearchEntry_lower(_ value: WaddleUserSearchEntry) -> RustBuffer {
     return FfiConverterTypeWaddleUserSearchEntry.lower(value)
+}
+
+
+/**
+ * XEP-0292 vCard4 profile fields (the subset the profile editor
+ * surfaces). `None` means the property is absent on the wire.
+ */
+public struct WaddleVCard4: Equatable, Hashable {
+    public var fullName: String?
+    public var nickname: String?
+    public var pronouns: String?
+    public var note: String?
+    public var url: String?
+    public var photoUri: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(fullName: String?, nickname: String?, pronouns: String?, note: String?, url: String?, photoUri: String?) {
+        self.fullName = fullName
+        self.nickname = nickname
+        self.pronouns = pronouns
+        self.note = note
+        self.url = url
+        self.photoUri = photoUri
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleVCard4: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleVCard4: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleVCard4 {
+        return
+            try WaddleVCard4(
+                fullName: FfiConverterOptionString.read(from: &buf),
+                nickname: FfiConverterOptionString.read(from: &buf),
+                pronouns: FfiConverterOptionString.read(from: &buf),
+                note: FfiConverterOptionString.read(from: &buf),
+                url: FfiConverterOptionString.read(from: &buf),
+                photoUri: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleVCard4, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.fullName, into: &buf)
+        FfiConverterOptionString.write(value.nickname, into: &buf)
+        FfiConverterOptionString.write(value.pronouns, into: &buf)
+        FfiConverterOptionString.write(value.note, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+        FfiConverterOptionString.write(value.photoUri, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleVCard4_lift(_ buf: RustBuffer) throws -> WaddleVCard4 {
+    return try FfiConverterTypeWaddleVCard4.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleVCard4_lower(_ value: WaddleVCard4) -> RustBuffer {
+    return FfiConverterTypeWaddleVCard4.lower(value)
 }
 
 // Note that we don't yet support `indirect` for enums.
@@ -9819,6 +10559,13 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
      */
     case InvalidJid
     /**
+     * A caller-supplied argument failed validation before any stanza
+     * was built — e.g. an empty XEP-0107 mood kind / XEP-0108 activity
+     * general (both become XML element names on the wire), an empty
+     * avatar image, or an all-empty tune payload. Nothing was sent.
+     */
+    case InvalidArgument
+    /**
      * A caller-supplied Jingle session id was empty or whitespace.
      */
     case InvalidSessionId
@@ -9879,15 +10626,16 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
 
         case 1: return .NotConnected
         case 2: return .InvalidJid
-        case 3: return .InvalidSessionId
-        case 4: return .Stanza(
+        case 3: return .InvalidArgument
+        case 4: return .InvalidSessionId
+        case 5: return .Stanza(
             condition: try FfiConverterString.read(from: &buf),
             text: try FfiConverterOptionString.read(from: &buf)
             )
-        case 5: return .MalformedResponse
-        case 6: return .Transport
-        case 7: return .Timeout
-        case 8: return .UntrustedReply
+        case 6: return .MalformedResponse
+        case 7: return .Transport
+        case 8: return .Timeout
+        case 9: return .UntrustedReply
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -9908,30 +10656,34 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
 
 
-        case .InvalidSessionId:
+        case .InvalidArgument:
             writeInt(&buf, Int32(3))
 
 
-        case let .Stanza(condition,text):
+        case .InvalidSessionId:
             writeInt(&buf, Int32(4))
+
+
+        case let .Stanza(condition,text):
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(condition, into: &buf)
             FfiConverterOptionString.write(text, into: &buf)
 
 
         case .MalformedResponse:
-            writeInt(&buf, Int32(5))
-
-
-        case .Transport:
             writeInt(&buf, Int32(6))
 
 
-        case .Timeout:
+        case .Transport:
             writeInt(&buf, Int32(7))
 
 
-        case .UntrustedReply:
+        case .Timeout:
             writeInt(&buf, Int32(8))
+
+
+        case .UntrustedReply:
+            writeInt(&buf, Int32(9))
 
         }
     }
@@ -11975,6 +12727,30 @@ public func FfiConverterCallbackInterfaceWaddleEventListener_lower(_ v: WaddleEv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
     typealias SwiftType = UInt16?
 
@@ -12095,6 +12871,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleActivity: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleActivity?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleActivity.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleActivity.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
     typealias SwiftType = WaddleAvatar?
 
@@ -12111,6 +12911,30 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleAvatar.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleAvatarResult: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAvatarResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleAvatarResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleAvatarResult.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12359,6 +13183,30 @@ fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewVideo: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleMood: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMood?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleMood.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleMood.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuffer {
     typealias SwiftType = WaddleMujiPresence?
 
@@ -12551,6 +13399,30 @@ fileprivate struct FfiConverterOptionTypeWaddleThreadTarget: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleTune: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleTune?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleTune.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleTune.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleUploadSlot: FfiConverterRustBuffer {
     typealias SwiftType = WaddleUploadSlot?
 
@@ -12567,6 +13439,30 @@ fileprivate struct FfiConverterOptionTypeWaddleUploadSlot: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWaddleUploadSlot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWaddleVCard4: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleVCard4?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleVCard4.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleVCard4.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -13693,7 +14589,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -13781,6 +14677,39 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_notification_mode() != 16446) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_avatar() != 59493) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_user_pep_profile() != 55127) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 55478) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4() != 36728) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_activity() != 9675) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_mood() != 55847) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_tune() != 62956) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_push_device() != 48200) {

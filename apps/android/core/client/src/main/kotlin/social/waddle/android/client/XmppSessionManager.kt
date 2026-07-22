@@ -27,6 +27,7 @@ import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleAdminUsersPage
+import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
@@ -35,8 +36,10 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleRoomConfig
 import social.waddle.client.ffi.WaddleRoomConfigPatch
+import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleUploadSlot
 import social.waddle.client.ffi.WaddleUserSearchEntry
+import social.waddle.client.ffi.WaddleVCard4
 
 /**
  * Owns the XMPP session lifecycle: Kotlin drives reconnect and
@@ -72,6 +75,7 @@ class XmppSessionManager(
     val pinStore = stores.pinStore
     val notifySettingsStore = stores.notifySettingsStore
     val roomMembersStore = stores.roomMembersStore
+    val profileStore = stores.profileStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -111,6 +115,8 @@ class XmppSessionManager(
 
     private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
+    private val profile = ProfileVerbs(activeSession, stores)
+
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
     private val loop = ConnectionLoop(
@@ -140,6 +146,11 @@ class XmppSessionManager(
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
+        // BEFORE the store clear (logout parity): a parked verb ack
+        // from the previous session resuming between the clear and the
+        // bump would pass its generation check and write stale state
+        // into the freshly seeded stores.
+        activeSession.advanceGeneration()
         clearSessionState()
         activeSession.ownBareJid = bareJid(session.jid)
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
@@ -177,6 +188,7 @@ class XmppSessionManager(
             }
         }
         cancelSessionScope()
+        activeSession.advanceGeneration()
         activeSession.ownBareJid = null
         activeSession.ownFullJid = null
         clearSessionState()
@@ -353,6 +365,48 @@ class XmppSessionManager(
         afterCursor: String? = null,
     ): WaddleAdminUsersPage? = roomAdmin.adminUsersList(prefix, pageSize, afterCursor)
 
+    /** Load the account's vCard4 + PEP status + avatar into [profileStore]. */
+    suspend fun loadSelfProfile(): VerbResult = profile.loadSelfProfile()
+
+    /** XEP-0292: optimistic vCard4 publish with rollback on failure. */
+    suspend fun publishProfile(vcard: WaddleVCard4): VerbResult = profile.publishProfile(vcard)
+
+    /** XEP-0084 §3: publish the account's avatar (cached on success). */
+    suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt): VerbResult =
+        profile.publishAvatar(data, mimeType, width, height)
+
+    /** XEP-0084 §4.3: publish the "no avatar" item and drop the local one. */
+    suspend fun disableAvatar(): VerbResult = profile.disableAvatar()
+
+    /** XEP-0084 avatar fetch for any JID, honoring the §4.2 item-id cache. */
+    suspend fun fetchAvatar(jid: String, knownId: String? = null): WaddleAvatar? =
+        profile.fetchAvatar(jid, knownId)
+
+    /** XEP-0107: publish a mood ([ProfileVerbs.setMood]). */
+    suspend fun setMood(kind: String, text: String? = null): VerbResult = profile.setMood(kind, text)
+
+    /** XEP-0107 §2.2: retract the mood. */
+    suspend fun clearMood(): VerbResult = profile.clearMood()
+
+    /** XEP-0108: publish an activity ([ProfileVerbs.setActivity]). */
+    suspend fun setActivity(general: String, specific: String? = null, text: String? = null): VerbResult =
+        profile.setActivity(general, specific, text)
+
+    /** XEP-0108: retract the activity. */
+    suspend fun clearActivity(): VerbResult = profile.clearActivity()
+
+    /**
+     * XEP-0118 tune publish. User-initiated and immediate (web
+     * parity): the XEP's "SHOULD wait several seconds" targets
+     * automatic players skipping tracks, and no automatic publisher
+     * exists here — a manual form submit publishes right away and the
+     * caller gets the real [VerbResult] to surface.
+     */
+    suspend fun setTune(tune: WaddleTune): VerbResult = profile.publishTune(tune)
+
+    /** XEP-0118 §3.2: retract the tune via the empty payload. */
+    suspend fun clearTune(): VerbResult = profile.clearTune()
+
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {
         loop.requestReconnect()
@@ -380,6 +434,10 @@ class XmppSessionManager(
 
     private suspend fun onTerminalAuthFailure() {
         _appState.value = WaddleAppState.SignedOut
+        // The dead session's in-flight verb acks (caller-scoped, up to
+        // the 30 s IQ timeout away) must not write during the signed-out
+        // idle period or into the next login's stores.
+        activeSession.advanceGeneration()
         // A live call slot must not outlive the session: the shell is
         // about to render the login screen with no in-app hang-up, and
         // the app-scoped collectors (FGS, media, ring notification)

@@ -32,6 +32,10 @@ sealed interface WaddleNavKey : NavKey {
     @Serializable
     data object Settings : WaddleNavKey
 
+    /** Own-profile publishing (vCard4, avatar, mood/activity/tune). */
+    @Serializable
+    data object Profile : WaddleNavKey
+
     /** XEP-0045 member management for one room. */
     @Serializable
     data class Members(val roomJid: String, val name: String) : WaddleNavKey

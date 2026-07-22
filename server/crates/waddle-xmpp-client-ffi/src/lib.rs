@@ -20,6 +20,7 @@ mod messaging;
 mod messaging_verbs;
 mod muji;
 mod notify_settings;
+mod profile_verbs;
 mod push;
 mod room_admin;
 mod send_outcome;
@@ -38,6 +39,8 @@ mod messaging_verbs_tests;
 mod muji_tests;
 #[cfg(test)]
 mod notify_settings_tests;
+#[cfg(test)]
+mod profile_verbs_tests;
 #[cfg(test)]
 mod room_admin_tests;
 
@@ -58,6 +61,7 @@ pub use notify_settings::{
     WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
     WaddleSetRoomNotificationModeOutcome,
 };
+pub use profile_verbs::{WaddleActivity, WaddleMood, WaddlePepProfile, WaddleTune, WaddleVCard4};
 pub use room_admin::{
     WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
     WaddleUserSearchEntry,

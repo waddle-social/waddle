@@ -596,7 +596,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let mood: WaddleMoodOpts = serde_wasm_bindgen::from_value(mood_json)
                 .map_err(|err| js_error(err.to_string()))?;
-            let iq = build_publish_mood_iq(&mood.kind, mood.text.as_deref());
+            let iq = build_publish_mood_iq(
+                &uuid::Uuid::new_v4().to_string(),
+                &mood.kind,
+                mood.text.as_deref(),
+            );
             let _ = send_iq_command(inner, iq).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -605,7 +609,11 @@ impl WaddleClient {
     pub fn retract_mood(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let _ = send_iq_command(inner, build_retract_mood_iq()).await?;
+            let _ = send_iq_command(
+                inner,
+                build_retract_mood_iq(&uuid::Uuid::new_v4().to_string()),
+            )
+            .await?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -616,6 +624,7 @@ impl WaddleClient {
             let activity: WaddleActivityOpts = serde_wasm_bindgen::from_value(activity_json)
                 .map_err(|err| js_error(err.to_string()))?;
             let iq = build_publish_activity_iq(
+                &uuid::Uuid::new_v4().to_string(),
                 &activity.general,
                 activity.specific.as_deref(),
                 activity.text.as_deref(),
@@ -628,7 +637,11 @@ impl WaddleClient {
     pub fn retract_activity(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let _ = send_iq_command(inner, build_retract_activity_iq()).await?;
+            let _ = send_iq_command(
+                inner,
+                build_retract_activity_iq(&uuid::Uuid::new_v4().to_string()),
+            )
+            .await?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -639,13 +652,16 @@ impl WaddleClient {
             let tune: WaddleTuneOpts = serde_wasm_bindgen::from_value(tune_json)
                 .map_err(|err| js_error(err.to_string()))?;
             let iq = build_publish_tune_iq(
-                tune.artist.as_deref(),
-                tune.title.as_deref(),
-                tune.source.as_deref(),
-                tune.length,
-                tune.rating,
-                tune.track.as_deref(),
-                tune.uri.as_deref(),
+                &uuid::Uuid::new_v4().to_string(),
+                &waddle_xmpp_client::pep::UserTune {
+                    artist: tune.artist,
+                    title: tune.title,
+                    source: tune.source,
+                    length: tune.length,
+                    rating: tune.rating,
+                    track: tune.track,
+                    uri: tune.uri,
+                },
             );
             let _ = send_iq_command(inner, iq).await?;
             Ok(JsValue::UNDEFINED)
@@ -655,7 +671,11 @@ impl WaddleClient {
     pub fn retract_tune(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let _ = send_iq_command(inner, build_retract_tune_iq()).await?;
+            let _ = send_iq_command(
+                inner,
+                build_retract_tune_iq(&uuid::Uuid::new_v4().to_string()),
+            )
+            .await?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -708,7 +728,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let mood = send_iq_command(
                 inner.clone(),
-                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_MOOD),
+                build_pep_items_iq(
+                    &uuid::Uuid::new_v4().to_string(),
+                    &jid,
+                    waddle_xmpp_client::pep::NS_MOOD,
+                ),
             )
             .await
             .ok()
@@ -719,7 +743,11 @@ impl WaddleClient {
             });
             let activity = send_iq_command(
                 inner.clone(),
-                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_ACTIVITY),
+                build_pep_items_iq(
+                    &uuid::Uuid::new_v4().to_string(),
+                    &jid,
+                    waddle_xmpp_client::pep::NS_ACTIVITY,
+                ),
             )
             .await
             .ok()
@@ -731,7 +759,11 @@ impl WaddleClient {
             });
             let tune = send_iq_command(
                 inner,
-                build_pep_items_iq(&jid, waddle_xmpp_client::pep::NS_TUNE),
+                build_pep_items_iq(
+                    &uuid::Uuid::new_v4().to_string(),
+                    &jid,
+                    waddle_xmpp_client::pep::NS_TUNE,
+                ),
             )
             .await
             .ok()

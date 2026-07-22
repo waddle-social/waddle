@@ -60,9 +60,9 @@ compares user-facing capability per area, verified against both codebases as of
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
 | Presence & status | RFC 6121 | ✅ | ✅ | Android: `PresenceStore.kt` |
-| Avatars | 0084, 0153 | ✅ | 🟡 | Android displays avatars only; no publish/upload FFI |
-| vCard / profile editing | 0292 | ✅ | ❌ | Web: `chat/src/components/chat/VCardEditor.vue`; Android is display-only |
-| Rich presence (mood/activity/tune) | 0107, 0108, 0118 | ✅ | ❌ | Web publishes via pubsub (`client-pubsub.ts`) |
+| Avatars | 0084 | ✅ | ✅ | Publish/remove via `publish_avatar`/`disable_avatar` (photo picker → ≤512² PNG); SHA-1-keyed cache honors §4.2 no-refetch. XEP-0153 vCard-temp hash publish is not implemented on any client — follow-up |
+| vCard / profile editing | 0292 | ✅ | ✅ | `feature/profile/ProfileScreen.kt` — optimistic save/rollback over `publish_vcard4` (web VCardEditor parity) |
+| Rich presence (mood/activity/tune) | 0107, 0108, 0118 | ✅ | ✅ | Mood/activity/tune publish + clear from the profile screen (84-kind closed vocab enforced at the FFI; manual tune submit publishes immediately, web parity) |
 | Idle time | 0319 | ✅ | ✅ | DM subtitle “away · idle Nm” (`DmScreen.kt`), minute ticker |
 
 ## Notifications
@@ -91,7 +91,7 @@ compares user-facing capability per area, verified against both codebases as of
 
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
-| Voice/video calls | 0166, 0353, 0272 | ✅ | 🟡 | DM audio + video calls shipped (CallStore reducer port, LiveKit media, CallStyle notifications, in-call UI, timeline call rows); Muji group calls (0272) pending |
+| Voice/video calls | 0166, 0353, 0272 | ✅ | ✅ | DM calls + Muji group calls (0272 presence flow, SFU mixer session, in-call roster, retained-call recovery); LiveKit media, CallStyle notifications |
 | Call extras (backgrounds, noise filter) | — | ✅ | ❌ | Web-only: MediaPipe background effects, AI noise filter |
 
 ## Social & community
@@ -126,8 +126,9 @@ compares user-facing capability per area, verified against both codebases as of
 
 Remaining gaps, in priority order:
 
-1. **Muji group calls (XEP-0272)** — DM calls shipped; the group-call presence flow, mixer session-initiate, and in-call roster remain.
-2. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
-3. **Profile editing** — vCard (0292) and avatar publish (0084); currently display-only.
-4. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
-5. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.
+1. **Sticker picker** (0449 pack discovery) — rendering ships on both clients; a picker exceeds web parity and needs new pubsub FFI.
+2. **Group DMs and bookmarks** (0402) — multi-party DMs and server-synced room list.
+3. **Inbox sync (0430)** — the Rust client parses `urn:waddle:inbox:0`; expose it over the FFI and feed `UnreadStore`.
+4. **Slash commands** — composer tokenizer + dispatch (web `slash-dispatch.ts`).
+5. **Encrypted attachments (0448)** — AES-GCM download/decrypt + encrypted upload.
+6. **Community surfaces** — feed (0472), stories (0501), events, extensions; lowest urgency, largest scope.

@@ -29,6 +29,23 @@ internal class ActiveSession(
     var ownBareJid: String? = null
 
     /**
+     * Monotonic account-session generation: bumped on every login and
+     * sign-out. Post-ack store writes capture it before the wire call
+     * and compare before writing, so a slow reply that lands after a
+     * logout (or a relogin — even into the SAME account, where a bare
+     * JID comparison would falsely pass) can never park stale state
+     * into the next session's stores.
+     */
+    @Volatile
+    var generation: Long = 0L
+        private set
+
+    /** Called under the manager's lifecycle mutex on login/sign-out. */
+    fun advanceGeneration() {
+        generation += 1
+    }
+
+    /**
      * The attempt's FULL JID (account bare JID + bound resource) —
      * the XEP-0166 initiator/responder identity and the XEP-0353
      * tie-break comparand. Set when the attempt's config is built and
