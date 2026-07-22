@@ -712,6 +712,37 @@ describe("extension command invocation", () => {
     expect(result.actions).toEqual({ allowed: ["cancel"] });
   });
 
+  test("self-closing fields and values parse like their expanded forms", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:generic" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form">' +
+        '<field var="notify" type="boolean"/>' +
+        '<field var="topic" type="text-single"><value/></field>' +
+        '<field var="question" type="text-single"><value>Lunch?</value></field>' +
+        "</x></command></iq>",
+    );
+
+    // The childless <field/> must neither vanish nor swallow its
+    // successors (minidom emits optional valueless fields this way).
+    const fields = result.form?.fields ?? [];
+    expect(fields.map((f) => f.name)).toEqual(["notify", "topic", "question"]);
+    expect(fields[0]?.values).toEqual([]);
+    expect(fields[1]?.values).toEqual([""]);
+    expect(fields[2]?.values).toEqual(["Lunch?"]);
+    // The boolean default then applies during form normalization.
+    const normalized = parseExtensionCommandForm(result.form);
+    expect(normalized.find((f) => f.name === "notify")?.values).toEqual(["0"]);
+  });
+
+  test("a self-closing x element parses as an empty form", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:generic" sessionid="s-1" status="executing">' +
+        '<x xmlns="jabber:x:data" type="form"/></command></iq>',
+    );
+
+    expect(result.form).toEqual({ type: "form", fields: [] });
+  });
+
   test("wire responses with completed status carry no implied actions", () => {
     const result = parseCommandIqResponse(
       '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" status="completed"/></iq>',
