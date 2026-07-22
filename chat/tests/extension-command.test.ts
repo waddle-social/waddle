@@ -701,6 +701,17 @@ describe("extension command invocation", () => {
     expect(result.actions).toEqual({ allowed: ["complete", "cancel"] });
   });
 
+  test("a self-closing actions element suppresses the implied complete", () => {
+    const result = parseCommandIqResponse(
+      '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" sessionid="s-1" status="executing">' +
+        '<actions/><x xmlns="jabber:x:data" type="form"><field var="prompt" type="text-single"><value/></field></x></command></iq>',
+    );
+
+    // <actions/> is the server saying "no forward actions": cancel only,
+    // matching the Rust parser (get_child sees the element as present).
+    expect(result.actions).toEqual({ allowed: ["cancel"] });
+  });
+
   test("wire responses with completed status carry no implied actions", () => {
     const result = parseCommandIqResponse(
       '<iq type="result"><command xmlns="http://jabber.org/protocol/commands" node="urn:waddle:extension:1:ai-chatbot" status="completed"/></iq>',

@@ -44,13 +44,18 @@ export function parseCommandIqResponse(xml: string): ExtensionCommandResult {
   const notes: ExtensionCommandNote[] = Array.from(commandBody.matchAll(/<note\b([^>]*)>([\s\S]*?)<\/note>/g))
     .map(([, attrs, value]) => ({ type: readXmlAttr(attrs, "type"), value: decodeXml(value).trim() }))
     .filter((note) => note.value.length > 0);
-  const actionsMatch = commandBody.match(/<actions\b([^>]*)>([\s\S]*?)<\/actions>/);
+  // A self-closing <actions/> counts as PRESENT (Rust-parser parity):
+  // it is the server saying "no forward actions", which must suppress
+  // the implied `complete` below, not trigger it.
+  const actionsMatch = commandBody.match(/<actions\b([^>]*)>([\s\S]*?)<\/actions>|<actions\b([^>]*)\/>/);
+  const actionsAttrs = actionsMatch?.[1] ?? actionsMatch?.[3] ?? "";
+  const actionsBody = actionsMatch?.[2] ?? "";
   const actions = actionsMatch ? {
-    execute: readXmlAttr(actionsMatch[1], "execute"),
-    next: actionsMatch[2].includes("<next") || undefined,
-    prev: actionsMatch[2].includes("<prev") || actionsMatch[2].includes("<previous") || undefined,
-    complete: actionsMatch[2].includes("<complete") || undefined,
-    cancel: actionsMatch[2].includes("<cancel") || undefined,
+    execute: readXmlAttr(actionsAttrs, "execute"),
+    next: actionsBody.includes("<next") || undefined,
+    prev: actionsBody.includes("<prev") || actionsBody.includes("<previous") || undefined,
+    complete: actionsBody.includes("<complete") || undefined,
+    cancel: actionsBody.includes("<cancel") || undefined,
   } : undefined;
   const formMatch = commandBody.match(/<x\b([^>]*)>([\s\S]*?)<\/x>/);
   const form = formMatch ? {

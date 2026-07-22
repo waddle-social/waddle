@@ -66,6 +66,19 @@ export function extensionCommandFormBlockedReason(fields: ExtensionCommandFormFi
   return `Extension command form contains a forbidden field: ${blocked.label}.`;
 }
 
+function hasRequiredExtensionCommandValue(field: ExtensionCommandFormField): boolean {
+  if (field.type === "fixed") return true;
+  if (field.type === "boolean") return field.value.trim().length > 0;
+  if (field.type === "list-multi" || field.type === "text-multi" || field.type === "jid-multi") {
+    return field.values.some((value) => value.trim().length > 0);
+  }
+  return field.value.trim().length > 0;
+}
+
+export function missingRequiredExtensionCommandFields(fields: ExtensionCommandFormField[]): ExtensionCommandFormField[] {
+  return visibleExtensionCommandFields(fields).filter((field) => field.required && !hasRequiredExtensionCommandValue(field));
+}
+
 function parseFieldOptions(options: unknown): ExtensionCommandFormOption[] {
   if (!Array.isArray(options)) return [];
   return options.flatMap((option) => {

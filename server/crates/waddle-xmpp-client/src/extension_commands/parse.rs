@@ -248,7 +248,7 @@ fn parse_form(x: &Element) -> ExtensionCommandForm {
 }
 
 fn parse_field(field: &Element) -> ExtensionFormFieldDescriptor {
-    let values = field
+    let mut values: Vec<String> = field
         .children()
         .filter(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
         .map(Element::text)
@@ -269,6 +269,12 @@ fn parse_field(field: &Element) -> ExtensionFormFieldDescriptor {
     let var = field.attr("var").unwrap_or_default().to_string();
     let field_type = ExtensionFieldType::parse(field.attr("type"));
     let blocked = is_forbidden_field(&var, field_type);
+    // Wasm-client parity: a valueless boolean defaults to "0" so a
+    // required consent-style boolean submits `false` without friction
+    // instead of tripping required-field gating.
+    if field_type == ExtensionFieldType::Boolean && values.is_empty() {
+        values.push("0".to_string());
+    }
     ExtensionFormFieldDescriptor {
         var,
         label: field.attr("label").map(str::to_string),

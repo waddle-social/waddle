@@ -420,6 +420,24 @@ fn result_parsing_extracts_status_session_notes_and_form() {
 }
 
 #[test]
+fn result_parsing_defaults_valueless_booleans_to_false() {
+    let iq = command_response(
+        "<command xmlns='http://jabber.org/protocol/commands' \
+         node='urn:waddle:extension:1:consent' sessionid='s-1' status='executing'>\
+         <x xmlns='jabber:x:data' type='form'>\
+         <field var='consent' type='boolean'><required/></field>\
+         </x>\
+         </command>",
+    );
+    let result = parse_extension_command_result(&iq).expect("parses");
+    let form = result.form.expect("form");
+    // Wasm-client parity: required booleans submit `false` untouched
+    // instead of tripping required-field gating.
+    assert_eq!(form.fields[0].values, vec!["0".to_string()]);
+    assert!(form.fields[0].required);
+}
+
+#[test]
 fn result_parsing_blocks_text_private_and_secret_named_fields() {
     let iq = command_response(
         "<command xmlns='http://jabber.org/protocol/commands' \

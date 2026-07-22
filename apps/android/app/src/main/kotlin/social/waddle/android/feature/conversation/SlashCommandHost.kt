@@ -28,6 +28,7 @@ object SlashCommandTestTags {
     const val POPOVER = "slash-command-popover"
     const val DISMISS = "slash-command-dismiss"
     const val BLOCKED_HINT = "slash-command-blocked-hint"
+    const val BLOCKED_HINT_DISMISS = "slash-command-blocked-hint-dismiss"
     const val FORM_SHEET = "slash-command-form-sheet"
     const val FORM_BLOCKED = "slash-command-form-blocked"
 

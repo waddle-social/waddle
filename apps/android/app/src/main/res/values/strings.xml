@@ -78,6 +78,7 @@
     </plurals>
     <string name="composer_send">Send</string>
     <string name="composer_slash_unknown">Unknown command %1$s</string>
+    <string name="composer_slash_send_as_text">Send as plain text</string>
     <string name="slash_commands_title">Commands</string>
     <string name="slash_commands_dismiss">Hide commands</string>
     <string name="extension_form_submit">Submit</string>

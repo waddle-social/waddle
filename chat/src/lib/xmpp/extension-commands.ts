@@ -1,6 +1,7 @@
 export { discoverExtensionCommands } from "./extension-commands/disco";
 export {
   extensionCommandFormBlockedReason,
+  missingRequiredExtensionCommandFields,
   parseExtensionCommandForm,
   visibleExtensionCommandFields,
 } from "./extension-commands/form-fields";

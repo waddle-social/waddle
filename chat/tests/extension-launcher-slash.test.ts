@@ -363,6 +363,52 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(stored?.values).toEqual(["tell me a joke"]);
   });
 
+  test("falls back to the palette when the executing form carries a forbidden field", async () => {
+    const events: string[] = [];
+    const { launcher, submitCalls } = createLauncher([
+      executingResult([field("prompt"), field("payload#api_key", { label: "API key" })]),
+    ], {
+      events,
+      roomJid: "pub@muc.example.com",
+      sendPublicChannelMessage: async (body) => {
+        events.push(`public:${body}`);
+      },
+    });
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "hello",
+    });
+
+    // Nothing reaches the wire (no submit, no public /ai prompt); the
+    // palette opens showing the blocked reason with submit disabled.
+    expect(ok).toBe(true);
+    expect(submitCalls).toEqual([]);
+    expect(events.filter((event) => event.startsWith("public:"))).toEqual([]);
+    expect(launcher.open.value).toBe(true);
+  });
+
+  test("falls back to the palette when a required field is still empty", async () => {
+    const { launcher, submitCalls } = createLauncher([
+      executingResult([field("prompt"), field("visibility", { required: true })]),
+    ]);
+
+    const ok = await launcher.dispatchSlashInvocation({
+      kind: "inline-submit",
+      command: aiCommand,
+      fieldName: "prompt",
+      value: "hello",
+    });
+
+    expect(ok).toBe(true);
+    expect(submitCalls).toEqual([]);
+    expect(launcher.open.value).toBe(true);
+    const stored = launcher.commandForms.value[aiCommand.node]?.fields.find((f) => f.name === "prompt");
+    expect(stored?.values).toEqual(["hello"]);
+  });
+
   test("does not submit when the server returns no executing form", async () => {
     const { launcher, submitCalls } = createLauncher([
       { status: "completed", notes: [] },

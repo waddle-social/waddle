@@ -211,15 +211,37 @@ fun MessageComposer(
                 )
             }
             slashBlockedPrefix?.let { blocked ->
-                Text(
-                    text = stringResource(R.string.composer_slash_unknown, blocked),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.error,
+                // Dismissing the hint is the mobile Esc: it disarms
+                // interception for this prefix so the next send posts
+                // the draft as plain text. Without it, a prefix that
+                // matches no command (no popover to dismiss) would be
+                // unsendable.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 4.dp)
+                        .padding(start = 16.dp, end = 4.dp, top = 4.dp)
                         .testTag(SlashCommandTestTags.BLOCKED_HINT),
-                )
+                ) {
+                    Text(
+                        text = stringResource(R.string.composer_slash_unknown, blocked),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(
+                        onClick = {
+                            dismissedSlashPrefix = blocked.removePrefix("/")
+                            slashBlockedPrefix = null
+                        },
+                        modifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT_DISMISS),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = stringResource(R.string.composer_slash_send_as_text),
+                        )
+                    }
+                }
             }
             if (mentionToken != null && mentionResults.isNotEmpty()) {
                 MentionPopover(

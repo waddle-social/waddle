@@ -64,9 +64,10 @@ fun resolveSlashCommand(
 /**
  * Whether the send button intercepts [trigger] as a slash command.
  * Web parity (`composerEnterAction`): a bare `/` (empty prefix) falls
- * through, and a prefix whose popover the user dismissed sends as
- * plain text — otherwise a deployment with no matching command would
- * make any `/word` draft unsendable.
+ * through, and a dismissed prefix (via the popover or the
+ * unknown-command hint's dismiss — the mobile Esc) sends as plain
+ * text — otherwise a deployment with no matching command would make
+ * any `/word` draft unsendable.
  */
 fun shouldInterceptSlashSend(trigger: SlashTrigger?, dismissedPrefix: String?): Boolean =
     trigger != null && trigger.prefix.isNotEmpty() && trigger.prefix != dismissedPrefix

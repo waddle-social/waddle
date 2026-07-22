@@ -2,7 +2,9 @@ import { computed, nextTick, ref, type Ref } from "vue";
 import type { ExtensionAnnotationAction } from "@/lib/chat-ui";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import {
+  extensionCommandFormBlockedReason,
   extensionCommandOutcome,
+  missingRequiredExtensionCommandFields,
   parseExtensionCommandForm,
   parseExtensionCommandLaunches,
   type DiscoveredExtensionCommand,
@@ -230,6 +232,23 @@ export function useExtensionLauncher(input: {
       generation: options.generation ?? commandGeneration,
       roomJid: options.roomJid ?? form.roomJid,
     };
+    // Hard gate (the palette also disables submit): a form carrying a
+    // forbidden field must never reach the wire with values, and
+    // required fields must be filled for any forward action. Runs
+    // BEFORE the AI public prompt so a refused submit posts nothing.
+    if (action !== "cancel" && action !== "prev") {
+      const blocked = extensionCommandFormBlockedReason(form.fields);
+      const gateDetail = blocked ??
+        (missingRequiredExtensionCommandFields(form.fields).length > 0
+          ? "Complete required fields to continue."
+          : undefined);
+      if (gateDetail) {
+        commandStates.value = { ...commandStates.value, [key]: { state: "error", detail: gateDetail } };
+        open.value = true;
+        void nextTick(input.focusPalette);
+        return false;
+      }
+    }
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
       if (!options.skipPublicPrompt) {
@@ -304,13 +323,20 @@ export function useExtensionLauncher(input: {
       }
 
       // inline-submit only stays inline if the server returned a single-stage
-      // form whose advertised XEP-0050 actions include `complete`. Otherwise
-      // fall back to the palette so the user can drive the multi-stage flow.
+      // form whose advertised XEP-0050 actions include `complete`, with no
+      // forbidden field and every required field filled. Otherwise fall back
+      // to the palette so the user can drive the multi-stage flow (and see
+      // the blocked reason / required gating with submit disabled).
       const allowed = form?.actions ?? [];
       if (form && allowed.includes("complete")) {
         updateField(key, invocation.fieldName, [invocation.value]);
         forceChannelOutputForSlashAi(command, context.roomJid);
-        return await submitForm(command, "complete", { roomJid: context.roomJid, generation: context.generation });
+        const fields = commandForms.value[key]?.fields ?? [];
+        const safeToSubmit = !extensionCommandFormBlockedReason(fields) &&
+          missingRequiredExtensionCommandFields(fields).length === 0;
+        if (safeToSubmit) {
+          return await submitForm(command, "complete", { roomJid: context.roomJid, generation: context.generation });
+        }
       }
 
       const outcome = extensionCommandOutcome(result);
