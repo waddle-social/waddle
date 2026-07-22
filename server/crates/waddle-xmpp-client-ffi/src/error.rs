@@ -21,6 +21,10 @@ pub enum WaddleError {
         condition: String,
         text: Option<String>,
     },
+    /// The server answered success but the payload did not match the
+    /// expected typed shape (server-side bug or schema drift).
+    #[error("malformed server response")]
+    MalformedResponse,
     /// The websocket transport failed or closed mid-request.
     #[error("transport failure")]
     Transport,

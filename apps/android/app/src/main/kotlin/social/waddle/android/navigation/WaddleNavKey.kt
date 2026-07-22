@@ -31,4 +31,12 @@ sealed interface WaddleNavKey : NavKey {
 
     @Serializable
     data object Settings : WaddleNavKey
+
+    /** XEP-0045 member management for one room. */
+    @Serializable
+    data class Members(val roomJid: String, val name: String) : WaddleNavKey
+
+    /** Community-admin users list (owner-gated settings entry). */
+    @Serializable
+    data object CommunityUsers : WaddleNavKey
 }

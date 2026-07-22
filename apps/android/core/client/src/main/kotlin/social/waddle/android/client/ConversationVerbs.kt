@@ -216,6 +216,18 @@ internal class ConversationVerbs(
     }
 
     /**
+     * XEP-0425: ask the room to moderate (remove) another user's
+     * message. Moderator/admin-gated server-side — a `forbidden`
+     * reply surfaces as [VerbResult.Rejected] plus an `Error` event.
+     * No optimistic tombstone: the room broadcasts the §4.3 retraction
+     * to every occupant (including this one) on success.
+     */
+    suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): VerbResult =
+        activeSession.verbCall { client ->
+            client.sendModeration(bareJid(roomJid), targetStanzaId, reason)
+        }
+
+    /**
      * `urn:waddle:pin:0` room pin/unpin. No optimistic pin-set write —
      * the room broadcasts a `<pin-event/>` that lands in the pin store
      * (and a forbidden reply for non-admins surfaces via `on_error`).

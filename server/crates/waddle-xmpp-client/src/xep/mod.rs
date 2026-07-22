@@ -11,6 +11,7 @@ pub mod fallback;
 pub mod reply;
 pub mod thread;
 pub mod threads;
+pub mod xep0045_owner;
 pub mod xep0050;
 pub mod xep0215;
 pub mod xep0292;

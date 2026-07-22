@@ -11,6 +11,7 @@ use url::Url;
 
 mod boundary_convert;
 mod calls;
+mod community_admin;
 mod convert;
 mod error;
 mod jid_parts;
@@ -18,6 +19,7 @@ mod messaging;
 mod messaging_verbs;
 mod notify_settings;
 mod push;
+mod room_admin;
 mod send_outcome;
 mod stanza;
 mod types;
@@ -27,14 +29,34 @@ mod calls_tests;
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]
+mod community_admin_tests;
+#[cfg(test)]
 mod messaging_verbs_tests;
 #[cfg(test)]
 mod notify_settings_tests;
+#[cfg(test)]
+mod room_admin_tests;
 
+pub use community_admin::{
+    WaddleAdminChannelAffiliationEntry, WaddleAdminChannelListEntry,
+    WaddleAdminChannelOccupantEntry, WaddleAdminChannelRef, WaddleAdminChannelsAffiliationsArgs,
+    WaddleAdminChannelsAffiliationsPage, WaddleAdminChannelsCreateArgs,
+    WaddleAdminChannelsKickResult, WaddleAdminChannelsListArgs, WaddleAdminChannelsListPage,
+    WaddleAdminChannelsOccupantsArgs, WaddleAdminChannelsOccupantsPage,
+    WaddleAdminChannelsSetAffiliationResult, WaddleAdminChannelsUpdateArgs, WaddleAdminSpaceEntry,
+    WaddleAdminSpaceMemberEntry, WaddleAdminSpaceRef, WaddleAdminSpacesCreateArgs,
+    WaddleAdminSpacesListArgs, WaddleAdminSpacesListPage, WaddleAdminSpacesMembersArgs,
+    WaddleAdminSpacesMembersPage, WaddleAdminSpacesSetRoleResult, WaddleAdminSpacesUpdateArgs,
+    WaddleAdminUserEntry, WaddleAdminUsersPage, WaddleSpaceRole,
+};
 pub use error::WaddleError;
 pub use notify_settings::{
     WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
     WaddleSetRoomNotificationModeOutcome,
+};
+pub use room_admin::{
+    WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
+    WaddleUserSearchEntry,
 };
 pub use types::*;
 

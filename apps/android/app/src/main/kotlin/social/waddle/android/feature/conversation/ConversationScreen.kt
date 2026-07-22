@@ -18,7 +18,11 @@ import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Search
+<<<<<<< HEAD
+import androidx.compose.material3.AlertDialog
+=======
 import androidx.compose.material.icons.outlined.Videocam
+>>>>>>> origin/main
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -30,6 +34,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -76,8 +81,13 @@ fun ConversationScreen(
     searchTarget: MessageSearchTarget? = null,
     /** Own bare JID for the self-mention row highlight (XEP-0372). */
     selfBareJid: String? = null,
+<<<<<<< HEAD
+    /** Extra host-specific top-bar actions (room members/settings). */
+    extraTopBarActions: @Composable () -> Unit = {},
+=======
     /** DM-only call entry points; `null` (channels, threads) hides them. */
     onStartCall: ((video: Boolean) -> Unit)? = null,
+>>>>>>> origin/main
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -89,6 +99,7 @@ fun ConversationScreen(
         ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(viewModel::sendAttachment) }
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
+    var moderateTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
@@ -138,6 +149,9 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+<<<<<<< HEAD
+                    extraTopBarActions()
+=======
                     if (onStartCall != null) {
                         IconButton(
                             onClick = { onStartCall(false) },
@@ -158,6 +172,7 @@ fun ConversationScreen(
                             )
                         }
                     }
+>>>>>>> origin/main
                     if (onOpenThread != null && state.threads.isNotEmpty()) {
                         IconButton(onClick = { threadsOverviewOpen = true }) {
                             Icon(
@@ -240,6 +255,7 @@ fun ConversationScreen(
             actionable = viewModel.actionTargetIdOf(item) != null,
             canPin = state.canPin,
             isPinned = item.identityIds.any { it in state.pinnedIds },
+            canModerate = state.canModerate,
             onDismiss = { sheetTarget = null },
             onReact = { emoji -> viewModel.toggleReaction(item, emoji) },
             onReply = { viewModel.startReply(item) },
@@ -252,6 +268,31 @@ fun ConversationScreen(
             onRetract = { viewModel.retract(item) },
             onCopy = { clipboard.setText(AnnotatedString(item.body)) },
             onSetPinned = { pinned -> viewModel.setPinned(item, pinned) },
+            onModerate = { moderateTarget = item },
+        )
+    }
+
+    moderateTarget?.let { item ->
+        AlertDialog(
+            onDismissRequest = { moderateTarget = null },
+            title = { Text(text = stringResource(R.string.moderate_confirm_title)) },
+            text = { Text(text = stringResource(R.string.moderate_confirm_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.moderate(item)
+                    moderateTarget = null
+                }) {
+                    Text(
+                        text = stringResource(R.string.action_moderate_message),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { moderateTarget = null }) {
+                    Text(text = stringResource(R.string.action_cancel))
+                }
+            },
         )
     }
 

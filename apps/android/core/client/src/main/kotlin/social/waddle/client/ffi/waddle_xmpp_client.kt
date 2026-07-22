@@ -703,6 +703,38 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_upload_service(
@@ -775,6 +807,22 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
     ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleeventlistener_on_event(
@@ -837,6 +885,38 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_sess
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_terminate_with_outcome(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_affiliations(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_create(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_delete(`ptr`: Long,`channelJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_kick(`ptr`: Long,`channelJid`: RustBuffer.ByValue,`occupantJid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_list(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_occupants(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_set_affiliation(`ptr`: Long,`channelJid`: RustBuffer.ByValue,`memberJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_update(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_create(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_delete(`ptr`: Long,`spaceJid`: RustBuffer.ByValue,`spaceNode`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_list(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_members(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_set_role(`ptr`: Long,`spaceJid`: RustBuffer.ByValue,`spaceNode`: RustBuffer.ByValue,`memberJid`: RustBuffer.ByValue,`role`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_update(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(`ptr`: Long,`prefix`: RustBuffer.ByValue,`pageSize`: RustBuffer.ByValue,`afterCursor`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_discover_topology(`ptr`: Long,
 ): Long
@@ -909,6 +989,22 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_n
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`appId`: RustBuffer.ByValue,`environment`: RustBuffer.ByValue,`credentials`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_room(`ptr`: Long,`localpart`: RustBuffer.ByValue,`nick`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_destroy_room(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_kick_occupant(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`nick`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_members(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(`ptr`: Long,`query`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
@@ -1087,6 +1183,54 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome() != 22694) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations() != 45635) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_create() != 38061) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_delete() != 34692) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_kick() != 20335) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_list() != 63463) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_occupants() != 52030) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_set_affiliation() != 26915) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_update() != 6117) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_create() != 38642) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_delete() != 64827) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_list() != 23143) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_members() != 9963) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_set_role() != 22959) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_spaces_update() != 34191) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_users_list() != 60110) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_is_community_owner() != 58991) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_discover_topology() != 33559) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1193,6 +1337,30 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room() != 54669) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_destroy_room() != 25776) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_config() != 2599) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_kick_occupant() != 31570) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_list_room_members() != 46363) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_users() != 32751) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room_affiliation() != 44903) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
@@ -1836,6 +2004,100 @@ public interface WaddleClientInterface {
      */
     suspend fun `sendCallSessionTerminateWithOutcome`(`peerFullJid`: kotlin.String, `sid`: kotlin.String, `reason`: WaddleJingleReason?): WaddleCallSessionTerminateOutcome
 
+    /**
+     * `urn:waddle:admin:channels:affiliations:0`.
+     */
+    suspend fun `adminChannelsAffiliations`(`args`: WaddleAdminChannelsAffiliationsArgs): WaddleAdminChannelsAffiliationsPage
+
+    /**
+     * `urn:waddle:admin:channels:create:0`.
+     */
+    suspend fun `adminChannelsCreate`(`args`: WaddleAdminChannelsCreateArgs): WaddleAdminChannelRef
+
+    /**
+     * `urn:waddle:admin:channels:delete:0` — destroys the MUC room.
+     * Calling this export is the confirmation (see
+     * [`Self::admin_spaces_delete`]).
+     */
+    suspend fun `adminChannelsDelete`(`channelJid`: kotlin.String)
+
+    /**
+     * `urn:waddle:admin:channels:kick:0` — operator kick by full
+     * occupant JID (server-side XEP-0045 §8.2 role→none).
+     */
+    suspend fun `adminChannelsKick`(`channelJid`: kotlin.String, `occupantJid`: kotlin.String, `reason`: kotlin.String?): WaddleAdminChannelsKickResult
+
+    /**
+     * `urn:waddle:admin:channels:list:0`.
+     */
+    suspend fun `adminChannelsList`(`args`: WaddleAdminChannelsListArgs): WaddleAdminChannelsListPage
+
+    /**
+     * `urn:waddle:admin:channels:occupants:0`.
+     */
+    suspend fun `adminChannelsOccupants`(`args`: WaddleAdminChannelsOccupantsArgs): WaddleAdminChannelsOccupantsPage
+
+    /**
+     * `urn:waddle:admin:channels:set-affiliation:0`.
+     */
+    suspend fun `adminChannelsSetAffiliation`(`channelJid`: kotlin.String, `memberJid`: kotlin.String, `affiliation`: WaddleMucAffiliation, `reason`: kotlin.String?): WaddleAdminChannelsSetAffiliationResult
+
+    /**
+     * `urn:waddle:admin:channels:update:0`.
+     */
+    suspend fun `adminChannelsUpdate`(`args`: WaddleAdminChannelsUpdateArgs): WaddleAdminChannelRef
+
+    /**
+     * `urn:waddle:admin:spaces:create:0`.
+     */
+    suspend fun `adminSpacesCreate`(`args`: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef
+
+    /**
+     * `urn:waddle:admin:spaces:delete:0` — cascade-destroys the
+     * space and its channels. Calling this export is the
+     * confirmation: the server-required `confirm="yes"` literal is
+     * supplied here, so UIs MUST show their own confirm dialog
+     * first.
+     */
+    suspend fun `adminSpacesDelete`(`spaceJid`: kotlin.String, `spaceNode`: kotlin.String?)
+
+    /**
+     * `urn:waddle:admin:spaces:list:0`.
+     */
+    suspend fun `adminSpacesList`(`args`: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage
+
+    /**
+     * `urn:waddle:admin:spaces:members:0`.
+     */
+    suspend fun `adminSpacesMembers`(`args`: WaddleAdminSpacesMembersArgs): WaddleAdminSpacesMembersPage
+
+    /**
+     * `urn:waddle:admin:spaces:set-role:0`.
+     */
+    suspend fun `adminSpacesSetRole`(`spaceJid`: kotlin.String, `spaceNode`: kotlin.String?, `memberJid`: kotlin.String, `role`: WaddleSpaceRole): WaddleAdminSpacesSetRoleResult
+
+    /**
+     * `urn:waddle:admin:spaces:update:0`.
+     */
+    suspend fun `adminSpacesUpdate`(`args`: WaddleAdminSpacesUpdateArgs): WaddleAdminSpaceRef
+
+    /**
+     * `urn:waddle:admin:users:list:0`: paginated user directory for
+     * the community owner. Non-owners receive a `forbidden` stanza
+     * error.
+     */
+    suspend fun `adminUsersList`(`prefix`: kotlin.String?, `pageSize`: kotlin.UInt?, `afterCursor`: kotlin.String?): WaddleAdminUsersPage
+
+    /**
+     * `true` iff the authenticated user is the community owner —
+     * i.e. the server accepts a `page_size=1` probe of the V1 users
+     * command. Any error (including `forbidden` and transport
+     * failures) resolves to `false`: the probe is best-effort
+     * gating for the admin UI entry point, never an authorization
+     * mechanism — the server re-checks every actual command.
+     */
+    suspend fun `isCommunityOwner`(): kotlin.Boolean
+
     suspend fun `discoverTopology`(): WaddleTopology
 
     suspend fun `discoverUploadService`(): kotlin.String?
@@ -2068,6 +2330,72 @@ public interface WaddleClientInterface {
      * per-device `disable_push_device` opt-out.
      */
     suspend fun `registerPushDevice`(`pushServiceJid`: kotlin.String, `appId`: kotlin.String, `environment`: WaddlePushEnvironment, `credentials`: WaddlePushDeviceCredentials): WaddleRegisterDeviceResult?
+
+    /**
+     * XEP-0045 §10.1 room creation: join `localpart@<muc service>`
+     * with `nick` (creating the room), then run the §10.1.3/§10.2
+     * reserved-room sequence — fetch the config form, merge the
+     * initial `patch`, submit — and leave again best-effort (web
+     * `createMucRoom` parity: the caller joins properly through the
+     * normal flow afterwards). Returns the bare room JID.
+     *
+     * If `localpart` collides with an existing room the creator does
+     * not own, the config fetch fails with a `forbidden` stanza
+     * error — surfaced verbatim so the UI can report the conflict.
+     */
+    suspend fun `createRoom`(`localpart`: kotlin.String, `nick`: kotlin.String, `patch`: WaddleRoomConfigPatch): kotlin.String
+
+    /**
+     * XEP-0045 §10.9: destroy the room. Owner-only server-side.
+     */
+    suspend fun `destroyRoom`(`roomJid`: kotlin.String, `reason`: kotlin.String?)
+
+    /**
+     * XEP-0045 §10.2: fetch the owner configuration form and project
+     * it into the typed [`WaddleRoomConfig`]. Owner-only; the
+     * service answers `forbidden` for everyone else.
+     */
+    suspend fun `fetchRoomConfig`(`roomJid`: kotlin.String): WaddleRoomConfig
+
+    /**
+     * XEP-0045 §8.2 kick: eject the occupant with nickname `nick` by
+     * setting `role='none'`. Distinct from a ban — the target's
+     * affiliation is untouched and they may rejoin.
+     */
+    suspend fun `kickOccupant`(`roomJid`: kotlin.String, `nick`: kotlin.String, `reason`: kotlin.String?)
+
+    /**
+     * XEP-0045 §9.5: retrieve the affiliation list for one tier.
+     * Callers query the four tiers (owner/admin/member/outcast)
+     * separately and tolerate per-tier `forbidden` /
+     * `service-unavailable` errors — web `MucAdmin.listRoomMembers`
+     * parity.
+     */
+    suspend fun `listRoomMembers`(`roomJid`: kotlin.String, `affiliation`: WaddleMucAffiliation): List<WaddleRoomMemberEntry>
+
+    /**
+     * XEP-0055 user search against the account domain's
+     * `jabber:iq:search` directory, matching on the `nick` column
+     * (wasm `search_users` parity). Backs the members add-member
+     * flow.
+     */
+    suspend fun `searchUsers`(`query`: kotlin.String): List<WaddleUserSearchEntry>
+
+    /**
+     * XEP-0045 §5.2 affiliation change addressed by bare JID:
+     * promote/demote (member/admin/owner), remove (`none`), or ban
+     * (§9.1 `outcast`). The service enforces the admin/owner
+     * privilege matrix and answers `forbidden`/`not-allowed`
+     * otherwise.
+     */
+    suspend fun `setRoomAffiliation`(`roomJid`: kotlin.String, `targetJid`: kotlin.String, `affiliation`: WaddleMucAffiliation, `reason`: kotlin.String?)
+
+    /**
+     * XEP-0045 §10.2 GET-merge-SET: apply `patch` on top of the
+     * service's current form and submit the merged result, so
+     * unedited settings round-trip verbatim.
+     */
+    suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch)
 
     companion object
 }
@@ -2594,6 +2922,405 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeWaddleCallSessionTerminateOutcome.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:affiliations:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsAffiliations`(`args`: WaddleAdminChannelsAffiliationsArgs) : WaddleAdminChannelsAffiliationsPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_affiliations(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminChannelsAffiliationsArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelsAffiliationsPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:create:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsCreate`(`args`: WaddleAdminChannelsCreateArgs) : WaddleAdminChannelRef {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_create(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminChannelsCreateArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelRef.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:delete:0` — destroys the MUC room.
+     * Calling this export is the confirmation (see
+     * [`Self::admin_spaces_delete`]).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsDelete`(`channelJid`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_delete(
+                uniffiHandle,
+                FfiConverterString.lower(`channelJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:kick:0` — operator kick by full
+     * occupant JID (server-side XEP-0045 §8.2 role→none).
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsKick`(`channelJid`: kotlin.String, `occupantJid`: kotlin.String, `reason`: kotlin.String?) : WaddleAdminChannelsKickResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_kick(
+                uniffiHandle,
+                FfiConverterString.lower(`channelJid`),FfiConverterString.lower(`occupantJid`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelsKickResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:list:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsList`(`args`: WaddleAdminChannelsListArgs) : WaddleAdminChannelsListPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_list(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminChannelsListArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelsListPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:occupants:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsOccupants`(`args`: WaddleAdminChannelsOccupantsArgs) : WaddleAdminChannelsOccupantsPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_occupants(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminChannelsOccupantsArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelsOccupantsPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:set-affiliation:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsSetAffiliation`(`channelJid`: kotlin.String, `memberJid`: kotlin.String, `affiliation`: WaddleMucAffiliation, `reason`: kotlin.String?) : WaddleAdminChannelsSetAffiliationResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_set_affiliation(
+                uniffiHandle,
+                FfiConverterString.lower(`channelJid`),FfiConverterString.lower(`memberJid`),FfiConverterTypeWaddleMucAffiliation.lower(`affiliation`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelsSetAffiliationResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:channels:update:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminChannelsUpdate`(`args`: WaddleAdminChannelsUpdateArgs) : WaddleAdminChannelRef {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_channels_update(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminChannelsUpdateArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminChannelRef.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:create:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesCreate`(`args`: WaddleAdminSpacesCreateArgs) : WaddleAdminSpaceRef {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_create(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminSpacesCreateArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminSpaceRef.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:delete:0` — cascade-destroys the
+     * space and its channels. Calling this export is the
+     * confirmation: the server-required `confirm="yes"` literal is
+     * supplied here, so UIs MUST show their own confirm dialog
+     * first.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesDelete`(`spaceJid`: kotlin.String, `spaceNode`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_delete(
+                uniffiHandle,
+                FfiConverterString.lower(`spaceJid`),FfiConverterOptionalString.lower(`spaceNode`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:list:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesList`(`args`: WaddleAdminSpacesListArgs) : WaddleAdminSpacesListPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_list(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminSpacesListArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminSpacesListPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:members:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesMembers`(`args`: WaddleAdminSpacesMembersArgs) : WaddleAdminSpacesMembersPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_members(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminSpacesMembersArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminSpacesMembersPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:set-role:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesSetRole`(`spaceJid`: kotlin.String, `spaceNode`: kotlin.String?, `memberJid`: kotlin.String, `role`: WaddleSpaceRole) : WaddleAdminSpacesSetRoleResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_set_role(
+                uniffiHandle,
+                FfiConverterString.lower(`spaceJid`),FfiConverterOptionalString.lower(`spaceNode`),FfiConverterString.lower(`memberJid`),FfiConverterTypeWaddleSpaceRole.lower(`role`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminSpacesSetRoleResult.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:spaces:update:0`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminSpacesUpdate`(`args`: WaddleAdminSpacesUpdateArgs) : WaddleAdminSpaceRef {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_spaces_update(
+                uniffiHandle,
+                FfiConverterTypeWaddleAdminSpacesUpdateArgs.lower(`args`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminSpaceRef.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:admin:users:list:0`: paginated user directory for
+     * the community owner. Non-owners receive a `forbidden` stanza
+     * error.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `adminUsersList`(`prefix`: kotlin.String?, `pageSize`: kotlin.UInt?, `afterCursor`: kotlin.String?) : WaddleAdminUsersPage {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_admin_users_list(
+                uniffiHandle,
+                FfiConverterOptionalString.lower(`prefix`),FfiConverterOptionalUInt.lower(`pageSize`),FfiConverterOptionalString.lower(`afterCursor`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleAdminUsersPage.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `true` iff the authenticated user is the community owner —
+     * i.e. the server accepts a `page_size=1` probe of the V1 users
+     * command. Any error (including `forbidden` and transport
+     * failures) resolves to `false`: the probe is best-effort
+     * gating for the admin UI entry point, never an authorization
+     * mechanism — the server re-checks every actual command.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `isCommunityOwner`() : kotlin.Boolean {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_is_community_owner(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_i8(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_i8(future) },
+        // lift function
+        { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -3490,6 +4217,228 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     }
 
 
+    /**
+     * XEP-0045 §10.1 room creation: join `localpart@<muc service>`
+     * with `nick` (creating the room), then run the §10.1.3/§10.2
+     * reserved-room sequence — fetch the config form, merge the
+     * initial `patch`, submit — and leave again best-effort (web
+     * `createMucRoom` parity: the caller joins properly through the
+     * normal flow afterwards). Returns the bare room JID.
+     *
+     * If `localpart` collides with an existing room the creator does
+     * not own, the config fetch fails with a `forbidden` stanza
+     * error — surfaced verbatim so the UI can report the conflict.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createRoom`(`localpart`: kotlin.String, `nick`: kotlin.String, `patch`: WaddleRoomConfigPatch) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_room(
+                uniffiHandle,
+                FfiConverterString.lower(`localpart`),FfiConverterString.lower(`nick`),FfiConverterTypeWaddleRoomConfigPatch.lower(`patch`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §10.9: destroy the room. Owner-only server-side.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `destroyRoom`(`roomJid`: kotlin.String, `reason`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_destroy_room(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §10.2: fetch the owner configuration form and project
+     * it into the typed [`WaddleRoomConfig`]. Owner-only; the
+     * service answers `forbidden` for everyone else.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchRoomConfig`(`roomJid`: kotlin.String) : WaddleRoomConfig {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_config(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleRoomConfig.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §8.2 kick: eject the occupant with nickname `nick` by
+     * setting `role='none'`. Distinct from a ban — the target's
+     * affiliation is untouched and they may rejoin.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `kickOccupant`(`roomJid`: kotlin.String, `nick`: kotlin.String, `reason`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_kick_occupant(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`nick`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §9.5: retrieve the affiliation list for one tier.
+     * Callers query the four tiers (owner/admin/member/outcast)
+     * separately and tolerate per-tier `forbidden` /
+     * `service-unavailable` errors — web `MucAdmin.listRoomMembers`
+     * parity.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listRoomMembers`(`roomJid`: kotlin.String, `affiliation`: WaddleMucAffiliation) : List<WaddleRoomMemberEntry> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_list_room_members(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterTypeWaddleMucAffiliation.lower(`affiliation`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleRoomMemberEntry.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0055 user search against the account domain's
+     * `jabber:iq:search` directory, matching on the `nick` column
+     * (wasm `search_users` parity). Backs the members add-member
+     * flow.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `searchUsers`(`query`: kotlin.String) : List<WaddleUserSearchEntry> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(
+                uniffiHandle,
+                FfiConverterString.lower(`query`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeWaddleUserSearchEntry.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §5.2 affiliation change addressed by bare JID:
+     * promote/demote (member/admin/owner), remove (`none`), or ban
+     * (§9.1 `outcast`). The service enforces the admin/owner
+     * privilege matrix and answers `forbidden`/`not-allowed`
+     * otherwise.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setRoomAffiliation`(`roomJid`: kotlin.String, `targetJid`: kotlin.String, `affiliation`: WaddleMucAffiliation, `reason`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`targetJid`),FfiConverterTypeWaddleMucAffiliation.lower(`affiliation`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * XEP-0045 §10.2 GET-merge-SET: apply `patch` on top of the
+     * service's current form and submit the merged result, so
+     * unedited settings round-trip verbatim.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterTypeWaddleRoomConfigPatch.lower(`patch`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
 
 
 
@@ -3524,6 +4473,1236 @@ public object FfiConverterTypeWaddleClient: FfiConverter<WaddleClient, Long> {
 
     override fun write(value: WaddleClient, buf: ByteBuffer) {
         buf.putLong(lower(value))
+    }
+}
+
+
+
+data class WaddleAdminChannelAffiliationEntry (
+    var `jid`: kotlin.String
+    ,
+    var `affiliation`: WaddleMucAffiliation
+    ,
+    var `reason`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelAffiliationEntry: FfiConverterRustBuffer<WaddleAdminChannelAffiliationEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelAffiliationEntry {
+        return WaddleAdminChannelAffiliationEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleMucAffiliation.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelAffiliationEntry) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterTypeWaddleMucAffiliation.allocationSize(value.`affiliation`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: WaddleAdminChannelAffiliationEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelListEntry (
+    var `channelJid`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `topic`: kotlin.String?
+    ,
+    /**
+     * `text` | `announcement` | `forum` | `group_dm` (open set).
+     */
+    var `channelType`: kotlin.String
+    ,
+    var `isPublic`: kotlin.Boolean
+    ,
+    var `membersOnly`: kotlin.Boolean
+    ,
+    var `occupantCount`: kotlin.UInt
+    ,
+    var `ownerCount`: kotlin.UInt
+    ,
+    var `adminCount`: kotlin.UInt
+    ,
+    var `memberCount`: kotlin.UInt
+    ,
+    var `outcastCount`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelListEntry: FfiConverterRustBuffer<WaddleAdminChannelListEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelListEntry {
+        return WaddleAdminChannelListEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelListEntry) = (
+            FfiConverterString.allocationSize(value.`channelJid`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`topic`) +
+            FfiConverterString.allocationSize(value.`channelType`) +
+            FfiConverterBoolean.allocationSize(value.`isPublic`) +
+            FfiConverterBoolean.allocationSize(value.`membersOnly`) +
+            FfiConverterUInt.allocationSize(value.`occupantCount`) +
+            FfiConverterUInt.allocationSize(value.`ownerCount`) +
+            FfiConverterUInt.allocationSize(value.`adminCount`) +
+            FfiConverterUInt.allocationSize(value.`memberCount`) +
+            FfiConverterUInt.allocationSize(value.`outcastCount`)
+    )
+
+    override fun write(value: WaddleAdminChannelListEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`channelJid`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`topic`, buf)
+            FfiConverterString.write(value.`channelType`, buf)
+            FfiConverterBoolean.write(value.`isPublic`, buf)
+            FfiConverterBoolean.write(value.`membersOnly`, buf)
+            FfiConverterUInt.write(value.`occupantCount`, buf)
+            FfiConverterUInt.write(value.`ownerCount`, buf)
+            FfiConverterUInt.write(value.`adminCount`, buf)
+            FfiConverterUInt.write(value.`memberCount`, buf)
+            FfiConverterUInt.write(value.`outcastCount`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelOccupantEntry (
+    var `nick`: kotlin.String
+    ,
+    var `realJid`: kotlin.String
+    ,
+    var `role`: WaddleMucRole
+    ,
+    var `affiliation`: WaddleMucAffiliation
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelOccupantEntry: FfiConverterRustBuffer<WaddleAdminChannelOccupantEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelOccupantEntry {
+        return WaddleAdminChannelOccupantEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleMucRole.read(buf),
+            FfiConverterTypeWaddleMucAffiliation.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelOccupantEntry) = (
+            FfiConverterString.allocationSize(value.`nick`) +
+            FfiConverterString.allocationSize(value.`realJid`) +
+            FfiConverterTypeWaddleMucRole.allocationSize(value.`role`) +
+            FfiConverterTypeWaddleMucAffiliation.allocationSize(value.`affiliation`)
+    )
+
+    override fun write(value: WaddleAdminChannelOccupantEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`nick`, buf)
+            FfiConverterString.write(value.`realJid`, buf)
+            FfiConverterTypeWaddleMucRole.write(value.`role`, buf)
+            FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelRef (
+    var `channelJid`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `topic`: kotlin.String?
+    ,
+    var `channelType`: kotlin.String
+    ,
+    var `isPublic`: kotlin.Boolean
+    ,
+    var `membersOnly`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelRef: FfiConverterRustBuffer<WaddleAdminChannelRef> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelRef {
+        return WaddleAdminChannelRef(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelRef) = (
+            FfiConverterString.allocationSize(value.`channelJid`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`topic`) +
+            FfiConverterString.allocationSize(value.`channelType`) +
+            FfiConverterBoolean.allocationSize(value.`isPublic`) +
+            FfiConverterBoolean.allocationSize(value.`membersOnly`)
+    )
+
+    override fun write(value: WaddleAdminChannelRef, buf: ByteBuffer) {
+            FfiConverterString.write(value.`channelJid`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`topic`, buf)
+            FfiConverterString.write(value.`channelType`, buf)
+            FfiConverterBoolean.write(value.`isPublic`, buf)
+            FfiConverterBoolean.write(value.`membersOnly`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsAffiliationsArgs (
+    var `channelJid`: kotlin.String
+    ,
+    /**
+     * Optional tier filter.
+     */
+    var `filter`: WaddleMucAffiliation?
+    ,
+    var `pageSize`: kotlin.UInt?
+    ,
+    var `afterCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsAffiliationsArgs: FfiConverterRustBuffer<WaddleAdminChannelsAffiliationsArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsAffiliationsArgs {
+        return WaddleAdminChannelsAffiliationsArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeWaddleMucAffiliation.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsAffiliationsArgs) = (
+            FfiConverterString.allocationSize(value.`channelJid`) +
+            FfiConverterOptionalTypeWaddleMucAffiliation.allocationSize(value.`filter`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pageSize`) +
+            FfiConverterOptionalString.allocationSize(value.`afterCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsAffiliationsArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`channelJid`, buf)
+            FfiConverterOptionalTypeWaddleMucAffiliation.write(value.`filter`, buf)
+            FfiConverterOptionalUInt.write(value.`pageSize`, buf)
+            FfiConverterOptionalString.write(value.`afterCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsAffiliationsPage (
+    var `entries`: List<WaddleAdminChannelAffiliationEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsAffiliationsPage: FfiConverterRustBuffer<WaddleAdminChannelsAffiliationsPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsAffiliationsPage {
+        return WaddleAdminChannelsAffiliationsPage(
+            FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsAffiliationsPage) = (
+            FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsAffiliationsPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsCreateArgs (
+    var `name`: kotlin.String
+    ,
+    var `topic`: kotlin.String?
+    ,
+    var `channelType`: kotlin.String?
+    ,
+    var `spaceJid`: kotlin.String?
+    ,
+    var `spaceNode`: kotlin.String?
+    ,
+    var `isPublic`: kotlin.Boolean?
+    ,
+    var `membersOnly`: kotlin.Boolean?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsCreateArgs: FfiConverterRustBuffer<WaddleAdminChannelsCreateArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsCreateArgs {
+        return WaddleAdminChannelsCreateArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsCreateArgs) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`topic`) +
+            FfiConverterOptionalString.allocationSize(value.`channelType`) +
+            FfiConverterOptionalString.allocationSize(value.`spaceJid`) +
+            FfiConverterOptionalString.allocationSize(value.`spaceNode`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`isPublic`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
+    )
+
+    override fun write(value: WaddleAdminChannelsCreateArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`topic`, buf)
+            FfiConverterOptionalString.write(value.`channelType`, buf)
+            FfiConverterOptionalString.write(value.`spaceJid`, buf)
+            FfiConverterOptionalString.write(value.`spaceNode`, buf)
+            FfiConverterOptionalBoolean.write(value.`isPublic`, buf)
+            FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsKickResult (
+    var `occupantJid`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsKickResult: FfiConverterRustBuffer<WaddleAdminChannelsKickResult> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsKickResult {
+        return WaddleAdminChannelsKickResult(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsKickResult) = (
+            FfiConverterString.allocationSize(value.`occupantJid`)
+    )
+
+    override fun write(value: WaddleAdminChannelsKickResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`occupantJid`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsListArgs (
+    var `spaceJid`: kotlin.String?
+    ,
+    var `spaceNode`: kotlin.String?
+    ,
+    var `prefix`: kotlin.String?
+    ,
+    var `pageSize`: kotlin.UInt?
+    ,
+    var `afterCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsListArgs: FfiConverterRustBuffer<WaddleAdminChannelsListArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsListArgs {
+        return WaddleAdminChannelsListArgs(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsListArgs) = (
+            FfiConverterOptionalString.allocationSize(value.`spaceJid`) +
+            FfiConverterOptionalString.allocationSize(value.`spaceNode`) +
+            FfiConverterOptionalString.allocationSize(value.`prefix`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pageSize`) +
+            FfiConverterOptionalString.allocationSize(value.`afterCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsListArgs, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`spaceJid`, buf)
+            FfiConverterOptionalString.write(value.`spaceNode`, buf)
+            FfiConverterOptionalString.write(value.`prefix`, buf)
+            FfiConverterOptionalUInt.write(value.`pageSize`, buf)
+            FfiConverterOptionalString.write(value.`afterCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsListPage (
+    var `entries`: List<WaddleAdminChannelListEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsListPage: FfiConverterRustBuffer<WaddleAdminChannelsListPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsListPage {
+        return WaddleAdminChannelsListPage(
+            FfiConverterSequenceTypeWaddleAdminChannelListEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsListPage) = (
+            FfiConverterSequenceTypeWaddleAdminChannelListEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsListPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminChannelListEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsOccupantsArgs (
+    var `channelJid`: kotlin.String
+    ,
+    var `pageSize`: kotlin.UInt?
+    ,
+    var `afterCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsOccupantsArgs: FfiConverterRustBuffer<WaddleAdminChannelsOccupantsArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsOccupantsArgs {
+        return WaddleAdminChannelsOccupantsArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsOccupantsArgs) = (
+            FfiConverterString.allocationSize(value.`channelJid`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pageSize`) +
+            FfiConverterOptionalString.allocationSize(value.`afterCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsOccupantsArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`channelJid`, buf)
+            FfiConverterOptionalUInt.write(value.`pageSize`, buf)
+            FfiConverterOptionalString.write(value.`afterCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsOccupantsPage (
+    var `entries`: List<WaddleAdminChannelOccupantEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsOccupantsPage: FfiConverterRustBuffer<WaddleAdminChannelsOccupantsPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsOccupantsPage {
+        return WaddleAdminChannelsOccupantsPage(
+            FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsOccupantsPage) = (
+            FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminChannelsOccupantsPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsSetAffiliationResult (
+    var `memberJid`: kotlin.String
+    ,
+    var `affiliation`: WaddleMucAffiliation
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsSetAffiliationResult: FfiConverterRustBuffer<WaddleAdminChannelsSetAffiliationResult> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsSetAffiliationResult {
+        return WaddleAdminChannelsSetAffiliationResult(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleMucAffiliation.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsSetAffiliationResult) = (
+            FfiConverterString.allocationSize(value.`memberJid`) +
+            FfiConverterTypeWaddleMucAffiliation.allocationSize(value.`affiliation`)
+    )
+
+    override fun write(value: WaddleAdminChannelsSetAffiliationResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`memberJid`, buf)
+            FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
+    }
+}
+
+
+
+data class WaddleAdminChannelsUpdateArgs (
+    var `channelJid`: kotlin.String
+    ,
+    var `name`: kotlin.String?
+    ,
+    var `topic`: kotlin.String?
+    ,
+    var `channelType`: kotlin.String?
+    ,
+    var `isPublic`: kotlin.Boolean?
+    ,
+    var `membersOnly`: kotlin.Boolean?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminChannelsUpdateArgs: FfiConverterRustBuffer<WaddleAdminChannelsUpdateArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminChannelsUpdateArgs {
+        return WaddleAdminChannelsUpdateArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminChannelsUpdateArgs) = (
+            FfiConverterString.allocationSize(value.`channelJid`) +
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`topic`) +
+            FfiConverterOptionalString.allocationSize(value.`channelType`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`isPublic`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
+    )
+
+    override fun write(value: WaddleAdminChannelsUpdateArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`channelJid`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`topic`, buf)
+            FfiConverterOptionalString.write(value.`channelType`, buf)
+            FfiConverterOptionalBoolean.write(value.`isPublic`, buf)
+            FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpaceEntry (
+    var `spaceJid`: kotlin.String
+    ,
+    var `spaceNode`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `iconUrl`: kotlin.String?
+    ,
+    var `channelCount`: kotlin.UInt
+    ,
+    var `memberCount`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpaceEntry: FfiConverterRustBuffer<WaddleAdminSpaceEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpaceEntry {
+        return WaddleAdminSpaceEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpaceEntry) = (
+            FfiConverterString.allocationSize(value.`spaceJid`) +
+            FfiConverterString.allocationSize(value.`spaceNode`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`iconUrl`) +
+            FfiConverterUInt.allocationSize(value.`channelCount`) +
+            FfiConverterUInt.allocationSize(value.`memberCount`)
+    )
+
+    override fun write(value: WaddleAdminSpaceEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`spaceJid`, buf)
+            FfiConverterString.write(value.`spaceNode`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`iconUrl`, buf)
+            FfiConverterUInt.write(value.`channelCount`, buf)
+            FfiConverterUInt.write(value.`memberCount`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpaceMemberEntry (
+    var `jid`: kotlin.String
+    ,
+    var `role`: WaddleSpaceRole
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpaceMemberEntry: FfiConverterRustBuffer<WaddleAdminSpaceMemberEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpaceMemberEntry {
+        return WaddleAdminSpaceMemberEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleSpaceRole.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpaceMemberEntry) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterTypeWaddleSpaceRole.allocationSize(value.`role`)
+    )
+
+    override fun write(value: WaddleAdminSpaceMemberEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterTypeWaddleSpaceRole.write(value.`role`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpaceRef (
+    var `spaceJid`: kotlin.String
+    ,
+    var `spaceNode`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `iconUrl`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpaceRef: FfiConverterRustBuffer<WaddleAdminSpaceRef> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpaceRef {
+        return WaddleAdminSpaceRef(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpaceRef) = (
+            FfiConverterString.allocationSize(value.`spaceJid`) +
+            FfiConverterString.allocationSize(value.`spaceNode`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`iconUrl`)
+    )
+
+    override fun write(value: WaddleAdminSpaceRef, buf: ByteBuffer) {
+            FfiConverterString.write(value.`spaceJid`, buf)
+            FfiConverterString.write(value.`spaceNode`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`iconUrl`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesCreateArgs (
+    var `name`: kotlin.String
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `iconUrl`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesCreateArgs: FfiConverterRustBuffer<WaddleAdminSpacesCreateArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesCreateArgs {
+        return WaddleAdminSpacesCreateArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesCreateArgs) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`iconUrl`)
+    )
+
+    override fun write(value: WaddleAdminSpacesCreateArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`iconUrl`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesListArgs (
+    var `prefix`: kotlin.String?
+    ,
+    var `pageSize`: kotlin.UInt?
+    ,
+    var `afterCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesListArgs: FfiConverterRustBuffer<WaddleAdminSpacesListArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesListArgs {
+        return WaddleAdminSpacesListArgs(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesListArgs) = (
+            FfiConverterOptionalString.allocationSize(value.`prefix`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pageSize`) +
+            FfiConverterOptionalString.allocationSize(value.`afterCursor`)
+    )
+
+    override fun write(value: WaddleAdminSpacesListArgs, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`prefix`, buf)
+            FfiConverterOptionalUInt.write(value.`pageSize`, buf)
+            FfiConverterOptionalString.write(value.`afterCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesListPage (
+    var `entries`: List<WaddleAdminSpaceEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesListPage: FfiConverterRustBuffer<WaddleAdminSpacesListPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesListPage {
+        return WaddleAdminSpacesListPage(
+            FfiConverterSequenceTypeWaddleAdminSpaceEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesListPage) = (
+            FfiConverterSequenceTypeWaddleAdminSpaceEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminSpacesListPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminSpaceEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesMembersArgs (
+    var `spaceJid`: kotlin.String
+    ,
+    var `spaceNode`: kotlin.String?
+    ,
+    var `pageSize`: kotlin.UInt?
+    ,
+    var `afterCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesMembersArgs: FfiConverterRustBuffer<WaddleAdminSpacesMembersArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesMembersArgs {
+        return WaddleAdminSpacesMembersArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesMembersArgs) = (
+            FfiConverterString.allocationSize(value.`spaceJid`) +
+            FfiConverterOptionalString.allocationSize(value.`spaceNode`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pageSize`) +
+            FfiConverterOptionalString.allocationSize(value.`afterCursor`)
+    )
+
+    override fun write(value: WaddleAdminSpacesMembersArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`spaceJid`, buf)
+            FfiConverterOptionalString.write(value.`spaceNode`, buf)
+            FfiConverterOptionalUInt.write(value.`pageSize`, buf)
+            FfiConverterOptionalString.write(value.`afterCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesMembersPage (
+    var `entries`: List<WaddleAdminSpaceMemberEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesMembersPage: FfiConverterRustBuffer<WaddleAdminSpacesMembersPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesMembersPage {
+        return WaddleAdminSpacesMembersPage(
+            FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesMembersPage) = (
+            FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminSpacesMembersPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesSetRoleResult (
+    var `memberJid`: kotlin.String
+    ,
+    var `role`: WaddleSpaceRole
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesSetRoleResult: FfiConverterRustBuffer<WaddleAdminSpacesSetRoleResult> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesSetRoleResult {
+        return WaddleAdminSpacesSetRoleResult(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleSpaceRole.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesSetRoleResult) = (
+            FfiConverterString.allocationSize(value.`memberJid`) +
+            FfiConverterTypeWaddleSpaceRole.allocationSize(value.`role`)
+    )
+
+    override fun write(value: WaddleAdminSpacesSetRoleResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`memberJid`, buf)
+            FfiConverterTypeWaddleSpaceRole.write(value.`role`, buf)
+    }
+}
+
+
+
+data class WaddleAdminSpacesUpdateArgs (
+    var `spaceJid`: kotlin.String
+    ,
+    var `spaceNode`: kotlin.String?
+    ,
+    var `name`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `iconUrl`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminSpacesUpdateArgs: FfiConverterRustBuffer<WaddleAdminSpacesUpdateArgs> {
+    override fun read(buf: ByteBuffer): WaddleAdminSpacesUpdateArgs {
+        return WaddleAdminSpacesUpdateArgs(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminSpacesUpdateArgs) = (
+            FfiConverterString.allocationSize(value.`spaceJid`) +
+            FfiConverterOptionalString.allocationSize(value.`spaceNode`) +
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`iconUrl`)
+    )
+
+    override fun write(value: WaddleAdminSpacesUpdateArgs, buf: ByteBuffer) {
+            FfiConverterString.write(value.`spaceJid`, buf)
+            FfiConverterOptionalString.write(value.`spaceNode`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`iconUrl`, buf)
+    }
+}
+
+
+
+/**
+ * V1 users-list row.
+ */
+data class WaddleAdminUserEntry (
+    var `jid`: kotlin.String
+    ,
+    var `displayName`: kotlin.String?
+    ,
+    /**
+     * Whether the user wears the community-owner hat (XEP-0317).
+     */
+    var `hasOwnerHat`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminUserEntry: FfiConverterRustBuffer<WaddleAdminUserEntry> {
+    override fun read(buf: ByteBuffer): WaddleAdminUserEntry {
+        return WaddleAdminUserEntry(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminUserEntry) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterOptionalString.allocationSize(value.`displayName`) +
+            FfiConverterBoolean.allocationSize(value.`hasOwnerHat`)
+    )
+
+    override fun write(value: WaddleAdminUserEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterOptionalString.write(value.`displayName`, buf)
+            FfiConverterBoolean.write(value.`hasOwnerHat`, buf)
+    }
+}
+
+
+
+data class WaddleAdminUsersPage (
+    var `entries`: List<WaddleAdminUserEntry>
+    ,
+    var `nextCursor`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAdminUsersPage: FfiConverterRustBuffer<WaddleAdminUsersPage> {
+    override fun read(buf: ByteBuffer): WaddleAdminUsersPage {
+        return WaddleAdminUsersPage(
+            FfiConverterSequenceTypeWaddleAdminUserEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAdminUsersPage) = (
+            FfiConverterSequenceTypeWaddleAdminUserEntry.allocationSize(value.`entries`) +
+            FfiConverterOptionalString.allocationSize(value.`nextCursor`)
+    )
+
+    override fun write(value: WaddleAdminUsersPage, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleAdminUserEntry.write(value.`entries`, buf)
+            FfiConverterOptionalString.write(value.`nextCursor`, buf)
     }
 }
 
@@ -6068,6 +8247,193 @@ public object FfiConverterTypeWaddleReplyTarget: FfiConverterRustBuffer<WaddleRe
 
 
 /**
+ * Current owner-visible room configuration, projected from the
+ * XEP-0045 §10.2 config form. Every field is optional: `None` means
+ * the service did not offer that field (or reported no value), so
+ * UIs can distinguish "unset" from an explicit `false`/empty.
+ */
+data class WaddleRoomConfig (
+    var `name`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `membersOnly`: kotlin.Boolean?
+    ,
+    var `publicRoom`: kotlin.Boolean?
+    ,
+    var `moderated`: kotlin.Boolean?
+    ,
+    /**
+     * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+     * registrar-prefix debt carried for parity).
+     */
+    var `forum`: kotlin.Boolean?
+    ,
+    var `pinPermission`: WaddlePinPermission?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRoomConfig: FfiConverterRustBuffer<WaddleRoomConfig> {
+    override fun read(buf: ByteBuffer): WaddleRoomConfig {
+        return WaddleRoomConfig(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalTypeWaddlePinPermission.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRoomConfig) = (
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`publicRoom`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`moderated`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`forum`) +
+            FfiConverterOptionalTypeWaddlePinPermission.allocationSize(value.`pinPermission`)
+    )
+
+    override fun write(value: WaddleRoomConfig, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
+            FfiConverterOptionalBoolean.write(value.`publicRoom`, buf)
+            FfiConverterOptionalBoolean.write(value.`moderated`, buf)
+            FfiConverterOptionalBoolean.write(value.`forum`, buf)
+            FfiConverterOptionalTypeWaddlePinPermission.write(value.`pinPermission`, buf)
+    }
+}
+
+
+
+/**
+ * Owner edit patch for [`WaddleClient::submit_room_config`]. `None`
+ * keeps the value the service currently reports (§10.2 GET-merge-SET
+ * round-trips unedited fields verbatim). `description: Some("")`
+ * clears the description.
+ */
+data class WaddleRoomConfigPatch (
+    var `name`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `forum`: kotlin.Boolean?
+    ,
+    var `pinPermission`: WaddlePinPermission?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRoomConfigPatch: FfiConverterRustBuffer<WaddleRoomConfigPatch> {
+    override fun read(buf: ByteBuffer): WaddleRoomConfigPatch {
+        return WaddleRoomConfigPatch(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalTypeWaddlePinPermission.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRoomConfigPatch) = (
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`forum`) +
+            FfiConverterOptionalTypeWaddlePinPermission.allocationSize(value.`pinPermission`)
+    )
+
+    override fun write(value: WaddleRoomConfigPatch, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalBoolean.write(value.`forum`, buf)
+            FfiConverterOptionalTypeWaddlePinPermission.write(value.`pinPermission`, buf)
+    }
+}
+
+
+
+/**
+ * One entry of a XEP-0045 §9.5 affiliation list.
+ */
+data class WaddleRoomMemberEntry (
+    /**
+     * Bare JID of the affiliated user.
+     */
+    var `jid`: kotlin.String
+    ,
+    var `affiliation`: WaddleMucAffiliation
+    ,
+    /**
+     * Reserved room nickname, when the service reports one.
+     */
+    var `nick`: kotlin.String?
+    ,
+    /**
+     * Reason recorded with the affiliation change (e.g. ban reason).
+     */
+    var `reason`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<WaddleRoomMemberEntry> {
+    override fun read(buf: ByteBuffer): WaddleRoomMemberEntry {
+        return WaddleRoomMemberEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypeWaddleMucAffiliation.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleRoomMemberEntry) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterTypeWaddleMucAffiliation.allocationSize(value.`affiliation`) +
+            FfiConverterOptionalString.allocationSize(value.`nick`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: WaddleRoomMemberEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterTypeWaddleMucAffiliation.write(value.`affiliation`, buf)
+            FfiConverterOptionalString.write(value.`nick`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+/**
  * Options bag attached to an outbound chat or groupchat send.
  */
 data class WaddleSendOptions (
@@ -6576,6 +8942,55 @@ public object FfiConverterTypeWaddleUploadSlot: FfiConverterRustBuffer<WaddleUpl
             FfiConverterString.write(value.`putUrl`, buf)
             FfiConverterString.write(value.`getUrl`, buf)
             FfiConverterSequenceTypeWaddleUploadHeader.write(value.`putHeaders`, buf)
+    }
+}
+
+
+
+/**
+ * XEP-0055 user directory search hit (`jabber:iq:search`).
+ */
+data class WaddleUserSearchEntry (
+    var `jid`: kotlin.String
+    ,
+    /**
+     * The `<nick/>` column — Waddle usernames.
+     */
+    var `username`: kotlin.String
+    ,
+    var `displayName`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleUserSearchEntry: FfiConverterRustBuffer<WaddleUserSearchEntry> {
+    override fun read(buf: ByteBuffer): WaddleUserSearchEntry {
+        return WaddleUserSearchEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleUserSearchEntry) = (
+            FfiConverterString.allocationSize(value.`jid`) +
+            FfiConverterString.allocationSize(value.`username`) +
+            FfiConverterOptionalString.allocationSize(value.`displayName`)
+    )
+
+    override fun write(value: WaddleUserSearchEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`jid`, buf)
+            FfiConverterString.write(value.`username`, buf)
+            FfiConverterOptionalString.write(value.`displayName`, buf)
     }
 }
 
@@ -7384,6 +9799,16 @@ sealed class WaddleException: kotlin.Exception() {
     }
 
     /**
+     * The server answered success but the payload did not match the
+     * expected typed shape (server-side bug or schema drift).
+     */
+    class MalformedResponse(
+        ) : WaddleException() {
+        override val message
+            get() = ""
+    }
+
+    /**
      * The websocket transport failed or closed mid-request.
      */
     class Transport(
@@ -7437,9 +9862,10 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            4 -> WaddleException.Transport()
-            5 -> WaddleException.Timeout()
-            6 -> WaddleException.UntrustedReply()
+            4 -> WaddleException.MalformedResponse()
+            5 -> WaddleException.Transport()
+            6 -> WaddleException.Timeout()
+            7 -> WaddleException.UntrustedReply()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -7459,6 +9885,10 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 4UL
                 + FfiConverterString.allocationSize(value.`condition`)
                 + FfiConverterOptionalString.allocationSize(value.`text`)
+            )
+            is WaddleException.MalformedResponse -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
             )
             is WaddleException.Transport -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
@@ -7491,16 +9921,20 @@ public object FfiConverterTypeWaddleError : FfiConverterRustBuffer<WaddleExcepti
                 FfiConverterOptionalString.write(value.`text`, buf)
                 Unit
             }
-            is WaddleException.Transport -> {
+            is WaddleException.MalformedResponse -> {
                 buf.putInt(4)
                 Unit
             }
-            is WaddleException.Timeout -> {
+            is WaddleException.Transport -> {
                 buf.putInt(5)
                 Unit
             }
-            is WaddleException.UntrustedReply -> {
+            is WaddleException.Timeout -> {
                 buf.putInt(6)
+                Unit
+            }
+            is WaddleException.UntrustedReply -> {
+                buf.putInt(7)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -7876,6 +10310,43 @@ public object FfiConverterTypeWaddlePinAction: FfiConverterRustBuffer<WaddlePinA
     override fun allocationSize(value: WaddlePinAction) = 4UL
 
     override fun write(value: WaddlePinAction, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * `urn:waddle:roomconfig:pinpermission` policy values.
+ */
+
+enum class WaddlePinPermission {
+
+    ADMINS_ONLY,
+    ANYONE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddlePinPermission: FfiConverterRustBuffer<WaddlePinPermission> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddlePinPermission.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddlePinPermission) = 4UL
+
+    override fun write(value: WaddlePinPermission, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -8571,6 +11042,45 @@ public object FfiConverterTypeWaddleSetRoomNotificationModeOutcome : FfiConverte
 
 
 /**
+ * Space pubsub roster role (`urn:waddle:admin:spaces:*`).
+ */
+
+enum class WaddleSpaceRole {
+
+    OWNER,
+    ADMIN,
+    MEMBER,
+    NONE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleSpaceRole: FfiConverterRustBuffer<WaddleSpaceRole> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleSpaceRole.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleSpaceRole) = 4UL
+
+    override fun write(value: WaddleSpaceRole, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * RFC 6120 §8.3.2 stanza-error `type` attribute. Mirrors the client
  * crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
  * value so consumers can distinguish it from every defined type.
@@ -8763,6 +11273,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
         }
     }
 }
@@ -9669,6 +12211,38 @@ public object FfiConverterOptionalTypeWaddleNotifyMode: FfiConverterRustBuffer<W
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddlePinPermission: FfiConverterRustBuffer<WaddlePinPermission?> {
+    override fun read(buf: ByteBuffer): WaddlePinPermission? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddlePinPermission.read(buf)
+    }
+
+    override fun allocationSize(value: WaddlePinPermission?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddlePinPermission.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddlePinPermission?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddlePinPermission.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleStanzaErrorType: FfiConverterRustBuffer<WaddleStanzaErrorType?> {
     override fun read(buf: ByteBuffer): WaddleStanzaErrorType? {
         if (buf.get().toInt() == 0) {
@@ -9779,6 +12353,174 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminChannelAffiliationEntry: FfiConverterRustBuffer<List<WaddleAdminChannelAffiliationEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminChannelAffiliationEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminChannelAffiliationEntry>(len) {
+            FfiConverterTypeWaddleAdminChannelAffiliationEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminChannelAffiliationEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminChannelAffiliationEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminChannelAffiliationEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminChannelAffiliationEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminChannelListEntry: FfiConverterRustBuffer<List<WaddleAdminChannelListEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminChannelListEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminChannelListEntry>(len) {
+            FfiConverterTypeWaddleAdminChannelListEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminChannelListEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminChannelListEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminChannelListEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminChannelListEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminChannelOccupantEntry: FfiConverterRustBuffer<List<WaddleAdminChannelOccupantEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminChannelOccupantEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminChannelOccupantEntry>(len) {
+            FfiConverterTypeWaddleAdminChannelOccupantEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminChannelOccupantEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminChannelOccupantEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminChannelOccupantEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminChannelOccupantEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminSpaceEntry: FfiConverterRustBuffer<List<WaddleAdminSpaceEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminSpaceEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminSpaceEntry>(len) {
+            FfiConverterTypeWaddleAdminSpaceEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminSpaceEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminSpaceEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminSpaceEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminSpaceEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminSpaceMemberEntry: FfiConverterRustBuffer<List<WaddleAdminSpaceMemberEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminSpaceMemberEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminSpaceMemberEntry>(len) {
+            FfiConverterTypeWaddleAdminSpaceMemberEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminSpaceMemberEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminSpaceMemberEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminSpaceMemberEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminSpaceMemberEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleAdminUserEntry: FfiConverterRustBuffer<List<WaddleAdminUserEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleAdminUserEntry> {
+        val len = buf.getInt()
+        return List<WaddleAdminUserEntry>(len) {
+            FfiConverterTypeWaddleAdminUserEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleAdminUserEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleAdminUserEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleAdminUserEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleAdminUserEntry.write(it, buf)
         }
     }
 }
@@ -10125,6 +12867,34 @@ public object FfiConverterSequenceTypeWaddleReference: FfiConverterRustBuffer<Li
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeWaddleRoomMemberEntry: FfiConverterRustBuffer<List<WaddleRoomMemberEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleRoomMemberEntry> {
+        val len = buf.getInt()
+        return List<WaddleRoomMemberEntry>(len) {
+            FfiConverterTypeWaddleRoomMemberEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleRoomMemberEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleRoomMemberEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleRoomMemberEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleRoomMemberEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeWaddleSharedFile: FfiConverterRustBuffer<List<WaddleSharedFile>> {
     override fun read(buf: ByteBuffer): List<WaddleSharedFile> {
         val len = buf.getInt()
@@ -10227,6 +12997,34 @@ public object FfiConverterSequenceTypeWaddleUploadHeader: FfiConverterRustBuffer
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleUploadHeader.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleUserSearchEntry: FfiConverterRustBuffer<List<WaddleUserSearchEntry>> {
+    override fun read(buf: ByteBuffer): List<WaddleUserSearchEntry> {
+        val len = buf.getInt()
+        return List<WaddleUserSearchEntry>(len) {
+            FfiConverterTypeWaddleUserSearchEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleUserSearchEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleUserSearchEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleUserSearchEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleUserSearchEntry.write(it, buf)
         }
     }
 }

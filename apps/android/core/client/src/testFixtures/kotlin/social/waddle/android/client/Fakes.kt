@@ -10,6 +10,25 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.client.ffi.WaddleAdminChannelRef
+import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsArgs
+import social.waddle.client.ffi.WaddleAdminChannelsAffiliationsPage
+import social.waddle.client.ffi.WaddleAdminChannelsCreateArgs
+import social.waddle.client.ffi.WaddleAdminChannelsKickResult
+import social.waddle.client.ffi.WaddleAdminChannelsListArgs
+import social.waddle.client.ffi.WaddleAdminChannelsListPage
+import social.waddle.client.ffi.WaddleAdminChannelsOccupantsArgs
+import social.waddle.client.ffi.WaddleAdminChannelsSetAffiliationResult
+import social.waddle.client.ffi.WaddleAdminChannelsUpdateArgs
+import social.waddle.client.ffi.WaddleAdminSpaceRef
+import social.waddle.client.ffi.WaddleAdminSpacesCreateArgs
+import social.waddle.client.ffi.WaddleAdminSpacesListArgs
+import social.waddle.client.ffi.WaddleAdminSpacesListPage
+import social.waddle.client.ffi.WaddleAdminSpacesMembersArgs
+import social.waddle.client.ffi.WaddleAdminSpacesMembersPage
+import social.waddle.client.ffi.WaddleAdminSpacesSetRoleResult
+import social.waddle.client.ffi.WaddleAdminSpacesUpdateArgs
+import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleBookmarkItem
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
@@ -23,17 +42,23 @@ import social.waddle.client.ffi.WaddleExternalService
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
+import social.waddle.client.ffi.WaddleRoomConfig
+import social.waddle.client.ffi.WaddleRoomConfigPatch
+import social.waddle.client.ffi.WaddleRoomMemberEntry
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
+import social.waddle.client.ffi.WaddleSpaceRole
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleUploadSlot
+import social.waddle.client.ffi.WaddleUserSearchEntry
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -479,7 +504,200 @@ class FakeWaddleClient : WaddleClientInterface {
         return retractionResult
     }
 
-    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean = unused()
+    /** Recorded (roomJid, targetStanzaId, reason) XEP-0425 moderations. */
+    val moderationCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var moderationResult = true
+
+    override suspend fun sendModeration(roomJid: String, targetStanzaId: String, reason: String?): Boolean {
+        moderationCalls += Triple(roomJid, targetStanzaId, reason)
+        return moderationResult
+    }
+
+    /**
+     * Canned §9.5 member lists per affiliation tier; a tier mapped to
+     * `null` (or [memberListFailure] set) throws, mirroring per-tier
+     * `forbidden` responses.
+     */
+    @Volatile
+    var roomMembersByTier: Map<WaddleMucAffiliation, List<WaddleRoomMemberEntry>> = emptyMap()
+
+    @Volatile
+    var memberListFailure: Throwable? = null
+
+    /** Recorded (roomJid, affiliation) member-list queries. */
+    val listMembersCalls = CopyOnWriteArrayList<Pair<String, WaddleMucAffiliation>>()
+
+    override suspend fun listRoomMembers(
+        roomJid: String,
+        affiliation: WaddleMucAffiliation,
+    ): List<WaddleRoomMemberEntry> {
+        listMembersCalls += roomJid to affiliation
+        memberListFailure?.let { throw it }
+        return roomMembersByTier[affiliation] ?: emptyList()
+    }
+
+    /** Recorded (roomJid, targetJid, affiliation, reason) affiliation sets. */
+    val setAffiliationCalls = CopyOnWriteArrayList<List<Any?>>()
+
+    @Volatile
+    var setAffiliationFailure: Throwable? = null
+
+    override suspend fun setRoomAffiliation(
+        roomJid: String,
+        targetJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ) {
+        setAffiliationCalls += listOf(roomJid, targetJid, affiliation, reason)
+        setAffiliationFailure?.let { throw it }
+    }
+
+    /** Recorded (roomJid, nick, reason) §8.2 kicks. */
+    val kickCalls = CopyOnWriteArrayList<Triple<String, String, String?>>()
+
+    @Volatile
+    var kickFailure: Throwable? = null
+
+    override suspend fun kickOccupant(roomJid: String, nick: String, reason: String?) {
+        kickCalls += Triple(roomJid, nick, reason)
+        kickFailure?.let { throw it }
+    }
+
+    /** Canned §10.2 owner config served by [fetchRoomConfig]. */
+    @Volatile
+    var roomConfig: WaddleRoomConfig = WaddleRoomConfig(
+        name = null,
+        description = null,
+        membersOnly = null,
+        publicRoom = null,
+        moderated = null,
+        forum = null,
+        pinPermission = null,
+    )
+
+    @Volatile
+    var fetchRoomConfigFailure: Throwable? = null
+
+    override suspend fun fetchRoomConfig(roomJid: String): WaddleRoomConfig {
+        fetchRoomConfigFailure?.let { throw it }
+        return roomConfig
+    }
+
+    /** Recorded (roomJid, patch) §10.2 config submits. */
+    val submitConfigCalls = CopyOnWriteArrayList<Pair<String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var submitConfigFailure: Throwable? = null
+
+    override suspend fun submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) {
+        submitConfigCalls += roomJid to patch
+        submitConfigFailure?.let { throw it }
+    }
+
+    /** Recorded (localpart, nick, patch) §10.1 creations. */
+    val createRoomCalls = CopyOnWriteArrayList<Triple<String, String, WaddleRoomConfigPatch>>()
+
+    @Volatile
+    var createRoomFailure: Throwable? = null
+
+    /** Domain the fake muc service appends to created localparts. */
+    @Volatile
+    var createRoomDomain: String = "muc.waddle.test"
+
+    override suspend fun createRoom(localpart: String, nick: String, patch: WaddleRoomConfigPatch): String {
+        createRoomCalls += Triple(localpart, nick, patch)
+        createRoomFailure?.let { throw it }
+        return "$localpart@$createRoomDomain"
+    }
+
+    /** Recorded (roomJid, reason) §10.9 destroys. */
+    val destroyRoomCalls = CopyOnWriteArrayList<Pair<String, String?>>()
+
+    @Volatile
+    var destroyRoomFailure: Throwable? = null
+
+    override suspend fun destroyRoom(roomJid: String, reason: String?) {
+        destroyRoomCalls += roomJid to reason
+        destroyRoomFailure?.let { throw it }
+    }
+
+    /** Canned XEP-0055 hits; recorded queries. */
+    @Volatile
+    var userSearchResults: List<WaddleUserSearchEntry> = emptyList()
+    val searchUsersCalls = CopyOnWriteArrayList<String>()
+
+    override suspend fun searchUsers(query: String): List<WaddleUserSearchEntry> {
+        searchUsersCalls += query
+        return userSearchResults
+    }
+
+    /** Canned owner-probe answer + V1 users page. */
+    @Volatile
+    var communityOwner = false
+
+    @Volatile
+    var adminUsersPage: WaddleAdminUsersPage = WaddleAdminUsersPage(entries = emptyList(), nextCursor = null)
+
+    /** Recorded (prefix, pageSize, afterCursor) users-list queries. */
+    val adminUsersListCalls = CopyOnWriteArrayList<Triple<String?, UInt?, String?>>()
+
+    override suspend fun isCommunityOwner(): Boolean = communityOwner
+
+    override suspend fun adminUsersList(
+        prefix: String?,
+        pageSize: UInt?,
+        afterCursor: String?,
+    ): WaddleAdminUsersPage {
+        adminUsersListCalls += Triple(prefix, pageSize, afterCursor)
+        return adminUsersPage
+    }
+
+    override suspend fun adminSpacesList(args: WaddleAdminSpacesListArgs): WaddleAdminSpacesListPage = unused()
+    override suspend fun adminSpacesCreate(args: WaddleAdminSpacesCreateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesUpdate(args: WaddleAdminSpacesUpdateArgs): WaddleAdminSpaceRef = unused()
+    override suspend fun adminSpacesDelete(spaceJid: String, spaceNode: String?) = unused()
+    override suspend fun adminSpacesMembers(args: WaddleAdminSpacesMembersArgs): WaddleAdminSpacesMembersPage =
+        unused()
+
+    override suspend fun adminSpacesSetRole(
+        spaceJid: String,
+        spaceNode: String?,
+        memberJid: String,
+        role: WaddleSpaceRole,
+    ): WaddleAdminSpacesSetRoleResult = unused()
+
+    override suspend fun adminChannelsList(args: WaddleAdminChannelsListArgs): WaddleAdminChannelsListPage =
+        unused()
+
+    override suspend fun adminChannelsCreate(args: WaddleAdminChannelsCreateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsUpdate(args: WaddleAdminChannelsUpdateArgs): WaddleAdminChannelRef =
+        unused()
+
+    override suspend fun adminChannelsDelete(channelJid: String) = unused()
+    override suspend fun adminChannelsOccupants(
+        args: WaddleAdminChannelsOccupantsArgs,
+    ): social.waddle.client.ffi.WaddleAdminChannelsOccupantsPage = unused()
+
+    override suspend fun adminChannelsAffiliations(
+        args: WaddleAdminChannelsAffiliationsArgs,
+    ): WaddleAdminChannelsAffiliationsPage = unused()
+
+    override suspend fun adminChannelsSetAffiliation(
+        channelJid: String,
+        memberJid: String,
+        affiliation: WaddleMucAffiliation,
+        reason: String?,
+    ): WaddleAdminChannelsSetAffiliationResult = unused()
+
+    override suspend fun adminChannelsKick(
+        channelJid: String,
+        occupantJid: String,
+        reason: String?,
+    ): WaddleAdminChannelsKickResult = unused()
 
     /** Recorded (conversation, state, isMuc) typing notifications. */
     val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, Boolean>>()

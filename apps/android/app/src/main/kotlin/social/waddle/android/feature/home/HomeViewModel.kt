@@ -3,14 +3,19 @@ package social.waddle.android.feature.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.ConnectionState
+import social.waddle.android.client.CreateRoomResult
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.store.NotifySettingsEntry
 import social.waddle.android.jid.bareJidOf
@@ -69,6 +74,53 @@ class HomeViewModel(
      */
     fun openChannel(roomJid: String) {
         viewModelScope.launch { sessionManager.joinRoom(roomJid, nick) }
+    }
+
+    private val _canCreateChannel = MutableStateFlow(false)
+
+    /**
+     * Web `canManageChannels` (owner-only) reduced to the best-effort
+     * community-owner probe: Android has no topology roles yet, so a
+     * space-owner-but-not-community-owner sees no create affordance
+     * (documented parity gap). UI gating only — room creation is
+     * re-authorized server-side.
+     */
+    val canCreateChannel: StateFlow<Boolean> = _canCreateChannel.asStateFlow()
+
+    private val _createEvents = MutableSharedFlow<CreateRoomResult>(extraBufferCapacity = 4)
+
+    /** Outcome of the last create-channel submit. */
+    val createEvents: SharedFlow<CreateRoomResult> = _createEvents
+
+    init {
+        viewModelScope.launch {
+            // Probe on every Ready transition until it succeeds: an
+            // early probe would race the connect and stick false, and
+            // a transient IQ failure retries on the next reconnect.
+            sessionManager.connectionState.collect { state ->
+                if (state is ConnectionState.Ready && !_canCreateChannel.value) {
+                    _canCreateChannel.value = sessionManager.isCommunityOwner()
+                }
+            }
+        }
+    }
+
+    /**
+     * XEP-0045 §10.1 create + configure (web `muc` intent parity):
+     * naive name slug as localpart, initial config carries
+     * name/description/forum. The result event carries the room JID
+     * so the screen can navigate into the new channel.
+     */
+    fun createChannel(name: String, description: String, forum: Boolean) {
+        viewModelScope.launch {
+            val result = sessionManager.createRoom(
+                name = name,
+                nick = nick,
+                description = description.trim().takeIf { it.isNotEmpty() },
+                forum = forum,
+            )
+            _createEvents.tryEmit(result)
+        }
     }
 
     private fun sectionsOf(

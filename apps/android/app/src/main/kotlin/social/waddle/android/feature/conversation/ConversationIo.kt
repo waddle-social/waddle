@@ -56,6 +56,9 @@ interface ConversationIo {
     /** XEP-0424: retract an own message. */
     suspend fun sendRetraction(targetId: String): VerbResult = VerbResult.Rejected
 
+    /** XEP-0425: moderate (remove) another user's message (rooms only). */
+    suspend fun sendModeration(targetId: String, reason: String?): VerbResult = VerbResult.Rejected
+
     /** Whether this conversation supports pinning (rooms only). */
     val canPin: Boolean get() = false
 

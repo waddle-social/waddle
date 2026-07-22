@@ -1,7 +1,11 @@
 package social.waddle.android.feature.channel
 
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.MessageSendExtras
@@ -9,6 +13,9 @@ import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.canManageMembersOf
+import social.waddle.android.client.canModerateOf
+import social.waddle.android.client.isRoomOwnerOf
 import social.waddle.android.client.mentionCandidatesOf
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
@@ -40,9 +47,26 @@ class ChannelViewModel(
     // No public/private discriminator on the topology yet (web
     // parity): every MUC resolves as a private group (§3: always).
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
+    canModerate = sessionManager.presenceStore.occupants
+        .map { rooms -> canModerateOf(rooms[roomJid].orEmpty()) },
     uploader = uploader,
     onConversationRead = onConversationRead,
 ) {
+    /**
+     * Web `canManageMembers` parity: own affiliation ∈ {owner, admin},
+     * from the room's XEP-0045 self-presence (status 110). Gates the
+     * member-management ENTRY only — the members screen re-derives it
+     * and the server enforces the privilege matrix on every change.
+     */
+    val canManageMembers: StateFlow<Boolean> = sessionManager.presenceStore.occupants
+        .map { rooms -> canManageMembersOf(rooms[roomJid].orEmpty()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** §10 owner use cases (settings sheet, destroy) are owner-only. */
+    val isRoomOwner: StateFlow<Boolean> = sessionManager.presenceStore.occupants
+        .map { rooms -> isRoomOwnerOf(rooms[roomJid].orEmpty()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     companion object {
         fun factory(graph: AppGraph, roomJid: String): ViewModelProvider.Factory =
             viewModelFactoryOf {
@@ -98,6 +122,9 @@ internal class ChannelIo(
 
     override suspend fun sendRetraction(targetId: String): VerbResult =
         sessionManager.sendRetraction(roomJid, isGroupchat = true, targetStanzaId = targetId)
+
+    override suspend fun sendModeration(targetId: String, reason: String?): VerbResult =
+        sessionManager.sendModeration(roomJid, targetStanzaId = targetId, reason = reason)
 
     override val canPin: Boolean get() = true
 
