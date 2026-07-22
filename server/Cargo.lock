@@ -7870,6 +7870,7 @@ dependencies = [
  "url",
  "uuid",
  "waddle-xmpp-client",
+ "waddle-xmpp-core",
 ]
 
 [[package]]

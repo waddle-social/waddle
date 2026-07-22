@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import social.waddle.android.client.MarkupRef
 import social.waddle.android.client.MentionRef
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.prefs.SharedFileRef
@@ -96,6 +97,7 @@ class ComposerController(
         mode: ComposerMode,
         files: List<SharedFileRef> = emptyList(),
         mentions: List<MentionRef> = emptyList(),
+        markup: List<MarkupRef> = emptyList(),
     ): MessageSendExtras? =
         when {
             mode is ComposerMode.Replying -> MessageSendExtras(
@@ -105,14 +107,23 @@ class ComposerController(
                 threadId = mode.threadId ?: screenThreadId,
                 sharedFiles = files,
                 mentions = mentions,
+                markup = markup,
             )
             files.isNotEmpty() -> MessageSendExtras(
                 threadId = screenThreadId,
                 sharedFiles = files,
                 mentions = mentions,
+                markup = markup,
             )
-            screenThreadId != null -> MessageSendExtras(threadId = screenThreadId, mentions = mentions)
-            mentions.isNotEmpty() -> MessageSendExtras(mentions = mentions)
+            screenThreadId != null -> MessageSendExtras(
+                threadId = screenThreadId,
+                mentions = mentions,
+                markup = markup,
+            )
+            mentions.isNotEmpty() || markup.isNotEmpty() -> MessageSendExtras(
+                mentions = mentions,
+                markup = markup,
+            )
             else -> null
         }
 }

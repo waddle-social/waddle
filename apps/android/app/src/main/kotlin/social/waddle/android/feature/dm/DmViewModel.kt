@@ -57,6 +57,9 @@ internal class DmIo(
     override suspend fun send(body: String, extras: MessageSendExtras?): SendResult =
         sessionManager.sendChatMessage(peerJid, body, extras)
 
+    override suspend fun lookupLinkPreview(url: String) =
+        sessionManager.lookupLinkPreview(url, scopeJid = peerJid)
+
     override fun recordConversationSeen() {
         sessionManager.recordDmSeen(peerJid)
     }

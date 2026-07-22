@@ -26,7 +26,7 @@ pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 /// call sites).
 pub const NS_CLIENT: &str = "jabber:client";
 pub(crate) const NS_WADDLE_EXTENSION: &str = "urn:waddle:extension:1";
-pub(crate) const NS_WADDLE_LINK_PREVIEW: &str = "urn:waddle:link-preview:0";
+pub const NS_WADDLE_LINK_PREVIEW: &str = "urn:waddle:link-preview:0";
 pub(crate) const NS_RDF_SYNTAX: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 pub(crate) const NS_OPENGRAPH: &str = "https://ogp.me/ns#";
 pub(crate) const NS_OPENGRAPH_IMAGE: &str = "https://ogp.me/ns#image:";

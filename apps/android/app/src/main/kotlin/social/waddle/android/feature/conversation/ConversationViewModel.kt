@@ -15,15 +15,22 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import social.waddle.android.client.LINK_PREVIEW_LOOKUP_TIMEOUT_MS
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
+import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
+import social.waddle.android.client.composeMarkdown
+import social.waddle.android.client.firstEligibleHttpsUrl
+import social.waddle.android.client.linkPreviewSendToken
 import social.waddle.android.client.prefs.SharedFileRef
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.client.ffi.WaddlePresence
 
 /**
  * Shared timeline/composer wiring for channels and DMs: store-backed
@@ -50,6 +57,11 @@ open class ConversationViewModel(
     private val threadId: String? = null,
     /** `@` popover candidates; empty (the default) hides mention UI. */
     mentionCandidates: Flow<List<MentionCandidate>> = flowOf(emptyList()),
+    /**
+     * MUC occupant presence keyed by nick, for XEP-0317 hats /
+     * XEP-0045 authority badges on message rows. Empty for DMs.
+     */
+    occupantPresence: Flow<Map<String, WaddlePresence>> = flowOf(emptyMap()),
     /** XEP-0492 effective mode (store fallback resolved to §3 default). */
     notifyMode: Flow<WaddleNotifyMode> = flowOf(WaddleNotifyMode.ALWAYS),
     /**
@@ -99,6 +111,10 @@ open class ConversationViewModel(
     /** XEP-0372 `@` autocomplete candidates for the composer popover. */
     val mentionCandidates: StateFlow<List<MentionCandidate>> =
         mentionCandidates.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Occupant presence by nick (hats + authority badges on rows). */
+    val authorPresence: StateFlow<Map<String, WaddlePresence>> =
+        occupantPresence.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val uiState: StateFlow<ConversationUiState> =
         combine(
@@ -216,23 +232,45 @@ open class ConversationViewModel(
     /**
      * Optimistic send: append a pending row and dispatch it. [mentions]
      * carry code-point offsets over `body.trim()` (the composer computes
-     * them against the same trim).
+     * them against the same trim). Markdown the user typed is converted
+     * into XEP-0394 markup spans at this boundary ([composeMarkdown]);
+     * the pending row and the wire both carry the CLEAN body.
      */
     fun send(body: String, mentions: List<MentionRef> = emptyList()) {
         val text = body.trim()
         if (text.isEmpty()) return
         val mode = composer.mode.value
         if (mode is ComposerMode.Editing) {
-            // XEP-0308 corrections don't carry mention refs (parity with
-            // the correction path, which has no extras seam).
+            // XEP-0308 corrections carry neither mention refs nor markup
+            // (parity with the correction path, which has no extras
+            // seam); the edited text is sent verbatim.
             composer.cancelEdit()
             viewModelScope.launch { sendCorrection(mode, text) }
             return
         }
-        val extras = composer.extrasFor(mode, mentions = mentions)
+        val composed = composeMarkdown(text, mentions)
+        val extras = composer.extrasFor(
+            mode,
+            mentions = composed.mentions,
+            markup = composed.markup,
+        )
         if (mode is ComposerMode.Replying) composer.cancelReply()
-        val message = tracker.append(text, extras, clock())
+        val message = tracker.append(composed.body, extras, clock())
         viewModelScope.launch { dispatch(message) }
+    }
+
+    /**
+     * Web `sendGif` parity: the selected GIF's `original.url` goes out
+     * as a PLAIN body (no markup, no link-preview lookup) — receivers
+     * render it via the lone-image-URL rule.
+     */
+    fun sendGif(url: String) {
+        if (url.isBlank()) return
+        val mode = composer.mode.value
+        val extras = composer.extrasFor(mode)
+        if (mode is ComposerMode.Replying) composer.cancelReply()
+        val message = tracker.append(url, extras, clock())
+        viewModelScope.launch { dispatch(message, lookupPreview = false) }
     }
 
     private suspend fun sendCorrection(mode: ComposerMode.Editing, text: String) {
@@ -242,11 +280,38 @@ open class ConversationViewModel(
         if (result is VerbResult.Ok) typingNotifier.onMessageSent() else composer.restoreFailedEdit(mode, text)
     }
 
-    private suspend fun dispatch(message: PendingMessage, wireBody: String = message.body) {
-        val result = io.send(wireBody, message.extras)
+    private suspend fun dispatch(
+        message: PendingMessage,
+        wireBody: String = message.body,
+        lookupPreview: Boolean = true,
+    ) {
+        val extras = if (lookupPreview) {
+            withLinkPreviewToken(message.extras, wireBody)
+        } else {
+            message.extras
+        }
+        val result = io.send(wireBody, extras)
         // Delivered (or queued for replay): typing ended with content,
         // not a pause — emit `active` (web parity).
         if (tracker.onSendResult(message.localId, result)) typingNotifier.onMessageSent()
+    }
+
+    /**
+     * Web composer parity: when the outgoing body carries an eligible
+     * HTTPS URL, resolve a `urn:waddle:link-preview:0` token within the
+     * web's 2 s lookup budget and attach it — the send NEVER blocks
+     * longer and proceeds without a preview on any failure or expiry.
+     */
+    private suspend fun withLinkPreviewToken(
+        extras: MessageSendExtras?,
+        wireBody: String,
+    ): MessageSendExtras? {
+        val url = firstEligibleHttpsUrl(wireBody) ?: return extras
+        val lookup = withTimeoutOrNull(LINK_PREVIEW_LOOKUP_TIMEOUT_MS) {
+            runCatching { io.lookupLinkPreview(url) }.getOrNull()
+        }
+        val token = linkPreviewSendToken(lookup, clock()) ?: return extras
+        return (extras ?: MessageSendExtras()).copy(linkPreviewToken = token)
     }
 
     /** The composer's text changed: drive the XEP-0085 state machine. */

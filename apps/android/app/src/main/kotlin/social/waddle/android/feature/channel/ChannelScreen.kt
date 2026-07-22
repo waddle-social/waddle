@@ -18,6 +18,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.room.RoomSettingsSheet
 import social.waddle.android.feature.room.RoomSettingsViewModel
 import social.waddle.android.feature.search.MessageSearchTarget
@@ -48,6 +49,7 @@ fun ChannelScreen(
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
         selfBareJid = session?.jid?.let(::bareJidOf),
+        trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         extraTopBarActions = {
             IconButton(
                 onClick = onOpenMembers,

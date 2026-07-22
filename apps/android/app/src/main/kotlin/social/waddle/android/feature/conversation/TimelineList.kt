@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import social.waddle.android.client.store.TimelineItem
+import social.waddle.client.ffi.WaddlePresence
 
 /**
  * Reverse-layout timeline (newest pinned at the bottom); reaching the
@@ -38,6 +39,8 @@ fun TimelineList(
     onOpenThread: ((item: TimelineItem) -> Unit)? = null,
     onAtNewestEdgeChanged: (Boolean) -> Unit = {},
     selfBareJid: String? = null,
+    authorPresence: Map<String, WaddlePresence> = emptyMap(),
+    trustedMediaOrigin: String? = null,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -91,6 +94,8 @@ fun TimelineList(
                 } ?: 0,
                 onOpenThread = onOpenThread,
                 selfBareJid = selfBareJid,
+                authorPresence = authorPresence,
+                trustedMediaOrigin = trustedMediaOrigin,
             )
         }
         if (isLoadingOlder) {

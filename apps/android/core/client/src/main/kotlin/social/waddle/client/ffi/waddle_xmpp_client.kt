@@ -667,6 +667,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
+    ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
@@ -764,6 +766,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_mds_displayed(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins(
+    ): Int
+    external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview(
     ): Int
     external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message(
     ): Int
@@ -948,6 +952,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_mds_disp
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_room_pins(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_lookup_link_preview(`ptr`: Long,`url`: RustBuffer.ByValue,`scopeJid`: RustBuffer.ByValue,
+): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_pin_direct_message(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_pin_message(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
@@ -1008,6 +1014,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_co
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
+external fun uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Double
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun ffi_waddle_xmpp_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1129,6 +1137,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid() != 54118) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1274,6 +1285,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_room_pins() != 59200) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_lookup_link_preview() != 12987) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_pin_direct_message() != 55354) {
@@ -1690,6 +1704,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterDouble: FfiConverter<Double, Double> {
+    override fun lift(value: Double): Double {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Double {
+        return buf.getDouble()
+    }
+
+    override fun lower(value: Double): Double {
+        return value
+    }
+
+    override fun allocationSize(value: Double) = 8UL
+
+    override fun write(value: Double, buf: ByteBuffer) {
+        buf.putDouble(value)
     }
 }
 
@@ -2157,6 +2194,16 @@ public interface WaddleClientInterface {
      * `forbidden` stanza error.
      */
     suspend fun `fetchRoomPins`(`roomJid`: kotlin.String): List<WaddlePinEntry>
+
+    /**
+     * `urn:waddle:link-preview:0`: resolve a composer URL into a
+     * send-time preview token scoped to the conversation
+     * `scope_jid` (DM peer or room bare JID). URLs that are not
+     * HTTPS with a dotted hostname report `Unsupported` without
+     * touching the wire (web `firstEligibleHttpsUrl` parity); a
+     * malformed or non-matching response reports `Failed`.
+     */
+    suspend fun `lookupLinkPreview`(`url`: kotlin.String, `scopeJid`: kotlin.String): WaddleLinkPreviewLookup
 
     /**
      * `urn:waddle:pin:0`: pin a message in a 1:1 DM conversation.
@@ -3656,6 +3703,35 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeWaddlePinEntry.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * `urn:waddle:link-preview:0`: resolve a composer URL into a
+     * send-time preview token scoped to the conversation
+     * `scope_jid` (DM peer or room bare JID). URLs that are not
+     * HTTPS with a dotted hostname report `Unsupported` without
+     * touching the wire (web `firstEligibleHttpsUrl` parity); a
+     * malformed or non-matching response reports `Failed`.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `lookupLinkPreview`(`url`: kotlin.String, `scopeJid`: kotlin.String) : WaddleLinkPreviewLookup {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_lookup_link_preview(
+                uniffiHandle,
+                FfiConverterString.lower(`url`),FfiConverterString.lower(`scopeJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleLinkPreviewLookup.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -6974,6 +7050,121 @@ public object FfiConverterTypeWaddleLinkPreviewImage: FfiConverterRustBuffer<Wad
 
 
 /**
+ * Typed outcome of the composer-side lookup: `preview` is present
+ * exactly when `status` is [`WaddleLinkPreviewLookupStatus::Ready`].
+ */
+data class WaddleLinkPreviewLookup (
+    var `status`: WaddleLinkPreviewLookupStatus
+    ,
+    var `preview`: WaddleLinkPreviewLookupPreview?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleLinkPreviewLookup: FfiConverterRustBuffer<WaddleLinkPreviewLookup> {
+    override fun read(buf: ByteBuffer): WaddleLinkPreviewLookup {
+        return WaddleLinkPreviewLookup(
+            FfiConverterTypeWaddleLinkPreviewLookupStatus.read(buf),
+            FfiConverterOptionalTypeWaddleLinkPreviewLookupPreview.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleLinkPreviewLookup) = (
+            FfiConverterTypeWaddleLinkPreviewLookupStatus.allocationSize(value.`status`) +
+            FfiConverterOptionalTypeWaddleLinkPreviewLookupPreview.allocationSize(value.`preview`)
+    )
+
+    override fun write(value: WaddleLinkPreviewLookup, buf: ByteBuffer) {
+            FfiConverterTypeWaddleLinkPreviewLookupStatus.write(value.`status`, buf)
+            FfiConverterOptionalTypeWaddleLinkPreviewLookupPreview.write(value.`preview`, buf)
+    }
+}
+
+
+
+/**
+ * Ready payload of a link-preview lookup. Attach `token` through
+ * [`WaddleSendOptions::link_preview_token`] — but only while the
+ * RFC 3339 `expires_at` instant is still in the future.
+ */
+data class WaddleLinkPreviewLookupPreview (
+    var `token`: kotlin.String
+    ,
+    var `originalUrl`: kotlin.String
+    ,
+    var `normalizedUrl`: kotlin.String
+    ,
+    var `expiresAt`: kotlin.String
+    ,
+    var `title`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `image`: WaddleLinkPreviewImage?
+    ,
+    var `playerEmbed`: WaddleLinkPreviewPlayer?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleLinkPreviewLookupPreview: FfiConverterRustBuffer<WaddleLinkPreviewLookupPreview> {
+    override fun read(buf: ByteBuffer): WaddleLinkPreviewLookupPreview {
+        return WaddleLinkPreviewLookupPreview(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeWaddleLinkPreviewImage.read(buf),
+            FfiConverterOptionalTypeWaddleLinkPreviewPlayer.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleLinkPreviewLookupPreview) = (
+            FfiConverterString.allocationSize(value.`token`) +
+            FfiConverterString.allocationSize(value.`originalUrl`) +
+            FfiConverterString.allocationSize(value.`normalizedUrl`) +
+            FfiConverterString.allocationSize(value.`expiresAt`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalTypeWaddleLinkPreviewImage.allocationSize(value.`image`) +
+            FfiConverterOptionalTypeWaddleLinkPreviewPlayer.allocationSize(value.`playerEmbed`)
+    )
+
+    override fun write(value: WaddleLinkPreviewLookupPreview, buf: ByteBuffer) {
+            FfiConverterString.write(value.`token`, buf)
+            FfiConverterString.write(value.`originalUrl`, buf)
+            FfiConverterString.write(value.`normalizedUrl`, buf)
+            FfiConverterString.write(value.`expiresAt`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalTypeWaddleLinkPreviewImage.write(value.`image`, buf)
+            FfiConverterOptionalTypeWaddleLinkPreviewPlayer.write(value.`playerEmbed`, buf)
+    }
+}
+
+
+
+/**
  * `og:video` iframe player embed of a XEP-0511 card.
  */
 data class WaddleLinkPreviewPlayer (
@@ -10117,6 +10308,59 @@ public object FfiConverterTypeWaddleJingleReason: FfiConverterRustBuffer<WaddleJ
 
 
 /**
+ * Status of a composer-side `urn:waddle:link-preview:0` lookup IQ
+ * (`WaddleClient::lookup_link_preview`).
+ */
+
+enum class WaddleLinkPreviewLookupStatus {
+
+    /**
+     * Preview resolved; the token in the paired preview payload is
+     * valid until its `expires_at` instant.
+     */
+    READY,
+    /**
+     * The URL cannot be previewed (unparsable or unsupported).
+     */
+    UNSUPPORTED,
+    /**
+     * The server's resolver is disabled or refused the URL.
+     */
+    BLOCKED,
+    /**
+     * Resolution failed, or the response payload was malformed.
+     */
+    FAILED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleLinkPreviewLookupStatus: FfiConverterRustBuffer<WaddleLinkPreviewLookupStatus> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleLinkPreviewLookupStatus.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleLinkPreviewLookupStatus) = 4UL
+
+    override fun write(value: WaddleLinkPreviewLookupStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * XEP-0394 markup span kind. Mirrors the client crate's
  * `MarkupSpanType`; `Link` is Waddle's `urn:waddle:markup:0` span
  * extension (XEP-0394 defines no link span).
@@ -11603,6 +11847,38 @@ public object FfiConverterOptionalTypeWaddleLinkPreviewImage: FfiConverterRustBu
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleLinkPreviewLookupPreview: FfiConverterRustBuffer<WaddleLinkPreviewLookupPreview?> {
+    override fun read(buf: ByteBuffer): WaddleLinkPreviewLookupPreview? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleLinkPreviewLookupPreview.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleLinkPreviewLookupPreview?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleLinkPreviewLookupPreview.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleLinkPreviewLookupPreview?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleLinkPreviewLookupPreview.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleLinkPreviewPlayer: FfiConverterRustBuffer<WaddleLinkPreviewPlayer?> {
     override fun read(buf: ByteBuffer): WaddleLinkPreviewPlayer? {
         if (buf.get().toInt() == 0) {
@@ -13034,6 +13310,20 @@ public object FfiConverterSequenceTypeWaddleUserSearchEntry: FfiConverterRustBuf
 
 
 
+
+
+        /**
+         * XEP-0392 §"Angle generation": hue in degrees (`0.0..360.0`) for
+         * `input` (nickname or bare JID, used verbatim — no normalization).
+         */ fun `consistentColorHue`(`input`: kotlin.String): kotlin.Double {
+            return FfiConverterDouble.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(
+
+        FfiConverterString.lower(`input`),_status)
+}
+    )
+    }
 
 
         /**

@@ -12,6 +12,7 @@ use url::Url;
 mod boundary_convert;
 mod calls;
 mod community_admin;
+mod consistent_color;
 mod convert;
 mod error;
 mod jid_parts;

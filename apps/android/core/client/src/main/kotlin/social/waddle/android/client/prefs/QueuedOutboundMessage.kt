@@ -2,6 +2,7 @@ package social.waddle.android.client.prefs
 
 import kotlinx.serialization.Serializable
 import social.waddle.android.client.FileDisposition
+import social.waddle.android.client.MarkupRef
 import social.waddle.android.client.MentionRef
 
 /**
@@ -55,4 +56,6 @@ data class QueuedOutboundMessage(
     val sharedFiles: List<SharedFileRef> = emptyList(),
     /** XEP-0372 mentions (see `MessageSendExtras.mentions`). */
     val mentions: List<MentionRef> = emptyList(),
+    /** XEP-0394 markup spans (see `MessageSendExtras.markup`). */
+    val markup: List<MarkupRef> = emptyList(),
 )

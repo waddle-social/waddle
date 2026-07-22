@@ -5,8 +5,8 @@ use waddle_xmpp_client::{
     mds::MdsCatchupEntry,
     messaging::{
         self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
-        JingleReason, LinkPreviewData, LiveKitJoin, MarkupSpan, MarkupSpanData, MarkupSpanType,
-        MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
+        JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan, MarkupSpanData,
+        MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
     },
     pin::{PinEntry, PinEvent, PinEventAction, PinPreview},
     request::StanzaId,
@@ -24,6 +24,7 @@ use crate::{
     WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
     WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
     WaddleForumPostKind, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus,
     WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
     WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMucAffiliation,
     WaddleMucRole, WaddleMujiPresence, WaddlePinAction, WaddlePinEntry, WaddlePinEvent,
@@ -410,6 +411,46 @@ fn link_preview_to_ffi(preview: LinkPreviewData) -> WaddleLinkPreview {
 
 fn link_previews_to_ffi(previews: Vec<LinkPreviewData>) -> Vec<WaddleLinkPreview> {
     previews.into_iter().map(link_preview_to_ffi).collect()
+}
+
+pub(crate) fn link_preview_lookup_to_ffi(lookup: LinkPreviewLookup) -> WaddleLinkPreviewLookup {
+    match lookup {
+        LinkPreviewLookup::Ready(ready) => WaddleLinkPreviewLookup {
+            status: WaddleLinkPreviewLookupStatus::Ready,
+            preview: Some(WaddleLinkPreviewLookupPreview {
+                token: ready.token.as_str().to_string(),
+                original_url: ready.original_url.to_string(),
+                normalized_url: ready.normalized_url.to_string(),
+                expires_at: ready.expires_at.to_rfc3339(),
+                title: ready.title,
+                description: ready.description,
+                image: ready.image.map(|image| WaddleLinkPreviewImage {
+                    url: image.url.to_string(),
+                    media_type: image.media_type.as_str().to_string(),
+                    width: image.width,
+                    height: image.height,
+                    alt: image.alt,
+                }),
+                player_embed: ready.player_embed.map(|player| WaddleLinkPreviewPlayer {
+                    url: player.url.to_string(),
+                    width: player.width,
+                    height: player.height,
+                }),
+            }),
+        },
+        LinkPreviewLookup::Unsupported => {
+            lookup_status_only(WaddleLinkPreviewLookupStatus::Unsupported)
+        }
+        LinkPreviewLookup::Blocked => lookup_status_only(WaddleLinkPreviewLookupStatus::Blocked),
+        LinkPreviewLookup::Failed => lookup_status_only(WaddleLinkPreviewLookupStatus::Failed),
+    }
+}
+
+pub(crate) fn lookup_status_only(status: WaddleLinkPreviewLookupStatus) -> WaddleLinkPreviewLookup {
+    WaddleLinkPreviewLookup {
+        status,
+        preview: None,
+    }
 }
 
 fn pin_preview_to_ffi(preview: PinPreview) -> WaddlePinPreview {

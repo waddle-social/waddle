@@ -78,6 +78,10 @@ fun ConversationScreen(
     searchTarget: MessageSearchTarget? = null,
     /** Own bare JID for the self-mention row highlight (XEP-0372). */
     selfBareJid: String? = null,
+    /** Presence line under the title (XEP-0319 idle, DM screens). */
+    subtitle: String? = null,
+    /** Origin whose cached XEP-0363 preview images may load. */
+    trustedMediaOrigin: String? = null,
     /** Extra host-specific top-bar actions (room members/settings). */
     extraTopBarActions: @Composable () -> Unit = {},
     /** DM-only call entry points; `null` (channels, threads) hides them. */
@@ -92,10 +96,12 @@ fun ConversationScreen(
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(viewModel::sendAttachment) }
+    val authorPresence by viewModel.authorPresence.collectAsStateWithLifecycle()
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var moderateTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
+    var gifPickerOpen by remember { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -132,7 +138,18 @@ fun ConversationScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(text = title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column {
+                        Text(text = title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        subtitle?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -223,6 +240,8 @@ fun ConversationScreen(
                 },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
                 selfBareJid = selfBareJid,
+                authorPresence = authorPresence,
+                trustedMediaOrigin = trustedMediaOrigin,
             )
             TypingIndicator(names = typing)
             MessageComposer(
@@ -234,6 +253,7 @@ fun ConversationScreen(
                 replying = composerMode as? ComposerMode.Replying,
                 onCancelReply = viewModel::cancelReply,
                 onAttach = { attachmentPicker.launch("*/*") },
+                onGif = { gifPickerOpen = true },
                 uploadState = uploadState,
                 onClearUpload = viewModel::clearUploadState,
             )
@@ -292,6 +312,20 @@ fun ConversationScreen(
             currentMode = notifyMode,
             onDismiss = { notifySheetOpen = false },
             onSelect = viewModel::setNotificationMode,
+        )
+    }
+
+    if (gifPickerOpen) {
+        // Graph read stays inside the open branch: hosts without a
+        // provided graph (plain scaffold tests) never open the picker.
+        val graph = LocalAppGraph.current
+        GifPickerSheet(
+            gateway = graph.gifSearchGateway,
+            onSelect = { url ->
+                gifPickerOpen = false
+                viewModel.sendGif(url)
+            },
+            onDismiss = { gifPickerOpen = false },
         )
     }
 

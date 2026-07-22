@@ -140,6 +140,28 @@
     <string name="notify_mismatch_dm">Your direct-message notification settings couldn\'t be saved — their storage was created by an incompatible older client.</string>
     <string name="notify_muted_badge">Muted</string>
 
+    <!-- Rich content: link previews, stickers, GIF picker (web parity) -->
+    <string name="link_preview_remote_media_unavailable">Remote preview media unavailable</string>
+    <string name="link_preview_image">Link preview image</string>
+    <string name="link_preview_play">Play</string>
+    <string name="composer_gif">GIF</string>
+    <string name="gif_picker_title">GIFs</string>
+    <string name="gif_search_placeholder">Search GIFs</string>
+    <string name="gif_powered_by">Powered by GIPHY</string>
+    <string name="gif_loading">Loading…</string>
+    <string name="gif_loading_trending">Loading trending GIFs…</string>
+    <string name="gif_no_results">No GIFs found</string>
+    <string name="gif_not_configured">GIF search is not configured.</string>
+    <string name="gif_rate_limited">Too many GIF searches — try again shortly.</string>
+    <string name="gif_unavailable">GIF search is unavailable right now.</string>
+
+    <!-- XEP-0319 idle display (web ChatHeader parity: "away · idle 20m") -->
+    <string name="dm_presence_away">away</string>
+    <string name="dm_presence_away_idle">away · idle %1$s</string>
+    <string name="idle_under_minute">&lt;1m</string>
+    <string name="idle_minutes">%1$dm</string>
+    <string name="idle_hours">%1$dh</string>
+    <string name="idle_days">%1$dd</string>
     <!-- Room lifecycle, member management, moderation -->
     <string name="action_save">Save</string>
     <string name="action_moderate_message">Delete for everyone</string>

@@ -7,7 +7,9 @@ import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleLinkPreview
 import social.waddle.client.ffi.WaddleMamPage
+import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleMucAffiliation
@@ -16,6 +18,7 @@ import social.waddle.client.ffi.WaddlePinEvent
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddlePresenceHat
 import social.waddle.client.ffi.WaddleReference
+import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleSmResumeState
 
 /** Fixture builders for the wide FFI records: overrides via named args. */
@@ -60,6 +63,10 @@ fun testMessage(
     broadcastMention: String? = null,
     mentionUris: List<String> = emptyList(),
     references: List<WaddleReference> = emptyList(),
+    markupSpans: List<WaddleMarkupSpan> = emptyList(),
+    linkPreviews: List<WaddleLinkPreview> = emptyList(),
+    isSticker: Boolean = false,
+    sharedFiles: List<WaddleSharedFile> = emptyList(),
     callThread: WaddleCallThreadAnchor? = null,
     callThreadEnded: WaddleCallThreadEnded? = null,
 ): WaddleMessage = WaddleMessage(
@@ -89,14 +96,14 @@ fun testMessage(
     isMuc = isMuc,
     thread = thread,
     parentThreadId = null,
-    markupSpans = emptyList(),
+    markupSpans = markupSpans,
     broadcastMention = broadcastMention,
     mentionUris = mentionUris,
     references = references,
     forumPostKind = null,
     forumTitle = null,
-    isSticker = false,
-    linkPreviews = emptyList(),
+    isSticker = isSticker,
+    linkPreviews = linkPreviews,
     pinEvent = pinEvent,
     callThreadEnded = callThreadEnded,
     carbon = null,
@@ -105,7 +112,7 @@ fun testMessage(
     replyFallbackStart = replyFallbackStart,
     replyFallbackEnd = replyFallbackEnd,
     callThread = callThread,
-    sharedFiles = emptyList(),
+    sharedFiles = sharedFiles,
     mdsDisplayed = mdsDisplayed,
 )
 
@@ -178,14 +185,16 @@ fun testPresence(
     mucAffiliation: WaddleMucAffiliation? = null,
     mucRole: WaddleMucRole? = null,
     mucJid: String? = null,
+    show: String? = null,
+    hats: List<WaddlePresenceHat> = emptyList(),
+    idleSince: String? = null,
     /** `110` marks the recipient's own presence (XEP-0045 §7.2.2). */
     mucStatusCodes: List<UShort> = emptyList(),
-    hats: List<WaddlePresenceHat> = emptyList(),
 ): WaddlePresence = WaddlePresence(
     from = from,
     to = "me@waddle.test",
     presenceType = presenceType,
-    show = null,
+    show = show,
     status = null,
     hats = hats,
     mucAffiliation = mucAffiliation,
@@ -193,7 +202,7 @@ fun testPresence(
     mucJid = mucJid,
     mucStatusCodes = mucStatusCodes,
     vcardAvatar = null,
-    idleSince = null,
+    idleSince = idleSince,
     errorCondition = null,
     errorType = null,
     errorText = null,

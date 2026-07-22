@@ -5,6 +5,7 @@ import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleNotifyMode
 
@@ -25,6 +26,13 @@ interface ConversationIo {
      * [extras] carry XEP-0461 reply / XEP-0201 thread annotations.
      */
     suspend fun send(body: String, extras: MessageSendExtras? = null): SendResult
+
+    /**
+     * `urn:waddle:link-preview:0`: resolve [url] into a send-time
+     * preview token scoped to this conversation; `null` when offline
+     * or unsupported by the transport.
+     */
+    suspend fun lookupLinkPreview(url: String): WaddleLinkPreviewLookup? = null
 
     /**
      * The user is looking at the conversation: persist recency so the

@@ -699,6 +699,105 @@ mod waddle_pin {
     }
 }
 
+// ── urn:waddle:link-preview:0 lookup ────────────────────────────────────────
+
+mod waddle_link_preview_lookup {
+    use super::*;
+    use crate::convert::link_preview_lookup_to_ffi;
+    use crate::WaddleLinkPreviewLookupStatus;
+    use waddle_xmpp_client::messaging::{
+        parse_link_preview_lookup_response, NS_CLIENT, NS_WADDLE_LINK_PREVIEW,
+    };
+
+    fn ready_lookup_iq() -> Element {
+        Element::builder("iq", NS_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "lookup-1")
+            .append(
+                Element::builder("lookup", NS_WADDLE_LINK_PREVIEW)
+                    .attr(minidom::rxml::xml_ncname!("status").to_owned(), "ready")
+                    .append(
+                        Element::builder("preview", NS_WADDLE_LINK_PREVIEW)
+                            .attr(minidom::rxml::xml_ncname!("token").to_owned(), "tok-9")
+                            .attr(
+                                minidom::rxml::xml_ncname!("original-url").to_owned(),
+                                "https://example.com/story",
+                            )
+                            .attr(
+                                minidom::rxml::xml_ncname!("normalized-url").to_owned(),
+                                "https://example.com/story",
+                            )
+                            .attr(
+                                minidom::rxml::xml_ncname!("expires-at").to_owned(),
+                                "2026-07-16T12:00:00Z",
+                            )
+                            .append(
+                                Element::builder("title", NS_WADDLE_LINK_PREVIEW)
+                                    .append("Story")
+                                    .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn ready_lookup_converts_to_ffi_record() {
+        let requested = url::Url::parse("https://example.com/story").expect("url");
+        let lookup = link_preview_lookup_to_ffi(parse_link_preview_lookup_response(
+            &ready_lookup_iq(),
+            &requested,
+        ));
+        assert_eq!(lookup.status, WaddleLinkPreviewLookupStatus::Ready);
+        let preview = lookup.preview.expect("ready preview");
+        assert_eq!(preview.token, "tok-9");
+        assert_eq!(preview.original_url, "https://example.com/story");
+        assert_eq!(preview.expires_at, "2026-07-16T12:00:00+00:00");
+        assert_eq!(preview.title.as_deref(), Some("Story"));
+        assert_eq!(preview.description, None);
+    }
+
+    #[tokio::test]
+    async fn lookup_throws_invalid_jid_for_bad_scope() {
+        let client = test_client(RecordingListener::default());
+        let result = client
+            .lookup_link_preview(
+                "https://example.com/story".to_string(),
+                "not a jid".to_string(),
+            )
+            .await;
+        assert!(matches!(result, Err(WaddleError::InvalidJid)));
+    }
+
+    #[tokio::test]
+    async fn ineligible_url_reports_unsupported_without_connection() {
+        let client = test_client(RecordingListener::default());
+        let result = client
+            .lookup_link_preview(
+                "http://example.com/insecure".to_string(),
+                "peer@waddle.test".to_string(),
+            )
+            .await
+            .expect("unsupported outcome");
+        assert_eq!(result.status, WaddleLinkPreviewLookupStatus::Unsupported);
+        assert!(result.preview.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_throws_not_connected() {
+        let client = test_client(RecordingListener::default());
+        let result = client
+            .lookup_link_preview(
+                "https://example.com/story".to_string(),
+                "peer@waddle.test".to_string(),
+            )
+            .await;
+        assert!(matches!(result, Err(WaddleError::NotConnected)));
+    }
+}
+
 // ── WaddleError mapping ──────────────────────────────────────────────────────
 
 mod waddle_error {

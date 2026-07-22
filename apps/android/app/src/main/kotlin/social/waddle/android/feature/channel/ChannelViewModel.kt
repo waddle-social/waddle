@@ -44,6 +44,8 @@ class ChannelViewModel(
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
     mentionCandidates = sessionManager.presenceStore.occupants
         .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
+    occupantPresence = sessionManager.presenceStore.occupants
+        .map { rooms -> rooms[roomJid].orEmpty() },
     // No public/private discriminator on the topology yet (web
     // parity): every MUC resolves as a private group (§3: always).
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
@@ -99,6 +101,9 @@ internal class ChannelIo(
 
     override suspend fun send(body: String, extras: MessageSendExtras?): SendResult =
         sessionManager.sendGroupchatMessage(roomJid, body, extras)
+
+    override suspend fun lookupLinkPreview(url: String) =
+        sessionManager.lookupLinkPreview(url, scopeJid = roomJid)
 
     override suspend fun sendChatState(state: WaddleChatState) {
         sessionManager.sendChatState(roomJid, isGroupchat = true, state = state)

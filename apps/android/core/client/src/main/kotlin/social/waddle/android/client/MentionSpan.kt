@@ -46,7 +46,7 @@ fun mentionSpansIn(
     }
 }
 
-private fun strippedRangeOf(start: UInt?, end: UInt?, displayCodePoints: Long): LongRange? {
+internal fun strippedRangeOf(start: UInt?, end: UInt?, displayCodePoints: Long): LongRange? {
     start ?: return null
     end ?: return null
     val startCp = start.toLong()
@@ -58,7 +58,7 @@ private fun strippedRangeOf(start: UInt?, end: UInt?, displayCodePoints: Long): 
 }
 
 /** Web `rebaseOffsetAfterRemoval`: shift an offset past a removed range. */
-private fun rebaseAfterRemoval(offset: Long, removed: LongRange): Long = when {
+internal fun rebaseAfterRemoval(offset: Long, removed: LongRange): Long = when {
     offset <= removed.first -> offset
     offset > removed.last -> offset - (removed.last + 1 - removed.first)
     else -> removed.first

@@ -16,6 +16,8 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import social.waddle.android.client.ClientFactory
 import social.waddle.android.client.ConnectivityNetworkSignal
+import social.waddle.android.client.GifSearchGateway
+import social.waddle.android.client.GiphyProxyGateway
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.RustClientFactory
 import social.waddle.android.client.WaddleAppState
@@ -56,6 +58,7 @@ class AppGraph(
     userStore: DataStore<Preferences>? = null,
     networkSignal: NetworkSignal? = null,
     loginGatewayFactory: (() -> LoginAuthGateway)? = null,
+    gifSearchGateway: GifSearchGateway? = null,
     /**
      * Media plane behind the call engine. Tests inject a fake so the
      * hermetic suites never open a real mic/camera or WebRTC stack.
@@ -75,6 +78,14 @@ class AppGraph(
 
     val loginGateway: () -> LoginAuthGateway =
         loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
+
+    /**
+     * GIF search over the server origin's `/api/giphy` proxy (the web
+     * contract). Same-origin as the auth REST base; a deployment
+     * without the proxy degrades to the "not configured" picker state.
+     */
+    val gifSearchGateway: GifSearchGateway =
+        gifSearchGateway ?: GiphyProxyGateway(serverUrl, okHttpClient)
 
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))

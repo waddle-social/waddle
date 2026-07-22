@@ -9,6 +9,7 @@ import social.waddle.android.client.store.MessageMutation
 import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
+import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleSendMessageOutcome
@@ -240,6 +241,15 @@ internal class ConversationVerbs(
                 client.unpinMessage(bareJid(roomJid), targetStanzaId)
             }
         }
+
+    /**
+     * `urn:waddle:link-preview:0` composer lookup: resolve [url] into a
+     * send-time token scoped to [scopeJid] (DM peer or room bare JID).
+     * `null` when no session is live or the transport broke — the send
+     * proceeds without a preview, never blocks on one.
+     */
+    suspend fun lookupLinkPreview(url: String, scopeJid: String): WaddleLinkPreviewLookup? =
+        activeSession.fetch { it.lookupLinkPreview(url, bareJid(scopeJid)) }
 
     /**
      * Seed the pin store with the room's current pin list (room open).

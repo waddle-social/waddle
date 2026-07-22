@@ -43,6 +43,12 @@ class ThreadViewModel(
     } else {
         flowOf(emptyList())
     },
+    occupantPresence = if (isGroupchat) {
+        sessionManager.presenceStore.occupants
+            .map { rooms -> rooms[conversationJid].orEmpty() }
+    } else {
+        flowOf(emptyMap())
+    },
     threadId = threadId,
     uploader = uploader,
     onConversationRead = onConversationRead,
