@@ -244,11 +244,13 @@ class CallStoreMucTest {
     }
 
     @Test
-    fun `a hangUp racing the preparing presence re-clears the room-visible ghost`() = runTest {
+    fun `a hangUp leave racing the preparing presence lands AFTER it on the wire`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)
-        // Stall ONLY the preparing presence so the concurrent
-        // teardown's leave overtakes it on the wire.
+        // Stall ONLY the preparing presence; the concurrent teardown's
+        // leave must queue behind it on the presence mutex instead of
+        // overtaking it (a leave-then-preparing inversion would plant a
+        // permanent room-visible <preparing/> ghost).
         f.client.updateMujiPresenceDelaysMillis += 50L
 
         val started = begin(f, this)
@@ -259,11 +261,11 @@ class CallStoreMucTest {
 
         assertFalse(started.await())
         assertEquals(CallState.Idle, f.store.state.value)
-        // Teardown leave first, then the orphaned preparing presence
-        // lands — the engine MUST re-clear it or every other occupant's
-        // awaitNoOtherPreparing sees a permanent <preparing/> ghost.
+        // The stalled preparing presence lands first, then the
+        // teardown's leave, then the abandoned attempt's idempotent
+        // re-clear — never an active/preparing marker after a leave.
         assertEquals(
-            listOf(leavePresenceVerb, preparingPresenceVerb, leavePresenceVerb),
+            listOf(preparingPresenceVerb, leavePresenceVerb, leavePresenceVerb),
             f.client.callVerbs,
         )
     }
@@ -469,6 +471,106 @@ class CallStoreMucTest {
             ),
             f.client.callVerbs.takeLast(2),
         )
+    }
+
+    @Test
+    fun `re-stamps parked behind an in-flight send carry the final optimistic state`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        assertTrue(activateMucCall(f).await())
+        f.client.updateMujiPresenceDelaysMillis += 50L
+
+        val mute = backgroundScope.async { f.store.muc.broadcastSelfMute(true) }
+        runCurrent()
+        // Two racing hand toggles PARK behind the in-flight mute: both
+        // snapshot the flags INSIDE the send mutex, so whatever order
+        // they acquire it in, both send the identical FINAL state —
+        // the wire can never end on a value the UI no longer shows.
+        val raise = backgroundScope.async { f.store.muc.setHandRaised(true) }
+        runCurrent()
+        val lower = backgroundScope.async { f.store.muc.setHandRaised(false) }
+        runCurrent()
+        advanceTimeBy(51)
+        runCurrent()
+
+        assertTrue(mute.await())
+        assertTrue(raise.await())
+        assertTrue(lower.await())
+        assertFalse(f.store.muc.selfHandRaised.value)
+        assertEquals(
+            listOf(
+                activePresenceVerb.copy(muted = true),
+                activePresenceVerb.copy(handRaised = false, muted = true),
+                activePresenceVerb.copy(handRaised = false, muted = true),
+            ),
+            f.client.callVerbs.takeLast(3),
+        )
+    }
+
+    @Test
+    fun `a parked re-stamp skips once a hangUp leave claims the slot`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        assertTrue(activateMucCall(f).await())
+        f.client.updateMujiPresenceDelaysMillis += 50L
+
+        val raise = backgroundScope.async { f.store.muc.setHandRaised(true) }
+        runCurrent()
+        // Parks behind the in-flight raise while the slot is still
+        // Active…
+        val mute = backgroundScope.async { f.store.muc.broadcastSelfMute(true) }
+        runCurrent()
+        // …then the teardown claims the slot. Its leave queues on the
+        // SAME mutex, and the parked re-stamp must re-check the slot
+        // and stand down instead of resurrecting the active
+        // advertisement after the leave.
+        val hangUp = backgroundScope.async { f.store.hangUp() }
+        runCurrent()
+        advanceTimeBy(51)
+        runCurrent()
+
+        assertTrue(raise.await())
+        assertFalse(mute.await())
+        hangUp.await()
+        assertEquals(CallState.Idle, f.store.state.value)
+        // XEP-0272 §Leaving pinned on the wire: the in-flight re-stamp,
+        // the leave, the mixer terminate — and nothing after the leave.
+        assertEquals(
+            listOf(activePresenceVerb.copy(handRaised = true), leavePresenceVerb, terminateVerb),
+            f.client.callVerbs.takeLast(3),
+        )
+    }
+
+    @Test
+    fun `an abandoned attempt's re-clear never wipes a newer same-room attempt`() = runTest {
+        var counter = 0
+        val f = Fixture(sid = { "c-${counter++}" })
+        f.store.start(backgroundScope)
+        // Stall attempt A's preparing presence so its abandoned-setup
+        // re-clear decision happens AFTER attempt B claimed the room.
+        f.client.updateMujiPresenceDelaysMillis += 50L
+
+        val a = backgroundScope.async { f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID) }
+        runCurrent()
+        val hangUp = backgroundScope.async { f.store.hangUp() }
+        runCurrent()
+        val b = backgroundScope.async { f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID) }
+        runCurrent()
+        advanceTimeBy(51)
+        runCurrent()
+        // B's setup proceeds normally: preparing echo, mixer accept.
+        f.store.onPresence(mujiPresence(SELF_NICK, preparing = true, mucJid = OWN_FULL))
+        runCurrent()
+        f.store.onCallEvent(mucSessionAccept("c-1"))
+        runCurrent()
+
+        assertFalse(a.await())
+        hangUp.await()
+        assertTrue(b.await())
+        assertTrue(f.store.state.value is CallState.Active)
+        // Neither A's teardown nor its abandoned re-clear may wipe the
+        // room B now owns: no leave presence lands at all.
+        assertTrue(f.client.callVerbs.none { it == leavePresenceVerb })
     }
 
     @Test

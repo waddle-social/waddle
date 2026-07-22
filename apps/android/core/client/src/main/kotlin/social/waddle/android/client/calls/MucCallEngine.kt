@@ -49,10 +49,13 @@ class MucCallEngine internal constructor(
     private val pendingAccepts = HashMap<String, PendingMujiAccept>()
 
     /**
-     * Serializes the muji presence re-stamps (hand raise / mute) so
-     * WIRE order matches snapshot order — two racing toggles must land
-     * on the last-writer-wins presence in the order they were taken.
-     * kotlinx's [Mutex] is fair, so waiters send in FIFO order.
+     * Serializes EVERY muji presence send — setup phases, in-call
+     * re-stamps, and leave clears — so WIRE order matches decision
+     * order: a teardown's leave can never be overtaken by a stalled
+     * setup presence, and a parked re-stamp can never resurrect the
+     * active advertisement after a leave (each re-stamp re-checks the
+     * slot INSIDE the lock). kotlinx's [Mutex] is fair, so waiters
+     * send in FIFO order.
      */
     private val presenceSendMutex = Mutex()
 
@@ -191,23 +194,17 @@ class MucCallEngine internal constructor(
         val target = mucActiveOrNull() ?: return false
         val nick = target.selfNick ?: return false
         _selfHandRaised.value = raised
-        val sent = presenceSendMutex.withLock {
-            signaling.updateMujiPresence(
-                MujiPresenceUpdate(
-                    roomJid = target.peer, nick = nick,
-                    active = true, preparing = false, video = target.media.video,
-                    // Mute read INSIDE the send mutex: any earlier mute
-                    // broadcast has already landed, so the re-stamp
-                    // carries the newest marker.
-                    flags = WaddleInCallPresenceFlags(handRaised = raised, muted = _selfMuted.value),
-                ),
-            )
+        return when (restampActivePresence(target, nick)) {
+            RestampOutcome.SENT -> true
+            // A teardown claimed the slot while this re-stamp was
+            // parked; its leave already cleared every in-call marker.
+            RestampOutcome.SLOT_MOVED -> false
+            RestampOutcome.FAILED -> {
+                _selfHandRaised.compareAndSet(expect = raised, update = !raised)
+                store.reportCallError("muji hand-raise update failed")
+                false
+            }
         }
-        if (!sent) {
-            _selfHandRaised.compareAndSet(expect = raised, update = !raised)
-            store.reportCallError("muji hand-raise update failed")
-        }
-        return sent
     }
 
     /**
@@ -219,17 +216,48 @@ class MucCallEngine internal constructor(
         val target = mucActiveOrNull() ?: return false
         val nick = target.selfNick ?: return false
         _selfMuted.value = muted
-        val sent = presenceSendMutex.withLock {
-            signaling.updateMujiPresence(
+        return when (restampActivePresence(target, nick)) {
+            RestampOutcome.SENT -> true
+            RestampOutcome.SLOT_MOVED -> false
+            RestampOutcome.FAILED -> {
+                store.reportCallError("muji mute update failed")
+                false
+            }
+        }
+    }
+
+    /** One serialized active-presence re-stamp attempt's outcome. */
+    private enum class RestampOutcome { SENT, FAILED, SLOT_MOVED }
+
+    /**
+     * Re-emit the active presence with BOTH in-call flags, serialized
+     * on [presenceSendMutex]. The flags are snapshotted INSIDE the
+     * lock, so racing toggles send the identical final optimistic
+     * state whatever order they acquire it in — and the slot is
+     * re-checked INSIDE the lock, so a re-stamp parked behind a
+     * teardown's leave skips silently instead of resurrecting the
+     * active advertisement on the wire.
+     */
+    private suspend fun restampActivePresence(
+        target: CallState.Active,
+        nick: String,
+    ): RestampOutcome = presenceSendMutex.withLock {
+        val current = mucActiveOrNull()
+        if (current == null || current.peer != target.peer || current.sid != target.sid) {
+            RestampOutcome.SLOT_MOVED
+        } else {
+            val sent = signaling.updateMujiPresence(
                 MujiPresenceUpdate(
                     roomJid = target.peer, nick = nick,
                     active = true, preparing = false, video = target.media.video,
-                    flags = WaddleInCallPresenceFlags(handRaised = _selfHandRaised.value, muted = muted),
+                    flags = WaddleInCallPresenceFlags(
+                        handRaised = _selfHandRaised.value,
+                        muted = _selfMuted.value,
+                    ),
                 ),
             )
+            if (sent) RestampOutcome.SENT else RestampOutcome.FAILED
         }
-        if (!sent) store.reportCallError("muji mute update failed")
-        return sent
     }
 
     /**
@@ -252,16 +280,17 @@ class MucCallEngine internal constructor(
         val session = sessionCache.read(room, self, nowMillis) ?: return false
         val join = session.join() ?: return false
         val media = session.media()
+        val promotedState = CallState.Active(
+            peer = session.roomJid,
+            sid = session.sid,
+            media = media,
+            join = join,
+            kind = CallKind.MUC,
+            selfNick = selfNick,
+        )
         val promoted = store.updateCallSlot { current ->
             if (current is CallState.Idle || current is CallState.Ended) {
-                CallState.Active(
-                    peer = session.roomJid,
-                    sid = session.sid,
-                    media = media,
-                    join = join,
-                    kind = CallKind.MUC,
-                    selfNick = selfNick,
-                ) to true
+                promotedState to true
             } else {
                 current to false
             }
@@ -270,17 +299,11 @@ class MucCallEngine internal constructor(
         // The re-publish must not wipe in-call state: joining without
         // mic capture stays advertised muted, and any flags a live
         // engine still carries survive (post-process-death both flows
-        // are at their false defaults anyway).
-        val muted = _selfMuted.value || !media.audio
-        val handRaised = _selfHandRaised.value
-        _selfMuted.value = muted
-        signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = room, nick = selfNick,
-                active = true, preparing = false, video = media.video,
-                flags = WaddleInCallPresenceFlags(handRaised = handRaised, muted = muted),
-            ),
-        )
+        // are at their false defaults anyway). The re-stamp serializes
+        // on the presence mutex and re-checks the slot, so it can never
+        // land after a leave that already claimed it.
+        _selfMuted.value = _selfMuted.value || !media.audio
+        restampActivePresence(promotedState, selfNick)
         return true
     }
 
@@ -299,6 +322,10 @@ class MucCallEngine internal constructor(
     ): Boolean {
         val room = normalizeMucCallRoomJid(roomJid)
         if (room.isEmpty() || selfNick.isNullOrEmpty()) return false
+        // A live local call owns this room: its presence must not be
+        // cleared, and the room's freshest cache entry is the LIVE
+        // session's — terminating that sid would kill the call.
+        if (slotHoldsMucRoom(room)) return false
         val self = selfFullJid?.trim().orEmpty()
         // Exact-resource entry first; otherwise any entry this ACCOUNT
         // owes the mixer for the room (the resource suffix may have
@@ -308,13 +335,15 @@ class MucCallEngine internal constructor(
         } else {
             sessionCache.read(room, self, nowMillis) ?: sessionCache.retainedEntry(room, self, nowMillis)
         }
-        val cleared = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = room, nick = selfNick,
-                active = false, preparing = false, video = false,
-                flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
-            ),
-        )
+        val cleared = presenceSendMutex.withLock {
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = room, nick = selfNick,
+                    active = false, preparing = false, video = false,
+                    flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
+                ),
+            )
+        }
         if (!cleared) {
             store.reportCallError("muji leave presence failed")
             return false
@@ -345,7 +374,18 @@ class MucCallEngine internal constructor(
         val self = selfFullJid?.trim().orEmpty()
         if (self.isEmpty()) return
         for (entry in sessionCache.terminatePendingEntries(self, nowMillis)) {
-            if (signaling.mujiSessionTerminate(entry.roomJid, entry.sid)) {
+            // Mixer sessions are (room, identity)-scoped: while the
+            // slot holds a call in this room, the stale terminate could
+            // fire onto the FRESH session — keep the entry flagged for
+            // the next connect instead.
+            if (slotHoldsMucRoom(entry.roomJid)) continue
+            val sent = signaling.mujiSessionTerminate(entry.roomJid, entry.sid)
+            // Re-check AFTER the send returns (the IQ round-trip is
+            // long enough for the user to begin a call here): if the
+            // room was claimed mid-retry the terminate may have raced
+            // onto the fresh session, so keep the flag and let a later
+            // cleanup settle it once the room is free again.
+            if (sent && !slotHoldsMucRoom(entry.roomJid)) {
                 sessionCache.forget(entry.roomJid, entry.selfFullJid, entry.sid)
             }
         }
@@ -384,14 +424,16 @@ class MucCallEngine internal constructor(
         val selfNick = attempt.selfNick
         val selfFullJid = attempt.selfFullJid
         val waiter = presence.registerPreparingEchoWaiter(room, selfNick, selfFullJid)
-        val sent = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = room, nick = selfNick,
-                active = false, preparing = true, video = false,
-                // in-call state isn't advertised before joining
-                flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
-            ),
-        )
+        val sent = presenceSendMutex.withLock {
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = room, nick = selfNick,
+                    active = false, preparing = true, video = false,
+                    // in-call state isn't advertised before joining
+                    flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
+                ),
+            )
+        }
         if (!sent) return false
         if (!stillPending(attempt)) return preparingFailed(attempt)
         if (!presence.awaitPreparingEcho(waiter, PREPARING_ECHO_TIMEOUT_MILLIS)) return preparingFailed(attempt)
@@ -405,12 +447,12 @@ class MucCallEngine internal constructor(
     /**
      * A prepare step failed after the preparing presence hit the wire.
      * When the slot no longer holds this attempt, a concurrent hangUp
-     * owned the cleanup — but its leave presence may have raced AHEAD
-     * of our still-in-flight preparing presence, leaving a permanent
-     * room-visible `<preparing/>` ghost that breaks every other
-     * occupant's `awaitNoOtherPreparing`. Re-clear it here (idempotent
-     * bare presence), mirroring [publishActivePresence]'s `!marked`
-     * branch; when the slot is still ours, [rollback] sends the leave.
+     * owned the cleanup — re-clear our room-visible advertisement here
+     * (idempotent bare presence), mirroring [publishActivePresence]'s
+     * `!marked` branch; when the slot is still ours, [rollback] sends
+     * the leave. [leavePresence] stands down when a NEWER same-room
+     * attempt already owns the room's presence, so an abandoned
+     * attempt can never wipe its successor's preparing/active marker.
      */
     private suspend fun preparingFailed(attempt: MucAttempt): Boolean {
         if (!stillPending(attempt)) {
@@ -424,13 +466,15 @@ class MucCallEngine internal constructor(
      * are advertised in MUC presence BEFORE the Jingle session).
      */
     private suspend fun publishActivePresence(attempt: MucAttempt): Boolean {
-        val sent = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = attempt.room, nick = attempt.selfNick,
-                active = true, preparing = false, video = attempt.media.video,
-                flags = WaddleInCallPresenceFlags(handRaised = false, muted = !attempt.media.audio),
-            ),
-        )
+        val sent = presenceSendMutex.withLock {
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = attempt.room, nick = attempt.selfNick,
+                    active = true, preparing = false, video = attempt.media.video,
+                    flags = WaddleInCallPresenceFlags(handRaised = false, muted = !attempt.media.audio),
+                ),
+            )
+        }
         if (!sent) return false
         val marked = store.updateCallSlot { current ->
             if (current is CallState.MucPending && current.roomJid == attempt.room && current.sid == attempt.sid) {
@@ -443,6 +487,8 @@ class MucCallEngine internal constructor(
             // The slot moved while the active presence was in flight:
             // the teardown owner saw activePresencePublished=false, so
             // re-clear the room-visible advertisement here (web parity).
+            // [leavePresence] stands down when a NEWER same-room
+            // attempt already owns the room's presence.
             leavePresence(attempt.room, attempt.selfNick, attempt.selfFullJid)
         }
         return marked
@@ -538,15 +584,27 @@ class MucCallEngine internal constructor(
         return false
     }
 
+    /**
+     * Room-visible presence clear (XEP-0272 §Leaving marker),
+     * serialized on [presenceSendMutex] so it keeps wire order with
+     * every other muji presence send. Stands down entirely — checked
+     * INSIDE the lock — when the slot holds a MUC phase for [room]: a
+     * NEWER same-room attempt owns the room's presence, its markers
+     * must survive this stale clear, and its own rollback/teardown
+     * sends the leave if it fails.
+     */
     private suspend fun leavePresence(room: String, selfNick: String, selfFullJid: String?) {
-        val cleared = signaling.updateMujiPresence(
-            MujiPresenceUpdate(
-                roomJid = room, nick = selfNick,
-                active = false, preparing = false, video = false,
-                // leaving the call clears all in-call state
-                flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
-            ),
-        )
+        val cleared = presenceSendMutex.withLock {
+            if (slotHoldsMucRoom(room)) return
+            signaling.updateMujiPresence(
+                MujiPresenceUpdate(
+                    roomJid = room, nick = selfNick,
+                    active = false, preparing = false, video = false,
+                    // leaving the call clears all in-call state
+                    flags = WaddleInCallPresenceFlags(handRaised = false, muted = false),
+                ),
+            )
+        }
         if (!cleared) store.reportCallError("muji leave presence failed")
         presence.clearParticipant(room, selfNick, selfFullJid)
         _selfHandRaised.value = false
@@ -575,6 +633,20 @@ class MucCallEngine internal constructor(
 
     private fun mucActiveOrNull(): CallState.Active? =
         (store.state.value as? CallState.Active)?.takeIf { it.kind == CallKind.MUC }
+
+    /**
+     * Whether the live slot holds ANY MUC phase for [room] — the
+     * signal that a (possibly newer) local attempt owns the room's
+     * presence and mixer session, so stale clears and terminates for
+     * the room must stand down.
+     */
+    private fun slotHoldsMucRoom(room: String): Boolean =
+        when (val current = store.state.value) {
+            is CallState.MucPending -> current.roomJid == room
+            is CallState.Active ->
+                current.kind == CallKind.MUC && normalizeMucCallRoomJid(current.peer) == room
+            else -> false
+        }
 
     companion object {
         /**

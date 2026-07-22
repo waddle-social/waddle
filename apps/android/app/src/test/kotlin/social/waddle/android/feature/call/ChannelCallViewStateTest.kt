@@ -167,17 +167,69 @@ class ChannelCallViewStateTest {
 
     // ── Retained-call cleanup (web leaveRetainedMucCallAction dock) ──────────
 
+    private val selfFullJid = "me@waddle.test/android"
+    private val deadResourceJid = "me@waddle.test/waddle-android-old"
+
+    private fun offersRetainedLeave(
+        state: CallState = CallState.Idle,
+        retained: RetainedSessionView? = RetainedSessionView(
+            terminatePending = false,
+            selfFullJid = deadResourceJid,
+        ),
+        mujiNicks: List<String> = listOf("me", "alice"),
+        selfNick: String? = "me",
+        owners: Map<String, String?> = emptyMap(),
+    ): Boolean = shouldOfferRetainedLeave(
+        state = state,
+        roomJid = room,
+        retained = retained,
+        muji = RoomMujiView(nicks = mujiNicks, owners = owners),
+        self = SelfCallIdentity(nick = selfNick, fullJid = selfFullJid),
+    )
+
     @Test
-    fun retainedGhostStillAdvertisedInMujiOffersTheLeave() {
+    fun deadResourceOwnedGhostOffersTheLeave() {
         assertEquals(
             true,
-            shouldOfferRetainedLeave(
-                state = CallState.Idle,
-                roomJid = room,
-                retained = RetainedSessionView(terminatePending = false),
-                mujiNicks = listOf("me", "alice"),
-                selfNick = "me",
+            offersRetainedLeave(
+                owners = mapOf("me" to deadResourceJid, "alice" to "alice@waddle.test/pc"),
             ),
+        )
+    }
+
+    @Test
+    fun hiddenOwnerFallsBackToTheGhostReading() {
+        // The room hides real JIDs: the cache + presence evidence wins.
+        assertEquals(true, offersRetainedLeave(owners = emptyMap()))
+    }
+
+    @Test
+    fun anotherLiveResourceSharingTheNickNeverOffersTheLeave() {
+        // Our bare JID, but a resource that is neither the cached dead
+        // one nor the current bound one: a sibling device is live in
+        // the call — the banner must offer Join, not a destructive leave.
+        assertEquals(
+            false,
+            offersRetainedLeave(owners = mapOf("me" to "me@waddle.test/tablet")),
+        )
+    }
+
+    @Test
+    fun aForeignOccupantSharingTheNickNeverOffersTheLeave() {
+        assertEquals(
+            false,
+            offersRetainedLeave(owners = mapOf("me" to "eve@waddle.test/pc")),
+        )
+    }
+
+    @Test
+    fun presenceOnlyGhostWithoutACacheEntryStillOffersTheLeave() {
+        // Process death BEFORE the mixer accept caches nothing, but the
+        // active presence already hit the room; the stable Android
+        // resource means the ghost's owner IS our current full JID.
+        assertEquals(
+            true,
+            offersRetainedLeave(retained = null, owners = mapOf("me" to selfFullJid)),
         )
     }
 
@@ -185,12 +237,9 @@ class ChannelCallViewStateTest {
     fun terminatePendingEntryOffersTheLeaveEvenWithoutAMujiGhost() {
         assertEquals(
             true,
-            shouldOfferRetainedLeave(
-                state = CallState.Idle,
-                roomJid = room,
-                retained = RetainedSessionView(terminatePending = true),
+            offersRetainedLeave(
+                retained = RetainedSessionView(terminatePending = true, selfFullJid = deadResourceJid),
                 mujiNicks = emptyList(),
-                selfNick = "me",
             ),
         )
     }
@@ -199,37 +248,24 @@ class ChannelCallViewStateTest {
     fun retainedLeaveNeverOffersWhileOurLiveCallOwnsTheRoom() {
         assertEquals(
             false,
-            shouldOfferRetainedLeave(
+            offersRetainedLeave(
                 state = activeMucCall(),
-                roomJid = room,
-                retained = RetainedSessionView(terminatePending = true),
+                retained = RetainedSessionView(terminatePending = true, selfFullJid = deadResourceJid),
                 mujiNicks = listOf("me"),
-                selfNick = "me",
+                owners = mapOf("me" to deadResourceJid),
             ),
         )
     }
 
     @Test
     fun aCachedSessionWithoutGhostOrPendingTerminateStaysQuiet() {
+        // Our nick is not advertised at all.
+        assertEquals(false, offersRetainedLeave(mujiNicks = listOf("alice")))
+        // No cache entry and the advertised nick belongs to a live
+        // sibling resource: nothing retained to clean up.
         assertEquals(
             false,
-            shouldOfferRetainedLeave(
-                state = CallState.Idle,
-                roomJid = room,
-                retained = RetainedSessionView(terminatePending = false),
-                mujiNicks = listOf("alice"),
-                selfNick = "me",
-            ),
-        )
-        assertEquals(
-            false,
-            shouldOfferRetainedLeave(
-                state = CallState.Idle,
-                roomJid = room,
-                retained = null,
-                mujiNicks = listOf("me"),
-                selfNick = "me",
-            ),
+            offersRetainedLeave(retained = null, owners = mapOf("me" to "me@waddle.test/tablet")),
         )
     }
 

@@ -81,25 +81,71 @@ sealed interface ChannelCallBannerState {
 data class RetainedSessionView(
     /** The entry's XEP-0166 mixer terminate never made it to the wire. */
     val terminatePending: Boolean,
+    /** The (possibly dead) full-JID resource that minted the entry. */
+    val selfFullJid: String? = null,
+)
+
+/** Our own MUC identity: occupant nick plus the current bound full JID. */
+data class SelfCallIdentity(
+    val nick: String?,
+    val fullJid: String?,
+)
+
+/**
+ * One room's Muji presence evidence: the advertised nicks plus the
+ * XEP-0045 owner (real full JID) the room exposes per nick.
+ */
+data class RoomMujiView(
+    val nicks: List<String>,
+    val owners: Map<String, String?>,
 )
 
 /**
  * Whether the retained-call cleanup affordance applies: our slot holds
- * NO call in this room, yet the session cache still has an entry our
- * account owes the room — and either the Muji view still advertises
- * our own nick (post-process-death ghost) or the entry's mixer
- * terminate is still pending.
+ * NO call in this room, yet either a cached entry still owes the
+ * mixer its terminate, or the Muji view advertises our nick under an
+ * identity only a DEAD resource of ours explains (post-process-death
+ * ghost — a cache entry is NOT required: a death before the mixer
+ * accept caches nothing, and `muc.leaveRetained` handles the
+ * presence-only clear). A nick owned by ANOTHER live resource of this
+ * account, or by a foreign occupant sharing it, is real participation
+ * — the caller offers Join, never the destructive leave.
  */
 fun shouldOfferRetainedLeave(
     state: CallState,
     roomJid: String,
     retained: RetainedSessionView?,
-    mujiNicks: List<String>,
-    selfNick: String?,
+    muji: RoomMujiView,
+    self: SelfCallIdentity,
 ): Boolean {
     if (localCallInRoom(state, roomJid)) return false
-    if (retained == null) return false
-    return retained.terminatePending || (!selfNick.isNullOrEmpty() && selfNick in mujiNicks)
+    if (retained?.terminatePending == true) return true
+    val nick = self.nick
+    if (nick.isNullOrEmpty() || nick !in muji.nicks) return false
+    return nickOwnerIsOurDeadResource(muji.owners[nick], self.fullJid, retained?.selfFullJid)
+}
+
+/**
+ * Whether the advertised nick's XEP-0045 owner identifies OUR dead
+ * resource: no exposed owner (the room hides real JIDs — the ghost
+ * reading is the only evidence left), the cache entry's resource, or
+ * our CURRENT resource (Android resource strings are stable across
+ * process death, and with no live local call in the room its
+ * advertisement is stale by definition). Any other full JID — a
+ * sibling resource of ours, or a foreign bare JID — means live
+ * participation under a shared nick.
+ */
+private fun nickOwnerIsOurDeadResource(
+    owner: String?,
+    selfFullJid: String?,
+    cachedSelfFullJid: String?,
+): Boolean {
+    val ownerKey = fullJidIdentityKey(owner)
+    if (ownerKey.isEmpty()) return true
+    val cachedKey = fullJidIdentityKey(cachedSelfFullJid)
+    if (cachedKey.isNotEmpty() && ownerKey == cachedKey) return true
+    val selfKey = fullJidIdentityKey(selfFullJid)
+    return selfKey.isNotEmpty() && ownerKey == selfKey
 }
 
 /**

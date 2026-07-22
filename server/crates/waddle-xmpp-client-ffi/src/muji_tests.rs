@@ -81,6 +81,16 @@ fn mixer_target_strips_the_resource_before_the_domain_split() {
     );
 }
 
+/// A domain that cannot host the mixer JID surfaces the typed
+/// [`WaddleError::InvalidJid`] instead of a panic.
+#[test]
+fn mixer_target_rejects_an_unparseable_mixer_host() {
+    assert!(matches!(
+        muji_mixer_target("alice@[::1]"),
+        Err(WaddleError::InvalidJid)
+    ));
+}
+
 /// XEP-0272 §Joining phase 1: the `<preparing/>` presence carries no
 /// contents, but the `urn:waddle:in-call:0` flags DO ride it (the
 /// shared builder stamps them whenever preparing or active — wasm

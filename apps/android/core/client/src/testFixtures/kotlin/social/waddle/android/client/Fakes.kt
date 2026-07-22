@@ -428,6 +428,13 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var mujiSessionTerminateFailure: Throwable? = null
 
+    /**
+     * Per-call virtual-time stalls before [sendMujiSessionTerminate]
+     * answers, consumed in send order — models the mixer IQ round-trip
+     * so tests can land a concurrent action mid-terminate.
+     */
+    val mujiSessionTerminateDelaysMillis = ConcurrentLinkedDeque<Long>()
+
     @Volatile
     var updateMujiPresenceFailure: Throwable? = null
 
@@ -442,6 +449,7 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun sendMujiSessionTerminate(roomJid: String, sid: String) {
+        mujiSessionTerminateDelaysMillis.pollFirst()?.let { if (it > 0) delay(it) }
         callVerbs += RecordedCallVerb.MujiSessionTerminate(roomJid, sid)
         mujiSessionTerminateFailure?.let { throw it }
     }

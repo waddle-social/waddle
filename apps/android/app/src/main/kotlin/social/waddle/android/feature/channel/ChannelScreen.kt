@@ -31,6 +31,8 @@ import social.waddle.android.feature.call.ChannelCallBanner
 import social.waddle.android.feature.call.ChannelCallControls
 import social.waddle.android.feature.call.ChannelCallTestTags
 import social.waddle.android.feature.call.RetainedSessionView
+import social.waddle.android.feature.call.RoomMujiView
+import social.waddle.android.feature.call.SelfCallIdentity
 import social.waddle.android.feature.call.channelCallBannerOf
 import social.waddle.android.feature.call.channelCallControlsOf
 import social.waddle.android.feature.call.normalizeCallRoomJid
@@ -86,14 +88,20 @@ fun ChannelScreen(
     ) {
         value = graph.sessionPrefs.mucCallSessions
             .retainedEntry(normalizedRoom, graph.sessionManager.ownFullJid())
-            ?.let { RetainedSessionView(terminatePending = it.terminatePending) }
+            ?.let { RetainedSessionView(terminatePending = it.terminatePending, selfFullJid = it.selfFullJid) }
     }
     val retainedLeave = shouldOfferRetainedLeave(
         state = callState,
         roomJid = roomJid,
         retained = retainedSession,
-        mujiNicks = participants[normalizedRoom]?.toList() ?: emptyList(),
-        selfNick = session?.xmppLocalpart,
+        muji = RoomMujiView(
+            nicks = participants[normalizedRoom]?.toList() ?: emptyList(),
+            owners = owners[normalizedRoom] ?: emptyMap(),
+        ),
+        self = SelfCallIdentity(
+            nick = session?.xmppLocalpart,
+            fullJid = graph.sessionManager.ownFullJid(),
+        ),
     )
 
     fun leaveRetainedCall() {

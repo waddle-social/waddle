@@ -2,6 +2,7 @@ package social.waddle.android.client.calls
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -261,6 +262,58 @@ class MucCallSessionCacheTest {
 
         val entry = f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)
         assertTrue(entry?.terminatePending == true)
+    }
+
+    @Test
+    fun `retryPendingTerminates skips a room the slot currently holds`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.sessionCache.markTerminatePending(ROOM_JID, "c-old", OWN_FULL, nowMillis = now)
+        // A fresh call owns the room before the retry runs: mixer
+        // sessions are (room, identity)-scoped, so the stale terminate
+        // could kill the LIVE session and must not be sent.
+        val fresh = backgroundScope.async {
+            f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID)
+        }
+        runCurrent()
+        assertTrue(f.store.state.value is CallState.MucPending)
+
+        f.store.muc.retryPendingTerminates(OWN_FULL, nowMillis = now + 1)
+
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.MujiSessionTerminate })
+        assertTrue(
+            f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)?.terminatePending == true,
+        )
+        fresh.cancel()
+    }
+
+    @Test
+    fun `a room claimed mid-retry keeps the entry flagged`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.sessionCache.markTerminatePending(ROOM_JID, "c-old", OWN_FULL, nowMillis = now)
+        f.client.mujiSessionTerminateDelaysMillis += 50L
+
+        val retry = backgroundScope.async {
+            f.store.muc.retryPendingTerminates(OWN_FULL, nowMillis = now + 1)
+        }
+        runCurrent()
+        // The stale terminate is in flight when the user begins a fresh
+        // call in the room: the send may have raced onto the fresh
+        // mixer session, so the entry must stay flagged for a later
+        // cleanup instead of being forgotten.
+        val fresh = backgroundScope.async {
+            f.store.muc.begin(ROOM_JID, audio, SELF_NICK, OWN_FULL, MIXER_JID)
+        }
+        runCurrent()
+        advanceTimeBy(51)
+        runCurrent()
+        retry.await()
+
+        assertTrue(
+            f.sessionCache.read(ROOM_JID, OWN_FULL, nowMillis = now + 2)?.terminatePending == true,
+        )
+        fresh.cancel()
     }
 
     @Test
