@@ -64,20 +64,25 @@ private fun reduceRinging(current: CallState, event: WaddleCallEvent): CallState
 private fun reduceProceed(current: CallState, event: WaddleCallEvent): CallState =
     if (current is CallState.Incoming && current.sid == event.sid) CallState.Idle else current
 
-/** XEP-0353 abort (`<reject/>` / `<retract/>`): only for the live slot. */
+/**
+ * XEP-0353 abort (`<reject/>` / `<retract/>`): only for the live slot.
+ * MUC group-call phases are engine-owned — ending them here would skip
+ * the leave presence, strand the preparation waiters, and retain the
+ * session cache; the store's MUC end effect runs the teardown instead.
+ */
 private fun reduceAbort(
     current: CallState,
     event: WaddleCallEvent,
     expired: Boolean,
     kindReason: CallEndReason,
 ): CallState =
-    if (current !is CallState.Idle && current.sidOrNull == event.sid) {
+    if (current !is CallState.Idle && !current.isMucCallPhase && current.sidOrNull == event.sid) {
         CallState.Ended(sid = event.sid, reason = if (expired) CallEndReason.Expired else kindReason)
     } else {
         current
     }
 
-private fun tieBreakExpired(tieBreak: Boolean, reason: social.waddle.client.ffi.WaddleJingleReason?): Boolean =
+internal fun tieBreakExpired(tieBreak: Boolean, reason: social.waddle.client.ffi.WaddleJingleReason?): Boolean =
     tieBreak && reason == social.waddle.client.ffi.WaddleJingleReason.EXPIRED
 
 /**
@@ -119,13 +124,17 @@ private fun reduceSessionAccept(
     )
 }
 
-/** Either side hung up; a stale terminate for another sid is a no-op. */
+/**
+ * Either side hung up; a stale terminate for another sid is a no-op.
+ * MUC phases stay untouched (see [reduceAbort]) — the store's MUC end
+ * effect owns their teardown.
+ */
 private fun reduceEnd(
     current: CallState,
     event: WaddleCallEvent,
     reason: social.waddle.client.ffi.WaddleJingleReason?,
 ): CallState =
-    if (current !is CallState.Idle && current.sidOrNull == event.sid) {
+    if (current !is CallState.Idle && !current.isMucCallPhase && current.sidOrNull == event.sid) {
         CallState.Ended(sid = event.sid, reason = CallEndReason.Finished(reason))
     } else {
         current

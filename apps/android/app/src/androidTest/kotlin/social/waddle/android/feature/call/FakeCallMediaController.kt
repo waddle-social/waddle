@@ -41,6 +41,10 @@ class FakeCallMediaController : CallMediaController {
     private val _localVideo = MutableStateFlow<VideoTrackHandle?>(null)
     override val localVideo: StateFlow<VideoTrackHandle?> = _localVideo
 
+    /** Tests script the SFU roster by writing this directly. */
+    val remoteIdentities = MutableStateFlow<List<String>>(emptyList())
+    override val remoteParticipantIdentities: StateFlow<List<String>> = remoteIdentities
+
     override suspend fun connect(
         join: WaddleLiveKitJoin,
         media: WaddleCallMedia,
@@ -55,6 +59,7 @@ class FakeCallMediaController : CallMediaController {
 
     override suspend fun disconnect() {
         disconnectCalls += 1
+        remoteIdentities.value = emptyList()
         _connection.value = CallMediaConnection.Idle
         _micEnabled.value = false
         _cameraEnabled.value = false

@@ -39,6 +39,7 @@ import social.waddle.client.ffi.WaddleConfig
 import social.waddle.client.ffi.WaddleDmBookmarkItem
 import social.waddle.client.ffi.WaddleEventListener
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleLinkPreviewLookupStatus
@@ -198,6 +199,25 @@ sealed interface RecordedCallVerb {
         val peerFullJid: String,
         val sid: String,
         val reason: WaddleJingleReason?,
+    ) : RecordedCallVerb
+
+    data class MujiSessionInitiate(
+        val roomJid: String,
+        val initiatorFullJid: String,
+        val sid: String,
+        val video: Boolean,
+    ) : RecordedCallVerb
+
+    data class MujiSessionTerminate(val roomJid: String, val sid: String) : RecordedCallVerb
+
+    data class UpdateMujiPresence(
+        val roomJid: String,
+        val nick: String,
+        val active: Boolean,
+        val preparing: Boolean,
+        val video: Boolean,
+        val handRaised: Boolean,
+        val muted: Boolean,
     ) : RecordedCallVerb
 }
 
@@ -391,6 +411,68 @@ class FakeWaddleClient : WaddleClientInterface {
         if (callTerminateDelayMillis > 0) delay(callTerminateDelayMillis)
         callVerbs += RecordedCallVerb.SessionTerminateWithOutcome(peerFullJid, sid, reason)
         return callTerminateOutcome
+    }
+
+    /** Set to fail the Unit-returning Muji FFI verbs (they throw on failure). */
+    @Volatile
+    var mujiSessionInitiateFailure: Throwable? = null
+
+    /**
+     * Per-call virtual-time stalls before [updateMujiPresence] answers,
+     * consumed in send order — lets tests land a concurrent action
+     * while ONE specific muji presence publication is in flight (the
+     * proceed/terminate delay hooks' presence twin).
+     */
+    val updateMujiPresenceDelaysMillis = ConcurrentLinkedDeque<Long>()
+
+    @Volatile
+    var mujiSessionTerminateFailure: Throwable? = null
+
+    /**
+     * Per-call virtual-time stalls before [sendMujiSessionTerminate]
+     * answers, consumed in send order — models the mixer IQ round-trip
+     * so tests can land a concurrent action mid-terminate.
+     */
+    val mujiSessionTerminateDelaysMillis = ConcurrentLinkedDeque<Long>()
+
+    @Volatile
+    var updateMujiPresenceFailure: Throwable? = null
+
+    override suspend fun sendMujiSessionInitiate(
+        roomJid: String,
+        initiatorFullJid: String,
+        sid: String,
+        video: Boolean,
+    ) {
+        callVerbs += RecordedCallVerb.MujiSessionInitiate(roomJid, initiatorFullJid, sid, video)
+        mujiSessionInitiateFailure?.let { throw it }
+    }
+
+    override suspend fun sendMujiSessionTerminate(roomJid: String, sid: String) {
+        mujiSessionTerminateDelaysMillis.pollFirst()?.let { if (it > 0) delay(it) }
+        callVerbs += RecordedCallVerb.MujiSessionTerminate(roomJid, sid)
+        mujiSessionTerminateFailure?.let { throw it }
+    }
+
+    override suspend fun updateMujiPresence(
+        roomJid: String,
+        nick: String,
+        active: Boolean,
+        preparing: Boolean,
+        video: Boolean,
+        flags: WaddleInCallPresenceFlags,
+    ) {
+        updateMujiPresenceDelaysMillis.pollFirst()?.let { if (it > 0) delay(it) }
+        callVerbs += RecordedCallVerb.UpdateMujiPresence(
+            roomJid = roomJid,
+            nick = nick,
+            active = active,
+            preparing = preparing,
+            video = video,
+            handRaised = flags.handRaised,
+            muted = flags.muted,
+        )
+        updateMujiPresenceFailure?.let { throw it }
     }
 
     override suspend fun fetchExternalServices(): List<WaddleExternalService> = externalServices

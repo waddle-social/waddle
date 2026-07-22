@@ -97,6 +97,7 @@ class XmppSessionManager(
         signaling = ClientCallSignaling(activeSession),
         ownBareJid = { activeSession.ownBareJid },
         ownFullJid = { activeSession.ownFullJid },
+        mucSessionCache = sessionPrefs.mucCallSessions,
     )
 
     private val router: XmppEventRouter =
@@ -128,6 +129,13 @@ class XmppSessionManager(
 
     /** Every domain event, after store fan-out; drops oldest under burst. */
     val events: SharedFlow<XmppEvent> = router.events
+
+    /**
+     * The live attempt's bound FULL JID (account bare JID + resource) —
+     * the identity the XEP-0272 group-call verbs key preparation echoes
+     * and the session cache on; `null` before the first connect.
+     */
+    fun ownFullJid(): String? = activeSession.ownFullJid
 
     /** Persist the session and start the connection loop. */
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
@@ -364,6 +372,10 @@ class XmppSessionManager(
     ) {
         attemptScope.launch { catchup.refreshTopology(client) }
         attemptScope.launch { catchup.onSessionReady(client, session, freshStream) }
+        // Once per connect: retry the XEP-0166 mixer terminates a
+        // previous group-call leave still owes (terminate-pending
+        // session-cache entries survive process death and reconnects).
+        attemptScope.launch { callStore.muc.retryPendingTerminates(activeSession.ownFullJid) }
     }
 
     private suspend fun onTerminalAuthFailure() {

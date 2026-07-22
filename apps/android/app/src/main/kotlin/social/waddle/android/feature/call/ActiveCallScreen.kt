@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FrontHand
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Videocam
@@ -42,14 +45,17 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
+import social.waddle.android.client.calls.CallKind
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
 
 /**
- * The in-call surface for outgoing-ring and active phases. Audio
- * calls render avatar + status + controls; video calls put the remote
- * track full-bleed with the local preview picture-in-picture.
+ * The in-call surface for outgoing-ring, group-call-setup, and active
+ * phases. Audio calls render avatar + status + controls (group calls
+ * add the roster panel with raised-hand/mute badges); video calls put
+ * the remote track full-bleed with the local preview
+ * picture-in-picture.
  */
 @Composable
 fun ActiveCallScreen(
@@ -60,8 +66,12 @@ fun ActiveCallScreen(
     val (peerJid, isVideoCall) = when (state) {
         is CallState.Outgoing -> state.to to state.media.video
         is CallState.Active -> state.peer to state.media.video
+        is CallState.MucPending -> state.roomJid to state.media.video
         else -> return
     }
+    val isMucCall = state is CallState.MucPending ||
+        (state is CallState.Active && state.kind == CallKind.MUC)
+    val isActiveMucCall = state is CallState.Active && state.kind == CallKind.MUC
     // System back must not pop the hidden nav stack under the call
     // surface — collapse to the banner instead.
     BackHandler(onBack = onMinimize)
@@ -72,6 +82,8 @@ fun ActiveCallScreen(
     val micEnabled by viewModel.media.micEnabled.collectAsStateWithLifecycle()
     val cameraEnabled by viewModel.media.cameraEnabled.collectAsStateWithLifecycle()
     val speakerOn by viewModel.media.speakerOn.collectAsStateWithLifecycle()
+    val mucRoster by viewModel.mucRoster.collectAsStateWithLifecycle()
+    val selfHandRaised by viewModel.selfHandRaised.collectAsStateWithLifecycle()
 
     Surface(
         modifier = Modifier
@@ -89,6 +101,7 @@ fun ActiveCallScreen(
                 AudioCallBackdrop(
                     peerJid = peerJid,
                     statusText = callStatusText(state, durationSeconds),
+                    roster = mucRoster.takeIf { isMucCall },
                 )
             }
 
@@ -128,6 +141,10 @@ fun ActiveCallScreen(
                 onFlipCamera = viewModel::flipCamera,
                 onToggleSpeaker = viewModel::toggleSpeaker,
                 onHangUp = viewModel::hangUp,
+                // Raise-hand is a Muji presence re-stamp — only live
+                // once the group call is Active on the wire.
+                handRaised = selfHandRaised.takeIf { isActiveMucCall },
+                onToggleHandRaised = viewModel::toggleHandRaised,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 40.dp),
@@ -137,7 +154,12 @@ fun ActiveCallScreen(
 }
 
 @Composable
-private fun AudioCallBackdrop(peerJid: String, statusText: String) {
+private fun AudioCallBackdrop(
+    peerJid: String,
+    statusText: String,
+    /** Group-call roster rows; `null` hides the panel (DM calls). */
+    roster: List<MucRosterEntry>? = null,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -155,6 +177,65 @@ private fun AudioCallBackdrop(peerJid: String, statusText: String) {
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (roster != null) {
+            MucRosterPanel(
+                roster = roster,
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .padding(top = 12.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The group-call roster: one row per resolved participant nick with
+ * the `urn:waddle:in-call:0` raised-hand and self-reported mute badges
+ * from Muji presence.
+ */
+@Composable
+private fun MucRosterPanel(roster: List<MucRosterEntry>, modifier: Modifier = Modifier) {
+    LazyColumn(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp)
+            .testTag(CallTestTags.MUC_ROSTER),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        items(items = roster, key = { it.nick }) { entry ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                CallPeerAvatar(peerJid = entry.nick, size = 32.dp)
+                Text(
+                    text = entry.nick,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f),
+                )
+                if (entry.handRaised) {
+                    Icon(
+                        Icons.Filled.FrontHand,
+                        contentDescription = stringResource(R.string.call_roster_hand_raised),
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                if (entry.muted) {
+                    Icon(
+                        Icons.Filled.MicOff,
+                        contentDescription = stringResource(R.string.call_roster_muted),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -170,6 +251,9 @@ private fun CallControls(
     onToggleSpeaker: () -> Unit,
     onHangUp: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Self raised-hand state; `null` hides the control (DM calls). */
+    handRaised: Boolean? = null,
+    onToggleHandRaised: () -> Unit = {},
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -181,6 +265,28 @@ private fun CallControls(
                 if (micEnabled) Icons.Filled.Mic else Icons.Filled.MicOff,
                 contentDescription = stringResource(R.string.call_action_toggle_mic),
             )
+        }
+        if (handRaised != null) {
+            FilledTonalIconButton(
+                onClick = onToggleHandRaised,
+                modifier = Modifier
+                    .size(56.dp)
+                    .testTag(CallTestTags.RAISE_HAND_BUTTON),
+                colors = if (handRaised) {
+                    IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    )
+                } else {
+                    IconButtonDefaults.filledTonalIconButtonColors()
+                },
+            ) {
+                Icon(
+                    Icons.Filled.FrontHand,
+                    contentDescription = stringResource(
+                        if (handRaised) R.string.call_action_lower_hand else R.string.call_action_raise_hand,
+                    ),
+                )
+            }
         }
         if (isVideoCall) {
             FilledTonalIconButton(onClick = onToggleCamera, modifier = Modifier.size(56.dp)) {
@@ -254,6 +360,9 @@ internal fun callStatusText(state: CallState, durationSeconds: Long): String = w
     is CallState.Outgoing -> stringResource(
         if (state.ringing) R.string.call_status_ringing else R.string.call_status_calling,
     )
+    // XEP-0272 §Joining setup in flight: presence echoes + the Jingle
+    // handshake with the mixer.
+    is CallState.MucPending -> stringResource(R.string.call_status_connecting)
     is CallState.Active -> formatCallDuration(durationSeconds)
     else -> ""
 }
@@ -284,4 +393,6 @@ object CallTestTags {
     const val BANNER = "call-banner"
     const val ENDED_BANNER = "call-ended-banner"
     const val FAKE_VIDEO_SURFACE = "call-fake-video"
+    const val MUC_ROSTER = "call-muc-roster"
+    const val RAISE_HAND_BUTTON = "call-raise-hand"
 }

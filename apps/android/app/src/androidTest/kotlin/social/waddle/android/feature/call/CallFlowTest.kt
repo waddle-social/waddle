@@ -3,11 +3,14 @@ package social.waddle.android.feature.call
 import android.Manifest
 import android.app.NotificationManager
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -24,12 +27,16 @@ import social.waddle.android.AppShell
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.TestAppGraph
 import social.waddle.android.client.RecordedCallVerb
+import social.waddle.android.client.calls.CallKind
 import social.waddle.android.client.calls.CallState
+import social.waddle.android.client.testPresence
+import social.waddle.android.feature.channel.ChannelScreen
 import social.waddle.android.service.NotificationChannels
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleLiveKitJoin
+import social.waddle.client.ffi.WaddleMujiPresence
 
 /**
  * DM call flows over the fully-faked graph: an inbound XEP-0353
@@ -53,6 +60,12 @@ class CallFlowTest {
         InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
             InstrumentationRegistry.getInstrumentation().targetContext.packageName,
             Manifest.permission.POST_NOTIFICATIONS,
+        )
+        // Pre-granted so the group-call join's permission launcher
+        // resolves without a system dialog blocking the test.
+        InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+            InstrumentationRegistry.getInstrumentation().targetContext.packageName,
+            Manifest.permission.RECORD_AUDIO,
         )
         harness = TestAppGraph()
         // The production Application starts these on its own graph; the
@@ -190,5 +203,145 @@ class CallFlowTest {
         }
         composeRule.waitUntil(timeoutMillis = 10_000) { harness.callMedia.disconnectCalls > 0 }
         assertTrue(harness.graph.sessionManager.callStore.state.value == CallState.Idle)
+    }
+
+    // ── XEP-0272 Muji group calls ───────────────────────────────────────────
+
+    private val roomJid = "room@muc.waddle.test"
+
+    private fun composeChannelWithOverlay() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalAppGraph provides harness.graph) {
+                Box {
+                    ChannelScreen(
+                        roomJid = roomJid,
+                        name = "room",
+                        onBack = {},
+                        onOpenThread = {},
+                    )
+                    CallOverlayHost(
+                        pendingCallAnswer = MutableStateFlow(false),
+                        onCallAnswerConsumed = {},
+                    )
+                }
+            }
+        }
+    }
+
+    private fun activeMujiPresence(nick: String, realJid: String? = null) = testPresence(
+        from = "$roomJid/$nick",
+        mucJid = realJid,
+        muji = WaddleMujiPresence(preparing = false, active = true, audio = true, video = false),
+    )
+
+    private fun mujiVerbs(): List<RecordedCallVerb> = harness.activeFakeClient().callVerbs.toList()
+
+    /**
+     * Drive the XEP-0272 §Joining handshake from the banner tap up to
+     * the mixer's session-initiate: preparing presence out → MUC echo
+     * back → active presence + initiate recorded.
+     */
+    private fun driveJoinHandshake(selfFullJid: String): RecordedCallVerb.MujiSessionInitiate {
+        composeRule.onNodeWithTag(ChannelCallTestTags.JOIN_BUTTON).performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            mujiVerbs().any { it is RecordedCallVerb.UpdateMujiPresence && it.preparing }
+        }
+        // The MUC echoes our preparing presence back (XEP-0272 MUST).
+        harness.emitPresence(
+            testPresence(
+                from = "$roomJid/icepuma",
+                mucJid = selfFullJid,
+                muji = WaddleMujiPresence(preparing = true, active = false, audio = false, video = false),
+            ),
+        )
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            mujiVerbs().any { it is RecordedCallVerb.MujiSessionInitiate }
+        }
+        assertTrue(
+            mujiVerbs().any {
+                it is RecordedCallVerb.UpdateMujiPresence && it.active && !it.preparing
+            },
+        )
+        return mujiVerbs().filterIsInstance<RecordedCallVerb.MujiSessionInitiate>().single()
+    }
+
+    /** The mixer's rewritten session-accept carrying the LiveKit join. */
+    private fun emitMixerAccept(sid: String, selfFullJid: String) {
+        harness.emitCallEvent(
+            WaddleCallEvent(
+                from = "calls.waddle.test",
+                to = null,
+                sid = sid,
+                kind = WaddleCallEventKind.SessionAccept(
+                    join = WaddleLiveKitJoin(
+                        url = "wss://livekit.waddle.test",
+                        room = roomJid,
+                        identity = selfFullJid,
+                        token = "jwt",
+                    ),
+                    media = WaddleCallMedia(audio = true, video = false),
+                ),
+            ),
+        )
+    }
+
+    /**
+     * XEP-0272 §Leaving order: the bare-presence leave marker MUST hit
+     * the wire before the mixer terminate.
+     */
+    private fun assertLeftPresenceFirst() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            mujiVerbs().any { it is RecordedCallVerb.MujiSessionTerminate }
+        }
+        val verbs = mujiVerbs()
+        val leaveIndex = verbs.indexOfFirst {
+            it is RecordedCallVerb.UpdateMujiPresence && !it.active && !it.preparing
+        }
+        val terminateIndex = verbs.indexOfFirst { it is RecordedCallVerb.MujiSessionTerminate }
+        assertTrue(leaveIndex in 0 until terminateIndex)
+    }
+
+    @Test
+    fun channelBannerJoinsGroupCallAndLeaveSendsPresenceBeforeTerminate() {
+        harness.signInAndConnect()
+        composeChannelWithOverlay()
+
+        // Another occupant advertises the room's live call: the banner
+        // comes up with the join affordance.
+        harness.emitPresence(activeMujiPresence(nick = "bob"))
+        waitForTag(ChannelCallTestTags.BANNER)
+
+        val selfFullJid = requireNotNull(harness.graph.sessionManager.ownFullJid())
+        val initiate = driveJoinHandshake(selfFullJid)
+        assertEquals(roomJid, initiate.roomJid)
+        emitMixerAccept(initiate.sid, selfFullJid)
+
+        // The slot promotes to Active(MUC), the in-call surface renders
+        // with the roster, and the FAKE media plane connects.
+        waitForTag(CallTestTags.ACTIVE_SCREEN)
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            val state = harness.graph.sessionManager.callStore.state.value
+            state is CallState.Active && state.kind == CallKind.MUC
+        }
+        composeRule.waitUntil(timeoutMillis = 10_000) { harness.callMedia.connectCalls.isNotEmpty() }
+        assertEquals(roomJid, harness.callMedia.connectCalls.single().join.room)
+        waitForTag(CallTestTags.MUC_ROSTER)
+        // Real LiveKit delivers the other occupant via ParticipantConnected;
+        // the roster prefers the (non-empty, self-including) LK identity
+        // list over the Muji presence view, so the fake must script bob's
+        // identity the way the SFU would.
+        harness.callMedia.remoteIdentities.value = listOf("bob@waddle.test/phone")
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText("bob").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("bob").assertIsDisplayed()
+
+        composeRule.onNodeWithTag(CallTestTags.HANG_UP_BUTTON).performClick()
+
+        assertLeftPresenceFirst()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            harness.graph.sessionManager.callStore.state.value == CallState.Idle
+        }
+        composeRule.waitUntil(timeoutMillis = 10_000) { harness.callMedia.disconnectCalls > 0 }
     }
 }

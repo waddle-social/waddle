@@ -5,8 +5,10 @@ import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.calls.CallKind
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.service.CallForegroundService
 import social.waddle.client.ffi.WaddleJingleReason
@@ -24,6 +26,7 @@ class CallSessionController(
     private val sessionManager: XmppSessionManager,
     val media: CallMediaController,
     private val scope: CoroutineScope,
+    private val liveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore(),
 ) {
     // Written by the state collector, read by the media-connection
     // collector — separate coroutines on a multithreaded dispatcher,
@@ -31,6 +34,12 @@ class CallSessionController(
     // LiveKitCallMediaController.room).
     @Volatile
     private var connectedSid: String? = null
+
+    /** The MUC call the live-roster projection currently mirrors. */
+    private data class LiveMucCall(val roomJid: String, val selfNick: String?, val sid: String)
+
+    // Only ever touched from the single state-collector coroutine.
+    private var liveMucCall: LiveMucCall? = null
 
     fun start() {
         scope.launch {
@@ -47,9 +56,13 @@ class CallSessionController(
             // and a dead Room forever.
             media.connection.collect { connection -> onMediaConnection(connection) }
         }
+        scope.launch {
+            consumeCaughtUpLeaveMarkers()
+        }
     }
 
     private suspend fun onCallState(state: CallState) {
+        markLiveRosterLeftIfNeeded(state)
         when (state) {
             is CallState.Outgoing -> startCallService()
             is CallState.Active -> {
@@ -61,6 +74,10 @@ class CallSessionController(
                     disconnectMediaIfConnected()
                     connectMedia(state)
                 }
+                // Tail call inside collectLatest: mirrors the SFU roster
+                // for as long as the slot stays this Active call; the
+                // next state emission cancels it.
+                if (state.kind == CallKind.MUC) projectLiveRoster(state)
             }
             is CallState.Incoming -> {
                 // Migration passes through Incoming while the OLD call's
@@ -72,6 +89,13 @@ class CallSessionController(
                 // Active is never a background-started capture.
                 if (state.accepting) startCallService()
             }
+            // Group-call setup is signaling-only (XEP-0272 §Joining) —
+            // media connects when the slot goes Active with the join —
+            // but the FGS must come up NOW, like Outgoing: the setup
+            // runs multi-second presence/Jingle waits that must survive
+            // backgrounding, and the mic capture that starts on Active
+            // must never be a background-started capture.
+            is CallState.MucPending -> startCallService()
             CallState.Idle, is CallState.Ended -> {
                 disconnectMediaIfConnected()
                 // Grace before stopping the FGS: a migration takeover
@@ -82,6 +106,52 @@ class CallSessionController(
                 // lands inside the grace.
                 delay(CallForegroundService.STOP_GRACE_MILLIS)
                 stopCallService()
+            }
+        }
+    }
+
+    /**
+     * Mirror the SFU's remote-participant identities (plus our own
+     * LiveKit identity — remote lists never include self) into the
+     * app-scoped roster store for the room this call owns.
+     */
+    private suspend fun projectLiveRoster(state: CallState.Active) {
+        liveMucCall = LiveMucCall(roomJid = state.peer, selfNick = state.selfNick, sid = state.sid)
+        media.remoteParticipantIdentities.collect { remotes ->
+            liveParticipants.setParticipants(state.peer, remotes + state.join.identity)
+        }
+    }
+
+    /**
+     * The slot left the MUC call the projection mirrored: stamp the
+     * self-leaving marker BEFORE dropping the live snapshot so the
+     * resolved count decreases monotonically instead of bouncing back
+     * to the stale Muji view for one presence RTT (web
+     * markRoomLeavingCall parity).
+     */
+    private fun markLiveRosterLeftIfNeeded(state: CallState) {
+        val left = liveMucCall ?: return
+        if (state is CallState.Active && state.sid == left.sid) return
+        liveMucCall = null
+        liveParticipants.markLeaving(left.roomJid, left.selfNick)
+        liveParticipants.clearRoom(left.roomJid)
+    }
+
+    /**
+     * Consume a room's leave marker once the server-authoritative Muji
+     * view no longer lists the marked nick — from then on the marker
+     * would only mask a genuine re-join.
+     */
+    private suspend fun consumeCaughtUpLeaveMarkers() {
+        combine(
+            sessionManager.callStore.mucCallPresence.participants,
+            liveParticipants.leavingRooms,
+            ::Pair,
+        ).collect { (participantsByRoom, leavingByRoom) ->
+            for ((room, nick) in leavingByRoom) {
+                if (participantsByRoom[room]?.contains(nick) != true) {
+                    liveParticipants.clearLeaving(room)
+                }
             }
         }
     }

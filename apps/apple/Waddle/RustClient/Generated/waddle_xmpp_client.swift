@@ -971,6 +971,43 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func unpinMessage(roomJid: String, targetStanzaId: String) async  -> Bool
 
     /**
+     * XEP-0272 over Waddle's SFU: send the Muji-bearing Jingle
+     * `session-initiate` to `calls.<own-domain>`. Resolves on the
+     * EMPTY IQ-result ack (XEP-0166 §6.3); the actual
+     * `session-accept` with the rewritten LiveKit transport arrives
+     * as a separate server-initiated IQ-set through
+     * `WaddleClientEvent::Call`, correlated by `sid` (a per-attempt
+     * id minted by the caller, so a stale accept from a cancelled
+     * same-room retry is ignorable without changing room semantics).
+     * `initiator_full_jid` MUST be the bound resource — the server
+     * rejects a mismatch with the authenticated session.
+     */
+    func sendMujiSessionInitiate(roomJid: String, initiatorFullJid: String, sid: String, video: Bool) async throws
+
+    /**
+     * XEP-0272 leave, mixer half: `session-terminate` with
+     * `<reason><success/></reason>` to `calls.<own-domain>`. The
+     * server unregisters the participant and revokes every LiveKit
+     * token it minted for `(room, identity)`; the call is idempotent.
+     * Per XEP-0272 §Leaving, the bare MUC presence
+     * ([`Self::update_muji_presence`] with neither flag) MUST go out
+     * first.
+     */
+    func sendMujiSessionTerminate(roomJid: String, sid: String) async throws
+
+    /**
+     * Publish this occupant's Muji call presence to the room
+     * (XEP-0272 §Joining / §Leaving): `preparing=true` for the
+     * two-phase setup marker, `active=true` for the content-declaring
+     * join (audio implied, video on request), neither for the
+     * bare-presence leave marker. `flags` re-stamps the
+     * `urn:waddle:in-call:0` raised-hand/mute markers alongside
+     * `<muji/>` — meaningless without call participation, so they are
+     * dropped on the leave variant.
+     */
+    func updateMujiPresence(roomJid: String, nick: String, active: Bool, preparing: Bool, video: Bool, flags: WaddleInCallPresenceFlags) async throws
+
+    /**
      * Fetch the user's Waddle DM-bookmark items (issue #720) from
      * PEP, surfaced with the XEP-0492 fallback mode + rich-payload
      * opt-in (#719) per direct-chat contact. The node is sparse /
@@ -2520,6 +2557,88 @@ open func unpinMessage(roomJid: String, targetStanzaId: String)async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * XEP-0272 over Waddle's SFU: send the Muji-bearing Jingle
+     * `session-initiate` to `calls.<own-domain>`. Resolves on the
+     * EMPTY IQ-result ack (XEP-0166 §6.3); the actual
+     * `session-accept` with the rewritten LiveKit transport arrives
+     * as a separate server-initiated IQ-set through
+     * `WaddleClientEvent::Call`, correlated by `sid` (a per-attempt
+     * id minted by the caller, so a stale accept from a cancelled
+     * same-room retry is ignorable without changing room semantics).
+     * `initiator_full_jid` MUST be the bound resource — the server
+     * rejects a mismatch with the authenticated session.
+     */
+open func sendMujiSessionInitiate(roomJid: String, initiatorFullJid: String, sid: String, video: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_muji_session_initiate(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(initiatorFullJid),FfiConverterString.lower(sid),FfiConverterBool.lower(video)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0272 leave, mixer half: `session-terminate` with
+     * `<reason><success/></reason>` to `calls.<own-domain>`. The
+     * server unregisters the participant and revokes every LiveKit
+     * token it minted for `(room, identity)`; the call is idempotent.
+     * Per XEP-0272 §Leaving, the bare MUC presence
+     * ([`Self::update_muji_presence`] with neither flag) MUST go out
+     * first.
+     */
+open func sendMujiSessionTerminate(roomJid: String, sid: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_muji_session_terminate(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(sid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Publish this occupant's Muji call presence to the room
+     * (XEP-0272 §Joining / §Leaving): `preparing=true` for the
+     * two-phase setup marker, `active=true` for the content-declaring
+     * join (audio implied, video on request), neither for the
+     * bare-presence leave marker. `flags` re-stamps the
+     * `urn:waddle:in-call:0` raised-hand/mute markers alongside
+     * `<muji/>` — meaningless without call participation, so they are
+     * dropped on the leave variant.
+     */
+open func updateMujiPresence(roomJid: String, nick: String, active: Bool, preparing: Bool, video: Bool, flags: WaddleInCallPresenceFlags)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_update_muji_presence(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(nick),FfiConverterBool.lower(active),FfiConverterBool.lower(preparing),FfiConverterBool.lower(video),FfiConverterTypeWaddleInCallPresenceFlags_lower(flags)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -5943,6 +6062,65 @@ public func FfiConverterTypeWaddleFallbackRange_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleFallbackRange_lower(_ value: WaddleFallbackRange) -> RustBuffer {
     return FfiConverterTypeWaddleFallbackRange.lower(value)
+}
+
+
+/**
+ * `urn:waddle:in-call:0` presence flags carried ALONGSIDE `<muji/>`
+ * (never inside it): raised hand and self-reported mute. Presence is
+ * last-writer-wins, so every update re-stamps BOTH flags.
+ */
+public struct WaddleInCallPresenceFlags: Equatable, Hashable {
+    public var handRaised: Bool
+    public var muted: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(handRaised: Bool, muted: Bool) {
+        self.handRaised = handRaised
+        self.muted = muted
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInCallPresenceFlags: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInCallPresenceFlags: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInCallPresenceFlags {
+        return
+            try WaddleInCallPresenceFlags(
+                handRaised: FfiConverterBool.read(from: &buf),
+                muted: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleInCallPresenceFlags, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.handRaised, into: &buf)
+        FfiConverterBool.write(value.muted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInCallPresenceFlags_lift(_ buf: RustBuffer) throws -> WaddleInCallPresenceFlags {
+    return try FfiConverterTypeWaddleInCallPresenceFlags.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInCallPresenceFlags_lower(_ value: WaddleInCallPresenceFlags) -> RustBuffer {
+    return FfiConverterTypeWaddleInCallPresenceFlags.lower(value)
 }
 
 
@@ -9641,6 +9819,10 @@ public enum WaddleError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
      */
     case InvalidJid
     /**
+     * A caller-supplied Jingle session id was empty or whitespace.
+     */
+    case InvalidSessionId
+    /**
      * The server answered with an RFC 6120 §8.3 stanza error.
      * `condition` is the defined-condition element name (e.g.
      * `forbidden`); `text` is the optional human-readable `<text/>`.
@@ -9697,14 +9879,15 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
 
         case 1: return .NotConnected
         case 2: return .InvalidJid
-        case 3: return .Stanza(
+        case 3: return .InvalidSessionId
+        case 4: return .Stanza(
             condition: try FfiConverterString.read(from: &buf),
             text: try FfiConverterOptionString.read(from: &buf)
             )
-        case 4: return .MalformedResponse
-        case 5: return .Transport
-        case 6: return .Timeout
-        case 7: return .UntrustedReply
+        case 5: return .MalformedResponse
+        case 6: return .Transport
+        case 7: return .Timeout
+        case 8: return .UntrustedReply
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -9725,26 +9908,30 @@ public struct FfiConverterTypeWaddleError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
 
 
-        case let .Stanza(condition,text):
+        case .InvalidSessionId:
             writeInt(&buf, Int32(3))
+
+
+        case let .Stanza(condition,text):
+            writeInt(&buf, Int32(4))
             FfiConverterString.write(condition, into: &buf)
             FfiConverterOptionString.write(text, into: &buf)
 
 
         case .MalformedResponse:
-            writeInt(&buf, Int32(4))
-
-
-        case .Transport:
             writeInt(&buf, Int32(5))
 
 
-        case .Timeout:
+        case .Transport:
             writeInt(&buf, Int32(6))
 
 
-        case .UntrustedReply:
+        case .Timeout:
             writeInt(&buf, Int32(7))
+
+
+        case .UntrustedReply:
+            writeInt(&buf, Int32(8))
 
         }
     }
@@ -13573,6 +13760,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate() != 54171) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate() != 26624) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_update_muji_presence() != 61666) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_dm_bookmarks() != 18377) {

@@ -13,6 +13,9 @@ pub enum WaddleError {
     /// A caller-supplied JID failed to parse.
     #[error("invalid JID")]
     InvalidJid,
+    /// A caller-supplied Jingle session id was empty or whitespace.
+    #[error("invalid session id")]
+    InvalidSessionId,
     /// The server answered with an RFC 6120 §8.3 stanza error.
     /// `condition` is the defined-condition element name (e.g.
     /// `forbidden`); `text` is the optional human-readable `<text/>`.

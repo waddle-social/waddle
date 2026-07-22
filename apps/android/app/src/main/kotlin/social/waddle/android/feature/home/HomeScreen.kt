@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Settings
@@ -174,6 +175,7 @@ fun HomeScreen(
 /** Semantics tags shared with instrumented tests. */
 object HomeScreenTestTags {
     const val CREATE_CHANNEL_ACTION = "home-create-channel-action"
+    const val CHANNEL_CALL_BADGE = "home-channel-call-badge"
 }
 
 @Composable
@@ -197,7 +199,11 @@ private fun DrawerContent(
                     onClick = { onChannelClick(channel) },
                     icon = { Icon(Icons.Outlined.Tag, contentDescription = null) },
                     badge = {
-                        ChannelRowBadges(isMuted = channel.isMuted, unreadCount = channel.unreadCount)
+                        ChannelRowBadges(
+                            isMuted = channel.isMuted,
+                            unreadCount = channel.unreadCount,
+                            inCallCount = channel.inCallCount,
+                        )
                     },
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
@@ -262,7 +268,11 @@ private fun ChannelListBody(
                     },
                     leadingContent = { Icon(Icons.Outlined.Tag, contentDescription = null) },
                     trailingContent = {
-                        ChannelRowBadges(isMuted = channel.isMuted, unreadCount = channel.unreadCount)
+                        ChannelRowBadges(
+                            isMuted = channel.isMuted,
+                            unreadCount = channel.unreadCount,
+                            inCallCount = channel.inCallCount,
+                        )
                     },
                     modifier = Modifier.clickable { onChannelClick(channel) },
                 )
@@ -288,13 +298,34 @@ private fun UnreadBadge(count: Int) {
     }
 }
 
-/** XEP-0492 mute glyph next to the unread badge on muted rows. */
+/**
+ * XEP-0492 mute glyph and the XEP-0272 live-call chip next to the
+ * unread badge.
+ */
 @Composable
-private fun ChannelRowBadges(isMuted: Boolean, unreadCount: Int) {
+private fun ChannelRowBadges(isMuted: Boolean, unreadCount: Int, inCallCount: Int = 0) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        if (inCallCount > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.testTag(HomeScreenTestTags.CHANNEL_CALL_BADGE),
+            ) {
+                Icon(
+                    Icons.Outlined.Call,
+                    contentDescription = stringResource(R.string.home_channel_call_badge),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = inCallCount.toString(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
         if (isMuted) {
             Icon(
                 Icons.Outlined.NotificationsOff,
