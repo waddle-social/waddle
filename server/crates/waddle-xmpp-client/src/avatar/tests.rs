@@ -368,6 +368,53 @@ fn request_avatar_falls_back_to_vcard_extval() {
     );
 }
 
+// ── §4.2 known-id skip (request_avatar_with_iq_skipping) ─────────────────────
+
+#[test]
+fn skipping_fetch_answers_id_only_for_a_known_metadata_id() {
+    let jid: BareJid = "alice@example.com".parse().unwrap();
+    // Only the metadata response is provisioned: issuing the data IQ
+    // (or the vCard fallback) would panic on the empty queue, so the
+    // assertion below also proves no further IQ left the seam.
+    let responses = std::cell::RefCell::new(vec![make_metadata_iq("deadbeef", "image/png")]);
+    let known = vec!["deadbeef".to_string()];
+
+    let fetch =
+        futures::executor::block_on(request_avatar_with_iq_skipping(&jid, &known, |_stanza| {
+            let response = responses.borrow_mut().remove(0);
+            async move { Ok::<_, AvatarRequestFailure<()>>(response) }
+        }))
+        .unwrap()
+        .expect("fetch outcome");
+
+    assert_eq!(fetch.id, "deadbeef");
+    assert_eq!(fetch.avatar, None);
+    assert!(responses.borrow().is_empty());
+}
+
+#[test]
+fn skipping_fetch_retrieves_data_for_an_unknown_metadata_id() {
+    let jid: BareJid = "alice@example.com".parse().unwrap();
+    let responses = std::cell::RefCell::new(vec![
+        make_metadata_iq("deadbeef", "image/png"),
+        make_data_iq("deadbeef", "aGVsbG8="),
+    ]);
+    let known = vec!["someoldid".to_string()];
+
+    let fetch =
+        futures::executor::block_on(request_avatar_with_iq_skipping(&jid, &known, |_stanza| {
+            let response = responses.borrow_mut().remove(0);
+            async move { Ok::<_, AvatarRequestFailure<()>>(response) }
+        }))
+        .unwrap()
+        .expect("fetch outcome");
+
+    assert_eq!(fetch.id, "deadbeef");
+    let avatar = fetch.avatar.expect("avatar bytes fetched");
+    assert_eq!(avatar.data, b"hello");
+    assert!(responses.borrow().is_empty());
+}
+
 // ── Publish builders (XEP-0084 §3) ───────────────────────────────────────────
 
 /// Walk a publish IQ down to its `<item>` and assert the envelope targets

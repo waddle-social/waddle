@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
@@ -34,23 +33,21 @@ data class SettingsUiState(
 /** Account row, theme mode, notification prefs, logout. */
 class SettingsViewModel(
     private val userPrefs: UserPrefs,
-    session: WaddleSessionInfo?,
+    private val currentSession: StateFlow<WaddleSessionInfo?>,
     private val performSignOut: suspend () -> Unit,
     sessionManager: XmppSessionManager? = null,
 ) : ViewModel() {
-    private val accountState = SettingsUiState(
-        username = session?.username,
-        jid = session?.jid,
-        avatarUrl = session?.avatarUrl,
-    )
-
-    /** The account's XMPP-published avatar; wins over the REST URL. */
-    val selfAvatar: StateFlow<WaddleAvatar?> = run {
-        val ownBareJid = session?.jid?.let(::bareJidOf)
-        sessionManager?.profileStore?.avatars
-            ?.map { avatars -> ownBareJid?.let(avatars::get) }
-            ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-            ?: MutableStateFlow(null)
+    /** The CURRENT account's XMPP-published avatar (derived from the
+     *  live session flow, never frozen at construction); wins over the
+     *  REST URL. */
+    val selfAvatar: StateFlow<WaddleAvatar?> = when (sessionManager) {
+        null -> MutableStateFlow(null)
+        else -> combine(
+            currentSession,
+            sessionManager.profileStore.avatars,
+        ) { session, avatars ->
+            session?.jid?.let(::bareJidOf)?.let(avatars::get)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     }
 
     private val _isCommunityOwner = MutableStateFlow(false)
@@ -80,18 +77,31 @@ class SettingsViewModel(
     }
 
     val uiState: StateFlow<SettingsUiState> = combine(
+        currentSession,
         userPrefs.theme,
         userPrefs.notificationsEnabled,
         userPrefs.messageSoundsEnabled,
         userPrefs.readReceiptsEnabled,
-    ) { theme, notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
-        accountState.copy(
+    ) { session, theme, notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
+        SettingsUiState(
+            username = session?.username,
+            jid = session?.jid,
+            avatarUrl = session?.avatarUrl,
             theme = theme,
             notificationsEnabled = notificationsEnabled,
             messageSoundsEnabled = messageSoundsEnabled,
             readReceiptsEnabled = readReceiptsEnabled,
         )
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, accountState)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, accountSeed())
+
+    private fun accountSeed(): SettingsUiState {
+        val session = currentSession.value
+        return SettingsUiState(
+            username = session?.username,
+            jid = session?.jid,
+            avatarUrl = session?.avatarUrl,
+        )
+    }
 
     fun setTheme(mode: ThemeMode) {
         viewModelScope.launch { userPrefs.setTheme(mode) }
@@ -118,7 +128,7 @@ class SettingsViewModel(
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             SettingsViewModel(
                 userPrefs = graph.userPrefs,
-                session = graph.currentSession.value,
+                currentSession = graph.currentSession,
                 performSignOut = graph::signOut,
                 sessionManager = graph.sessionManager,
             )

@@ -60,9 +60,9 @@ compares user-facing capability per area, verified against both codebases as of
 | Feature | XEP(s) | Web | Android | Notes |
 | --- | --- | --- | --- | --- |
 | Presence & status | RFC 6121 | ✅ | ✅ | Android: `PresenceStore.kt` |
-| Avatars | 0084, 0153 | ✅ | ✅ | Publish/remove via `publish_avatar`/`disable_avatar` (photo picker → ≤512² PNG); SHA-1-keyed cache honors §4.2 no-refetch |
+| Avatars | 0084 | ✅ | ✅ | Publish/remove via `publish_avatar`/`disable_avatar` (photo picker → ≤512² PNG); SHA-1-keyed cache honors §4.2 no-refetch. XEP-0153 vCard-temp hash publish is not implemented on any client — follow-up |
 | vCard / profile editing | 0292 | ✅ | ✅ | `feature/profile/ProfileScreen.kt` — optimistic save/rollback over `publish_vcard4` (web VCardEditor parity) |
-| Rich presence (mood/activity/tune) | 0107, 0108, 0118 | ✅ | ✅ | Mood/activity/tune publish + clear from the profile screen (84-kind vocab, debounced tune per 0118) |
+| Rich presence (mood/activity/tune) | 0107, 0108, 0118 | ✅ | ✅ | Mood/activity/tune publish + clear from the profile screen (84-kind closed vocab enforced at the FFI; manual tune submit publishes immediately, web parity) |
 | Idle time | 0319 | ✅ | ✅ | DM subtitle “away · idle Nm” (`DmScreen.kt`), minute ticker |
 
 ## Notifications

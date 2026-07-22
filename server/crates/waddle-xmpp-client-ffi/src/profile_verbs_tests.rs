@@ -25,9 +25,10 @@ use waddle_xmpp_client::pep::{
 use waddle_xmpp_client::xep::xep0292::{parse_vcard4_element, NS_VCARD4};
 
 use crate::profile_verbs::{
-    activity_from_core, mood_from_core, publish_avatar_iqs, require_pep_element_name,
-    tune_from_core, tune_is_empty, tune_to_core, vcard4_from_core, vcard4_to_core, WaddleTune,
-    WaddleVCard4,
+    activity_from_core, mint_request_id, mood_from_core, publish_avatar_iqs,
+    require_activity_general, require_activity_specific, require_mood_kind,
+    require_pep_element_name, tune_from_core, tune_is_empty, tune_to_core, vcard4_from_core,
+    vcard4_to_core, WaddleTune, WaddleVCard4, GENERAL_ACTIVITIES, MOOD_KINDS,
 };
 use crate::{WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError, WaddleEventListener};
 
@@ -180,6 +181,40 @@ mod xep0084 {
         assert!(sent.is_empty());
     }
 
+    /// XEP-0084 §5.1 MUST: the published image is PNG. The FFI is the
+    /// conformance boundary, so any other MIME type is refused before
+    /// a stanza is built.
+    #[tokio::test]
+    async fn publish_rejects_non_png_mime_before_sending() {
+        for mime in ["image/jpeg", "image/webp", "image/PNG", "text/plain"] {
+            let (result, sent) = record_publish(b"hello", mime, 0, 0).await;
+            assert_eq!(
+                result.unwrap_err(),
+                WaddleError::InvalidArgument,
+                "mime {mime:?} must be rejected"
+            );
+            assert!(sent.is_empty());
+        }
+    }
+
+    /// §4.2.1 `<info/>` width/height are `xs:unsignedShort`: values the
+    /// wire type cannot carry are rejected, never clamped (a clamped
+    /// dimension would advertise geometry the bytes do not have).
+    #[tokio::test]
+    async fn publish_rejects_dimensions_beyond_unsigned_short() {
+        let (result, sent) = record_publish(b"hello", "image/png", 65_536, 64).await;
+        assert_eq!(result.unwrap_err(), WaddleError::InvalidArgument);
+        assert!(sent.is_empty());
+
+        let (result, sent) = record_publish(b"hello", "image/png", 64, 65_536).await;
+        assert_eq!(result.unwrap_err(), WaddleError::InvalidArgument);
+        assert!(sent.is_empty());
+
+        let (result, sent) = record_publish(b"hello", "image/png", 65_535, 65_535).await;
+        result.expect("boundary dimensions accepted");
+        assert_eq!(sent.len(), 2);
+    }
+
     #[test]
     fn disable_avatar_publishes_empty_metadata_at_current() {
         let iq = waddle_xmpp_client::avatar::build_disable_avatar_iq();
@@ -298,7 +333,8 @@ mod xep0107 {
 
     #[test]
     fn publish_wire_shape_nests_kind_and_text() {
-        let iq = build_publish_mood_iq("happy", Some("feeling good"));
+        let iq = build_publish_mood_iq("mood-req", "happy", Some("feeling good"));
+        assert_eq!(iq.attr("id"), Some("mood-req"));
         let mood = publish_item(&iq, NS_MOOD)
             .get_child("mood", NS_MOOD)
             .expect("mood payload");
@@ -311,7 +347,8 @@ mod xep0107 {
 
     #[test]
     fn retract_wire_shape_publishes_empty_mood() {
-        let iq = build_retract_mood_iq();
+        let iq = build_retract_mood_iq("mood-retract-req");
+        assert_eq!(iq.attr("id"), Some("mood-retract-req"));
         let mood = publish_item(&iq, NS_MOOD)
             .get_child("mood", NS_MOOD)
             .expect("mood payload");
@@ -331,7 +368,19 @@ mod xep0107 {
     #[tokio::test]
     async fn publish_mood_rejects_invalid_kind_before_connecting() {
         let client = offline_client();
-        for kind in ["", "  ", "Happy", "not a mood", "<mood/>"] {
+        // "euphoric" is shape-valid but outside the closed §3 registry;
+        // "text" is the annotation element, never a kind; "2fast" is
+        // not a valid NCName start.
+        for kind in [
+            "",
+            "  ",
+            "Happy",
+            "not a mood",
+            "<mood/>",
+            "euphoric",
+            "text",
+            "2fast",
+        ] {
             assert_eq!(
                 client
                     .publish_mood(kind.to_string(), None)
@@ -367,7 +416,13 @@ mod xep0108 {
 
     #[test]
     fn publish_wire_shape_nests_specific_inside_general() {
-        let iq = build_publish_activity_iq("working", Some("coding"), Some("rewriting waddle"));
+        let iq = build_publish_activity_iq(
+            "activity-req",
+            "working",
+            Some("coding"),
+            Some("rewriting waddle"),
+        );
+        assert_eq!(iq.attr("id"), Some("activity-req"));
         let activity = publish_item(&iq, NS_ACTIVITY)
             .get_child("activity", NS_ACTIVITY)
             .expect("activity payload");
@@ -383,7 +438,8 @@ mod xep0108 {
 
     #[test]
     fn retract_wire_shape_publishes_empty_activity() {
-        let iq = build_retract_activity_iq();
+        let iq = build_retract_activity_iq("activity-retract-req");
+        assert_eq!(iq.attr("id"), Some("activity-retract-req"));
         let activity = publish_item(&iq, NS_ACTIVITY)
             .get_child("activity", NS_ACTIVITY)
             .expect("activity payload");
@@ -405,20 +461,30 @@ mod xep0108 {
     #[tokio::test]
     async fn publish_activity_rejects_invalid_names_before_connecting() {
         let client = offline_client();
-        assert_eq!(
-            client
-                .publish_activity(String::new(), None, None)
-                .await
-                .unwrap_err(),
-            WaddleError::InvalidArgument
-        );
-        assert_eq!(
-            client
-                .publish_activity("working".to_string(), Some("no way".to_string()), None)
-                .await
-                .unwrap_err(),
-            WaddleError::InvalidArgument
-        );
+        // The general category is a CLOSED 12-entry registry: shape-valid
+        // strings outside it (e.g. "euphoric") are refused too.
+        for general in ["", "no way", "euphoric", "text"] {
+            assert_eq!(
+                client
+                    .publish_activity(general.to_string(), None, None)
+                    .await
+                    .unwrap_err(),
+                WaddleError::InvalidArgument,
+                "general {general:?} must be rejected"
+            );
+        }
+        // The specific is free-form but must be a wire-safe element
+        // name (NCName start) and must not shadow `<text/>`.
+        for specific in ["no way", "2fast", "-lane", "text"] {
+            assert_eq!(
+                client
+                    .publish_activity("working".to_string(), Some(specific.to_string()), None)
+                    .await
+                    .unwrap_err(),
+                WaddleError::InvalidArgument,
+                "specific {specific:?} must be rejected"
+            );
+        }
     }
 
     #[tokio::test]
@@ -445,16 +511,8 @@ mod xep0118 {
 
     #[test]
     fn publish_wire_shape_carries_every_field() {
-        let tune = tune_to_core(full_tune());
-        let iq = build_publish_tune_iq(
-            tune.artist.as_deref(),
-            tune.title.as_deref(),
-            tune.source.as_deref(),
-            tune.length,
-            tune.rating,
-            tune.track.as_deref(),
-            tune.uri.as_deref(),
-        );
+        let iq = build_publish_tune_iq("tune-req", &tune_to_core(full_tune()));
+        assert_eq!(iq.attr("id"), Some("tune-req"));
         let payload = publish_item(&iq, NS_TUNE)
             .get_child("tune", NS_TUNE)
             .expect("tune payload");
@@ -473,7 +531,8 @@ mod xep0118 {
 
     #[test]
     fn retract_wire_shape_publishes_empty_tune() {
-        let iq = build_retract_tune_iq();
+        let iq = build_retract_tune_iq("tune-retract-req");
+        assert_eq!(iq.attr("id"), Some("tune-retract-req"));
         let tune = publish_item(&iq, NS_TUNE)
             .get_child("tune", NS_TUNE)
             .expect("tune payload");
@@ -499,6 +558,32 @@ mod xep0118 {
                 ..full_tune()
             })
             .rating,
+            None
+        );
+    }
+
+    /// The schema types `<length/>` as `xs:unsignedShort`: seconds
+    /// beyond 65535 are clamped to the wire type's ceiling.
+    #[test]
+    fn length_clamps_into_unsigned_short_range() {
+        let length_of = |length| {
+            tune_to_core(WaddleTune {
+                length_seconds: Some(length),
+                ..full_tune()
+            })
+            .length
+        };
+        assert_eq!(length_of(0), Some(0));
+        assert_eq!(length_of(259), Some(259));
+        assert_eq!(length_of(65_535), Some(65_535));
+        assert_eq!(length_of(65_536), Some(65_535));
+        assert_eq!(length_of(u32::MAX), Some(65_535));
+        assert_eq!(
+            tune_to_core(WaddleTune {
+                length_seconds: None,
+                ..full_tune()
+            })
+            .length,
             None
         );
     }
@@ -572,13 +657,88 @@ mod validation {
 
     #[test]
     fn element_name_gate_rejects_wire_breaking_names() {
-        for name in ["", " ", "Happy", "a b", "mood/>", "ünïcode", "<x"] {
+        // "2fast" / "-lane" fail the NCName start rule (an element name
+        // must not begin with a digit or hyphen).
+        for name in [
+            "",
+            " ",
+            "Happy",
+            "a b",
+            "mood/>",
+            "ünïcode",
+            "<x",
+            "2fast",
+            "-lane",
+        ] {
             assert_eq!(
                 require_pep_element_name(name).unwrap_err(),
                 WaddleError::InvalidArgument,
                 "name {name:?} must be rejected"
             );
         }
+    }
+
+    /// The registries are CLOSED sets mirroring the server's typed
+    /// enums: 84 XEP-0107 §3 moods, 12 XEP-0108 §3.1 generals.
+    #[test]
+    fn registries_pin_the_closed_sets() {
+        assert_eq!(MOOD_KINDS.len(), 84);
+        assert_eq!(GENERAL_ACTIVITIES.len(), 12);
+        for kind in MOOD_KINDS {
+            require_mood_kind(kind).expect("registry mood accepted");
+            require_pep_element_name(kind).expect("registry mood is wire-safe");
+        }
+        for general in GENERAL_ACTIVITIES {
+            require_activity_general(general).expect("registry general accepted");
+            require_pep_element_name(general).expect("registry general is wire-safe");
+        }
+    }
+
+    #[test]
+    fn mood_kind_gate_is_registry_membership() {
+        require_mood_kind("happy").expect("registry kind accepted");
+        for kind in ["euphoric", "text", "2fast", ""] {
+            assert_eq!(
+                require_mood_kind(kind).unwrap_err(),
+                WaddleError::InvalidArgument,
+                "kind {kind:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_gates_split_registry_general_from_free_form_specific() {
+        require_activity_general("working").expect("registry general accepted");
+        for general in ["euphoric", "coding", "text", ""] {
+            assert_eq!(
+                require_activity_general(general).unwrap_err(),
+                WaddleError::InvalidArgument,
+                "general {general:?} must be rejected"
+            );
+        }
+        // Specifics are extensible: any wire-safe name except "text".
+        require_activity_specific("coding").expect("free-form specific accepted");
+        require_activity_specific("day_off").expect("free-form specific accepted");
+        for specific in ["text", "2fast", "-lane", ""] {
+            assert_eq!(
+                require_activity_specific(specific).unwrap_err(),
+                WaddleError::InvalidArgument,
+                "specific {specific:?} must be rejected"
+            );
+        }
+    }
+
+    /// RFC 6120 §8.2.3: each IQ request gets a fresh id — two builds
+    /// mint two different request ids, so a slow reply can never
+    /// resolve a later request's waiter.
+    #[test]
+    fn minted_request_ids_are_unique_per_build() {
+        let first = build_publish_mood_iq(&mint_request_id(), "happy", None);
+        let second = build_publish_mood_iq(&mint_request_id(), "happy", None);
+        let first_id = first.attr("id").expect("id stamped");
+        let second_id = second.attr("id").expect("id stamped");
+        assert_ne!(first_id, second_id);
+        assert_ne!(mint_request_id(), mint_request_id());
     }
 
     #[tokio::test]

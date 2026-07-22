@@ -962,7 +962,7 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_join_room(`ptr
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`nick`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(`ptr`: Long,`jid`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(`ptr`: Long,`jid`: RustBuffer.ByValue,`knownIds`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(`ptr`: Long,`serviceJid`: RustBuffer.ByValue,`filename`: RustBuffer.ByValue,`size`: Long,`contentType`: RustBuffer.ByValue,
 ): Long
@@ -1316,7 +1316,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -1415,16 +1415,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 55115) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 47928) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 7919) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 10801) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 55478) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4() != 36728) {
@@ -2273,12 +2273,15 @@ public interface WaddleClientInterface {
     suspend fun `leaveRoom`(`roomJid`: kotlin.String, `nick`: kotlin.String)
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
-    suspend fun `requestAvatar`(`jid`: kotlin.String): WaddleAvatar?
+    suspend fun `requestAvatar`(`jid`: kotlin.String, `knownIds`: List<kotlin.String>): WaddleAvatarResult?
 
     suspend fun `requestUploadSlot`(`serviceJid`: kotlin.String, `filename`: kotlin.String, `size`: kotlin.ULong, `contentType`: kotlin.String): WaddleUploadSlot?
 
@@ -2529,8 +2532,9 @@ public interface WaddleClientInterface {
     suspend fun `fetchVcard4`(`jid`: kotlin.String): WaddleVCard4?
 
     /**
-     * XEP-0108: publish a user activity. `general` (and `specific`
-     * when present) must be defined category element names.
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
      */
     suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?)
 
@@ -2539,19 +2543,23 @@ public interface WaddleClientInterface {
      * base64 data item first, then (after the server ack) the
      * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
      * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
      */
     suspend fun `publishAvatar`(`data`: kotlin.ByteArray, `mimeType`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt)
 
     /**
-     * XEP-0107: publish a user mood. `kind` must be a defined mood
-     * element name (e.g. `happy`).
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
      */
     suspend fun `publishMood`(`kind`: kotlin.String, `text`: kotlin.String?)
 
     /**
      * XEP-0118: publish a user tune. At least one field must be set —
      * an all-empty tune is the §3.2 *stop* shape, which is
-     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
      */
     suspend fun `publishTune`(`tune`: WaddleTune)
 
@@ -3732,25 +3740,28 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `requestAvatar`(`jid`: kotlin.String) : WaddleAvatar? {
+    override suspend fun `requestAvatar`(`jid`: kotlin.String, `knownIds`: List<kotlin.String>) : WaddleAvatarResult? {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
                 uniffiHandle,
-                FfiConverterString.lower(`jid`),
+                FfiConverterString.lower(`jid`),FfiConverterSequenceString.lower(`knownIds`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterOptionalTypeWaddleAvatar.lift(it) },
+        { FfiConverterOptionalTypeWaddleAvatarResult.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -4600,8 +4611,9 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * XEP-0108: publish a user activity. `general` (and `specific`
-     * when present) must be defined category element names.
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4630,6 +4642,9 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * base64 data item first, then (after the server ack) the
      * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
      * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4654,8 +4669,8 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * XEP-0107: publish a user mood. `kind` must be a defined mood
-     * element name (e.g. `happy`).
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4682,7 +4697,8 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     /**
      * XEP-0118: publish a user tune. At least one field must be set —
      * an all-empty tune is the §3.2 *stop* shape, which is
-     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -6822,6 +6838,51 @@ public object FfiConverterTypeWaddleAvatar: FfiConverterRustBuffer<WaddleAvatar>
             FfiConverterString.write(value.`mimeType`, buf)
             FfiConverterByteArray.write(value.`data`, buf)
             FfiConverterOptionalString.write(value.`url`, buf)
+    }
+}
+
+
+
+/**
+ * Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+ * resolved; `avatar` is `None` exactly when that id was in the
+ * caller's known set — the data IQ was skipped (XEP-0084 §4.2 "MUST
+ * NOT retrieve the image data") and the caller serves its cached
+ * bytes for `id` instead.
+ */
+data class WaddleAvatarResult (
+    var `id`: kotlin.String
+    ,
+    var `avatar`: WaddleAvatar?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleAvatarResult: FfiConverterRustBuffer<WaddleAvatarResult> {
+    override fun read(buf: ByteBuffer): WaddleAvatarResult {
+        return WaddleAvatarResult(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeWaddleAvatar.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleAvatarResult) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterOptionalTypeWaddleAvatar.allocationSize(value.`avatar`)
+    )
+
+    override fun write(value: WaddleAvatarResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterOptionalTypeWaddleAvatar.write(value.`avatar`, buf)
     }
 }
 
@@ -12649,6 +12710,38 @@ public object FfiConverterOptionalTypeWaddleAvatar: FfiConverterRustBuffer<Waddl
         } else {
             buf.put(1)
             FfiConverterTypeWaddleAvatar.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWaddleAvatarResult: FfiConverterRustBuffer<WaddleAvatarResult?> {
+    override fun read(buf: ByteBuffer): WaddleAvatarResult? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleAvatarResult.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleAvatarResult?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleAvatarResult.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleAvatarResult?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleAvatarResult.write(value, buf)
         }
     }
 }

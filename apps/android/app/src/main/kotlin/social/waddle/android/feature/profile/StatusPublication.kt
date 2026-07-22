@@ -133,9 +133,10 @@ private fun parseBounded(raw: String, min: Int, max: Int): ParseOutcome {
     return ParseOutcome.Value(parsed)
 }
 
-/** Web parity: any URI with a real scheme (`https://…`, `spotify:…`);
- *  single-letter schemes are rejected like the web's drive-path guard. */
-private fun isAbsoluteUri(value: String): Boolean {
-    val scheme = runCatching { URI(value).scheme }.getOrNull() ?: return false
-    return scheme.length > 1
-}
+/** Web parity (EFFECTIVE behavior): any parseable absolute URI — one
+ *  with a scheme — passes (`https://…`, `spotify:…`, even a
+ *  single-letter scheme). The web checks `protocol.length > 1`, but
+ *  `URL.protocol` includes the trailing `:` so that is always true;
+ *  its real gate is "did the URL constructor accept it". */
+private fun isAbsoluteUri(value: String): Boolean =
+    runCatching { URI(value).scheme }.getOrNull() != null

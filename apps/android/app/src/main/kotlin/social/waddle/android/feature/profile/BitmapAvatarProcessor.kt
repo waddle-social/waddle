@@ -21,10 +21,16 @@ class BitmapAvatarProcessor(private val contentResolver: ContentResolver) {
         try {
             val bitmap = ImageDecoder.decodeBitmap(
                 ImageDecoder.createSource(contentResolver, uri),
-            ) { decoder, _, _ ->
+            ) { decoder, info, _ ->
                 // Software allocation: hardware bitmaps cannot be read
                 // back for cropping or PNG encoding.
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                // Bound the decode: subsample from the header size so a
+                // huge pick materializes at most ~MAX_DECODE_DIMENSION²
+                // pixels before the crop/scale transform runs.
+                decoder.setTargetSampleSize(
+                    avatarDecodeSampleSize(info.size.width, info.size.height),
+                )
             }
             encode(bitmap)
         } catch (cancellation: CancellationException) {

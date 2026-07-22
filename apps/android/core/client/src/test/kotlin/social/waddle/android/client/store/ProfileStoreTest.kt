@@ -46,6 +46,45 @@ class ProfileStoreTest {
     }
 
     @Test
+    fun `knownAvatarIds lists the cached ids for the bare owner`() {
+        assertEquals(emptyList<String>(), store.knownAvatarIds("alice@waddle.test"))
+        store.onAvatar(testAvatar(id = "id-1", data = byteArrayOf(1)))
+        store.onAvatar(testAvatar(id = "id-2", data = byteArrayOf(2)))
+        assertEquals(listOf("id-1", "id-2"), store.knownAvatarIds("alice@waddle.test/phone"))
+    }
+
+    @Test
+    fun `the per-jid byte cache evicts beyond the last four ids`() {
+        for (index in 1..5) {
+            store.onAvatar(testAvatar(id = "id-$index", data = byteArrayOf(index.toByte())))
+        }
+
+        // Oldest entry gone, the four newest retained in order.
+        assertNull(store.cachedAvatar("alice@waddle.test", "id-1"))
+        assertEquals(
+            listOf("id-2", "id-3", "id-4", "id-5"),
+            store.knownAvatarIds("alice@waddle.test"),
+        )
+        assertEquals("id-5", store.avatars.value["alice@waddle.test"]?.id)
+    }
+
+    @Test
+    fun `re-seeing a cached id refreshes its eviction slot`() {
+        for (index in 1..4) {
+            store.onAvatar(testAvatar(id = "id-$index", data = byteArrayOf(index.toByte())))
+        }
+        // id-1 becomes the newest again, so the next insert evicts id-2.
+        store.onAvatar(testAvatar(id = "id-1", data = byteArrayOf(1)))
+        store.onAvatar(testAvatar(id = "id-5", data = byteArrayOf(5)))
+
+        assertNull(store.cachedAvatar("alice@waddle.test", "id-2"))
+        assertEquals(
+            listOf("id-3", "id-4", "id-1", "id-5"),
+            store.knownAvatarIds("alice@waddle.test"),
+        )
+    }
+
+    @Test
     fun `setSelfStatus seeds all three status flows`() {
         store.setSelfStatus(
             WaddlePepProfile(

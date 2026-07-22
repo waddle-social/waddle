@@ -41,7 +41,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,7 +55,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
-import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.GENERAL_ACTIVITIES
@@ -72,7 +70,14 @@ import social.waddle.client.ffi.WaddleAvatar
 @Composable
 fun ProfileScreen(onBack: () -> Unit) {
     val graph = LocalAppGraph.current
-    val viewModel: ProfileViewModel = viewModel(factory = ProfileViewModel.factory(graph))
+    val session by graph.currentSession.collectAsStateWithLifecycle()
+    // Keyed per account (channel-screen parity): logout→login as
+    // another account must get a fresh VM and a fresh load instead of
+    // a cached VM whose one-shot load already ran.
+    val viewModel: ProfileViewModel = viewModel(
+        key = "profile:${session?.jid.orEmpty()}",
+        factory = ProfileViewModel.factory(graph),
+    )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val avatar by viewModel.selfAvatar.collectAsStateWithLifecycle()
 
@@ -121,13 +126,16 @@ private fun AvatarSection(
     viewModel: ProfileViewModel,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val processor = remember { BitmapAvatarProcessor(context.contentResolver) }
+    val restAvatarUrl by viewModel.restAvatarUrl.collectAsStateWithLifecycle()
     val pickAvatar = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null) {
-            scope.launch { viewModel.publishAvatar(processor.process(uri)) }
+            // The whole process→publish pipeline runs in the VM scope:
+            // busy flips before processing and navigating away no
+            // longer silently discards the pick.
+            viewModel.publishAvatar { processor.process(uri) }
         }
     }
 
@@ -138,7 +146,7 @@ private fun AvatarSection(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SelfAvatarImage(avatar = avatar, restAvatarUrl = viewModel.restAvatarUrl)
+        SelfAvatarImage(avatar = avatar, restAvatarUrl = restAvatarUrl)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
@@ -263,11 +271,22 @@ private fun VcardSection(state: VcardSectionState, viewModel: ProfileViewModel) 
             }
         }
         if (state.loadFailed) {
-            Text(
-                text = stringResource(R.string.profile_load_failed),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.profile_load_failed),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                OutlinedButton(
+                    onClick = viewModel::retryLoad,
+                    modifier = Modifier.testTag(ProfileScreenTestTags.VCARD_RETRY),
+                ) {
+                    Text(text = stringResource(R.string.profile_retry))
+                }
+            }
         }
         FeedbackText(feedback = state.feedback, testTag = ProfileScreenTestTags.VCARD_FEEDBACK)
     }
@@ -584,7 +603,6 @@ private fun FeedbackText(feedback: ProfileFeedback?, testTag: String? = null) {
 private fun ProfileFeedback.messageRes(): Int = when (this) {
     ProfileFeedback.PUBLISHED -> R.string.profile_feedback_published
     ProfileFeedback.CLEARED -> R.string.profile_feedback_cleared
-    ProfileFeedback.SCHEDULED -> R.string.profile_feedback_scheduled
     ProfileFeedback.UNCHANGED -> R.string.profile_feedback_unchanged
     ProfileFeedback.INVALID -> R.string.profile_feedback_invalid
     ProfileFeedback.FAILED -> R.string.profile_feedback_failed
@@ -613,6 +631,7 @@ object ProfileScreenTestTags {
     const val VCARD_NOTE = "profile-vcard-note"
     const val VCARD_SAVE = "profile-vcard-save"
     const val VCARD_REVERT = "profile-vcard-revert"
+    const val VCARD_RETRY = "profile-vcard-retry"
     const val VCARD_FEEDBACK = "profile-vcard-feedback"
     const val MOOD_PICKER = "profile-mood-picker"
     const val MOOD_SEARCH = "profile-mood-search"

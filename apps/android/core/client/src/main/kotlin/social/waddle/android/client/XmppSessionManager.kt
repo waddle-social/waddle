@@ -4,10 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -119,9 +117,6 @@ class XmppSessionManager(
 
     private val profile = ProfileVerbs(activeSession, stores)
 
-    /** The pending debounced XEP-0118 tune publish (see [setTune]). */
-    private var tunePublishJob: Job? = null
-
     private val catchup = SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState)
 
     private val loop = ConnectionLoop(
@@ -152,6 +147,9 @@ class XmppSessionManager(
     suspend fun login(session: WaddleSessionInfo) = lifecycleMutex.withLock {
         cancelSessionScope()
         clearSessionState()
+        // New account session: in-flight verb replies from the previous
+        // one must not write into these freshly seeded stores.
+        activeSession.advanceGeneration()
         activeSession.ownBareJid = bareJid(session.jid)
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
@@ -188,6 +186,7 @@ class XmppSessionManager(
             }
         }
         cancelSessionScope()
+        activeSession.advanceGeneration()
         activeSession.ownBareJid = null
         activeSession.ownFullJid = null
         clearSessionState()
@@ -395,28 +394,16 @@ class XmppSessionManager(
     suspend fun clearActivity(): VerbResult = profile.clearActivity()
 
     /**
-     * XEP-0118 tune publish, debounced by [TUNE_DEBOUNCE_MILLIS]
-     * (the spec's "SHOULD wait several seconds before publishing new
-     * tune information" against track-skipping). Each call replaces
-     * the pending publish; the result lands in [profileStore]'s
-     * `selfTune` once the debounced send succeeds. No live session →
-     * dropped, like other live-only signals.
+     * XEP-0118 tune publish. User-initiated and immediate (web
+     * parity): the XEP's "SHOULD wait several seconds" targets
+     * automatic players skipping tracks, and no automatic publisher
+     * exists here — a manual form submit publishes right away and the
+     * caller gets the real [VerbResult] to surface.
      */
-    fun setTune(tune: WaddleTune) {
-        val scope = sessionScope ?: return
-        tunePublishJob?.cancel()
-        tunePublishJob = scope.launch {
-            delay(TUNE_DEBOUNCE_MILLIS)
-            profile.publishTune(tune)
-        }
-    }
+    suspend fun setTune(tune: WaddleTune): VerbResult = profile.publishTune(tune)
 
-    /** XEP-0118 §3.2: cancel any pending publish and retract the tune. */
-    suspend fun clearTune(): VerbResult {
-        tunePublishJob?.cancel()
-        tunePublishJob = null
-        return profile.clearTune()
-    }
+    /** XEP-0118 §3.2: retract the tune via the empty payload. */
+    suspend fun clearTune(): VerbResult = profile.clearTune()
 
     /** Manual retry from the Failed banner: fresh budget immediately. */
     fun requestReconnect() {
@@ -514,8 +501,5 @@ class XmppSessionManager(
 
         /** Sign-out budget for the pre-disconnect call hang-up. */
         const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
-
-        /** XEP-0118: "wait several seconds" before publishing a new tune. */
-        const val TUNE_DEBOUNCE_MILLIS = 3_000L
     }
 }

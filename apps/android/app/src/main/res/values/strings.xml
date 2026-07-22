@@ -234,7 +234,8 @@
     <string name="profile_save">Save profile</string>
     <string name="profile_saving">Publishing…</string>
     <string name="profile_revert">Revert</string>
-    <string name="profile_load_failed">Couldn\'t load your profile. It will retry on the next connection.</string>
+    <string name="profile_load_failed">Couldn\'t load your profile.</string>
+    <string name="profile_retry">Retry</string>
     <string name="profile_publish">Publish</string>
     <string name="profile_clear">Clear</string>
     <string name="profile_avatar_change">Change avatar</string>
@@ -254,7 +255,6 @@
     <string name="profile_tune_empty">Add at least one tune detail, or use Clear to remove your current tune.</string>
     <string name="profile_feedback_published">Published.</string>
     <string name="profile_feedback_cleared">Cleared.</string>
-    <string name="profile_feedback_scheduled">Sharing shortly…</string>
     <string name="profile_feedback_unchanged">Nothing to publish — your draft matches the saved profile.</string>
     <string name="profile_feedback_invalid">Check the fields and try again.</string>
     <string name="profile_feedback_failed">Couldn\'t publish the change. Any optimistic edit was rolled back.</string>

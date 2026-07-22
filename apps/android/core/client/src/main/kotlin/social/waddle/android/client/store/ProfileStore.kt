@@ -79,11 +79,29 @@ class ProfileStore {
     fun cachedAvatar(jid: String, itemId: String): WaddleAvatar? =
         cacheById.value[bareJid(jid)]?.get(itemId)
 
-    /** Record [avatar] as its owner's current avatar and cache its bytes. */
+    /** The item ids whose bytes are cached for [jid] — the known-id set
+     *  handed to the FFI fetch so the §4.2 data-IQ skip happens on the
+     *  wire path, not only on the local shortcut. */
+    fun knownAvatarIds(jid: String): List<String> =
+        cacheById.value[bareJid(jid)]?.keys?.toList() ?: emptyList()
+
+    /** Record [avatar] as its owner's current avatar and cache its
+     *  bytes. The per-JID byte cache is bounded to the
+     *  [MAX_CACHED_AVATAR_IDS_PER_JID] most recently seen ids (kept in
+     *  insertion order); older entries are evicted. */
     fun onAvatar(avatar: WaddleAvatar) {
         val owner = bareJid(avatar.jid)
         cacheById.update { cache ->
-            cache + (owner to ((cache[owner] ?: emptyMap()) + (avatar.id to avatar)))
+            // Re-insert so the current id is always the newest entry.
+            val entries = ((cache[owner] ?: emptyMap()) - avatar.id) + (avatar.id to avatar)
+            val bounded = if (entries.size > MAX_CACHED_AVATAR_IDS_PER_JID) {
+                entries.entries
+                    .drop(entries.size - MAX_CACHED_AVATAR_IDS_PER_JID)
+                    .associate { it.key to it.value }
+            } else {
+                entries
+            }
+            cache + (owner to bounded)
         }
         _avatars.update { it + (owner to avatar) }
     }
@@ -101,5 +119,12 @@ class ProfileStore {
         _selfTune.value = null
         cacheById.value = emptyMap()
         _avatars.value = emptyMap()
+    }
+
+    companion object {
+        /** Modest per-JID byte-cache bound: the current id plus a few
+         *  recent ones (an avatar A→B→A flip still skips refetches)
+         *  without letting a churn-happy peer grow the cache unbounded. */
+        const val MAX_CACHED_AVATAR_IDS_PER_JID = 4
     }
 }

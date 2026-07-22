@@ -2,6 +2,7 @@ package social.waddle.android.feature.profile
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AvatarTransformTest {
@@ -47,5 +48,39 @@ class AvatarTransformTest {
         assertNull(avatarGeometry(width = 100, height = 0))
         assertNull(avatarGeometry(width = -1, height = -1))
         assertNull(avatarGeometry(width = 100, height = 100, maxDimension = 0))
+    }
+
+    // ── Decode sample size (setTargetSampleSize bound) ────────────────
+
+    @Test
+    fun `sources within the decode bound decode fully`() {
+        assertEquals(1, avatarDecodeSampleSize(width = 800, height = 600))
+        assertEquals(1, avatarDecodeSampleSize(width = 1024, height = 1024))
+        assertEquals(1, avatarDecodeSampleSize(width = 512, height = 1024))
+    }
+
+    @Test
+    fun `oversized sources subsample so the larger side fits the bound`() {
+        assertEquals(2, avatarDecodeSampleSize(width = 1025, height = 500))
+        assertEquals(4, avatarDecodeSampleSize(width = 4000, height = 3000))
+        assertEquals(12, avatarDecodeSampleSize(width = 12000, height = 9000))
+        // 100-megapixel pick: at most ~1024² pixels materialize.
+        assertEquals(10, avatarDecodeSampleSize(width = 10000, height = 10000))
+    }
+
+    @Test
+    fun `sample size divides the larger dimension under the bound`() {
+        for ((width, height) in listOf(4000 to 3000, 1025 to 500, 9999 to 1, 20000 to 20000)) {
+            val sample = avatarDecodeSampleSize(width, height)
+            val largest = maxOf(width, height)
+            assertTrue(largest / sample <= MAX_DECODE_DIMENSION)
+        }
+    }
+
+    @Test
+    fun `degenerate decode inputs fall back to a full decode`() {
+        assertEquals(1, avatarDecodeSampleSize(width = 0, height = 100))
+        assertEquals(1, avatarDecodeSampleSize(width = 100, height = -1))
+        assertEquals(1, avatarDecodeSampleSize(width = 100, height = 100, maxDimension = 0))
     }
 }

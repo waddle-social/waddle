@@ -294,63 +294,49 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
     build_pep_publish_iq(id, node, payload)
 }
 
-pub fn build_publish_mood_iq(mood: &str, text: Option<&str>) -> Element {
-    build_pep_publish_iq("pep-publish-mood", NS_MOOD, build_mood_element(mood, text))
+// Every builder below takes the IQ `id` from the caller: ids identify a
+// single request on the stream (RFC 6120 §8.2.3), so each request MUST
+// mint a fresh one (the FFI and wasm callers use UUIDs) — a fixed id
+// would misroute a slow reply onto a later request's waiter.
+
+pub fn build_publish_mood_iq(id: &str, mood: &str, text: Option<&str>) -> Element {
+    build_pep_publish_iq(id, NS_MOOD, build_mood_element(mood, text))
 }
 
-pub fn build_retract_mood_iq() -> Element {
-    build_pep_clear_iq("pep-retract-mood", NS_MOOD)
+pub fn build_retract_mood_iq(id: &str) -> Element {
+    build_pep_clear_iq(id, NS_MOOD)
 }
 
 pub fn build_publish_activity_iq(
+    id: &str,
     general: &str,
     specific: Option<&str>,
     text: Option<&str>,
 ) -> Element {
     build_pep_publish_iq(
-        "pep-publish-activity",
+        id,
         NS_ACTIVITY,
         build_activity_element_with_specific(general, specific, text),
     )
 }
 
-pub fn build_retract_activity_iq() -> Element {
-    build_pep_clear_iq("pep-retract-activity", NS_ACTIVITY)
+pub fn build_retract_activity_iq(id: &str) -> Element {
+    build_pep_clear_iq(id, NS_ACTIVITY)
 }
 
-pub fn build_publish_tune_iq(
-    artist: Option<&str>,
-    title: Option<&str>,
-    source: Option<&str>,
-    length: Option<u32>,
-    rating: Option<u8>,
-    track: Option<&str>,
-    uri: Option<&str>,
-) -> Element {
-    build_pep_publish_iq(
-        "pep-publish-tune",
-        NS_TUNE,
-        build_tune_element(&UserTune {
-            artist: artist.map(str::to_string),
-            title: title.map(str::to_string),
-            source: source.map(str::to_string),
-            length,
-            rating,
-            track: track.map(str::to_string),
-            uri: uri.map(str::to_string),
-        }),
-    )
+pub fn build_publish_tune_iq(id: &str, tune: &UserTune) -> Element {
+    build_pep_publish_iq(id, NS_TUNE, build_tune_element(tune))
 }
 
-pub fn build_retract_tune_iq() -> Element {
-    build_pep_clear_iq("pep-retract-tune", NS_TUNE)
+pub fn build_retract_tune_iq(id: &str) -> Element {
+    build_pep_clear_iq(id, NS_TUNE)
 }
 
-pub fn build_pep_items_iq(target_jid: &str, node: &str) -> Element {
+pub fn build_pep_items_iq(id: &str, target_jid: &str, node: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), target_jid)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "pep-items")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
         .append(
             Element::builder("pubsub", NS_PUBSUB)
                 .append(

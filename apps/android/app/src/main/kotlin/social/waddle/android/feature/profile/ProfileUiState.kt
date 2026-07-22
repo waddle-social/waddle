@@ -9,9 +9,6 @@ enum class ProfileFeedback {
     /** The retraction went through. */
     CLEARED,
 
-    /** A debounced tune publish is pending (XEP-0118 "wait several seconds"). */
-    SCHEDULED,
-
     /** The draft matches the saved profile — nothing to publish. */
     UNCHANGED,
 

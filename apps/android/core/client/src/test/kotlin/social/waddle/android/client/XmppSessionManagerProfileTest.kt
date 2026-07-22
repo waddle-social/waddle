@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -59,7 +60,7 @@ class XmppSessionManagerProfileTest {
 
         assertEquals(listOf(own), harness.client.fetchVcard4Calls)
         assertEquals(listOf(own), harness.client.fetchPepProfileCalls)
-        assertEquals(listOf(own), harness.client.requestAvatarCalls)
+        assertEquals(listOf(own), harness.client.requestAvatarCalls.map { it.first })
         assertEquals("Ice Puma", harness.manager.profileStore.selfVcard.value?.fullName)
         assertEquals("happy", harness.manager.profileStore.selfMood.value?.kind)
         assertEquals("Come Together", harness.manager.profileStore.selfTune.value?.title)
@@ -178,6 +179,53 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
+    fun `fetchAvatar hands the store's known ids to the wire fetch and skips the data on a hit`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.avatar = testAvatar(jid = "alice@waddle.test", id = "id-1")
+
+        // First fetch: nothing cached, so no known ids ride along and
+        // the bytes come back over the wire.
+        val first = harness.manager.fetchAvatar("alice@waddle.test")
+        assertEquals("id-1", first?.id)
+        assertEquals(emptyList<String>(), harness.client.requestAvatarCalls[0].second)
+
+        // Second wire fetch (no local knownId shortcut): the cached
+        // id-1 rides along, the fake answers id-only (§4.2 data-IQ
+        // skip), and the cached bytes are re-marked current.
+        harness.manager.profileStore.clearAvatar("alice@waddle.test")
+        val second = harness.manager.fetchAvatar("alice@waddle.test")
+        assertEquals("id-1", second?.id)
+        assertTrue("id-1" in harness.client.requestAvatarCalls[1].second)
+        assertEquals(
+            "id-1",
+            harness.manager.profileStore.avatars.value["alice@waddle.test"]?.id,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a publish ack that lands after a same-account relogin is dropped`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.profileVerbDelayMillis = 1_000L
+
+        // The publish is in flight when the account signs out and
+        // signs back IN AS THE SAME account: a bare-JID owner gate
+        // would falsely pass here, the generation gate must not.
+        val pending = async { harness.manager.setMood("happy", null) }
+        runCurrent()
+        harness.manager.logout()
+        harness.loginReady(this)
+
+        advanceTimeBy(1_001L)
+        runCurrent()
+        assertEquals(VerbResult.Ok, pending.await())
+        assertNull(harness.manager.profileStore.selfMood.value)
+        harness.manager.logout()
+    }
+
+    @Test
     fun `mood and activity verbs record and mirror into the store`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
@@ -215,36 +263,38 @@ class XmppSessionManagerProfileTest {
     }
 
     @Test
-    fun `setTune debounces and only the last pending tune publishes`() = runTest {
+    fun `setTune publishes immediately and returns the wire result`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
 
-        harness.manager.setTune(testTune(title = "First"))
-        runCurrent()
-        assertTrue(harness.client.profileVerbs.isEmpty())
-
-        // A quick track skip replaces the pending publish entirely.
-        harness.manager.setTune(testTune(title = "Second"))
-        advanceTimeBy(XmppSessionManager.TUNE_DEBOUNCE_MILLIS + 1)
-        runCurrent()
+        // User-initiated submit: no debounce — the verb goes out now
+        // and the caller sees the real result (web parity).
+        assertEquals(VerbResult.Ok, harness.manager.setTune(testTune(title = "Come Together")))
 
         val published = harness.client.profileVerbs.filterIsInstance<RecordedProfileVerb.PublishTune>()
-        assertEquals(listOf("Second"), published.map { it.tune.title })
-        assertEquals("Second", harness.manager.profileStore.selfTune.value?.title)
+        assertEquals(listOf("Come Together"), published.map { it.tune.title })
+        assertEquals("Come Together", harness.manager.profileStore.selfTune.value?.title)
         harness.manager.logout()
     }
 
     @Test
-    fun `clearTune cancels the pending debounced publish and retracts`() = runTest {
+    fun `a refused setTune surfaces Rejected and leaves the store untouched`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.profileVerbFailure = RuntimeException("not-acceptable")
+
+        assertEquals(VerbResult.Rejected, harness.manager.setTune(testTune(title = "Nope")))
+        assertNull(harness.manager.profileStore.selfTune.value)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `clearTune retracts and clears the store`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         harness.manager.profileStore.setSelfTune(testTune())
 
-        harness.manager.setTune(testTune(title = "Skipped"))
-        runCurrent()
         assertEquals(VerbResult.Ok, harness.manager.clearTune())
-        advanceTimeBy(XmppSessionManager.TUNE_DEBOUNCE_MILLIS + 1)
-        runCurrent()
 
         assertEquals(listOf(RecordedProfileVerb.RetractTune), harness.client.profileVerbs)
         assertNull(harness.manager.profileStore.selfTune.value)

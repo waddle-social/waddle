@@ -832,12 +832,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func leaveRoom(roomJid: String, nick: String) async
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
-    func requestAvatar(jid: String) async  -> WaddleAvatar?
+    func requestAvatar(jid: String, knownIds: [String]) async  -> WaddleAvatarResult?
 
     func requestUploadSlot(serviceJid: String, filename: String, size: UInt64, contentType: String) async  -> WaddleUploadSlot?
 
@@ -1088,8 +1091,9 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func fetchVcard4(jid: String) async throws  -> WaddleVCard4?
 
     /**
-     * XEP-0108: publish a user activity. `general` (and `specific`
-     * when present) must be defined category element names.
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
      */
     func publishActivity(general: String, specific: String?, text: String?) async throws
 
@@ -1098,19 +1102,23 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * base64 data item first, then (after the server ack) the
      * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
      * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
      */
     func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32) async throws
 
     /**
-     * XEP-0107: publish a user mood. `kind` must be a defined mood
-     * element name (e.g. `happy`).
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
      */
     func publishMood(kind: String, text: String?) async throws
 
     /**
      * XEP-0118: publish a user tune. At least one field must be set —
      * an all-empty tune is the §3.2 *stop* shape, which is
-     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
      */
     func publishTune(tune: WaddleTune) async throws
 
@@ -2130,24 +2138,27 @@ open func leaveRoom(roomJid: String, nick: String)async   {
 }
 
     /**
-     * Request the XEP-0084 avatar for a user. Returns `None` when the target
-     * JID hasn't published an avatar or the fetch failed; errors are
-     * reported on the event listener so the caller can treat `None` as
-     * "fall back to initials".
+     * Request the XEP-0084 avatar for a user. `known_ids` are item ids
+     * whose bytes the caller already caches: when the advertised
+     * metadata id is among them the data IQ is skipped (§4.2 "MUST NOT
+     * retrieve the image data") and the result carries the id alone.
+     * Returns `None` when the target JID hasn't published an avatar or
+     * the fetch failed; errors are reported on the event listener so
+     * the caller can treat `None` as "fall back to initials".
      */
-open func requestAvatar(jid: String)async  -> WaddleAvatar?  {
+open func requestAvatar(jid: String, knownIds: [String])async  -> WaddleAvatarResult?  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(jid)
+                    FfiConverterString.lower(jid),FfiConverterSequenceString.lower(knownIds)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeWaddleAvatar.lift,
+            liftFunc: FfiConverterOptionTypeWaddleAvatarResult.lift,
             errorHandler: nil
 
         )
@@ -2901,8 +2912,9 @@ open func fetchVcard4(jid: String)async throws  -> WaddleVCard4?  {
 }
 
     /**
-     * XEP-0108: publish a user activity. `general` (and `specific`
-     * when present) must be defined category element names.
+     * XEP-0108: publish a user activity. `general` must be one of the
+     * 12 registry categories; `specific` (when present) is free-form
+     * but must be a wire-safe element name.
      */
 open func publishActivity(general: String, specific: String?, text: String?)async throws   {
     return
@@ -2926,6 +2938,9 @@ open func publishActivity(general: String, specific: String?, text: String?)asyn
      * base64 data item first, then (after the server ack) the
      * metadata item, both at the SHA-1-of-bytes item id. Pass `0`
      * for `width` / `height` when the dimensions are unknown.
+     * `mime_type` must be `image/png` (§5.1 MUST; the client image
+     * pipelines always encode PNG) and dimensions must fit
+     * `xs:unsignedShort`, else `InvalidArgument`.
      */
 open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UInt32)async throws   {
     return
@@ -2945,8 +2960,8 @@ open func publishAvatar(data: Data, mimeType: String, width: UInt32, height: UIn
 }
 
     /**
-     * XEP-0107: publish a user mood. `kind` must be a defined mood
-     * element name (e.g. `happy`).
+     * XEP-0107: publish a user mood. `kind` must be one of the 84
+     * registry mood element names (e.g. `happy`).
      */
 open func publishMood(kind: String, text: String?)async throws   {
     return
@@ -2968,7 +2983,8 @@ open func publishMood(kind: String, text: String?)async throws   {
     /**
      * XEP-0118: publish a user tune. At least one field must be set —
      * an all-empty tune is the §3.2 *stop* shape, which is
-     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10.
+     * [`Self::retract_tune`]'s job. `rating` is clamped to 1–10 and
+     * `length_seconds` to the schema's `xs:unsignedShort` range.
      */
 open func publishTune(tune: WaddleTune)async throws   {
     return
@@ -5514,6 +5530,67 @@ public func FfiConverterTypeWaddleAvatar_lift(_ buf: RustBuffer) throws -> Waddl
 #endif
 public func FfiConverterTypeWaddleAvatar_lower(_ value: WaddleAvatar) -> RustBuffer {
     return FfiConverterTypeWaddleAvatar.lower(value)
+}
+
+
+/**
+ * Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+ * resolved; `avatar` is `None` exactly when that id was in the
+ * caller's known set — the data IQ was skipped (XEP-0084 §4.2 "MUST
+ * NOT retrieve the image data") and the caller serves its cached
+ * bytes for `id` instead.
+ */
+public struct WaddleAvatarResult: Equatable, Hashable {
+    public var id: String
+    public var avatar: WaddleAvatar?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, avatar: WaddleAvatar?) {
+        self.id = id
+        self.avatar = avatar
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleAvatarResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleAvatarResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleAvatarResult {
+        return
+            try WaddleAvatarResult(
+                id: FfiConverterString.read(from: &buf),
+                avatar: FfiConverterOptionTypeWaddleAvatar.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleAvatarResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionTypeWaddleAvatar.write(value.avatar, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAvatarResult_lift(_ buf: RustBuffer) throws -> WaddleAvatarResult {
+    return try FfiConverterTypeWaddleAvatarResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleAvatarResult_lower(_ value: WaddleAvatarResult) -> RustBuffer {
+    return FfiConverterTypeWaddleAvatarResult.lower(value)
 }
 
 
@@ -12842,6 +12919,30 @@ fileprivate struct FfiConverterOptionTypeWaddleAvatar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleAvatarResult: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleAvatarResult?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleAvatarResult.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleAvatarResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleCallEvent: FfiConverterRustBuffer {
     typealias SwiftType = WaddleCallEvent?
 
@@ -14488,7 +14589,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_room() != 15630) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 34606) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_avatar() != 55862) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
@@ -14587,16 +14688,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 55115) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 47928) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 59372) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 7919) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mood() != 4753) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 10801) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_tune() != 55478) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_vcard4() != 36728) {

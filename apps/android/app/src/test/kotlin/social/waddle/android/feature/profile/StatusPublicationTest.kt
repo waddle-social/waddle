@@ -80,11 +80,20 @@ class StatusPublicationTest {
         val bad = buildTunePublication(TuneDraft(uri = "not a uri"))
         assertTrue(TuneFieldError.INVALID_URI in bad.errors)
 
+        val relative = buildTunePublication(TuneDraft(uri = "path/to/track"))
+        assertTrue(TuneFieldError.INVALID_URI in relative.errors)
+
         val https = buildTunePublication(TuneDraft(uri = "https://example.com/track"))
         assertEquals("https://example.com/track", https.publication?.uri)
 
         val spotify = buildTunePublication(TuneDraft(uri = "spotify:track:abc123"))
         assertEquals("spotify:track:abc123", spotify.publication?.uri)
+
+        // Web-effective parity: any parseable absolute URI passes,
+        // single-letter schemes included (the web's protocol-length
+        // check is vacuous — `URL.protocol` carries the trailing `:`).
+        val singleLetter = buildTunePublication(TuneDraft(uri = "x:track"))
+        assertEquals("x:track", singleLetter.publication?.uri)
     }
 
     @Test

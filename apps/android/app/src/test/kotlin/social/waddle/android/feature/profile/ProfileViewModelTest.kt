@@ -1,16 +1,18 @@
 package social.waddle.android.feature.profile
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -22,6 +24,7 @@ import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
 import social.waddle.android.client.RecordedProfileVerb
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testAvatar
@@ -53,10 +56,13 @@ class ProfileViewModelTest {
 
         val client get() = factory.clients.last()
 
+        val currentSession = MutableStateFlow<WaddleSessionInfo?>(
+            testSessionInfo(jid = "icepuma@waddle.test"),
+        )
+
         fun viewModel() = ProfileViewModel(
             sessionManager = manager,
-            ownJid = "icepuma@waddle.test",
-            restAvatarUrl = "https://rest.example/avatar.png",
+            currentSession = currentSession,
         )
     }
 
@@ -206,20 +212,16 @@ class ProfileViewModelTest {
     }
 
     @Test
-    fun `tune publish is debounced and confirms once the store reflects it`() = runTest {
+    fun `tune publish is immediate and surfaces the wire result`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         val viewModel = harness.viewModel()
         runCurrent()
 
+        // Manual submit: publishes right away (web parity), no
+        // debounce window, no SCHEDULED intermediate state.
         viewModel.setTuneField(ProfileViewModel.TuneField.TITLE, "Come Together")
         viewModel.publishTune()
-        runCurrent()
-
-        assertEquals(ProfileFeedback.SCHEDULED, viewModel.uiState.value.tune.feedback)
-        assertTrue(harness.client.profileVerbs.isEmpty())
-
-        advanceTimeBy(XmppSessionManager.TUNE_DEBOUNCE_MILLIS + 1)
         runCurrent()
 
         val published = harness.client.profileVerbs
@@ -227,21 +229,39 @@ class ProfileViewModelTest {
             .single()
         assertEquals("Come Together", published.tune.title)
         assertEquals(ProfileFeedback.PUBLISHED, viewModel.uiState.value.tune.feedback)
+        assertFalse(viewModel.uiState.value.tune.busy)
         harness.manager.logout()
     }
 
     @Test
-    fun `clearTune cancels a pending debounced publish`() = runTest {
+    fun `a refused tune publish reports FAILED immediately`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+        harness.client.profileVerbFailure = RuntimeException("not-acceptable")
+
+        // Re-publishing the SAME tune value twice would leave the
+        // selfTune StateFlow unchanged (conflation) — feedback must
+        // come from the returned result, never from awaiting an
+        // emission that cannot happen.
+        viewModel.setTuneField(ProfileViewModel.TuneField.TITLE, "Nope")
+        viewModel.publishTune()
+        runCurrent()
+
+        assertEquals(ProfileFeedback.FAILED, viewModel.uiState.value.tune.feedback)
+        assertFalse(viewModel.uiState.value.tune.busy)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `clearTune retracts`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
         val viewModel = harness.viewModel()
         runCurrent()
 
-        viewModel.setTuneField(ProfileViewModel.TuneField.TITLE, "Skipped")
-        viewModel.publishTune()
-        runCurrent()
         viewModel.clearTune()
-        advanceTimeBy(XmppSessionManager.TUNE_DEBOUNCE_MILLIS + 1)
         runCurrent()
 
         assertEquals(
@@ -261,7 +281,6 @@ class ProfileViewModelTest {
 
         viewModel.setTuneField(ProfileViewModel.TuneField.RATING, "11")
         viewModel.publishTune()
-        advanceTimeBy(XmppSessionManager.TUNE_DEBOUNCE_MILLIS + 1)
         runCurrent()
 
         assertTrue(harness.client.profileVerbs.isEmpty())
@@ -277,13 +296,14 @@ class ProfileViewModelTest {
         val viewModel = harness.viewModel()
         runCurrent()
 
-        viewModel.publishAvatar(null)
+        viewModel.publishAvatar { null }
+        runCurrent()
         assertEquals(ProfileFeedback.FAILED, viewModel.uiState.value.avatar.feedback)
         assertTrue(harness.client.profileVerbs.isEmpty())
 
-        viewModel.publishAvatar(
-            ProcessedAvatar(data = byteArrayOf(1, 2, 3), mimeType = "image/png", width = 64, height = 64),
-        )
+        viewModel.publishAvatar {
+            ProcessedAvatar(data = byteArrayOf(1, 2, 3), mimeType = "image/png", width = 64, height = 64)
+        }
         runCurrent()
         assertEquals(
             RecordedProfileVerb.PublishAvatar(3, "image/png", 64u, 64u),
@@ -294,6 +314,65 @@ class ProfileViewModelTest {
         viewModel.removeAvatar()
         runCurrent()
         assertEquals(RecordedProfileVerb.DisableAvatar, harness.client.profileVerbs.last())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `avatar busy flips before processing and blocks a second pick`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        // Park the pipeline mid-processing: busy must already be set.
+        val processing = CompletableDeferred<ProcessedAvatar?>()
+        viewModel.publishAvatar { processing.await() }
+        runCurrent()
+        assertTrue(viewModel.uiState.value.avatar.busy)
+
+        // A second pick while one is in flight is refused outright.
+        var secondRan = false
+        viewModel.publishAvatar {
+            secondRan = true
+            null
+        }
+        runCurrent()
+        assertFalse(secondRan)
+
+        processing.complete(
+            ProcessedAvatar(data = byteArrayOf(9), mimeType = "image/png", width = 8, height = 8),
+        )
+        runCurrent()
+        assertFalse(viewModel.uiState.value.avatar.busy)
+        assertEquals(
+            RecordedProfileVerb.PublishAvatar(1, "image/png", 8u, 8u),
+            harness.client.profileVerbs.single(),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a failed load exposes retry which reloads`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.fetchVcard4Failure = RuntimeException("boom")
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        assertTrue(viewModel.uiState.value.vcard.loadFailed)
+        assertFalse(viewModel.uiState.value.vcard.loaded)
+
+        // The transient failure clears; Retry reloads without waiting
+        // for a reconnect.
+        harness.client.fetchVcard4Failure = null
+        harness.client.vcard4 = testVcard4(fullName = "Ice Puma")
+        viewModel.retryLoad()
+        runCurrent()
+
+        val state = viewModel.uiState.value.vcard
+        assertTrue(state.loaded)
+        assertFalse(state.loadFailed)
+        assertEquals("Ice Puma", state.fullName)
         harness.manager.logout()
     }
 
@@ -309,6 +388,12 @@ class ProfileViewModelTest {
         runCurrent()
 
         assertEquals("id-1", viewModel.selfAvatar.value?.id)
+
+        // Identity is a flow: when the session flips to another
+        // account, the avatar follows the CURRENT session.
+        harness.currentSession.value = testSessionInfo(jid = "pingu@waddle.test")
+        runCurrent()
+        assertNull(viewModel.selfAvatar.value)
         harness.manager.logout()
     }
 }

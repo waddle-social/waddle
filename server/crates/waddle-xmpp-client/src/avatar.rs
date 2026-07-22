@@ -319,11 +319,43 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
     })
 }
 
+/// Outcome of a §4.2-aware avatar fetch: `id` is the item id the fetch
+/// resolved (the advertised XEP-0084 metadata id, or the synthetic
+/// vCard fallback id). `avatar` is `None` exactly when `id` was in the
+/// caller's known set — XEP-0084 §4.2 forbids re-retrieving image data
+/// the client already holds, so the data IQ was skipped and the caller
+/// serves the bytes from its own cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarFetch {
+    pub id: String,
+    pub avatar: Option<Avatar>,
+}
+
 /// Request an avatar using XEP-0084 first, then XEP-0054 vCard PHOTO fallback.
 pub async fn request_avatar_with_iq<F, Fut, E>(
     jid: &BareJid,
-    mut send_iq: F,
+    send_iq: F,
 ) -> Result<Option<Avatar>, E>
+where
+    F: FnMut(Element) -> Fut,
+    Fut: Future<Output = Result<Element, AvatarRequestFailure<E>>>,
+{
+    request_avatar_with_iq_skipping(jid, &[], send_iq)
+        .await
+        .map(|fetch| fetch.and_then(|fetch| fetch.avatar))
+}
+
+/// XEP-0084 fetch honoring the §4.2 no-refetch rule: query the metadata
+/// node, and if the advertised item id is in `known_ids` answer with an
+/// id-only [`AvatarFetch`] WITHOUT issuing the data IQ. Unknown ids
+/// fetch data as usual; when the metadata path yields nothing the
+/// XEP-0054 vCard PHOTO fallback runs (never skipped — its synthetic id
+/// does not address a pubsub data item).
+pub async fn request_avatar_with_iq_skipping<F, Fut, E>(
+    jid: &BareJid,
+    known_ids: &[String],
+    mut send_iq: F,
+) -> Result<Option<AvatarFetch>, E>
 where
     F: FnMut(Element) -> Fut,
     Fut: Future<Output = Result<Element, AvatarRequestFailure<E>>>,
@@ -337,13 +369,23 @@ where
 
     if let Some(meta_response) = meta_response {
         if let Some(info) = parse_metadata_response(&meta_response) {
-            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
-                return Ok(Some(Avatar {
-                    jid: jid.clone(),
+            if known_ids.iter().any(|known| known == &info.id) {
+                return Ok(Some(AvatarFetch {
                     id: info.id,
-                    mime_type: info.mime_type,
-                    data: Vec::new(),
-                    url: Some(url),
+                    avatar: None,
+                }));
+            }
+
+            if let Some(url) = info.url.as_deref().and_then(normalize_https_avatar_url) {
+                return Ok(Some(AvatarFetch {
+                    id: info.id.clone(),
+                    avatar: Some(Avatar {
+                        jid: jid.clone(),
+                        id: info.id,
+                        mime_type: info.mime_type,
+                        data: Vec::new(),
+                        url: Some(url),
+                    }),
                 }));
             }
 
@@ -352,12 +394,15 @@ where
                 Ok(data_response) => {
                     if let Some(base64_text) = parse_data_response(&data_response) {
                         if let Some(data) = decode_base64_bytes(&base64_text) {
-                            return Ok(Some(Avatar {
-                                jid: jid.clone(),
-                                id: info.id,
-                                mime_type: info.mime_type,
-                                data,
-                                url: None,
+                            return Ok(Some(AvatarFetch {
+                                id: info.id.clone(),
+                                avatar: Some(Avatar {
+                                    jid: jid.clone(),
+                                    id: info.id,
+                                    mime_type: info.mime_type,
+                                    data,
+                                    url: None,
+                                }),
                             }));
                         }
                         warn!(jid = %jid, "avatar data base64 decode failed");
@@ -369,7 +414,12 @@ where
         }
     }
 
-    request_vcard_avatar(jid, send_iq).await
+    Ok(request_vcard_avatar(jid, send_iq)
+        .await?
+        .map(|avatar| AvatarFetch {
+            id: avatar.id.clone(),
+            avatar: Some(avatar),
+        }))
 }
 
 async fn request_vcard_avatar<F, Fut, E>(jid: &BareJid, mut send_iq: F) -> Result<Option<Avatar>, E>
@@ -435,17 +485,24 @@ pub trait AvatarExt {
     /// Fetch the published avatar for the given JID, if any.
     ///
     /// Issues XEP-0084 IQ round-trips first and falls back to XEP-0054 vCard
-    /// PHOTO when avatar metadata or data is unavailable.
+    /// PHOTO when avatar metadata or data is unavailable. Item ids in
+    /// `known_ids` honor the §4.2 no-refetch rule: an advertised id the
+    /// caller already holds answers id-only, without the data IQ.
     fn request_avatar<'a>(
         &'a self,
         jid: &'a BareJid,
-    ) -> impl std::future::Future<Output = ClientResult<Option<Avatar>>> + Send + 'a;
+        known_ids: &'a [String],
+    ) -> impl std::future::Future<Output = ClientResult<Option<AvatarFetch>>> + Send + 'a;
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 impl AvatarExt for ClientHandle {
-    async fn request_avatar(&self, jid: &BareJid) -> ClientResult<Option<Avatar>> {
-        request_avatar_with_iq(jid, |stanza| async move {
+    async fn request_avatar(
+        &self,
+        jid: &BareJid,
+        known_ids: &[String],
+    ) -> ClientResult<Option<AvatarFetch>> {
+        request_avatar_with_iq_skipping(jid, known_ids, |stanza| async move {
             self.send_iq(stanza).await.map_err(|error| match error {
                 ClientError::StanzaError(_) => AvatarRequestFailure::StanzaError,
                 other => AvatarRequestFailure::Other(other),

@@ -30,6 +30,7 @@ import social.waddle.client.ffi.WaddleAdminSpacesSetRoleResult
 import social.waddle.client.ffi.WaddleAdminSpacesUpdateArgs
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
+import social.waddle.client.ffi.WaddleAvatarResult
 import social.waddle.client.ffi.WaddleBookmarkItem
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleChatState
@@ -563,6 +564,18 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var profileVerbFailure: Throwable? = null
 
+    /**
+     * Virtual-time stall before every profile verb answers — lets a
+     * test land a logout/relogin while a publish ack is in flight
+     * (the session-generation store-write gate).
+     */
+    @Volatile
+    var profileVerbDelayMillis = 0L
+
+    private suspend fun profileVerbStall() {
+        if (profileVerbDelayMillis > 0) delay(profileVerbDelayMillis)
+    }
+
     /** Canned vCard4 served by [fetchVcard4]; recorded jids. */
     @Volatile
     var vcard4: WaddleVCard4? = null
@@ -582,15 +595,23 @@ class FakeWaddleClient : WaddleClientInterface {
     @Volatile
     var avatar: WaddleAvatar? = null
 
-    val requestAvatarCalls = CopyOnWriteArrayList<String>()
+    /** Recorded (jid, knownIds) avatar fetches. */
+    val requestAvatarCalls = CopyOnWriteArrayList<Pair<String, List<String>>>()
 
     /** Raw payload of the most recent [publishAvatar] call. */
     @Volatile
     var publishedAvatarBytes: ByteArray? = null
 
-    override suspend fun requestAvatar(jid: String): WaddleAvatar? {
-        requestAvatarCalls += jid
-        return avatar
+    override suspend fun requestAvatar(jid: String, knownIds: List<String>): WaddleAvatarResult? {
+        requestAvatarCalls += jid to knownIds
+        val current = avatar ?: return null
+        // Mirror the FFI's §4.2 contract: a known advertised id answers
+        // id-only (no data fetch); an unknown id carries the bytes.
+        return if (current.id in knownIds) {
+            WaddleAvatarResult(id = current.id, avatar = null)
+        } else {
+            WaddleAvatarResult(id = current.id, avatar = current)
+        }
     }
 
     override suspend fun fetchVcard4(jid: String): WaddleVCard4? {
@@ -605,47 +626,56 @@ class FakeWaddleClient : WaddleClientInterface {
     }
 
     override suspend fun publishVcard4(vcard: WaddleVCard4) {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishVcard4(vcard)
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun publishAvatar(data: ByteArray, mimeType: String, width: UInt, height: UInt) {
+        profileVerbStall()
         publishedAvatarBytes = data
         profileVerbs += RecordedProfileVerb.PublishAvatar(data.size, mimeType, width, height)
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun disableAvatar() {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.DisableAvatar
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun publishMood(kind: String, text: String?) {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishMood(kind, text)
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun retractMood() {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.RetractMood
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun publishActivity(general: String, specific: String?, text: String?) {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishActivity(general, specific, text)
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun retractActivity() {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.RetractActivity
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun publishTune(tune: WaddleTune) {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishTune(tune)
         profileVerbFailure?.let { throw it }
     }
 
     override suspend fun retractTune() {
+        profileVerbStall()
         profileVerbs += RecordedProfileVerb.RetractTune
         profileVerbFailure?.let { throw it }
     }

@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -15,6 +16,7 @@ import social.waddle.android.AppGraph
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleAvatar
@@ -32,52 +34,52 @@ private const val MAX_STATUS_TEXT = 160
 /**
  * Profile screen state: the vCard4 editor with optimistic save +
  * rollback (web `VCardEditor.vue` parity), the mood/activity/tune
- * status sections (web `UserSettingsPage.vue` parity, tune debounced
- * by the session manager), and the XEP-0084 avatar actions.
+ * status sections (web `UserSettingsPage.vue` parity), and the
+ * XEP-0084 avatar actions.
+ *
+ * Account identity is derived from [currentSession] as a flow (never
+ * frozen at construction), and the screen additionally keys the VM by
+ * the signed-in JID — logout→login as another account always gets a
+ * fresh VM and a fresh load.
  */
 class ProfileViewModel(
     private val sessionManager: XmppSessionManager,
-    ownJid: String?,
-    /** REST fallback avatar; XMPP bytes from [selfAvatar] win. */
-    val restAvatarUrl: String?,
+    currentSession: StateFlow<WaddleSessionInfo?>,
 ) : ViewModel() {
-    private val ownBareJid: String? = ownJid?.let(::bareJidOf)
-
     private val _uiState = MutableStateFlow(ProfileUiState())
     val uiState: StateFlow<ProfileUiState> = _uiState.asStateFlow()
 
-    /** The account's current XMPP avatar (preferred over [restAvatarUrl]). */
-    val selfAvatar: StateFlow<WaddleAvatar?> = sessionManager.profileStore.avatars
-        .map { avatars -> ownBareJid?.let(avatars::get) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    /** REST fallback avatar for the CURRENT session; XMPP bytes win. */
+    val restAvatarUrl: StateFlow<String?> = currentSession
+        .map { session -> session?.avatarUrl }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, currentSession.value?.avatarUrl)
+
+    /** The current account's XMPP avatar (preferred over [restAvatarUrl]). */
+    val selfAvatar: StateFlow<WaddleAvatar?> = combine(
+        currentSession,
+        sessionManager.profileStore.avatars,
+    ) { session, avatars ->
+        session?.jid?.let(::bareJidOf)?.let(avatars::get)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private var loadedOnce = false
-
-    /** The tune handed to the debounced publish, matched against the
-     *  store to flip SCHEDULED feedback to PUBLISHED. */
-    private var pendingTune: WaddleTune? = null
 
     init {
         viewModelScope.launch {
             // Load on every Ready transition until it succeeds: an
             // early fetch racing the connect must retry on reconnect
             // instead of gating the editor forever (web loads on mount
-            // and gates saves on a successful load).
+            // and gates saves on a successful load). StateFlow replays
+            // the current state, so entering the screen while already
+            // Ready loads immediately.
             sessionManager.connectionState.collect { state ->
                 if (state is ConnectionState.Ready && !loadedOnce) load()
-            }
-        }
-        viewModelScope.launch {
-            sessionManager.profileStore.selfTune.collect { tune ->
-                if (pendingTune != null && tune == pendingTune) {
-                    pendingTune = null
-                    _uiState.update { it.copy(tune = it.tune.copy(feedback = ProfileFeedback.PUBLISHED)) }
-                }
             }
         }
     }
 
     private suspend fun load() {
+        if (_uiState.value.vcard.saving) return
         _uiState.update { it.copy(vcard = it.vcard.copy(loading = true, loadFailed = false)) }
         if (sessionManager.loadSelfProfile() != VerbResult.Ok) {
             _uiState.update { it.copy(vcard = it.vcard.copy(loading = false, loadFailed = true)) }
@@ -87,6 +89,14 @@ class ProfileViewModel(
         applyVcardDraft(sessionManager.profileStore.selfVcard.value)
         seedStatusDrafts()
         _uiState.update { it.copy(vcard = it.vcard.copy(loading = false, loaded = true)) }
+    }
+
+    /** Manual retry from the load-failed banner: no dead-end while a
+     *  live session exists. */
+    fun retryLoad() {
+        val state = _uiState.value.vcard
+        if (loadedOnce || state.loading) return
+        viewModelScope.launch { load() }
     }
 
     // ── vCard4 ────────────────────────────────────────────────────────
@@ -238,8 +248,8 @@ class ProfileViewModel(
         it.copy(tune = it.tune.copy(draft = field.applyTo(it.tune.draft, value)))
     }
 
-    /** Hand the tune to the manager's debounced publish; feedback flips
-     *  from SCHEDULED to PUBLISHED once the store confirms the send. */
+    /** Publish the tune immediately (web parity — no debounce for a
+     *  manual submit) and surface the real result. */
     fun publishTune() {
         val build = buildTunePublication(_uiState.value.tune.draft)
         val publication = build.publication
@@ -249,15 +259,18 @@ class ProfileViewModel(
             }
             return
         }
-        pendingTune = publication
-        sessionManager.setTune(publication)
         _uiState.update {
-            it.copy(tune = it.tune.copy(errors = emptySet(), feedback = ProfileFeedback.SCHEDULED))
+            it.copy(tune = it.tune.copy(errors = emptySet(), busy = true, feedback = null))
+        }
+        viewModelScope.launch {
+            val result = sessionManager.setTune(publication)
+            _uiState.update {
+                it.copy(tune = it.tune.copy(busy = false, feedback = feedbackFor(result)))
+            }
         }
     }
 
     fun clearTune() {
-        pendingTune = null
         _uiState.update { it.copy(tune = it.tune.copy(errors = emptySet(), busy = true, feedback = null)) }
         viewModelScope.launch {
             val result = sessionManager.clearTune()
@@ -270,14 +283,23 @@ class ProfileViewModel(
 
     // ── Avatar (XEP-0084) ─────────────────────────────────────────────
 
-    /** Publish a processed pick; `null` means the image could not be read. */
-    fun publishAvatar(processed: ProcessedAvatar?) {
-        if (processed == null) {
-            _uiState.update { it.copy(avatar = it.avatar.copy(feedback = ProfileFeedback.FAILED)) }
-            return
-        }
+    /**
+     * Run the whole pick pipeline — [load] (decode/process) and then
+     * the publish — inside the VM scope: the busy flag flips BEFORE
+     * processing starts, a second pick is refused while one is in
+     * flight, and navigating away no longer silently discards the
+     * pick mid-pipeline. [load] answers `null` when the image could
+     * not be read.
+     */
+    fun publishAvatar(load: suspend () -> ProcessedAvatar?) {
+        if (_uiState.value.avatar.busy) return
         _uiState.update { it.copy(avatar = it.avatar.copy(busy = true, feedback = null)) }
         viewModelScope.launch {
+            val processed = load()
+            if (processed == null) {
+                _uiState.update { it.copy(avatar = it.avatar.copy(busy = false, feedback = ProfileFeedback.FAILED)) }
+                return@launch
+            }
             val result = sessionManager.publishAvatar(
                 processed.data,
                 processed.mimeType,
@@ -291,6 +313,7 @@ class ProfileViewModel(
     }
 
     fun removeAvatar() {
+        if (_uiState.value.avatar.busy) return
         _uiState.update { it.copy(avatar = it.avatar.copy(busy = true, feedback = null)) }
         viewModelScope.launch {
             val result = sessionManager.disableAvatar()
@@ -400,8 +423,7 @@ class ProfileViewModel(
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             ProfileViewModel(
                 sessionManager = graph.sessionManager,
-                ownJid = graph.currentSession.value?.jid,
-                restAvatarUrl = graph.currentSession.value?.avatarUrl,
+                currentSession = graph.currentSession,
             )
         }
     }
