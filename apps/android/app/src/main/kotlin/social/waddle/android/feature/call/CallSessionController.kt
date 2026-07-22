@@ -72,6 +72,9 @@ class CallSessionController(
                 // Active is never a background-started capture.
                 if (state.accepting) startCallService()
             }
+            // Group-call setup is signaling-only (XEP-0272 §Joining);
+            // media connects when the slot goes Active with the join.
+            is CallState.MucPending -> Unit
             CallState.Idle, is CallState.Ended -> {
                 disconnectMediaIfConnected()
                 // Grace before stopping the FGS: a migration takeover

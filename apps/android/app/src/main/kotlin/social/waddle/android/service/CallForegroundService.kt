@@ -118,6 +118,7 @@ class CallForegroundService : Service() {
             is CallState.Outgoing -> state.to
             is CallState.Active -> state.peer
             is CallState.Incoming -> state.from
+            is CallState.MucPending -> state.roomJid
             // A start command can race call death (fast propose
             // failure, remote conclusion): the mandatory promote then
             // shows a neutral wrap-up body for the stop grace instead

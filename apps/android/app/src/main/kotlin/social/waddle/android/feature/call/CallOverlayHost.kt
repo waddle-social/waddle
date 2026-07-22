@@ -83,6 +83,9 @@ fun CallOverlayHost(
                 )
             }
         is CallState.Ended -> CallEndedBanner(onDismiss = viewModel::dismissEnded)
+        // Group-call setup has no ring/overlay surface yet; the MUC
+        // in-call UI lands with the group-call feature work.
+        is CallState.MucPending -> Unit
         CallState.Idle -> Unit
     }
 }

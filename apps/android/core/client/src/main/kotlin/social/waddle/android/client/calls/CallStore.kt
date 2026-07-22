@@ -14,6 +14,7 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleJingleReason
+import social.waddle.client.ffi.WaddlePresence
 import java.util.UUID
 
 /**
@@ -33,11 +34,19 @@ class CallStore internal constructor(
     private val signaling: CallSignaling,
     private val ownBareJid: () -> String?,
     private val ownFullJid: () -> String?,
+    mucSessionCache: MucCallSessionCache,
     private val outgoingTimeoutMillis: Long = OUTGOING_TIMEOUT_MILLIS,
     private val sessionAcceptTimeoutMillis: Long = SESSION_ACCEPT_TIMEOUT_MILLIS,
     private val newSid: () -> String = ::newCallSid,
 ) {
     private val stateLock = Any()
+
+    /** XEP-0272 Muji presence bookkeeping (participants/owners/media). */
+    val mucCallPresence: MucCallPresence = MucCallPresence()
+
+    /** The MUC group-call flow sharing this store's single call slot. */
+    val muc: MucCallEngine =
+        MucCallEngine(this, signaling, mucCallPresence, mucSessionCache, ownFullJid, newSid)
 
     private val _state = MutableStateFlow<CallState>(CallState.Idle)
 
@@ -91,6 +100,13 @@ class CallStore internal constructor(
             _state.value = CallState.Idle
             _lastError.value = null
         }
+        muc.clear()
+        mucCallPresence.clear()
+    }
+
+    /** Inbound presence fan-out from the router: XEP-0272 Muji bookkeeping. */
+    internal fun onPresence(presence: WaddlePresence) {
+        mucCallPresence.applyMucCallPresence(presence)
     }
 
     /**
@@ -101,6 +117,10 @@ class CallStore internal constructor(
      * fire only for remote-originated events.
      */
     internal fun onCallEvent(event: WaddleCallEvent) {
+        // A Muji session-accept is owned by the pending `muc.begin`
+        // resolver, never the 1:1 reducer — the reducer would
+        // mis-interpret it as a peer accepting a JMI ring.
+        if (muc.tryFulfillAccept(event)) return
         val selfBare = ownBareJid()?.lowercase()
         val isSelfOriginated = selfBare != null && bareJid(event.from).lowercase() == selfBare
         val prev: CallState
@@ -234,7 +254,9 @@ class CallStore internal constructor(
             _state.value = CallState.Idle
         }
         when (current) {
-            is CallState.Active -> terminateActive(current, reason)
+            is CallState.Active ->
+                if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
+            is CallState.MucPending -> muc.teardownPending(current)
             is CallState.Outgoing ->
                 if (!signaling.retract(bareJid(current.to), current.sid)) reportError("call retract failed")
             is CallState.Incoming ->
@@ -268,7 +290,7 @@ class CallStore internal constructor(
             current = state
             _state.value = CallState.Idle
         }
-        terminateActive(current, reason)
+        if (current.kind == CallKind.MUC) muc.teardownActive(current) else terminateActive(current, reason)
     }
 
     /**
@@ -906,6 +928,28 @@ class CallStore internal constructor(
     private fun reportError(message: String) {
         _lastError.value = message
     }
+
+    /**
+     * Atomic read-modify-write on the single shared call slot for the
+     * MUC group-call flow ([MucCallEngine]). Any transition cancels the
+     * DM timers (Idle/Ended entry states hold none, so this is a
+     * no-op guard) and clears the stale error, matching the reducer
+     * path's transition side-effects.
+     */
+    internal fun <T> updateCallSlot(block: (CallState) -> Pair<CallState, T>): T =
+        synchronized(stateLock) {
+            val current = _state.value
+            val (next, result) = block(current)
+            if (next != current) {
+                cancelCallTimersLocked()
+                _state.value = next
+                _lastError.value = null
+            }
+            result
+        }
+
+    /** Error surface for the MUC engine (same slot as the DM verbs). */
+    internal fun reportCallError(message: String) = reportError(message)
 
     companion object {
         /**

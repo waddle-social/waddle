@@ -97,6 +97,7 @@ class XmppSessionManager(
         signaling = ClientCallSignaling(activeSession),
         ownBareJid = { activeSession.ownBareJid },
         ownFullJid = { activeSession.ownFullJid },
+        mucSessionCache = sessionPrefs.mucCallSessions,
     )
 
     private val router: XmppEventRouter =
