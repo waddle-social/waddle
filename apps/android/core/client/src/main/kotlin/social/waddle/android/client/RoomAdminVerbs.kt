@@ -211,8 +211,14 @@ internal class RoomAdminVerbs(
 
     /** Re-discover the space/channel topology into the room store. */
     suspend fun refreshTopology() {
-        activeSession.fetch { client -> client.discoverTopology() }
-            ?.let(stores.roomStore::setTopology)
+        // Generation-gated like every other post-wire store write
+        // (ProfileVerbs precedent): a discovery answering after a
+        // logout/relogin must not park the previous account's rooms
+        // in the freshly seeded store.
+        val generation = activeSession.generation
+        val topology = activeSession.fetch { client -> client.discoverTopology() } ?: return
+        if (activeSession.generation != generation) return
+        stores.roomStore.setTopology(topology)
     }
 
     /** XEP-0055 user search (`nick` column); `null` offline/failed. */

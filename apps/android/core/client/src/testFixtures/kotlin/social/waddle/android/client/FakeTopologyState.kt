@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.delay
 import social.waddle.client.ffi.WaddleTopology
 
 /**
@@ -21,7 +22,15 @@ class FakeTopologyState {
     @Volatile
     var failure: Throwable? = null
 
-    fun discoverTopology(): WaddleTopology {
+    /**
+     * Virtual-time stall before [discoverTopology] answers — lets
+     * tests retire the session while a refresh is parked mid-flight.
+     */
+    @Volatile
+    var delayMillis = 0L
+
+    suspend fun discoverTopology(): WaddleTopology {
+        if (delayMillis > 0) delay(delayMillis)
         calls += 1
         failure?.let { throw it }
         return result

@@ -1,8 +1,10 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -129,6 +131,30 @@ class XmppSessionManagerGroupDmTest {
         assertEquals(RoomAdminResult.Rejected, harness.manager.leaveGroupDm(room))
         assertTrue(room in harness.manager.roomStore.joinedRooms.value)
         assertEquals(callsAfterReady, harness.client.topology.calls)
+    }
+
+    @Test
+    fun `a topology refresh answering after a relogin never lands in the new session`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val seeded = harness.manager.roomStore.topology.value
+        // The refresh parks mid-flight; the account signs out and back
+        // in, so its answer belongs to a retired session.
+        harness.client.topology.delayMillis = 1_000L
+        harness.client.topology.result = harness.client.topology.result.copy(
+            channels = listOf(testChannel(roomJid = "stale@muc.waddle.test")),
+        )
+
+        val pending = async { harness.manager.renameGroupDm(room, "Renamed") }
+        runCurrent()
+        harness.manager.logout()
+        harness.loginReady(this)
+        advanceTimeBy(1_100L)
+        runCurrent()
+        pending.await()
+
+        assertEquals(seeded, harness.manager.roomStore.topology.value)
+        harness.manager.logout()
     }
 
     @Test
