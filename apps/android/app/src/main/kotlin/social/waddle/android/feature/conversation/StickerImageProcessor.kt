@@ -2,9 +2,10 @@ package social.waddle.android.feature.conversation
 
 import android.content.ContentResolver
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
 import androidx.core.graphics.scale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -19,22 +20,51 @@ class ProcessedStickerImage(
 }
 
 /**
- * Bitmap half of the sticker transform: decode a picked image Uri,
- * shrink it onto the [stickerTransformFor] plan (≤512² preserving
- * aspect), and re-encode as lossy WEBP — small on the wire, alpha
- * preserved, and every sticker lands on one predictable media type
- * regardless of what the picker returned. `null` on any decode
- * failure; the caller surfaces it as a create failure.
+ * Bitmap half of the sticker transform: decode a picked image Uri
+ * via [ImageDecoder] (EXIF orientation applied — a portrait JPEG must
+ * not publish sideways), shrink it onto the [stickerTransformFor] plan
+ * (≤512² preserving aspect), and re-encode as lossy WEBP — small on
+ * the wire, alpha preserved, and every sticker lands on one
+ * predictable media type regardless of what the picker returned.
+ * `null` on any decode failure; the caller surfaces it as a create
+ * failure.
  */
 class StickerImageProcessor(private val contentResolver: ContentResolver) {
     suspend fun process(uri: Uri): ProcessedStickerImage? = withContext(Dispatchers.IO) {
-        runCatching { decodeAndEncode(uri) }.getOrNull()
+        try {
+            decodeAndEncode(uri)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun decodeAndEncode(uri: Uri): ProcessedStickerImage? {
-        val bounds = decodeBounds(uri) ?: return null
-        val transform = stickerTransformFor(bounds.first, bounds.second) ?: return null
-        val decoded = decodeSampled(uri, transform.sampleSize) ?: return null
+        var plan: StickerTransform? = null
+        val decoded = ImageDecoder.decodeBitmap(
+            ImageDecoder.createSource(contentResolver, uri),
+        ) { decoder, info, _ ->
+            // Software allocation: hardware bitmaps cannot be read
+            // back for the scale pass or the WEBP encode.
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            // info.size is the EXIF-oriented size (ImageDecoder
+            // applies rotation), so the plan — and the published
+            // dimensions — match what the user saw in the picker.
+            // The pure-geometry module stays the sample-size source:
+            // the decode pre-shrinks but never lands below the target,
+            // leaving the exact final size to the scale pass.
+            val transform = stickerTransformFor(info.size.width, info.size.height)
+            plan = transform
+            if (transform != null && transform.sampleSize > 1) {
+                decoder.setTargetSampleSize(transform.sampleSize)
+            }
+        }
+        val transform = plan
+        if (transform == null) {
+            decoded.recycle()
+            return null
+        }
         val scaled = scaleOnto(decoded, transform)
         val output = ByteArrayOutputStream()
         val compressed =
@@ -47,22 +77,6 @@ class StickerImageProcessor(private val contentResolver: ContentResolver) {
             width = transform.width,
             height = transform.height,
         )
-    }
-
-    private fun decodeBounds(uri: Uri): Pair<Int, Int>? {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, options)
-        } ?: return null
-        if (options.outWidth <= 0 || options.outHeight <= 0) return null
-        return options.outWidth to options.outHeight
-    }
-
-    private fun decodeSampled(uri: Uri, sampleSize: Int): Bitmap? {
-        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-        return contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, options)
-        }
     }
 
     private fun scaleOnto(decoded: Bitmap, transform: StickerTransform): Bitmap =

@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StickerImageTransformTest {
@@ -45,6 +46,33 @@ class StickerImageTransformTest {
         val banner = checkNotNull(stickerTransformFor(5000, 1))
         assertEquals(512, banner.width)
         assertEquals(1, banner.height)
+    }
+
+    @Test
+    fun `pre-shrunk decode always stays at or above the target box`() {
+        // The processor hands sampleSize to ImageDecoder and scales the
+        // sampled bitmap onto width×height: the sampled longest edge
+        // must never land below the target, or the final pass would
+        // upscale.
+        listOf(513, 1024, 2048, 4095, 10_000).forEach { longest ->
+            val plan = checkNotNull(stickerTransformFor(longest, longest / 2))
+            assertTrue(
+                "sampled $longest/${plan.sampleSize} fell below the box",
+                longest / plan.sampleSize >= STICKER_MAX_DIMENSION,
+            )
+            assertTrue(plan.width <= STICKER_MAX_DIMENSION && plan.height <= STICKER_MAX_DIMENSION)
+        }
+    }
+
+    @Test
+    fun `oriented portrait sources plan portrait output`() {
+        // ImageDecoder reports the EXIF-rotated size; a portrait JPEG
+        // (even one stored landscape with a 90° orientation tag) plans
+        // portrait dimensions.
+        assertEquals(
+            StickerTransform(sampleSize = 4, width = 256, height = 512),
+            stickerTransformFor(1024, 2048),
+        )
     }
 
     @Test

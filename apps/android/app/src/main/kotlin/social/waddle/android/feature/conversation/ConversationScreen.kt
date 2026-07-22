@@ -38,7 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -52,7 +52,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.VerbResult
@@ -106,14 +105,13 @@ fun ConversationScreen(
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     var gifPickerOpen by remember { mutableStateOf(false) }
-    var stickerPickerOpen by remember { mutableStateOf(false) }
-    var createStickerPackOpen by remember { mutableStateOf(false) }
+    // Saveable: the create pipeline runs in a ViewModel and survives a
+    // config change — the sheets observing it must come back too.
+    var stickerPickerOpen by rememberSaveable { mutableStateOf(false) }
+    var createStickerPackOpen by rememberSaveable { mutableStateOf(false) }
     val notifyMode by viewModel.notifyMode.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
-    // Screen-scoped (not sheet-scoped): a pack removal must not be
-    // cancelled by the picker sheet closing right after the confirm.
-    val screenScope = rememberCoroutineScope()
     val actionFailedText = stringResource(R.string.action_failed)
     val actionFailedOfflineText = stringResource(R.string.action_failed_offline)
     // Carrier-aware XEP-0060 precondition-not-met copy (web parity):
@@ -346,6 +344,16 @@ fun ConversationScreen(
         val graph = LocalAppGraph.current
         val packs by graph.sessionManager.stickerPackStore.packs.collectAsStateWithLifecycle()
         LaunchedEffect(graph) { graph.sessionManager.loadStickerPacks() }
+        // VM-scoped (not composition-scoped): a removal keeps running —
+        // and reconciles the store — even when the sheet closes or the
+        // screen rotates right after the confirm.
+        val packsViewModel: StickerPacksViewModel = viewModel(
+            key = STICKER_PACKS_VIEW_MODEL_KEY,
+            factory = StickerPacksViewModel.factory(graph),
+        )
+        LaunchedEffect(packsViewModel) {
+            packsViewModel.removeFailures.collect { snackbarHostState.showSnackbar(actionFailedText) }
+        }
         StickerPickerSheet(
             packs = packs,
             onSelect = { item, pack ->
@@ -356,24 +364,25 @@ fun ConversationScreen(
                 stickerPickerOpen = false
                 createStickerPackOpen = true
             },
-            onRemovePack = { pack ->
-                screenScope.launch {
-                    if (graph.sessionManager.removeStickerPack(pack.id) is VerbResult.Failure) {
-                        snackbarHostState.showSnackbar(actionFailedText)
-                    }
-                }
-            },
+            onRemovePack = { pack -> packsViewModel.removePack(pack.id) },
             onDismiss = { stickerPickerOpen = false },
         )
     }
 
     if (createStickerPackOpen) {
         val graph = LocalAppGraph.current
+        // Same instance as the picker branch (shared key): the create
+        // pipeline lives in the VM and survives sheet recreation.
+        val packsViewModel: StickerPacksViewModel = viewModel(
+            key = STICKER_PACKS_VIEW_MODEL_KEY,
+            factory = StickerPacksViewModel.factory(graph),
+        )
+        val createPhase by packsViewModel.createPhase.collectAsStateWithLifecycle()
         CreateStickerPackSheet(
-            onCreate = { name, summary, images, onProgress ->
-                graph.stickerPackCreator.create(name, summary, images, onProgress)
-            },
+            phase = createPhase,
+            onCreate = packsViewModel::createPack,
             onCreated = {
+                packsViewModel.consumeCreateSuccess()
                 createStickerPackOpen = false
                 // Back to the picker: the store already holds the new pack.
                 stickerPickerOpen = true
@@ -447,6 +456,9 @@ fun ConversationScreen(
         }
     }
 }
+
+/** Shared VM key: the picker and create sheets address ONE instance. */
+private const val STICKER_PACKS_VIEW_MODEL_KEY = "sticker-packs"
 
 /** Semantics tags for the DM call entry points, shared with tests. */
 object ConversationCallTestTags {

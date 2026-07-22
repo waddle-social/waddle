@@ -74,6 +74,21 @@ pub(crate) fn map_fetch_packs_reply(
     }
 }
 
+/// Map a retract reply. `item-not-found` — the pack is already gone,
+/// e.g. a retry after a retract whose reply was lost mid-flight —
+/// counts as success: the delete verb is idempotent (mirroring the
+/// fetch path, where the never-created node is the normal first-run
+/// state), so the caller can reconcile its cache and self-heal.
+pub(crate) fn map_retract_reply(reply: Result<Element, ClientError>) -> Result<(), ClientError> {
+    match reply {
+        Ok(_) => Ok(()),
+        Err(ClientError::StanzaError(err)) if err.condition == STANZA_CONDITION_ITEM_NOT_FOUND => {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Map a single-pack fetch reply. Both `item-not-found` and a result
 /// without the requested pack yield `Ok(None)`.
 pub(crate) fn map_fetch_pack_reply(
@@ -165,14 +180,26 @@ impl WaddleClient {
     }
 
     /// XEP-0449: retract (delete) one pack from the account's own PEP
-    /// node. Returns `false` on invalid input, no live session, or a
-    /// stanza error (with an `Error` event carrying the diagnostic).
+    /// node. Idempotent: an `item-not-found` reply (the pack is
+    /// already gone) is success, so a retry after an interrupted
+    /// retract self-heals. Returns `false` on invalid input, no live
+    /// session, or any other stanza error (with an `Error` event
+    /// carrying the diagnostic).
     pub async fn retract_sticker_pack(&self, pack_id: String) -> bool {
         let Some(pack_id) = PackId::new(pack_id) else {
             self.emit_error("retract_sticker_pack failed: pack id must not be empty".to_string());
             return false;
         };
+        let Some(handle) = self.clone_handle().await else {
+            return false;
+        };
         let iq = sticker_pack_retract_stanza(&pack_id);
-        self.send_iq_or_error(iq, "retract_sticker_pack").await
+        match map_retract_reply(send_iq_with_timeout(&handle, iq).await) {
+            Ok(()) => true,
+            Err(e) => {
+                self.emit_error(format!("retract_sticker_pack failed: {e}"));
+                false
+            }
+        }
     }
 }

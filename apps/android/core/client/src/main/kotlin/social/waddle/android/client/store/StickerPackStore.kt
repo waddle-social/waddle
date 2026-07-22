@@ -36,19 +36,35 @@ class StickerPackStore {
         _packs.value = StickerPacksResult.Unavailable
     }
 
-    /** A publish was accepted: upsert the pack under its server-derived id. */
+    /**
+     * A publish was accepted: upsert the pack under its server-derived
+     * id. Merges only into a loaded cache (Ready/Empty); Unavailable
+     * and null stay unloaded — the server holds packs this session
+     * never saw, so claiming Ready from one publish would present a
+     * silently incomplete list. The next load resolves the full set.
+     */
     fun applyPublished(pack: StickerPack) {
         _packs.update { current ->
-            val existing = (current as? StickerPacksResult.Ready)?.packs.orEmpty()
-            StickerPacksResult.Ready(existing.filterNot { it.id == pack.id } + pack)
+            when (current) {
+                is StickerPacksResult.Ready ->
+                    StickerPacksResult.Ready(current.packs.filterNot { it.id == pack.id } + pack)
+                StickerPacksResult.Empty -> StickerPacksResult.Ready(listOf(pack))
+                else -> current
+            }
         }
     }
 
-    /** A retract was accepted: drop the pack; none left = [StickerPacksResult.Empty]. */
+    /**
+     * A retract was accepted: drop the pack; none left =
+     * [StickerPacksResult.Empty]. Only a Ready cache filters —
+     * Unavailable and null stay unloaded (an empty filter result would
+     * otherwise fabricate a loaded Empty state and short-circuit the
+     * next load).
+     */
     fun applyRemoved(packId: String) {
         _packs.update { current ->
-            val remaining = (current as? StickerPacksResult.Ready)?.packs.orEmpty()
-                .filterNot { it.id == packId }
+            if (current !is StickerPacksResult.Ready) return@update current
+            val remaining = current.packs.filterNot { it.id == packId }
             if (remaining.isEmpty()) StickerPacksResult.Empty else StickerPacksResult.Ready(remaining)
         }
     }

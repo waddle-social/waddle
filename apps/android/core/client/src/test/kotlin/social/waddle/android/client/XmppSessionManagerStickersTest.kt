@@ -140,6 +140,9 @@ class XmppSessionManagerStickersTest {
     fun `publish upserts the pack under the server-derived id`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
+        // Loaded first (the picker always loads before creating): a
+        // publish into an unloaded cache deliberately stays unloaded.
+        harness.manager.loadStickerPacks()
         harness.client.stickerPublishedId = "server-pack-id"
 
         val result = harness.manager.publishStickerPack(

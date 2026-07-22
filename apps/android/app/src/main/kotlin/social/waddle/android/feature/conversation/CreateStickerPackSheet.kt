@@ -26,10 +26,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,45 +39,53 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import coil3.compose.AsyncImage
-import kotlinx.coroutines.launch
 import social.waddle.android.R
 
-/** XEP-0449 anti-DoS cap: at most 24 stickers per published pack. */
+/**
+ * Waddle product cap (anti-DoS): at most 24 stickers per published
+ * pack. XEP-0449 itself defines no item limit — this bounds the
+ * process/upload pipeline and the published pack size by choice.
+ */
 const val STICKER_PACK_MAX_ITEMS = 24
 
 /**
  * Create-pack bottom sheet: pack name + summary, 1–24 images via the
  * photo picker, an optional lang-less desc per image (blank falls back
  * to the pack name at publish), upload progress, and inline failure
- * states. [onCreate] runs the full pipeline ([StickerPackCreator]);
- * the sheet only owns form + progress state.
+ * states. The create attempt itself lives in [StickerPacksViewModel]
+ * ([phase] observes it) so a rotation mid-upload cannot kill the
+ * pipeline; the sheet owns only form state, saved across recreation.
+ * [onCreated] fires once [CreatePackPhase.Succeeded] is observed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CreateStickerPackSheet(
-    onCreate: suspend (
-        name: String,
-        summary: String?,
-        images: List<StickerImageInput>,
-        onProgress: (Int, Int) -> Unit,
-    ) -> CreateStickerPackResult,
+    phase: CreatePackPhase,
+    onCreate: (name: String, summary: String?, images: List<StickerImageInput>) -> Unit,
     onCreated: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var name by remember { mutableStateOf("") }
-    var summary by remember { mutableStateOf("") }
-    var images by remember { mutableStateOf(listOf<StickerImageInput>()) }
-    var creating by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf(0 to 0) }
-    var failure by remember { mutableStateOf<CreateStickerPackResult?>(null) }
-    val scope = rememberCoroutineScope()
+    var name by rememberSaveable { mutableStateOf("") }
+    var summary by rememberSaveable { mutableStateOf("") }
+    var images by rememberSaveable(stateSaver = StickerImageInputListSaver) {
+        mutableStateOf(listOf<StickerImageInput>())
+    }
+    val creating = phase is CreatePackPhase.Creating
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(STICKER_PACK_MAX_ITEMS),
     ) { uris ->
         val known = images.map { it.uri }.toSet()
         images = (images + uris.filterNot { it in known }.map { StickerImageInput(it, "") })
             .take(STICKER_PACK_MAX_ITEMS)
+    }
+
+    // Sticky success consumed on (re)composition: even when the sheet
+    // was recreated mid-attempt, the finished create closes it exactly
+    // once.
+    LaunchedEffect(phase) {
+        if (phase == CreatePackPhase.Succeeded) onCreated()
     }
 
     ModalBottomSheet(
@@ -139,21 +148,21 @@ fun CreateStickerPackSheet(
                     },
                 )
             }
-            if (creating) {
+            (phase as? CreatePackPhase.Creating)?.let { progress ->
                 Text(
                     text = stringResource(
                         R.string.sticker_create_progress,
-                        progress.first,
-                        progress.second,
+                        progress.done,
+                        progress.total,
                     ),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
-            failure?.let { result ->
+            (phase as? CreatePackPhase.Failed)?.let { failed ->
                 Text(
                     text = stringResource(
-                        if (result == CreateStickerPackResult.NotConnected) {
+                        if (failed.result == CreateStickerPackResult.NotConnected) {
                             R.string.sticker_create_offline
                         } else {
                             R.string.sticker_create_failed
@@ -166,18 +175,7 @@ fun CreateStickerPackSheet(
             }
             Button(
                 onClick = {
-                    creating = true
-                    failure = null
-                    progress = 0 to images.size
-                    scope.launch {
-                        val result = runCatching {
-                            onCreate(name, summary.trim().takeIf { it.isNotEmpty() }, images) { done, total ->
-                                progress = done to total
-                            }
-                        }.getOrDefault(CreateStickerPackResult.Failed)
-                        creating = false
-                        if (result == CreateStickerPackResult.Ok) onCreated() else failure = result
-                    }
+                    onCreate(name, summary.trim().takeIf { it.isNotEmpty() }, images)
                 },
                 enabled = !creating && name.isNotBlank() && images.isNotEmpty(),
                 modifier = Modifier.testTag(CreateStickerPackTestTags.PUBLISH),
@@ -187,6 +185,21 @@ fun CreateStickerPackSheet(
         }
     }
 }
+
+/**
+ * Saver for the picked-image form state: flattened (uri, desc) string
+ * pairs — `Uri` itself is not saveable-friendly, its string form
+ * round-trips losslessly.
+ */
+private val StickerImageInputListSaver = listSaver<List<StickerImageInput>, String>(
+    save = { inputs -> inputs.flatMap { listOf(it.uri.toString(), it.desc) } },
+    restore = { flat ->
+        flat.chunked(2).mapNotNull { pair ->
+            val uri = pair.getOrNull(0) ?: return@mapNotNull null
+            StickerImageInput(uri.toUri(), pair.getOrNull(1).orEmpty())
+        }
+    },
+)
 
 @Composable
 private fun PickedStickerImages(

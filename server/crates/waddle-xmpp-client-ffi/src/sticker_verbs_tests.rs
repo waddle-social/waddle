@@ -24,7 +24,7 @@ use waddle_xmpp_client::ClientError;
 
 use crate::convert::sticker_pack_from_ffi;
 use crate::sticker_verbs::{
-    map_fetch_pack_reply, map_fetch_packs_reply, sticker_pack_fetch_stanza,
+    map_fetch_pack_reply, map_fetch_packs_reply, map_retract_reply, sticker_pack_fetch_stanza,
     sticker_pack_publish_stanza, sticker_pack_retract_stanza, sticker_packs_fetch_stanza,
 };
 use crate::{
@@ -365,6 +365,26 @@ fn single_pack_reply_maps_found_and_missing() {
     )
     .expect("item-not-found is Ok(None)");
     assert!(not_found.is_none());
+}
+
+#[test]
+fn retract_item_not_found_is_idempotent_success() {
+    // The pack is already gone (a cancelled-after-retract retry): the
+    // delete self-heals — the caller reconciles its cache exactly as
+    // on a fresh success.
+    assert!(map_retract_reply(Err(item_not_found())).is_ok());
+
+    // A plain result stays success; every other failure stays typed.
+    let ok = Element::builder("iq", "jabber:client")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+        .build();
+    assert!(map_retract_reply(Ok(ok)).is_ok());
+    assert!(map_retract_reply(Err(forbidden())).is_err());
+    assert!(map_retract_reply(Err(ClientError::IqTimeout {
+        timeout: std::time::Duration::from_secs(30),
+    }))
+    .is_err());
 }
 
 // ── Typed failures through the exported methods ──────────────────────
