@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::message::Message;
@@ -90,13 +88,16 @@ pub struct GetRoomSnapshot {
 }
 
 impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
-    type Reply = Result<RoomChainSnapshot, Infallible>;
+    type Reply = Result<RoomChainSnapshot, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetRoomSnapshot,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // This is the dispatch-chain admission snapshot, not a diagnostic
+        // read: returning it authorizes archive writes and room fan-out.
+        self.gate_serving_activity()?;
         let occupants: Vec<RoomChainOccupant> = self
             .room
             .occupants
@@ -174,6 +175,7 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
         msg: BuildGroupchatBroadcast,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         let sender_occupant = self
             .room
             .find_occupant_by_real_jid(&msg.sender_jid)
@@ -226,15 +228,17 @@ pub struct GetNicknameGeneration {
 }
 
 impl kameo::message::Message<GetNicknameGeneration> for RoomActor {
-    type Reply = u64;
+    type Reply = Result<u64, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetNicknameGeneration,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room
+        self.gate_serving_activity()?;
+        Ok(self
+            .room
             .current_nickname_generation(&msg.nick)
-            .unwrap_or(0)
+            .unwrap_or(0))
     }
 }

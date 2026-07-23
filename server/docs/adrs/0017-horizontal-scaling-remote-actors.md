@@ -165,8 +165,10 @@ Key elements:
      slot-lease TTL. The CAS guarantees at most one
      live leaseholder per slot, so no two concurrent swarm members ever
      share a PeerId — including the old+new pod overlap of a
-     RollingUpdate with surge; as defense in depth, the swarm behaviour
-     layer rejects a second live session for an already-connected PeerId.
+     RollingUpdate with surge. The swarm permits multiple authenticated
+     transport connections to that one PeerId and tracks connectivity on
+     the first established / last closed connection; this is required for
+     safe convergence when both endpoints dial each other concurrently.
      **Scale-up beyond the enrolled pool requires a pipeline enrollment
      run first** — a documented operational constraint — and the Phase 4
      chart ships the pool-Secret templating plus the enrollment Helm hook
@@ -990,9 +992,19 @@ Key elements:
      never double-promote the same unacked queue into `pending_delivery`.
      The same janitor performs the `pending_delivery` sweep-flush for owned
      bare JIDs (element 5).
-   - Graceful shutdown drain **releases claims per entity, after that
-     entity's final fenced writes** (Phase 3 drain sequence) rather than
-     assuming exclusive table ownership.
+   - Graceful shutdown closes process-wide room admission, drains every root
+     room-serving scope, terminally inventories/seals/hard-retires every
+     locally-owned `RoomActor`, and then releases the **complete room batch
+     or none of it**. Any uncertain seal or retirement, timeout, poisoned
+     fence, or fatal fence leaves every room claim held for normal
+     TTL-fenced reclaim; a partially clean room set is never released.
+     `UserActor` has no final durable write, so its handoff barrier is
+     deliberately separate: terminally disable new same-incarnation
+     publication, retire the exact actor and every local resource, verify
+     both actor and connection registries are quiescent, then release only
+     those independently verified user claims. The SM-session Q6 drain
+     remains a third, independent owner of its promote/delete/release
+     sequence.
    - An **orphan reaper** handles rows claimed by nodes whose liveness
      expired: any node may steal such claims (fenced CAS) and then expire or
      promote them, after first committing the expire CAS on the owner's
@@ -1205,7 +1217,7 @@ convention alone.
   All fan-out paths use `try_send` + typed drop outcome.
 - **Phase 2 — remote subsystem spike:** build the swarm subsystem (event
   loop; **keypair-pool Secret management with the Postgres CAS slot lease
-  and duplicate-PeerId rejection** per element 3; peer-ID allowlist
+  and safe multi-connection convergence** per element 3; peer-ID allowlist
   enforcement with read-only runtime grants and **live-connection
   revocation on refresh** per element 3; headless-DNS peer dialing
   with re-dial on pod churn; swarm-level configuration — listen addrs,
@@ -1288,26 +1300,39 @@ convention alone.
   Demote/fenced-broadcast backstop, and the re-election
   protocol (element 7); steal-intent/owner-veto unwedge path for RoomActor
   and UserActor claims (element 4); Postgres-backed ISR token store with the
-  two-case failure handling (element 10). Graceful drain sequence,
-  **per-entity, not phase-ordered** (phase ordering would self-fence the
-  draining node's own final writes): (1) mark the node draining in `nodes`
+  two-case failure handling (element 10). Graceful drain sequence preserves
+  the **writes-before-release invariant** without allowing a partially
+  retired room set to transfer: (1) mark the node draining in `nodes`
   so it stops acquiring claims **for entities it is not already serving
   locally** — a draining node continues to hold and write under the SM
   claims of its own draining sessions, which exist since `<enable/>`;
-  (2) for each owned entity, complete all final fenced writes (detach
-  snapshot, Q6 promotion or explicit durable-queue handoff, occupant-roster
-  flush) **while still holding the claim**, and only then release that
-  entity's claim — triggering immediate re-election, not TTL wait — in
-  parallel with connection drain but completing before process exit. There
-  is no global "promote what remains" step after release: releasing first
-  and promoting second is a fencing violation by this ADR's own rules.
-  **Claim release is batched**: the ordering constraint is
-  writes-before-release *per entity*, which batching preserves — entities
-  whose final fenced writes have committed are released in fenced
-  multi-row statements (or the release piggybacks on the entity's final
-  fenced write's transaction), because a per-entity release tail of ~18k
-  claims (the modeled 50k users + 5k rooms over ~3 replicas) through a
-  small pool cannot fit a seconds-scale budget one statement at a time.
+  (2) stop HTTP/root room admission, cancel every producer that can open a
+  room-serving scope, and wait for the process-wide scope count to reach
+  zero; (3) close `RoomRegistryActor` creation, take a terminal inventory,
+  reconciling every timed-out claim acquisition behind a transaction-scoped
+  entity-key lock that also exists before a claim row is inserted,
+  and seal plus hard-retire **every** locally-owned room while its exact
+  claim is still held; (4) revalidate and consume the clean room-serving
+  fence, then release the deduplicated complete room set in one
+  `release_many`. Any failed, retained, timed-out, or reply-ambiguous room,
+  any poisoned/fatal fence, or any ambiguous batch result selects terminal
+  no-release for the entire room set. There is no partial room release and
+  no global "promote what remains" step after release: releasing first and
+  completing work second is a fencing violation by this ADR's own rules.
+  `UserActor` is the explicit no-durable-final-write refinement: cap the
+  all-or-none `RoomActor` work at half of `claimReleaseBudget`, then
+  terminally disable same-incarnation publication, retire and verify each
+  exact local user actor/resource set, and use all remaining budget for the
+  verified user-claim release batch. Unused room time is donated to users;
+  a wedged room cannot consume the user handoff opportunity. A timeout,
+  identity mismatch, full detach channel, unverifiable registry, or
+  ambiguous release never authorizes a user claim release.
+  SM sessions retain their independent Q6 promote/delete/release sequence.
+  **Claim release is batched**: rooms use one all-or-none statement; users
+  use a batch containing only exact identities whose local retirement was
+  verified. This avoids a per-claim release tail of ~18k claims (the modeled
+  50k users + 5k rooms over ~3 replicas) through a small pool that cannot fit
+  a seconds-scale budget one statement at a time.
   If the budget still overruns, the kubelet SIGKILLs with claims
   unreleased — fencing keeps that safe, but the affected entities stall
   until lease-TTL expiry, silently degrading the "~1 move per entity per
@@ -1461,10 +1486,11 @@ convention alone.
   outage; a node genuinely isolated from all of two-or-more live peers
   still fences, while partial link failures degrade to durable-queue
   routing instead of amputating healthy nodes (element 4).
-- Rolling deploys re-elect ownership immediately via proactive per-entity
-  claim release instead of stalling every owned room/user for a heartbeat
-  TTL, and rollout-aware placement moves each entity approximately once per
-  deploy.
+- Clean rolling drains re-elect ownership immediately via the all-or-none
+  room batch plus the separately verified user batch. An ambiguous room
+  drain deliberately transfers no room claims and waits for heartbeat-TTL
+  recovery; rollout-aware placement still moves every cleanly released
+  entity approximately once per deploy.
 - Phase 1 is a self-funding refactor (retires dead-code-in-waiting and
   external locking) even if clustering never ships — but it is a delivery-
   path rebuild with preserved invariants, not a pure move.
@@ -1553,10 +1579,12 @@ convention alone.
   so any pod with code execution holds the private-key bytes for the *whole
   pool*, not just its CAS-leased slot. A compromised process can therefore
   present any allowlisted PeerId directly from the pool bytes without
-  leasing a slot (the swarm-layer duplicate-PeerId rejection only blocks a
-  *currently-connected* PeerId, not an unused pool slot), so revoking a
-  single key does not contain a compromised pod — it reconnects under
-  another pool key. **The practical unit of revocation under key-material
+  leasing a slot. Transport authentication and connection counting cannot
+  prove that the remote process owns the corresponding Postgres lease, and
+  permitting multiple transport connections per PeerId is necessary for
+  safe simultaneous-dial convergence, so revoking a single key does not
+  contain a compromised pod — it reconnects under another pool key.
+  **The practical unit of revocation under key-material
   compromise is thus the entire pool** (rotate the pool, roll every
   replica); per-key revocation contains cleanly-decommissioned/rotated
   peers, not an actively-compromised pod. The recorded StatefulSet /

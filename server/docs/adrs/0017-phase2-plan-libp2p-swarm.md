@@ -117,7 +117,8 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
   counter) via the OTel `metrics.rs` + periodic-task pattern.
   *Exit:* single-node swarm boots, listens, reports PeerId, bootstraps.
 
-- **Slice 2 — keypair-slot Postgres CAS lease + duplicate-PeerId rejection.**
+- **Slice 2 — keypair-slot Postgres CAS lease + safe multi-connection
+  convergence.**
   `keypair_slots` lease (Postgres-only CAS: Acquire `INSERT … ON CONFLICT DO
   NOTHING` + `rows_affected==1`; Heartbeat renewal CAS on freshness; Expire CAS
   (committed `expired` flag); Release on drain — all on Postgres `now()`),
@@ -130,10 +131,14 @@ behaviour is unchanged and asserted by the unchanged e2e suite.
   can no longer prove it still holds the slot. Self-fencing cancels a
   clustering-scoped child token, tearing down only the clustering subsystem
   (swarm, relay, janitors) — never the whole server.
-  Duplicate-PeerId rejection at the swarm behaviour layer (reject a second live
-  session for an already-connected PeerId) as defence in depth. Runs on the
-  shared global pool in Phase 2; the **dedicated small control-plane
-  pool/handle** is a Phase 3 deliverable (see the implementation notes).
+  Multiple authenticated transport connections to the same PeerId remain
+  valid: simultaneous full-mesh dialing can establish an inbound and outbound
+  connection at both endpoints, and independently closing each endpoint's
+  locally second connection can make the peers close opposite links and lose
+  connectivity entirely. Peer-level bookkeeping therefore changes only on
+  the first established and last closed connection. Runs on the shared global
+  pool in Phase 2; the **dedicated small control-plane pool/handle** is a
+  Phase 3 deliverable (see the implementation notes).
   Postgres-gated CAS tests (acquire, renew, expire-steal, at-most-one
   leaseholder per slot).
 

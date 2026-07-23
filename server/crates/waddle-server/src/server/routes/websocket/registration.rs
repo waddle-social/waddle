@@ -130,6 +130,33 @@ pub(super) async fn register_bound_connection_after_frame(
         blocklist,
     );
 
+    // Graceful UserActor retirement disables this same publication authority
+    // before it verifies both registries empty and releases the durable claim.
+    // Hold the read side from the first ConnectionRegistry insertion through
+    // the authoritative UserActor mirror (or its rollback), so shutdown's
+    // exclusive disable cannot complete while a bind is between those two
+    // views. A bind that reaches this point after disable fails before
+    // publishing anything.
+    let claim_publication = if let Some(node_identity) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .node_identity
+        .as_ref()
+    {
+        let expected = node_identity.current();
+        let Some(guard) = node_identity.guard_if_current(&expected).await else {
+            warn!(
+                jid = %jid,
+                "connection registration rejected after node publication authority was disabled"
+            );
+            return RegistrationAfterFrame::SessionInitializationFailed;
+        };
+        Some(guard)
+    } else {
+        None
+    };
+
     let owner = state
         .deps
         .protocol
@@ -196,12 +223,22 @@ pub(super) async fn register_bound_connection_after_frame(
         .connection_registry
         .entry_if_owner(&jid, &owner)
     {
-        let mirror_outcome = crate::server::dual_registration::mirror_register_outcome(
-            &state.deps.protocol.user_registry,
-            jid.clone(),
-            entry.clone(),
-        )
-        .await;
+        let mirror_outcome = if let Some(publication_guard) = claim_publication.as_ref() {
+            crate::server::dual_registration::mirror_register_outcome_under_authority(
+                &state.deps.protocol.user_registry,
+                jid.clone(),
+                entry.clone(),
+                publication_guard.permit(),
+            )
+            .await
+        } else {
+            crate::server::dual_registration::mirror_register_outcome(
+                &state.deps.protocol.user_registry,
+                jid.clone(),
+                entry.clone(),
+            )
+            .await
+        };
         let registered = match mirror_outcome {
             crate::server::dual_registration::MirrorRegisterOutcome::Registered => true,
             crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
@@ -232,6 +269,12 @@ pub(super) async fn register_bound_connection_after_frame(
             return RegistrationAfterFrame::SessionInitializationFailed;
         }
     }
+
+    // The two authoritative registration views are now coherent. Dropping
+    // this guard allows shutdown to disable publication and retire them
+    // together; later owner-gated stream-state finalization cannot create a
+    // new registry entry.
+    drop(claim_publication);
 
     let sm_finalization = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     info!(

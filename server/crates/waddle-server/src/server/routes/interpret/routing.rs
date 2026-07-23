@@ -398,11 +398,13 @@ pub(crate) enum FullJidDeliveryOutcome {
     /// Confirmed offline: no live channel and no detached session to fall
     /// back to.
     Unavailable,
-    /// Dropped for an ambiguous/transient reason: full channel, a storage
-    /// error while recording to detached, or a terminal ask failure
-    /// classified `MaybeEnqueued` (never routed to detached, to avoid
-    /// double-delivery).
+    /// Dropped for a settled transient reason: full channel or a storage
+    /// error while recording to detached.
     Dropped,
+    /// The `UserActor` ask may already be in its mailbox and may still commit
+    /// after the reply wait failed. Callers suppress fallback and must mark
+    /// terminal room-claim release unsafe.
+    MaybeEnqueued,
     /// The relay ask may have reached the target and committed the delivery,
     /// but the sender did not observe the reply. Callers must suppress local
     /// or headless fallback to avoid duplicate user-visible effects.
@@ -415,8 +417,18 @@ impl FullJidDeliveryOutcome {
         match self {
             Self::Delivered | Self::QueuedDetached => true,
             Self::Unavailable | Self::Dropped => false,
+            Self::MaybeEnqueued => true,
             #[cfg(feature = "clustering")]
             Self::MaybeCommitted => true,
+        }
+    }
+
+    pub(crate) fn is_ambiguous(self) -> bool {
+        match self {
+            Self::MaybeEnqueued => true,
+            #[cfg(feature = "clustering")]
+            Self::MaybeCommitted => true,
+            Self::Delivered | Self::QueuedDetached | Self::Unavailable | Self::Dropped => false,
         }
     }
 }
@@ -442,7 +454,7 @@ fn detached_after_routing_failure(outcome: DetachedDeliveryOutcome) -> FullJidDe
     match outcome {
         DetachedDeliveryOutcome::Queued => FullJidDeliveryOutcome::QueuedDetached,
         DetachedDeliveryOutcome::Unavailable | DetachedDeliveryOutcome::Failed => {
-            FullJidDeliveryOutcome::Dropped
+            FullJidDeliveryOutcome::MaybeEnqueued
         }
     }
 }
@@ -463,6 +475,10 @@ fn classify_send_error<M, E>(error: &kameo::error::SendError<M, E>) -> ActorSend
             ActorSendFailure::MaybeEnqueued
         }
     }
+}
+
+pub(crate) fn actor_send_maybe_enqueued<M, E>(error: &kameo::error::SendError<M, E>) -> bool {
+    classify_send_error(error) == ActorSendFailure::MaybeEnqueued
 }
 
 /// Deliver one stanza to one resource through the authoritative `UserActor`
@@ -788,7 +804,7 @@ pub(super) async fn deliver_peer_to_live_only(
                     "live-only delivery: TrySendPeer failed terminally (possibly \
                      enqueued); dropping to avoid double-delivery"
                 );
-                FullJidDeliveryOutcome::Dropped
+                FullJidDeliveryOutcome::MaybeEnqueued
             }
         },
     }

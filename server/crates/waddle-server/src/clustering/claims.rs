@@ -52,7 +52,8 @@
 //! claims).
 //!
 //! All CAS statements run on the dedicated control-plane pool
-//! ([`Database::control_plane_guard`], ADR-0017 element 4/12, Slice 0):
+//! ([`Database::control_plane_guard`] or
+//! [`Database::begin_control_plane`], ADR-0017 element 4/12, Slice 0):
 //! this per-node/per-entity liveness traffic must never queue behind fenced
 //! bulk writes, backstop fencing SELECTs, or claims-read storms on the main
 //! pool. `ensure_schema` is one-time startup DDL, not hot-path liveness
@@ -132,6 +133,36 @@ fn log_if_postgres_deadlock(error: &DatabaseError, entity_key: &str, statement: 
 /// in this slice decodes the key back, but a future slice safely could.
 fn entity_key(entity: &Entity) -> String {
     format!("{}:{}", entity.entity_type.as_db_str(), entity.id)
+}
+
+/// Domain-separate claim-entity locks from other advisory-lock users. A
+/// 64-bit hash collision can only serialize unrelated entities; it cannot
+/// weaken ownership safety.
+const CLAIM_ENTITY_LOCK_SEED: i64 = 0x5741_4444_4c45;
+
+/// Serialize a potentially absent claim INSERT with terminal reconciliation.
+///
+/// A row lock cannot cover a missing `clustering_claims` tuple. This
+/// transaction-scoped entity-key lock exists before the row does, so a
+/// terminal lookup issued after an acquisition has reached Postgres waits for
+/// that acquisition to commit or roll back before taking its snapshot.
+async fn lock_claim_entity(
+    tx: &mut crate::db::Transaction<'_>,
+    entity: &Entity,
+) -> Result<(), ClaimError> {
+    let mut rows = tx
+        .query(
+            r#"
+            /* claim_entity_serialization_lock */
+            SELECT pg_advisory_xact_lock(hashtextextended(?, ?))
+            "#,
+            crate::db_params![entity_key(entity), CLAIM_ENTITY_LOCK_SEED],
+        )
+        .await
+        .map_err(db_err)?;
+    rows.next().await.map_err(db_err)?;
+    drop(rows);
+    Ok(())
 }
 
 /// The inverse of [`entity_key`]: reconstruct an [`Entity`] from an encoded
@@ -634,7 +665,8 @@ impl ClaimStore for PostgresClaimStore {
         if !me.is_active() {
             return Err(ClaimError::AuthorityDisabled);
         }
-        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        let mut tx = self.db.begin_control_plane().await.map_err(db_err)?;
+        lock_claim_entity(&mut tx, entity).await?;
         // Acquire CAS (element 4): a fresh claim only inserts; a
         // still-live claim on the same entity leaves the row untouched and
         // affects zero rows.
@@ -650,7 +682,7 @@ impl ClaimStore for PostgresClaimStore {
         // every subsequent `acquire`/`steal_stale` call under ordinary
         // READ COMMITTED semantics by the time this node's drain loop
         // itself proceeds to iterate owned entities.
-        let mut inserted = conn
+        let mut inserted = tx
             .query(
                 r#"
                 INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch)
@@ -673,15 +705,21 @@ impl ClaimStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        if let Some(row) = inserted.next().await.map_err(db_err)? {
-            return Ok(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?));
+        let acquired = match inserted.next().await.map_err(db_err)? {
+            Some(row) => Some(ClaimEpoch(row.get::<i64>(0).map_err(db_err)?)),
+            None => None,
+        };
+        drop(inserted);
+        if let Some(epoch) = acquired {
+            tx.commit().await.map_err(db_err)?;
+            return Ok(epoch);
         }
         // Zero rows affected: either a genuine conflict (someone already
         // holds this entity) or this node's own draining gate blocked the
         // INSERT before it ever reached `ON CONFLICT`. Distinguish with one
         // follow-up read — only ever taken on this already-cold "lost the
         // race" path, never the common uncontended-acquire case above.
-        let mut rows = conn
+        let mut rows = tx
             .query(
                 r#"
                 SELECT
@@ -695,7 +733,7 @@ impl ClaimStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        match rows.next().await.map_err(db_err)? {
+        let outcome = match rows.next().await.map_err(db_err)? {
             Some(row) => {
                 let claimed: bool = row.get(0).map_err(db_err)?;
                 let draining: bool = row.get(1).map_err(db_err)?;
@@ -712,7 +750,10 @@ impl ClaimStore for PostgresClaimStore {
                 }
             }
             None => Err(ClaimError::AlreadyClaimed),
-        }
+        };
+        drop(rows);
+        tx.commit().await.map_err(db_err)?;
+        outcome
     }
 
     async fn ensure_claimed(
@@ -1105,13 +1146,13 @@ impl ClaimStore for PostgresClaimStore {
         entity: &Entity,
     ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, ClaimError> {
         // Terminal orphan recovery can arrive here after its caller dropped
-        // a steal future. Locking the claim row makes this SELECT wait behind
-        // that detached UPDATE, so the returned version is post-commit (or
-        // post-rollback) rather than the unlocked pre-CAS snapshot. A stale
-        // room steal only updates an existing row, so the absent-row gap does
-        // not need predicate/range locking.
-        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
-        let mut rows = conn
+        // a claim future. The entity advisory lock makes an absent-row lookup
+        // wait behind a fresh INSERT, while the row lock also waits behind a
+        // detached steal UPDATE. The returned version is therefore
+        // post-commit (or post-rollback) for both acquisition shapes.
+        let mut tx = self.db.begin_control_plane().await.map_err(db_err)?;
+        lock_claim_entity(&mut tx, entity).await?;
+        let mut rows = tx
             .query(
                 r#"
                 /* terminal_claim_reconciliation_lock */
@@ -1133,7 +1174,7 @@ impl ClaimStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        match rows.next().await.map_err(db_err)? {
+        let snapshot = match rows.next().await.map_err(db_err)? {
             Some(row) => {
                 let node_id: String = row.get(0).map_err(db_err)?;
                 let node_epoch: String = row.get(1).map_err(db_err)?;
@@ -1146,7 +1187,10 @@ impl ClaimStore for PostgresClaimStore {
                 }))
             }
             None => Ok(None),
-        }
+        };
+        drop(rows);
+        tx.commit().await.map_err(db_err)?;
+        snapshot
     }
 
     async fn fence(
@@ -4161,6 +4205,94 @@ mod tests {
 
     fn room_entity(id: &str) -> Entity {
         Entity::new(EntityType::RoomActor, id.to_string())
+    }
+
+    async fn wait_for_claim_entity_lock_waiters(db: &Database, expected: i64) {
+        let monitor = db.guard().await.expect("monitor guard");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut rows = monitor
+                    .query(
+                        r#"
+                        SELECT COUNT(*) FROM pg_stat_activity
+                        WHERE pid <> pg_backend_pid()
+                          AND query LIKE '%claim_entity_serialization_lock%'
+                          AND wait_event_type = 'Lock'
+                        "#,
+                        (),
+                    )
+                    .await
+                    .expect("inspect entity-lock waiters");
+                let blocked = rows
+                    .next()
+                    .await
+                    .expect("read waiter count")
+                    .expect("waiter count row")
+                    .get::<i64>(0)
+                    .expect("waiter count");
+                if blocked >= expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expected claim entity-lock waiters");
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_lookup_waits_for_an_in_flight_absent_row_acquire() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let owner = node_identity();
+        store.register(&owner, None).await.expect("register owner");
+        let entity = room_entity("terminal-insert-barrier@muc.example.com");
+
+        // Hold the entity key before any claim row exists. Queue the real
+        // acquire first, then terminal reconciliation, to model shutdown
+        // observing an acquisition whose response future timed out while its
+        // INSERT was already pending in Postgres.
+        let mut blocker = store
+            .db
+            .begin_control_plane()
+            .await
+            .expect("begin entity-lock blocker");
+        lock_claim_entity(&mut blocker, &entity)
+            .await
+            .expect("hold entity lock");
+
+        let acquire_store = PostgresClaimStore::new(store.db.clone());
+        let acquire_entity = entity.clone();
+        let acquire_owner = owner.clone();
+        let acquire =
+            tokio::spawn(
+                async move { acquire_store.acquire(&acquire_entity, &acquire_owner).await },
+            );
+        wait_for_claim_entity_lock_waiters(&store.db, 1).await;
+
+        let lookup_store = PostgresClaimStore::new(store.db.clone());
+        let lookup_entity = entity.clone();
+        let lookup = tokio::spawn(async move {
+            lookup_store
+                .current_claim_after_pending_writes(&lookup_entity)
+                .await
+        });
+        wait_for_claim_entity_lock_waiters(&store.db, 2).await;
+
+        blocker.commit().await.expect("release entity-lock blocker");
+        let acquired_epoch = acquire
+            .await
+            .expect("acquire task joined")
+            .expect("acquire committed");
+        let snapshot = lookup
+            .await
+            .expect("lookup task joined")
+            .expect("terminal lookup")
+            .expect("fresh claim is visible");
+        assert_eq!(snapshot.owner, owner);
+        assert_eq!(snapshot.claim_epoch, acquired_epoch);
     }
 
     #[tokio::test]

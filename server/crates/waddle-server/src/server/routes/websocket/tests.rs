@@ -440,6 +440,7 @@ async fn create_test_websocket_state_with_extension_manager(
     Arc::new(WebSocketState {
             deps: WebSocketDeps {
                 app_state: Arc::clone(&app_state),
+                room_serving: app_state.room_serving.clone(),
                 auth_state,
                 transport_security:
                     super::state::TransportSecurity::from_public_websocket_url(

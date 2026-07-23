@@ -1,5 +1,5 @@
-//! Graceful per-entity claim drain + rollout-aware acquire placement
-//! (ADR-0017 Phase 3 Slice 10, element 4's drain sequence). The
+//! Graceful claim drain + rollout-aware acquire placement (ADR-0017 Phase 3
+//! Slice 10, element 4's drain sequence). The
 //! drain-observability deliverable below (drain-duration histogram,
 //! `claims_released_on_drain`/`claims_abandoned_on_drain` counters, alert
 //! on nonzero abandonment) is the ADR's own Phase 3 Implementation Plan
@@ -8,15 +8,15 @@
 //! this doc comment previously carried — corrected, per the phase plan's
 //! Slice 10 FIX 5(a) council-adjudicated pass).
 //!
-//! **Locked spec** (element 4, quoted in the phase plan's Slice 10 section):
-//! per-entity, not phase-ordered drain — mark the node draining in `nodes`
-//! (stop acquiring NEW claims, keep serving already-owned ones); for each
-//! owned entity, complete its final fenced write(s) *while still holding the
-//! claim*, then release; batched via [`ClaimStore::release_many`] (one
-//! round-trip, not one-at-a-time, given the ~18k modeled claims a full
-//! cluster carries); **no** global "promote what remains" step after
-//! release — releasing first and completing a write second is the exact
-//! fencing violation element 4 forbids.
+//! **Production refinement of the element 4 invariant:** mark the node
+//! draining in `nodes` (stop acquiring NEW claims, keep serving already-owned
+//! ones), close the process-wide room admission fence, then inventory, seal,
+//! and hard-retire every locally-owned room while its exact claim is still
+//! held. Only a clean, revalidated fence authorizes one all-or-none
+//! [`ClaimStore::release_many`] for the complete room batch. Any uncertain
+//! seal/retirement, timeout, or fatal fence abandons every room claim for
+//! lease-TTL recovery; there is no partial room release. `UserActor` claims
+//! use the separate post-authority-disable verified-release phase below.
 //!
 //! **Composes with, does not replace, the existing Q6 SM-session drain**
 //! (`server::session_janitors::spawn_graceful_shutdown_drain`,
@@ -28,95 +28,326 @@
 //! drain paths concurrently would be exactly the double-drain hazard the
 //! phase plan's Slice 10 "interaction with existing drain" note warns
 //! against — one path could release a claim the other path's promotion is
-//! still mid-write under. Only [`EntityType::RoomActor`] (and, forward-
-//! looking, `UserActor` once a later phase wires production claims for it)
-//! is drained here.
+//! still mid-write under. [`EntityType::RoomActor`] is drained by the
+//! ordinary seal phase; [`EntityType::UserActor`] uses the separate
+//! post-authority-disable quiescence phase in
+//! [`run_disabled_user_shutdown_drain`].
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::{ClaimStore, DisabledNodeIdentity, EntityType, NodeIdentity};
+
+#[cfg(test)]
+use waddle_xmpp::ownership::Entity;
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
 use super::self_fence::{mark_draining_bounded, LocallyClaimedEntities};
+use crate::server::room_serving_quiescence::RoomServingFence;
 
 #[cfg(test)]
-use super::self_fence::run_shutdown_drain_with_heartbeat;
+use super::self_fence::{run_shutdown_drain_with_heartbeat, ShutdownDrainTiming};
 
 /// Upper bound on how long [`mark_draining_bounded`] itself is allowed to
 /// take within the overall drain budget — a hung flag-flip must not eat the
-/// whole per-entity release budget.
+/// whole room-batch release budget.
 const MARK_DRAINING_BOUND: Duration = Duration::from_secs(2);
 
-/// Run the Slice 10 graceful drain sequence to completion (or until
-/// `budget` is exhausted) for every locally-owned, eligible entity. Called
-/// exactly once per fence/shutdown, from every ordinary-shutdown branch in
-/// [`super::self_fence::run_node_lease`]'s `'tick` loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomShutdownDrainOutcome {
+    Released,
+    Abandoned,
+}
+
+async fn abandon_room_batch(
+    local_claims: &Arc<dyn LocallyClaimedEntities>,
+    room_count: usize,
+    start: Instant,
+) -> RoomShutdownDrainOutcome {
+    if !local_claims.abandon_room_shutdown().await {
+        tracing::warn!(
+            "clustering drain: terminal no-release registry barrier could not be confirmed; \
+             process shutdown still proceeds without releasing room claims"
+        );
+    }
+    if room_count != 0 {
+        metrics::record_claims_abandoned_on_drain(room_count as u64);
+    }
+    metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
+    RoomShutdownDrainOutcome::Abandoned
+}
+
+/// Run the Slice 10 graceful room drain sequence to completion (or until
+/// `budget` is exhausted) for the complete locally-owned `RoomActor` batch.
+/// Called exactly once per fence/shutdown by
+/// [`super::self_fence::run_node_lease_authorized`].
 ///
 /// Sequence: (1) mark this node draining — [`super::claims`]'s
 /// `acquire`/`steal_stale` CAS gate then atomically refuses any NEW claim
 /// under this node's identity, while claims it already holds keep being
-/// served (never revoked by this function); (2) for each owned, eligible
-/// entity, call [`LocallyClaimedEntities::seal_before_release`] to complete
-/// (or confirm already-complete) its final fenced write, and — **strictly
-/// after that call returns successfully, never before** — append it to the
-/// release batch (the batch-entry-only-after-commit invariant, major fix
-/// 13 in the phase plan); (3) once every eligible entity has been sealed or
-/// the budget is exhausted, release everything sealed in ONE
-/// [`ClaimStore::release_many`] call. An entity whose seal did not
-/// complete within budget is left claimed — abandoned, not lost: the claim
-/// stays fenced-safe and is reclaimed later by another node's orphan
-/// reaper, or by this node itself once its own lease naturally lapses.
+/// served (never revoked by this function); (2) for each owned room, call
+/// [`LocallyClaimedEntities::seal_before_release`] and hard
+/// retirement to complete (or confirm already-complete) its final fenced
+/// work; (3) revalidate the consumed process-wide [`RoomServingFence`]; and
+/// (4) only when *every* room passed, release the complete set in one
+/// [`ClaimStore::release_many`] call. One failed/retained/timed-out room,
+/// fatal fence, or invalid release fence selects terminal no-release mode
+/// for the whole set. Claims remain fenced-safe and are reclaimed after this
+/// node lease expires.
 pub(crate) async fn run_shutdown_drain<L>(
     lease: &L,
     claim_store: &Arc<dyn ClaimStore>,
     identity: &NodeIdentity,
     local_claims: &Arc<dyn LocallyClaimedEntities>,
     budget: Duration,
-) where
+    fence: RoomServingFence,
+    fatal_fence: &CancellationToken,
+) -> RoomShutdownDrainOutcome
+where
     L: NodeLeaseStore + Send + Sync,
 {
     let start = Instant::now();
+    if fatal_fence.is_cancelled() || !fence.is_current_clean() {
+        tracing::warn!(
+            "clustering drain: room-serving release fence is invalid or a fatal fence is active; \
+             selecting terminal no-release mode"
+        );
+        return abandon_room_batch(local_claims, 0, start).await;
+    }
     mark_draining_bounded(lease, identity, MARK_DRAINING_BOUND.min(budget)).await;
 
     let deadline = start + budget;
-    let owned = local_claims.owned().await;
-    let mut to_release: Vec<Entity> = Vec::new();
-    let mut abandoned: u64 = 0;
+    if fatal_fence.is_cancelled() || !fence.is_current_clean() {
+        tracing::warn!(
+            "clustering drain: release authorization was invalidated while marking the node \
+             draining; leaving every room claim held"
+        );
+        return abandon_room_batch(local_claims, 0, start).await;
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let room_shutdown_started = tokio::time::timeout(remaining, local_claims.begin_room_shutdown())
+        .await
+        .unwrap_or(false);
+    if !room_shutdown_started {
+        tracing::warn!(
+            "clustering drain: terminal RoomActor admission gate could not be confirmed; \
+             leaving every room claim held"
+        );
+        return abandon_room_batch(local_claims, 0, start).await;
+    }
 
-    for entity in owned {
-        // Only entities this generic loop owns draining for — see the
-        // module doc for why `SmSession` is deliberately excluded (the
-        // existing Q6 drain owns those) and `UserActor` has no production
-        // claim-acquisition call site yet (deviation 34).
-        if entity.entity_type != EntityType::RoomActor {
-            continue;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        tracing::warn!("clustering drain: budget exhausted before RoomActor ownership inventory");
+        return abandon_room_batch(local_claims, 0, start).await;
+    }
+    let owned =
+        match tokio::time::timeout(remaining, local_claims.owned_of_type(EntityType::RoomActor))
+            .await
+        {
+            Ok(owned) => owned,
+            Err(_) => {
+                tracing::warn!(
+                    "clustering drain: RoomActor ownership inventory timed out; \
+                 leaving room claims held"
+                );
+                return abandon_room_batch(local_claims, 0, start).await;
+            }
+        };
+    let mut seen = HashSet::with_capacity(owned.len());
+    let rooms: Vec<_> = owned
+        .into_iter()
+        .filter(|entity| entity.entity_type == EntityType::RoomActor)
+        .filter(|entity| seen.insert(entity.clone()))
+        .collect();
+    let room_count = rooms.len();
+
+    for entity in &rooms {
+        if fatal_fence.is_cancelled() || !fence.is_current_clean() {
+            tracing::warn!(
+                "clustering drain: release authorization was invalidated before all rooms \
+                 were sealed; abandoning the complete room batch"
+            );
+            return abandon_room_batch(local_claims, room_count, start).await;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             tracing::warn!(
-                entity_id = %entity.id,
-                "clustering drain: budget exhausted before this entity's seal even started; \
-                 leaving it claimed (fenced-safe, reclaimed later)"
+                count = room_count,
+                "clustering drain: budget exhausted before remaining RoomActor seals; \
+                 abandoning the complete room batch"
             );
-            abandoned += 1;
-            continue;
+            return abandon_room_batch(local_claims, room_count, start).await;
         }
-        let sealed = tokio::time::timeout(remaining, local_claims.seal_before_release(&entity))
+        let sealed = tokio::time::timeout(remaining, local_claims.seal_before_release(entity))
             .await
             .unwrap_or(false);
-        if sealed {
-            // Batch-entry-only-after-commit invariant (major fix 13): this
-            // entity enters `to_release` strictly after `seal_before_release`
-            // — which performs/confirms the entity's final fenced write —
-            // has already returned `true`, never before.
+        if !sealed {
+            tracing::warn!(
+                entity_id = %entity.id,
+                "clustering drain: a room seal failed or timed out; abandoning the complete \
+                 room batch"
+            );
+            return abandon_room_batch(local_claims, room_count, start).await;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let retired = if remaining.is_zero() {
+            false
+        } else {
+            tokio::time::timeout(remaining, local_claims.retire_room_after_shutdown(entity))
+                .await
+                .unwrap_or(false)
+        };
+        if !retired {
+            tracing::warn!(
+                entity_id = %entity.id,
+                "clustering drain: a sealed RoomActor could not be hard-retired; abandoning \
+                 the complete room batch"
+            );
+            return abandon_room_batch(local_claims, room_count, start).await;
+        }
+    }
+
+    if fatal_fence.is_cancelled() || !fence.is_current_clean() {
+        tracing::warn!(
+            count = room_count,
+            "clustering drain: release authorization was invalidated after retirement; \
+             abandoning the complete room batch"
+        );
+        return abandon_room_batch(local_claims, room_count, start).await;
+    }
+
+    if !rooms.is_empty() {
+        let attempted = rooms.len() as u64;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                count = attempted,
+                "clustering drain: budget exhausted before release_many; \
+                 abandoning the complete room batch"
+            );
+            return abandon_room_batch(local_claims, room_count, start).await;
+        } else {
+            // This is the only room-claim-release-authorizing call in the
+            // shutdown graph. `RoomServingFence` is non-Clone and consumed by
+            // this function, so the all-or-none batch cannot be replayed.
+            match tokio::time::timeout(remaining, claim_store.release_many(&rooms, identity)).await
+            {
+                Ok(Ok(())) => metrics::record_claims_released_on_drain(attempted),
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        %error,
+                        count = attempted,
+                        "clustering drain: release_many failed; entities remain claimed \
+                         (fenced-safe, reclaimed later)"
+                    );
+                    return abandon_room_batch(local_claims, room_count, start).await;
+                }
+                Err(_) => {
+                    // A cancelled database DELETE may have committed. Do not
+                    // replay this epoch-blind batch; either outcome is safe
+                    // because the node is already marked draining.
+                    tracing::warn!(
+                        count = attempted,
+                        "clustering drain: release_many timed out with an ambiguous commit \
+                         outcome; not retrying the batch"
+                    );
+                    return abandon_room_batch(local_claims, room_count, start).await;
+                }
+            }
+        }
+    }
+    if fatal_fence.is_cancelled() || !fence.is_current_clean() {
+        tracing::warn!(
+            count = room_count,
+            "clustering drain: terminal safety changed while the release batch was in flight; \
+             selecting terminal abandon mode without replaying the batch"
+        );
+        return abandon_room_batch(local_claims, 0, start).await;
+    }
+    metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
+    RoomShutdownDrainOutcome::Released
+}
+
+/// Retire and release locally-owned `UserActor` claims after publication
+/// authority has been terminally disabled.
+///
+/// This is a separate second drain phase because `UserActor` has no durable
+/// final-write seal. Its handoff barrier is local quiescence instead: exact
+/// owner demotion plus acknowledged connection teardown, followed by a
+/// verification that neither actor nor connection registry can still route
+/// the user. [`DisabledNodeIdentity`] proves that no same-incarnation actor
+/// can be published between that verification and [`ClaimStore::release_many`].
+/// Any failed, timed-out, or unverifiable retirement is left claimed for
+/// ordinary fenced reclaim.
+pub(crate) async fn run_disabled_user_shutdown_drain(
+    claim_store: &Arc<dyn ClaimStore>,
+    disabled_identity: &DisabledNodeIdentity,
+    local_claims: &Arc<dyn LocallyClaimedEntities>,
+    budget: Duration,
+) {
+    if budget.is_zero() {
+        tracing::warn!(
+            "clustering user drain: no shutdown budget remains; leaving UserActor claims held"
+        );
+        return;
+    }
+
+    let start = Instant::now();
+    let deadline = start + budget;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let owned =
+        match tokio::time::timeout(remaining, local_claims.owned_of_type(EntityType::UserActor))
+            .await
+        {
+            Ok(owned) => owned,
+            Err(_) => {
+                tracing::warn!(
+                    "clustering user drain: local ownership snapshot timed out; \
+                 leaving UserActor claims held"
+                );
+                return;
+            }
+        };
+    let mut seen = HashSet::with_capacity(owned.len());
+    let users: Vec<_> = owned
+        .into_iter()
+        .filter(|entity| entity.entity_type == EntityType::UserActor)
+        .filter(|entity| seen.insert(entity.clone()))
+        .collect();
+
+    let mut to_release = Vec::new();
+    let mut abandoned = 0u64;
+    let mut users = users.into_iter();
+    while let Some(entity) = users.next() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let skipped = 1u64 + users.count() as u64;
+            tracing::warn!(
+                count = skipped,
+                "clustering user drain: budget exhausted before remaining retirements; \
+                 leaving their claims held"
+            );
+            abandoned += skipped;
+            break;
+        }
+        let retired = tokio::time::timeout(
+            remaining,
+            local_claims.retire_user_after_authority_disabled(&entity, disabled_identity),
+        )
+        .await
+        .unwrap_or(false);
+        if retired {
             to_release.push(entity);
         } else {
             tracing::warn!(
                 entity_id = %entity.id,
-                "clustering drain: seal_before_release failed or timed out; leaving this \
-                 entity claimed (fenced-safe, reclaimed later)"
+                "clustering user drain: exact actor/resource retirement failed or timed out; \
+                 leaving the claim held"
             );
             abandoned += 1;
         }
@@ -124,25 +355,49 @@ pub(crate) async fn run_shutdown_drain<L>(
 
     if !to_release.is_empty() {
         let attempted = to_release.len() as u64;
-        match claim_store.release_many(&to_release, identity).await {
-            Ok(()) => {
-                metrics::record_claims_released_on_drain(attempted);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    count = attempted,
-                    "clustering drain: release_many failed; entities remain claimed \
-                     (fenced-safe, reclaimed later)"
-                );
-                abandoned += attempted;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                count = attempted,
+                "clustering user drain: budget exhausted before release_many; \
+                 verified-retired claims remain held"
+            );
+            abandoned += attempted;
+        } else {
+            match tokio::time::timeout(
+                remaining,
+                claim_store.release_many(&to_release, disabled_identity.prior_identity()),
+            )
+            .await
+            {
+                Ok(Ok(())) => metrics::record_claims_released_on_drain(attempted),
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        %error,
+                        count = attempted,
+                        "clustering user drain: release_many failed; claims remain held"
+                    );
+                    abandoned += attempted;
+                }
+                Err(_) => {
+                    // Dropping a database DELETE future can make its commit
+                    // outcome ambiguous. Never replay the epoch-blind batch:
+                    // publication authority is already terminally disabled
+                    // and the users are locally quiescent, so either outcome
+                    // is safe and any retained rows can expire normally.
+                    tracing::warn!(
+                        count = attempted,
+                        "clustering user drain: release_many timed out with an ambiguous \
+                         commit outcome; not retrying the batch"
+                    );
+                    abandoned += attempted;
+                }
             }
         }
     }
     if abandoned > 0 {
         metrics::record_claims_abandoned_on_drain(abandoned);
     }
-    metrics::record_drain_duration_ms(start.elapsed().as_secs_f64() * 1000.0);
 }
 
 /// Rollout-aware claim-acquisition backoff decision (ADR-0017 Phase 3 Slice
@@ -235,7 +490,10 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
+    use waddle_xmpp::ownership::{
+        ClaimEpoch, ClaimError, ClaimSnapshot, ExactReleaseOutcome, InProcessClaimStore,
+        NodeIdentity, ResumeIdentityProof, StalePredicate,
+    };
 
     // --- rollout_backoff_delay: pure-function coverage -----------------
 
@@ -401,6 +659,15 @@ mod tests {
                 }
             }
         }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, _entity: &Entity) -> bool {
+            self.demote_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }
     }
 
     fn room(id: &str) -> Entity {
@@ -411,11 +678,50 @@ mod tests {
         Entity::new(EntityType::SmSession, id.to_string())
     }
 
+    fn user(id: &str) -> Entity {
+        Entity::new(EntityType::UserActor, id.to_string())
+    }
+
     fn identity() -> NodeIdentity {
         NodeIdentity::new(
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
         )
+    }
+
+    fn clean_room_serving_fence() -> RoomServingFence {
+        use crate::server::room_serving_quiescence::{
+            RoomServingQuiescence, RoomServingTerminalOutcome,
+        };
+
+        let (_admission, closer) = RoomServingQuiescence::create();
+        closer.close();
+        match closer.finalize() {
+            RoomServingTerminalOutcome::Clean(fence) => fence,
+            outcome => panic!("test room-serving fence must be clean: {outcome:?}"),
+        }
+    }
+
+    async fn run_test_shutdown_drain<L>(
+        lease: &L,
+        claim_store: &Arc<dyn ClaimStore>,
+        identity: &NodeIdentity,
+        local_claims: &Arc<dyn LocallyClaimedEntities>,
+        budget: Duration,
+    ) -> RoomShutdownDrainOutcome
+    where
+        L: NodeLeaseStore + Send + Sync,
+    {
+        run_shutdown_drain(
+            lease,
+            claim_store,
+            identity,
+            local_claims,
+            budget,
+            clean_room_serving_fence(),
+            &CancellationToken::new(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -435,14 +741,15 @@ mod tests {
             .expect("acquire room b");
         let sm_c_epoch = claim_store.acquire(&sm_c, &me).await.expect("acquire sm c");
 
+        let retire_calls = Arc::new(AtomicU32::new(0));
         let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
             owned: vec![room_a.clone(), room_b.clone(), sm_c.clone()],
             outcome: SealOutcome::Succeed,
             seal_calls: Arc::new(Mutex::new(Vec::new())),
-            demote_calls: Arc::new(AtomicU32::new(0)),
+            demote_calls: Arc::clone(&retire_calls),
         });
 
-        run_shutdown_drain(
+        run_test_shutdown_drain(
             &NoopLease,
             &claim_store,
             &me,
@@ -473,6 +780,11 @@ mod tests {
             "the sm_session entity must be left untouched by the generic drain loop \
              (owned by the separate Q6 SM drain path instead)"
         );
+        assert_eq!(
+            retire_calls.load(Ordering::SeqCst),
+            2,
+            "every released RoomActor must be hard-retired after sealing"
+        );
     }
 
     #[tokio::test]
@@ -489,7 +801,7 @@ mod tests {
             demote_calls: Arc::new(AtomicU32::new(0)),
         });
 
-        run_shutdown_drain(
+        run_test_shutdown_drain(
             &NoopLease,
             &claim_store,
             &me,
@@ -504,6 +816,544 @@ mod tests {
                 .await
                 .unwrap_or(false),
             "a failed seal must leave the claim held, not release it"
+        );
+    }
+
+    struct OneFailedSealClaims {
+        rooms: Vec<Entity>,
+        failed: Entity,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for OneFailedSealClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            self.rooms.clone()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn abandon_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn seal_before_release(&self, entity: &Entity) -> bool {
+            entity != &self.failed
+        }
+
+        async fn retire_room_after_shutdown(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn one_failed_seal_abandons_every_room_without_a_partial_release() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let first = room("first-seals@muc.example.com");
+        let second = room("second-fails@muc.example.com");
+        let first_epoch = claim_store.acquire(&first, &me).await.expect("first claim");
+        let second_epoch = claim_store
+            .acquire(&second, &me)
+            .await
+            .expect("second claim");
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(OneFailedSealClaims {
+            rooms: vec![first.clone(), second.clone()],
+            failed: second.clone(),
+        });
+
+        let outcome = run_test_shutdown_drain(
+            &NoopLease,
+            &claim_store,
+            &me,
+            &local_claims,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(outcome, RoomShutdownDrainOutcome::Abandoned);
+        assert!(
+            claim_store
+                .fence(&first, &me, first_epoch)
+                .await
+                .unwrap_or(false),
+            "a room sealed before a later failure must still remain claimed"
+        );
+        assert!(
+            claim_store
+                .fence(&second, &me, second_epoch)
+                .await
+                .unwrap_or(false),
+            "the failed room must remain claimed"
+        );
+    }
+
+    #[tokio::test]
+    async fn fatal_fence_forces_abandon_before_any_room_release() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let entity = room("fatal-fence@muc.example.com");
+        let epoch = claim_store.acquire(&entity, &me).await.expect("claim");
+        let seal_calls = Arc::new(Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
+            owned: vec![entity.clone()],
+            outcome: SealOutcome::Succeed,
+            seal_calls: Arc::clone(&seal_calls),
+            demote_calls: Arc::new(AtomicU32::new(0)),
+        });
+        let fatal_fence = CancellationToken::new();
+        fatal_fence.cancel();
+
+        let outcome = run_shutdown_drain(
+            &NoopLease,
+            &claim_store,
+            &me,
+            &local_claims,
+            Duration::from_secs(5),
+            clean_room_serving_fence(),
+            &fatal_fence,
+        )
+        .await;
+
+        assert_eq!(outcome, RoomShutdownDrainOutcome::Abandoned);
+        assert!(seal_calls.lock().expect("seal call lock").is_empty());
+        assert!(
+            claim_store
+                .fence(&entity, &me, epoch)
+                .await
+                .unwrap_or(false),
+            "fatal fencing must preserve every room claim"
+        );
+    }
+
+    struct FailedRoomRetirementClaims {
+        room: Entity,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for FailedRoomRetirementClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            vec![self.room.clone()]
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn seal_before_release(&self, entity: &Entity) -> bool {
+            entity == &self.room
+        }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, entity: &Entity) -> bool {
+            assert_eq!(entity, &self.room);
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_never_releases_a_sealed_room_while_its_actor_remains_live() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let entity = room("retirement-fails@muc.example.com");
+        let epoch = claim_store.acquire(&entity, &me).await.expect("acquire");
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FailedRoomRetirementClaims {
+            room: entity.clone(),
+        });
+
+        run_test_shutdown_drain(
+            &NoopLease,
+            &claim_store,
+            &me,
+            &local_claims,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(
+            claim_store
+                .fence(&entity, &me, epoch)
+                .await
+                .unwrap_or(false),
+            "a sealed room whose actor cannot be retired must remain claimed"
+        );
+    }
+
+    struct FakeUserRetirementClaims {
+        owned: Vec<Entity>,
+        releasable: Vec<Entity>,
+        retire_calls: Arc<Mutex<Vec<Entity>>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for FakeUserRetirementClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            self.owned.clone()
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn retire_user_after_authority_disabled(
+            &self,
+            entity: &Entity,
+            _disabled_identity: &DisabledNodeIdentity,
+        ) -> bool {
+            self.retire_calls
+                .lock()
+                .expect("retire call lock")
+                .push(entity.clone());
+            self.releasable.contains(entity)
+        }
+    }
+
+    struct UserOnlyInventoryClaims {
+        user: Entity,
+        inventory_calls: Arc<Mutex<Vec<EntityType>>>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for UserOnlyInventoryClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            panic!("the UserActor drain must not enumerate all entity registries")
+        }
+
+        async fn owned_of_type(&self, entity_type: EntityType) -> Vec<Entity> {
+            self.inventory_calls
+                .lock()
+                .expect("inventory call lock")
+                .push(entity_type);
+            match entity_type {
+                EntityType::UserActor => vec![self.user.clone()],
+                EntityType::RoomActor | EntityType::SmSession => {
+                    panic!("the UserActor drain queried an unrelated entity inventory")
+                }
+            }
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn retire_user_after_authority_disabled(
+            &self,
+            entity: &Entity,
+            _disabled_identity: &DisabledNodeIdentity,
+        ) -> bool {
+            entity == &self.user
+        }
+    }
+
+    struct HangingReleaseClaimStore {
+        inner: Arc<InProcessClaimStore>,
+        release_calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl ClaimStore for HangingReleaseClaimStore {
+        async fn ensure_schema(&self) -> Result<(), ClaimError> {
+            self.inner.ensure_schema().await
+        }
+
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.acquire(entity, me).await
+        }
+
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner.ensure_claimed(entity, me).await
+        }
+
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            staleness: StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: ClaimEpoch,
+            witness: ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<ClaimEpoch, ClaimError> {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim(entity).await
+        }
+
+        async fn current_claim_after_pending_writes(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+            self.inner.current_claim_after_pending_writes(entity).await
+        }
+
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<bool, ClaimError> {
+            self.inner.fence(entity, me, mine).await
+        }
+
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<(), ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+
+        async fn release_exact(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: ClaimEpoch,
+        ) -> Result<ExactReleaseOutcome, ClaimError> {
+            self.inner.release_exact(entity, me, mine).await
+        }
+
+        async fn release_many(
+            &self,
+            _entities: &[Entity],
+            _me: &NodeIdentity,
+        ) -> Result<(), ClaimError> {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_user_drain_releases_only_verified_retired_user_claims() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let released_user = user("released@example.com");
+        let retained_user = user("retained@example.com");
+        let untouched_room = room("room@muc.example.com");
+        let released_epoch = claim_store
+            .acquire(&released_user, &me)
+            .await
+            .expect("acquire releasable user");
+        let retained_epoch = claim_store
+            .acquire(&retained_user, &me)
+            .await
+            .expect("acquire retained user");
+        let room_epoch = claim_store
+            .acquire(&untouched_room, &me)
+            .await
+            .expect("acquire room");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(me.clone());
+        let disabled_identity = live_identity.disable().await;
+        let retire_calls = Arc::new(Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeUserRetirementClaims {
+            // Duplicate input proves the release batch is canonicalized.
+            owned: vec![
+                released_user.clone(),
+                retained_user.clone(),
+                untouched_room.clone(),
+                released_user.clone(),
+            ],
+            releasable: vec![released_user.clone()],
+            retire_calls: Arc::clone(&retire_calls),
+        });
+
+        run_disabled_user_shutdown_drain(
+            &claim_store,
+            &disabled_identity,
+            &local_claims,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert!(
+            !claim_store
+                .fence(&released_user, &me, released_epoch)
+                .await
+                .unwrap_or(true),
+            "verified-retired UserActor claim must be released"
+        );
+        assert!(
+            claim_store
+                .fence(&retained_user, &me, retained_epoch)
+                .await
+                .unwrap_or(false),
+            "failed retirement must leave the UserActor claim held"
+        );
+        assert!(
+            claim_store
+                .fence(&untouched_room, &me, room_epoch)
+                .await
+                .unwrap_or(false),
+            "the disabled user phase must not touch RoomActor claims"
+        );
+        assert_eq!(
+            *retire_calls.lock().expect("retire call lock"),
+            vec![released_user, retained_user],
+            "each canonical UserActor must be retired exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_user_drain_uses_only_the_user_actor_inventory() {
+        let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let entity = user("typed-inventory@example.com");
+        let epoch = claim_store
+            .acquire(&entity, &me)
+            .await
+            .expect("acquire user");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(me.clone());
+        let disabled_identity = live_identity.disable().await;
+        let inventory_calls = Arc::new(Mutex::new(Vec::new()));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(UserOnlyInventoryClaims {
+            user: entity.clone(),
+            inventory_calls: Arc::clone(&inventory_calls),
+        });
+
+        run_disabled_user_shutdown_drain(
+            &claim_store,
+            &disabled_identity,
+            &local_claims,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            *inventory_calls.lock().expect("inventory call lock"),
+            vec![EntityType::UserActor]
+        );
+        assert!(
+            !claim_store.fence(&entity, &me, epoch).await.unwrap_or(true),
+            "the user-specific inventory must still reach retirement and release"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_user_drain_bounds_a_hanging_release_without_retrying() {
+        let inner = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let retired_user = user("release-hangs@example.com");
+        let epoch = inner
+            .acquire(&retired_user, &me)
+            .await
+            .expect("acquire user");
+        let hanging_store = Arc::new(HangingReleaseClaimStore {
+            inner: Arc::clone(&inner),
+            release_calls: AtomicU32::new(0),
+        });
+        let claim_store: Arc<dyn ClaimStore> = hanging_store.clone();
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(me.clone());
+        let disabled_identity = live_identity.disable().await;
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeUserRetirementClaims {
+            owned: vec![retired_user.clone()],
+            releasable: vec![retired_user.clone()],
+            retire_calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let budget = Duration::from_millis(50);
+
+        let drain = tokio::spawn(async move {
+            run_disabled_user_shutdown_drain(
+                &claim_store,
+                &disabled_identity,
+                &local_claims,
+                budget,
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(budget * 2).await;
+        drain.await.expect("bounded user drain");
+
+        assert_eq!(
+            hanging_store.release_calls.load(Ordering::SeqCst),
+            1,
+            "an ambiguous timed-out release must never be replayed"
+        );
+        assert!(
+            inner
+                .fence(&retired_user, &me, epoch)
+                .await
+                .unwrap_or(false),
+            "the hanging fake never committed, so timeout must leave its claim held"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_drain_bounds_a_hanging_release_without_retrying() {
+        let inner = Arc::new(InProcessClaimStore::new());
+        let me = identity();
+        let entity = room("release-hangs@muc.example.com");
+        let epoch = inner.acquire(&entity, &me).await.expect("acquire room");
+        let hanging_store = Arc::new(HangingReleaseClaimStore {
+            inner: Arc::clone(&inner),
+            release_calls: AtomicU32::new(0),
+        });
+        let claim_store: Arc<dyn ClaimStore> = hanging_store.clone();
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(FakeLocalClaims {
+            owned: vec![entity.clone()],
+            outcome: SealOutcome::Succeed,
+            seal_calls: Arc::new(Mutex::new(Vec::new())),
+            demote_calls: Arc::new(AtomicU32::new(0)),
+        });
+        let budget = Duration::from_millis(50);
+        let task_me = me.clone();
+
+        let drain = tokio::spawn(async move {
+            run_test_shutdown_drain(&NoopLease, &claim_store, &task_me, &local_claims, budget)
+                .await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(budget * 2).await;
+        drain.await.expect("bounded room drain");
+
+        assert_eq!(
+            hanging_store.release_calls.load(Ordering::SeqCst),
+            1,
+            "an ambiguous timed-out room release must never be replayed"
+        );
+        assert!(
+            inner.fence(&entity, &me, epoch).await.unwrap_or(false),
+            "the hanging fake never committed, so timeout must leave its room claim held"
         );
     }
 
@@ -524,7 +1374,8 @@ mod tests {
         let budget = Duration::from_millis(50);
         let task_me = me.clone();
         let drain = tokio::spawn(async move {
-            run_shutdown_drain(&NoopLease, &claim_store, &task_me, &local_claims, budget).await;
+            run_test_shutdown_drain(&NoopLease, &claim_store, &task_me, &local_claims, budget)
+                .await;
             claim_store
         });
         tokio::time::advance(budget * 4).await;
@@ -563,7 +1414,7 @@ mod tests {
             demote_calls: Arc::new(AtomicU32::new(0)),
         });
 
-        run_shutdown_drain(
+        run_test_shutdown_drain(
             &NoopLease,
             &claim_store,
             &me,
@@ -662,7 +1513,7 @@ mod tests {
         // below must fit inside.
         let budget = Duration::from_secs(5);
         let start = Instant::now();
-        run_shutdown_drain(&NoopLease, &claim_store, &me, &local_claims, budget).await;
+        run_test_shutdown_drain(&NoopLease, &claim_store, &me, &local_claims, budget).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -768,6 +1619,14 @@ mod tests {
             tokio::time::sleep(self.seal_delay).await;
             true
         }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, _entity: &Entity) -> bool {
+            true
+        }
     }
 
     /// ADR-0017 Phase 3 Slice 10 FIX 2 (council-adjudicated): the ordering
@@ -829,6 +1688,7 @@ mod tests {
         // independent pool.
         let claim_store: Arc<dyn ClaimStore> =
             Arc::new(super::super::claims::PostgresClaimStore::new(db.clone()));
+        let fatal_fence = CancellationToken::new();
 
         // Structured concurrency, no `tokio::spawn`: `drain_future` and the
         // polling loop below both only ever take `&claim_store_typed`
@@ -842,8 +1702,12 @@ mod tests {
             &claim_store,
             &me,
             &local_claims,
-            claim_release_budget,
-            lease_ttl,
+            ShutdownDrainTiming {
+                claim_release_budget,
+                lease_ttl,
+            },
+            clean_room_serving_fence(),
+            &fatal_fence,
         ));
         let mut drain_future = drain_future;
 

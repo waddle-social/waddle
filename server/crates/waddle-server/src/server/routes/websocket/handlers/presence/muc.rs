@@ -117,10 +117,13 @@ fn sync_resolver_affiliation_on_rejection(
         existing_room_actor,
         scheduler,
         None,
+        None,
         room_jid,
         jid,
-        affiliation,
-        expected_admission_revision,
+        crate::server::routes::websocket::ResolverAffiliationSyncWork {
+            affiliation,
+            expected_admission_revision,
+        },
     );
 }
 
@@ -128,17 +131,13 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
     scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
     room_registry: Option<RoomRegistry>,
+    room_serving: Option<&crate::server::room_serving_quiescence::RoomServingHandle>,
     room_jid: &BareJid,
     jid: BareJid,
-    affiliation: Affiliation,
-    expected_admission_revision: u64,
+    work: crate::server::routes::websocket::ResolverAffiliationSyncWork,
 ) {
     let Some(actor) = existing_room_actor else {
         return;
-    };
-    let work = crate::server::routes::websocket::ResolverAffiliationSyncWork {
-        affiliation,
-        expected_admission_revision,
     };
     let worker = match scheduler.schedule(room_jid, &jid, actor.id(), work) {
         crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Started(worker) => {
@@ -184,25 +183,58 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
     // they never consult the registry and therefore cannot create a room.
     // Reusing the captured revision makes every delayed attempt harmless once
     // a newer admission or affiliation mutation has landed.
-    tokio::spawn(run_resolver_affiliation_sync_worker(
-        actor,
-        room_registry,
-        room_jid,
-        jid,
-        *worker,
-    ));
+    let worker = *worker;
+    if let Some(room_serving) = room_serving {
+        let ambiguity_marker = room_serving.clone();
+        let log_room_jid = room_jid.clone();
+        let log_jid = jid.clone();
+        if let Err(error) = room_serving.spawn(move |scope| async move {
+            let ambiguous = run_resolver_affiliation_sync_worker(
+                actor,
+                room_registry,
+                Some(ambiguity_marker),
+                room_jid,
+                jid,
+                worker,
+            )
+            .await;
+            if ambiguous {
+                scope.poison();
+            } else {
+                scope.complete_clean();
+            }
+        }) {
+            debug!(
+                room = %log_room_jid,
+                jid = %log_jid,
+                ?error,
+                "Skipped resolver affiliation repair because room admission is closed"
+            );
+        }
+    } else {
+        tokio::spawn(run_resolver_affiliation_sync_worker(
+            actor,
+            room_registry,
+            None,
+            room_jid,
+            jid,
+            worker,
+        ));
+    }
 }
 
 async fn run_resolver_affiliation_sync_worker(
     actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
     room_registry: Option<RoomRegistry>,
+    room_serving: Option<crate::server::room_serving_quiescence::RoomServingHandle>,
     room_jid: BareJid,
     jid: BareJid,
     mut worker: crate::server::routes::websocket::state::ResolverAffiliationSyncWorker,
-) {
+) -> bool {
     let mut work = worker.current();
     let mut effective_admission_revision = worker.effective_admission_revision();
     let mut attempt = 1usize;
+    let mut ambiguous = false;
     loop {
         let result = actor
             .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
@@ -220,7 +252,7 @@ async fn run_resolver_affiliation_sync_worker(
                 admission_revision,
             }) => {
                 let Some(next) = worker.finish_applied_or_take_update(admission_revision) else {
-                    return;
+                    return ambiguous;
                 };
                 work = next;
                 effective_admission_revision = worker.effective_admission_revision();
@@ -259,14 +291,20 @@ async fn run_resolver_affiliation_sync_worker(
                                 room = %room_jid,
                                 "Rejected-join repair observed a room already absent or replaced"
                             ),
-                            Err(error) => warn!(
-                                room = %room_jid,
-                                %error,
-                                "Failed to reap deposed room after rejected-join affiliation repair"
-                            ),
+                            Err(error) => {
+                                ambiguous = true;
+                                if let Some(room_serving) = &room_serving {
+                                    room_serving.mark_unsafe_to_release();
+                                }
+                                warn!(
+                                    room = %room_jid,
+                                    %error,
+                                    "Failed to reap deposed room after rejected-join affiliation repair"
+                                );
+                            }
                         }
                     }
-                    return;
+                    return ambiguous;
                 }
                 let disposition = if outcome
                     == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable
@@ -276,7 +314,7 @@ async fn run_resolver_affiliation_sync_worker(
                     crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome
                 };
                 let Some(next) = worker.finish_terminal_or_take_update(disposition) else {
-                    return;
+                    return ambiguous;
                 };
                 work = next;
                 effective_admission_revision = worker.effective_admission_revision();
@@ -307,7 +345,7 @@ async fn run_resolver_affiliation_sync_worker(
                 let Some(next) = worker.finish_terminal_or_take_update(
                     crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion,
                 ) else {
-                    return;
+                    return ambiguous;
                 };
                 work = next;
                 effective_admission_revision = worker.effective_admission_revision();
@@ -315,6 +353,12 @@ async fn run_resolver_affiliation_sync_worker(
                 continue;
             }
             Err(error) => {
+                if crate::server::routes::interpret::actor_send_maybe_enqueued(&error) {
+                    ambiguous = true;
+                    if let Some(room_serving) = &room_serving {
+                        room_serving.mark_unsafe_to_release();
+                    }
+                }
                 warn!(
                     room = %room_jid,
                     attempt,
@@ -324,7 +368,7 @@ async fn run_resolver_affiliation_sync_worker(
                 let Some(next) = worker.finish_terminal_or_take_update(
                     crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome,
                 ) else {
-                    return;
+                    return ambiguous;
                 };
                 work = next;
                 effective_admission_revision = worker.effective_admission_revision();
@@ -468,6 +512,8 @@ async fn try_deliver_registered_remote_resource(
 enum RemoteMucJoinDecision {
     Delivered(Vec<Stanza>),
     MaybeCommitted,
+    RetryableNoEffect,
+    LocalRoomOrUnclaimed,
 }
 
 #[cfg(feature = "clustering")]
@@ -480,19 +526,101 @@ enum RemoteMucLeaveDecision {
 
 #[cfg(feature = "clustering")]
 fn remote_muc_join_decision(
-    outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
-) -> Option<RemoteMucJoinDecision> {
-    match outcome {
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
-            Some(RemoteMucJoinDecision::Delivered(replies))
+    decision: crate::clustering::route_bridge::MucProxyRouteDecision,
+) -> RemoteMucJoinDecision {
+    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
+    match decision {
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(replies)) => {
+            RemoteMucJoinDecision::Delivered(replies)
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
-            Some(RemoteMucJoinDecision::MaybeCommitted)
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+            RemoteMucJoinDecision::MaybeCommitted
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
-        | None => None,
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Unavailable)
+        | MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Dropped)
+        | MucProxyRouteDecision::RoomClaimUnavailable
+        | MucProxyRouteDecision::OriginUnavailable => RemoteMucJoinDecision::RetryableNoEffect,
+        MucProxyRouteDecision::LocalRoom | MucProxyRouteDecision::RoomUnclaimed => {
+            RemoteMucJoinDecision::LocalRoomOrUnclaimed
+        }
+    }
+}
+
+#[cfg(feature = "clustering")]
+async fn try_proxy_remote_muc_join(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    nick: &str,
+    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    origin: &crate::server::routes::interpret::OrderedRelayRouteOrigin,
+) -> RemoteMucJoinDecision {
+    let Some(bridge) = state
+        .deps
+        .app_state
+        .clustering_claims
+        .ordered_relay_delivery_bridge
+        .as_ref()
+    else {
+        // `ClusteringHandles` deliberately uses an absent bridge to mean
+        // runtime clustering is disabled, including an all-features binary
+        // running in portable single-node mode. The frame layer still
+        // constructs typed origin provenance in that build, so the origin
+        // alone cannot be used as proof that a cluster route is required.
+        return RemoteMucJoinDecision::LocalRoomOrUnclaimed;
+    };
+
+    let mut presence = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    presence.from = Some(jid::Jid::from(sender_jid.clone()));
+    presence.to = room_jid
+        .clone()
+        .with_resource_str(nick)
+        .ok()
+        .map(jid::Jid::from);
+    if let Some(show) = presence_show {
+        presence.show = Some(show.to_xep0045());
+    }
+    let stanza = Stanza::Presence(presence);
+    let _remote_muc_membership_guard = state
+        .deps
+        .protocol
+        .remote_muc_memberships
+        .lock_membership(sender_jid, room_jid)
+        .await;
+    let decision = remote_muc_join_decision(
+        bridge
+            .try_proxy_muc_remote_decision(
+                room_jid,
+                &stanza,
+                crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
+                origin,
+            )
+            .await,
+    );
+    match decision {
+        RemoteMucJoinDecision::Delivered(replies) => {
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .record_join(sender_jid, room_jid, nick);
+            RemoteMucJoinDecision::Delivered(replies)
+        }
+        RemoteMucJoinDecision::MaybeCommitted => {
+            // The remote owner may already have mutated room state. Retain
+            // cleanup responsibility while the client retries/resynchronizes
+            // instead of returning a local error that would claim no effect.
+            state
+                .deps
+                .protocol
+                .remote_muc_memberships
+                .record_join(sender_jid, room_jid, nick);
+            RemoteMucJoinDecision::MaybeCommitted
+        }
+        RemoteMucJoinDecision::RetryableNoEffect => RemoteMucJoinDecision::RetryableNoEffect,
+        RemoteMucJoinDecision::LocalRoomOrUnclaimed => RemoteMucJoinDecision::LocalRoomOrUnclaimed,
     }
 }
 
@@ -521,50 +649,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_muc_join_decision_suppresses_errors_for_uncertain_commit() {
+    fn remote_muc_join_decision_preserves_typed_route_outcomes() {
+        use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
         assert!(matches!(
-            remote_muc_join_decision(Some(
+            remote_muc_join_decision(MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::Delivered(vec![Stanza::Presence(
+                    xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None,)
+                ),]),
+            )),
+            RemoteMucJoinDecision::Delivered(_)
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::MaybeCommitted,
+            )),
+            RemoteMucJoinDecision::MaybeCommitted
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+            )),
+            RemoteMucJoinDecision::MaybeCommitted
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::Unavailable,
+            )),
+            RemoteMucJoinDecision::RetryableNoEffect
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::Attempted(
+                OrderedRelayMucProxyOutcome::Dropped,
+            )),
+            RemoteMucJoinDecision::RetryableNoEffect
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::RoomClaimUnavailable),
+            RemoteMucJoinDecision::RetryableNoEffect
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::OriginUnavailable),
+            RemoteMucJoinDecision::RetryableNoEffect
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::LocalRoom),
+            RemoteMucJoinDecision::LocalRoomOrUnclaimed
+        ));
+        assert!(matches!(
+            remote_muc_join_decision(MucProxyRouteDecision::RoomUnclaimed),
+            RemoteMucJoinDecision::LocalRoomOrUnclaimed
+        ));
+    }
+
+    #[test]
+    fn remote_muc_join_decision_keeps_delivered_replies() {
+        let decision = remote_muc_join_decision(
+            crate::clustering::route_bridge::MucProxyRouteDecision::Attempted(
                 crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
                     Stanza::Presence(xmpp_parsers::presence::Presence::new(
                         xmpp_parsers::presence::Type::None,
                     )),
                 ]),
-            )),
-            Some(RemoteMucJoinDecision::Delivered(_))
-        ));
-        assert!(matches!(
-            remote_muc_join_decision(Some(
-                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
-            )),
-            Some(RemoteMucJoinDecision::MaybeCommitted)
-        ));
-        assert!(matches!(
-            remote_muc_join_decision(Some(
-                crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
-            )),
-            Some(RemoteMucJoinDecision::MaybeCommitted)
-        ));
-        assert!(remote_muc_join_decision(Some(
-            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable,
-        ))
-        .is_none());
-        assert!(remote_muc_join_decision(Some(
-            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped,
-        ))
-        .is_none());
-        assert!(remote_muc_join_decision(None).is_none());
-    }
-
-    #[test]
-    fn remote_muc_join_decision_keeps_delivered_replies() {
-        let decision = remote_muc_join_decision(Some(
-            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(vec![
-                Stanza::Presence(xmpp_parsers::presence::Presence::new(
-                    xmpp_parsers::presence::Type::None,
-                )),
-            ]),
-        ));
-        let Some(RemoteMucJoinDecision::Delivered(replies)) = decision else {
+            ),
+        );
+        let RemoteMucJoinDecision::Delivered(replies) = decision else {
             panic!("expected delivered replies");
         };
         assert_eq!(replies.len(), 1);
@@ -902,14 +1051,17 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         Some(RoomRegistry::wrap(
                             state.deps.protocol.room_registry.clone(),
                         )),
+                        Some(&state.deps.room_serving),
                         room_jid,
                         // Room affiliations are keyed by the joiner's
                         // bare JID (`JoinWithAffiliation` uses
                         // `sender_jid.to_bare()`), so the sync must use
                         // the same key.
                         sender_jid.to_bare(),
-                        Affiliation::Outcast,
-                        admission_revision,
+                        crate::server::routes::websocket::ResolverAffiliationSyncWork {
+                            affiliation: Affiliation::Outcast,
+                            expected_admission_revision: admission_revision,
+                        },
                     );
                     return deny_join_admission(
                         room_jid,
@@ -939,12 +1091,15 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                             Some(RoomRegistry::wrap(
                                 state.deps.protocol.room_registry.clone(),
                             )),
+                            Some(&state.deps.room_serving),
                             room_jid,
                             // Same key as `JoinWithAffiliation`:
                             // `sender_jid.to_bare()`.
                             sender_jid.to_bare(),
-                            Affiliation::None,
-                            admission_revision,
+                            crate::server::routes::websocket::ResolverAffiliationSyncWork {
+                                affiliation: Affiliation::None,
+                                expected_admission_revision: admission_revision,
+                            },
                         );
                         return deny_join_admission(
                             room_jid,
@@ -988,6 +1143,51 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         let (room_actor, created_instant_room) = match existing_room_actor {
             Some(actor) => (actor, false),
             None => {
+                // A missing local actor does not imply a new room: it can be
+                // an unmanaged room whose live actor is owned by another
+                // cluster node. Ask the authoritative claim-backed relay
+                // path before applying the local room-creation permission.
+                // The typed route decision allows only `LocalRoom` and
+                // `RoomUnclaimed` to reach the normal creation guard below;
+                // ambiguous claim/origin failures return a retryable stanza
+                // error without creating a competing local actor.
+                #[cfg(feature = "clustering")]
+                if let Some(origin) = ordered_relay_origin.as_ref() {
+                    match try_proxy_remote_muc_join(
+                        state,
+                        room_jid,
+                        sender_jid,
+                        &nick,
+                        presence_show,
+                        origin,
+                    )
+                    .await
+                    {
+                        RemoteMucJoinDecision::Delivered(replies) => {
+                            return replies
+                                .into_iter()
+                                .map(|reply| stanza_to_xml(&reply))
+                                .collect();
+                        }
+                        RemoteMucJoinDecision::MaybeCommitted => return Vec::new(),
+                        RemoteMucJoinDecision::RetryableNoEffect => {
+                            return vec![build_muc_presence_error_xml(
+                                room_jid,
+                                &nick,
+                                sender_jid,
+                                StanzaError::new(
+                                    ErrorType::Wait,
+                                    DefinedCondition::ResourceConstraint,
+                                    "en",
+                                    "This room's remote owner is temporarily unavailable; \
+                                     please retry.",
+                                ),
+                            )];
+                        }
+                        RemoteMucJoinDecision::LocalRoomOrUnclaimed => {}
+                    }
+                }
+
                 if managed_channel.is_none()
                     && !room_preparation_pending
                     && !server_permission_allowed(
@@ -1054,91 +1254,53 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 .await
                 {
                     Ok(acquisition) => acquisition,
-                    // ADR-0017 Phase 3 Slice 7 FIX 6 (council-adjudicated):
-                    // another node genuinely, currently owns this room's
-                    // claim. Phase 4 first tries the ordered relay MUC proxy
-                    // so the owning RoomActor remains the single writer.
-                    Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                    // The local registry cannot currently serve this room:
+                    // either a fresh foreign owner is already known or an
+                    // exact local generation is still reconciling. Phase 4
+                    // first asks the ordered-relay bridge, whose authoritative
+                    // claim read proxies only to a fresh foreign owner, so the
+                    // owning RoomActor remains the single writer. If the room
+                    // is local, unclaimed, or unavailable, preserve the
+                    // variant-specific retryable fallback below.
+                    Err(
+                        ownership_error @ (
+                            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)
+                            | waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_)
+                        ),
+                    ) => {
                         #[cfg(feature = "clustering")]
                         if let Some(origin) = ordered_relay_origin.as_ref() {
-                            if let Some(bridge) = state
-                                .deps
-                                .app_state
-                                .clustering_claims
-                                .ordered_relay_delivery_bridge
-                                .as_ref()
+                            match try_proxy_remote_muc_join(
+                                state,
+                                room_jid,
+                                sender_jid,
+                                &nick,
+                                presence_show,
+                                origin,
+                            )
+                            .await
                             {
-                                let mut presence = xmpp_parsers::presence::Presence::new(
-                                    xmpp_parsers::presence::Type::None,
-                                );
-                                presence.from = Some(jid::Jid::from(sender_jid.clone()));
-                                presence.to = room_jid
-                                    .clone()
-                                    .with_resource_str(&nick)
-                                    .ok()
-                                    .map(jid::Jid::from);
-                                if let Some(show) = presence_show {
-                                    presence.show = Some(show.to_xep0045());
+                                RemoteMucJoinDecision::Delivered(replies) => {
+                                    return replies
+                                        .into_iter()
+                                        .map(|reply| stanza_to_xml(&reply))
+                                        .collect();
                                 }
-                                let stanza = Stanza::Presence(presence);
-                                let _remote_muc_membership_guard = state
-                                    .deps
-                                    .protocol
-                                    .remote_muc_memberships
-                                    .lock_membership(sender_jid, room_jid)
-                                    .await;
-                                match remote_muc_join_decision(
-                                    bridge
-                                        .try_proxy_muc_remote(
-                                            room_jid,
-                                            &stanza,
-                                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
-                                            origin,
-                                        )
-                                        .await,
-                                ) {
-                                    Some(RemoteMucJoinDecision::Delivered(replies)) => {
-                                        state
-                                            .deps
-                                            .protocol
-                                            .remote_muc_memberships
-                                            .record_join(sender_jid, room_jid, &nick);
-                                        return replies
-                                            .into_iter()
-                                            .map(|reply| stanza_to_xml(&reply))
-                                            .collect();
-                                    }
-                                    Some(RemoteMucJoinDecision::MaybeCommitted) => {
-                                        // The remote owner may already have mutated room state; a
-                                        // local presence error would lie. Keep cleanup state and let
-                                        // the client retry/resynchronize instead.
-                                        state
-                                            .deps
-                                            .protocol
-                                            .remote_muc_memberships
-                                            .record_join(sender_jid, room_jid, &nick);
-                                        return Vec::new();
-                                    }
-                                    None => {}
-                                }
+                                RemoteMucJoinDecision::MaybeCommitted => return Vec::new(),
+                                RemoteMucJoinDecision::RetryableNoEffect
+                                | RemoteMucJoinDecision::LocalRoomOrUnclaimed => {}
                             }
                         }
-                        return vec![build_muc_presence_error_xml(
-                            room_jid,
-                            &nick,
-                            sender_jid,
-                            StanzaError::new(
-                                ErrorType::Wait,
-                                DefinedCondition::ResourceConstraint,
-                                "en",
+                        let message = match ownership_error {
+                            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_) => {
                                 "This room's ownership is currently held by another node; \
-                                 please retry.",
-                            ),
-                        )];
-                    }
-                    Err(
-                        waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
-                    ) => {
+                                 please retry."
+                            }
+                            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_) => {
+                                "This room's ownership is being reconciled; please retry."
+                            }
+                            _ => unreachable!("match arm accepts only remote-proxyable ownership errors"),
+                        };
                         return vec![build_muc_presence_error_xml(
                             room_jid,
                             &nick,
@@ -1147,7 +1309,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                 ErrorType::Wait,
                                 DefinedCondition::ResourceConstraint,
                                 "en",
-                                "This room's ownership is being reconciled; please retry.",
+                                message,
                             ),
                         )];
                     }
@@ -2126,13 +2288,17 @@ mod resolver_sync_retry_tests {
         else {
             panic!("new scheduler starts one worker");
         };
-        tokio::spawn(run_resolver_affiliation_sync_worker(
-            actor,
-            room_registry,
-            room_jid,
-            member,
-            *worker,
-        ))
+        tokio::spawn(async move {
+            let _ = run_resolver_affiliation_sync_worker(
+                actor,
+                room_registry,
+                None,
+                room_jid,
+                member,
+                *worker,
+            )
+            .await;
+        })
     }
 
     #[tokio::test(start_paused = true)]

@@ -267,6 +267,17 @@ async fn handle_xmpp_frame_impl(
             // an IQ get/set gets a conformant resource-constraint/wait error and
             // message/presence are dropped (logged + metered).
             let backstop = StanzaBackstop::capture(&stanza, phase.bound_jid());
+            let mut room_scope = match state.deps.room_serving.try_scope() {
+                Ok(scope) => scope,
+                Err(error) => {
+                    warn!(?error, "Rejecting inbound stanza: room serving is closed");
+                    if let Some(inbound_sequence) = reserved_inbound_for_sm {
+                        sm_inbound_completion.abandon(inbound_sequence);
+                    }
+                    return Vec::new();
+                }
+            };
+            room_scope.arm();
             let dispatch = async {
                 match *stanza {
                     Stanza::Iq(iq) => {
@@ -320,11 +331,21 @@ async fn handle_xmpp_frame_impl(
                 }
             };
             let (responses, disposition) = match run_with_backstop(backstop, dispatch).await {
-                Ok(responses) => (responses, InboundDisposition::Handled),
+                Ok(responses) => {
+                    room_scope.complete_clean();
+                    (responses, InboundDisposition::Handled)
+                }
                 Err(StanzaTimeout::HandledIq(reply)) => {
+                    // The dispatch future was cancelled after it may already
+                    // have committed a room-side effect. Keep serving live
+                    // traffic, but permanently forbid a clean claim release.
+                    room_scope.poison();
                     (vec![element_to_xml(reply)], InboundDisposition::Handled)
                 }
-                Err(StanzaTimeout::Unhandled) => (Vec::new(), InboundDisposition::Unhandled),
+                Err(StanzaTimeout::Unhandled) => {
+                    room_scope.poison();
+                    (Vec::new(), InboundDisposition::Unhandled)
+                }
             };
             settle_inbound_dispatch(
                 disposition,

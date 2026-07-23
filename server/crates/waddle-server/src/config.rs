@@ -178,8 +178,9 @@ pub struct ClusteringConfig {
     /// does not have to wait out the full production default in real
     /// wall-clock time.
     pub orphan_reaper_interval: Duration,
-    /// Enable the relay's fault-injection message set (crash/sleep) for the
-    /// multi-process cluster harness (`WADDLE_CLUSTERING_FAULT_INJECTION`).
+    /// Enable the relay's fault-injection message set (crash/sleep/peer probe)
+    /// for the multi-process cluster harness
+    /// (`WADDLE_CLUSTERING_FAULT_INJECTION`).
     /// Never enable in production: it lets any enrolled peer stop this node's
     /// relay or hold its mailbox.
     pub fault_injection: bool,
@@ -187,6 +188,11 @@ pub struct ClusteringConfig {
     /// (`WADDLE_CLUSTERING_NODE_ID_FILE`) so the harness can resolve this
     /// node's relay name — mirrors the `WADDLE_HTTP_PORT_FILE` convention.
     pub node_id_file: Option<std::path::PathBuf>,
+    /// Harness-only filesystem barrier that makes two subprocesses queue
+    /// their first bootstrap dial before either swarm advances the handshake
+    /// (`WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR`). Requires
+    /// `fault_injection`; absent in production.
+    pub fault_dial_barrier_dir: Option<std::path::PathBuf>,
     /// Node-lease (`clustering_nodes`) heartbeat/TTL timing (ADR-0017 Phase 3
     /// Slice 2, Q6): a **second**, conceptually distinct lease from
     /// `lease` above — that one guards a leased keypair-pool slot (libp2p
@@ -259,6 +265,7 @@ impl std::fmt::Debug for ClusteringConfig {
             .field("orphan_reaper_interval", &self.orphan_reaper_interval)
             .field("fault_injection", &self.fault_injection)
             .field("node_id_file", &self.node_id_file)
+            .field("fault_dial_barrier_dir", &self.fault_dial_barrier_dir)
             .field("node_lease", &self.node_lease)
             .field("self_fence", &self.self_fence)
             .field("steal_intent", &self.steal_intent)
@@ -485,6 +492,7 @@ impl Default for ClusteringConfig {
             orphan_reaper_interval: Duration::from_secs(120),
             fault_injection: false,
             node_id_file: None,
+            fault_dial_barrier_dir: None,
             node_lease: ClusteringNodeLeaseConfig::default(),
             self_fence: ClusteringSelfFenceConfig::default(),
             steal_intent: ClusteringStealIntentConfig::default(),
@@ -790,6 +798,16 @@ impl ClusteringConfig {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from);
+        let fault_dial_barrier_dir = vars
+            .get("WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+        if fault_dial_barrier_dir.is_some() && !fault_injection {
+            return Err("WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR requires \
+                 WADDLE_CLUSTERING_FAULT_INJECTION=true"
+                .to_string());
+        }
         // FIX 6: moved from a raw `std::env::var` read at the `mod.rs`
         // clustering-bringup call site into the typed config pipeline, like
         // every sibling var — trimmed, empty ⇒ `None`, never a parse
@@ -1000,6 +1018,7 @@ impl ClusteringConfig {
             orphan_reaper_interval,
             fault_injection,
             node_id_file,
+            fault_dial_barrier_dir,
             node_lease: ClusteringNodeLeaseConfig {
                 heartbeat_interval: node_lease_heartbeat_interval,
                 lease_ttl: node_lease_ttl,
@@ -1819,6 +1838,10 @@ mod tests {
             ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "2000"),
             ("WADDLE_CLUSTERING_FAULT_INJECTION", "true"),
             ("WADDLE_CLUSTERING_NODE_ID_FILE", "/tmp/node-id"),
+            (
+                "WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR",
+                "/tmp/dial-barrier",
+            ),
         ])
         .unwrap();
         assert_eq!(config.dial_interval.as_millis(), 2000);
@@ -1827,15 +1850,27 @@ mod tests {
             config.node_id_file,
             Some(std::path::PathBuf::from("/tmp/node-id"))
         );
+        assert_eq!(
+            config.fault_dial_barrier_dir,
+            Some(std::path::PathBuf::from("/tmp/dial-barrier"))
+        );
 
         let defaults = ClusteringConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
         assert_eq!(defaults.dial_interval.as_secs(), 15);
         assert!(!defaults.fault_injection);
         assert!(defaults.node_id_file.is_none());
+        assert!(defaults.fault_dial_barrier_dir.is_none());
 
         let err =
             ClusteringConfig::from_vars([("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "0")]).unwrap_err();
         assert!(err.contains("WADDLE_CLUSTERING_DIAL_INTERVAL_MS"));
+
+        let err = ClusteringConfig::from_vars([(
+            "WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR",
+            "/tmp/dial-barrier",
+        )])
+        .unwrap_err();
+        assert!(err.contains("WADDLE_CLUSTERING_FAULT_INJECTION"));
     }
 
     // FIX 6: `pod_template_hash` moved from a raw `std::env::var` read at the

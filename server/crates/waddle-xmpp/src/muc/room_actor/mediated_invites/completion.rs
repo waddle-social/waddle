@@ -12,6 +12,9 @@ impl kameo::message::Message<FinalizeMediatedInviteGrant> for RoomActor {
         msg: FinalizeMediatedInviteGrant,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.seal_state.is_sealed() {
+            return MediatedInviteGrantFinalization::RoomSealed;
+        }
         let Some(record) = self.invite_operations.get_mut(&msg.operation_id) else {
             return MediatedInviteGrantFinalization::Superseded;
         };
@@ -60,6 +63,9 @@ impl kameo::message::Message<AcknowledgeMediatedInviteOperation> for RoomActor {
         msg: AcknowledgeMediatedInviteOperation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.seal_state.is_sealed() {
+            return MediatedInviteOperationAcknowledgement::RoomSealed;
+        }
         let Some(record) = self.invite_operations.get(&msg.operation_id) else {
             return MediatedInviteOperationAcknowledgement::Unknown;
         };

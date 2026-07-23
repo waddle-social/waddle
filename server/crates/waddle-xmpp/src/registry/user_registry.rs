@@ -27,8 +27,8 @@ use super::user_actor::{
 };
 use crate::metrics;
 use crate::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
-    SharedNodeIdentity, StalePredicate,
+    ClaimEpoch, ClaimError, ClaimStore, CurrentNodeIdentityPermit, DisabledNodeIdentity, Entity,
+    EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity, StalePredicate,
 };
 
 const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
@@ -181,6 +181,44 @@ impl UserRegistryActor {
         actor_ref
     }
 
+    async fn discard_new_user_actor(
+        &mut self,
+        bare_jid: &BareJid,
+        actor_ref: &ActorRef<UserActor>,
+    ) {
+        let Some(entry) = self.users.get(bare_jid) else {
+            return;
+        };
+        if entry.actor_ref.id() != actor_ref.id() || !entry.resources.is_empty() {
+            return;
+        }
+        let Some(entry) = self.users.remove(bare_jid) else {
+            return;
+        };
+        entry.actor_ref.kill();
+        self.release_user_claim(bare_jid, &entry.claim).await;
+    }
+
+    fn demote_user_actor_if_owner(
+        &mut self,
+        bare_jid: &BareJid,
+        owner: &NodeIdentity,
+    ) -> Option<DemotedUserActor> {
+        let entry = self.users.get(bare_jid)?.clone();
+        if entry.claim.owner != *owner {
+            return None;
+        }
+        let removed = self.users.remove(bare_jid)?;
+        removed.actor_ref.kill();
+        Some(DemotedUserActor {
+            resources: removed
+                .resources
+                .into_iter()
+                .map(|(jid, entry)| DemotedUserResource { jid, entry })
+                .collect(),
+        })
+    }
+
     async fn acquire_and_publish_user(
         &mut self,
         bare_jid: BareJid,
@@ -192,6 +230,99 @@ impl UserRegistryActor {
             return Err(UserRegistryError::ClaimUnavailable(bare_jid));
         };
         Ok(self.spawn_user_actor(bare_jid, claim))
+    }
+
+    async fn acquire_and_publish_user_under_permit(
+        &mut self,
+        bare_jid: BareJid,
+        publication_permit: &CurrentNodeIdentityPermit,
+    ) -> Result<ActorRef<UserActor>, UserRegistryError> {
+        let claim = self.acquire_user_claim(&bare_jid).await?;
+        let Some(publication_guard) = self.node_identity.upgrade_permit(publication_permit) else {
+            self.release_user_claim(&bare_jid, &claim).await;
+            return Err(UserRegistryError::ClaimUnavailable(bare_jid));
+        };
+        if claim.owner != *publication_guard.identity() {
+            drop(publication_guard);
+            self.release_user_claim(&bare_jid, &claim).await;
+            return Err(UserRegistryError::ClaimUnavailable(bare_jid));
+        }
+        // `spawn_user_actor` is synchronous: hold upgraded authority only
+        // across the exact local publication, never an actor or backend await.
+        Ok(self.spawn_user_actor(bare_jid, claim))
+    }
+
+    async fn register_user_resource(
+        &mut self,
+        jid: FullJid,
+        entry: ConnectionEntry,
+        publication_permit: Option<&CurrentNodeIdentityPermit>,
+    ) -> Result<(), UserRegistryError> {
+        let bare_jid = jid.to_bare();
+        let mirrored_entry = entry.clone();
+        if self.poisoned_users.contains(&bare_jid) {
+            return Err(UserRegistryError::UserActorStateLost(bare_jid));
+        }
+
+        let (user_actor, new_actor) = if let Some(actor_ref) = self
+            .existing_user_actor_for_current_claim(&bare_jid)
+            .await?
+        {
+            (actor_ref, false)
+        } else if let Some(publication_permit) = publication_permit {
+            (
+                self.acquire_and_publish_user_under_permit(bare_jid.clone(), publication_permit)
+                    .await?,
+                true,
+            )
+        } else {
+            (self.acquire_and_publish_user(bare_jid.clone()).await?, true)
+        };
+
+        // Existing-actor registration and new-actor resource publication are
+        // both publication boundaries. Upgrade only after all potentially
+        // unbounded claim-store validation/acquisition work, then retain this
+        // short-lived guard across the bounded child ask and synchronous
+        // resource-map insertion. A queued message never owns this guard.
+        let publication_guard = if let Some(publication_permit) = publication_permit {
+            match self.node_identity.upgrade_permit(publication_permit) {
+                Some(publication_guard) => Some(publication_guard),
+                None => {
+                    if new_actor {
+                        self.discard_new_user_actor(&bare_jid, &user_actor).await;
+                    }
+                    return Err(UserRegistryError::ClaimUnavailable(bare_jid));
+                }
+            }
+        } else {
+            None
+        };
+
+        match user_actor
+            .ask(RegisterConnection {
+                jid: jid.clone(),
+                entry,
+            })
+            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
+            .reply_timeout(CHILD_ACTOR_TIMEOUT)
+            .await
+        {
+            Ok(()) => {
+                if let Some(user) = self.users.get_mut(&bare_jid) {
+                    user.resources.insert(jid, mirrored_entry);
+                }
+                drop(publication_guard);
+            }
+            Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
+                return Err(UserRegistryError::UserActorBusy(bare_jid));
+            }
+            Err(_) => {
+                drop(publication_guard);
+                return Err(self.mark_actor_state_lost(&bare_jid).await);
+            }
+        }
+
+        Ok(())
     }
 
     async fn release_user_claim(&self, bare_jid: &BareJid, claim: &UserClaimLease) {
@@ -353,6 +484,13 @@ impl UserRegistryActor {
                         jid = %jid,
                         requester = %bare_jid,
                         "stale UserActor resource force-detach identity mismatch; refusing claim reuse"
+                    );
+                    return false;
+                }
+                Ok(Ok(ForceDetachOutcome::Unavailable)) => {
+                    warn!(
+                        jid = %jid,
+                        "stale UserActor resource force-detach was unavailable; refusing claim reuse"
                     );
                     return false;
                 }
@@ -531,78 +669,106 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
         msg: RegisterUserResource,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let bare_jid = msg.jid.to_bare();
-        let mirrored_entry = msg.entry.clone();
-        if self.poisoned_users.contains(&bare_jid) {
-            return Err(UserRegistryError::UserActorStateLost(bare_jid));
-        }
-
-        let user_actor = if let Some(actor_ref) = self
-            .existing_user_actor_for_current_claim(&bare_jid)
-            .await?
-        {
-            actor_ref
-        } else {
-            self.acquire_and_publish_user(bare_jid.clone()).await?
-        };
-
-        match user_actor
-            .ask(RegisterConnection {
-                jid: msg.jid.clone(),
-                entry: msg.entry,
-            })
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
-            .await
-        {
-            Ok(()) => {
-                if let Some(user) = self.users.get_mut(&bare_jid) {
-                    user.resources.insert(msg.jid.clone(), mirrored_entry);
-                }
-            }
-            Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
-                return Err(UserRegistryError::UserActorBusy(bare_jid));
-            }
-            Err(_) => return Err(self.mark_actor_state_lost(&bare_jid).await),
-        }
-
-        Ok(())
+        self.register_user_resource(msg.jid, msg.entry, None).await
     }
 }
 
-/// Register a user resource without replacing a different owner token.
+/// Register a local WebSocket resource while reusing the publication guard
+/// already acquired before its ConnectionRegistry insertion.
+///
+/// The caller retains the real guard through rollback enqueue. This message
+/// carries only a weak permit, so a timed-out ask cannot retain the identity
+/// read lock and deadlock a queued terminal-disable writer.
+pub struct RegisterUserResourceUnderAuthority {
+    pub jid: FullJid,
+    pub entry: ConnectionEntry,
+    pub publication_permit: CurrentNodeIdentityPermit,
+}
+
+impl kameo::message::Message<RegisterUserResourceUnderAuthority> for UserRegistryActor {
+    type Reply = Result<(), UserRegistryError>;
+
+    async fn handle(
+        &mut self,
+        msg: RegisterUserResourceUnderAuthority,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // Prove the caller still owns live authority when this mailbox handler
+        // begins, but never retain the upgraded guard across an await.
+        let Some(publication_guard) = self.node_identity.upgrade_permit(&msg.publication_permit)
+        else {
+            return Err(UserRegistryError::ClaimUnavailable(msg.jid.to_bare()));
+        };
+        drop(publication_guard);
+        self.register_user_resource(msg.jid, msg.entry, Some(&msg.publication_permit))
+            .await
+    }
+}
+
+/// Register a user resource without replacing a different owner token while
+/// reusing the publication guard held by the clustered remote-owner caller.
 ///
 /// This keeps clustered remote-resource mirrors from deleting a live local
 /// same-full-JID resource that won the slot while the remote register was in
-/// flight. It otherwise follows [`RegisterUserResource`] so user lifecycle and
-/// claim acquisition remain serialized by this actor.
-pub struct RegisterUserResourceIfOwnerOrAbsent {
+/// flight. The weak permit also prevents an already-queued relay registration
+/// from publishing a resource after terminal node-identity disable.
+pub struct RegisterUserResourceIfOwnerOrAbsentUnderAuthority {
     pub jid: FullJid,
     pub entry: ConnectionEntry,
     pub owner: Arc<AtomicBool>,
+    pub publication_permit: CurrentNodeIdentityPermit,
 }
 
-impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegistryActor {
+impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsentUnderAuthority>
+    for UserRegistryActor
+{
     type Reply = Result<bool, UserRegistryError>;
 
     async fn handle(
         &mut self,
-        msg: RegisterUserResourceIfOwnerOrAbsent,
+        msg: RegisterUserResourceIfOwnerOrAbsentUnderAuthority,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // Reject a message that only begins running after its caller has
+        // dropped publication authority. Never retain this first upgrade
+        // across claim-store I/O.
+        let Some(publication_guard) = self.node_identity.upgrade_permit(&msg.publication_permit)
+        else {
+            return Err(UserRegistryError::ClaimUnavailable(msg.jid.to_bare()));
+        };
+        drop(publication_guard);
+
         let bare_jid = msg.jid.to_bare();
         let mirrored_entry = msg.entry.clone();
         if self.poisoned_users.contains(&bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(bare_jid));
         }
 
-        let user_actor = if let Some(actor_ref) = self
+        let (user_actor, new_actor) = if let Some(actor_ref) = self
             .existing_user_actor_for_current_claim(&bare_jid)
             .await?
         {
-            actor_ref
+            (actor_ref, false)
         } else {
-            self.acquire_and_publish_user(bare_jid.clone()).await?
+            (
+                self.acquire_and_publish_user_under_permit(
+                    bare_jid.clone(),
+                    &msg.publication_permit,
+                )
+                .await?,
+                true,
+            )
+        };
+
+        // Claim validation/acquisition above may await. Re-upgrade at the
+        // exact resource-publication boundary and retain the short guard
+        // through the bounded child ask plus synchronous registry mirror.
+        let Some(publication_guard) = self.node_identity.upgrade_permit(&msg.publication_permit)
+        else {
+            if new_actor {
+                self.discard_new_user_actor(&bare_jid, &user_actor).await;
+            }
+            return Err(UserRegistryError::ClaimUnavailable(bare_jid));
         };
 
         match user_actor
@@ -621,12 +787,16 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
                         user.resources.insert(msg.jid.clone(), mirrored_entry);
                     }
                 }
+                drop(publication_guard);
                 Ok(registered)
             }
             Err(SendError::MailboxFull(_) | SendError::Timeout(_)) => {
                 Err(UserRegistryError::UserActorBusy(bare_jid))
             }
-            Err(_) => Err(self.mark_actor_state_lost(&bare_jid).await),
+            Err(_) => {
+                drop(publication_guard);
+                Err(self.mark_actor_state_lost(&bare_jid).await)
+            }
         }
     }
 }
@@ -779,19 +949,52 @@ impl kameo::message::Message<DemoteUserActorIfOwner> for UserRegistryActor {
         msg: DemoteUserActorIfOwner,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let entry = self.users.get(&msg.bare_jid)?.clone();
-        if entry.claim.owner != msg.owner {
-            return None;
+        self.demote_user_actor_if_owner(&msg.bare_jid, &msg.owner)
+    }
+}
+
+/// Result of graceful-shutdown retirement after publication authority was
+/// terminally disabled.
+#[derive(kameo::Reply)]
+pub enum RetireUserActorAfterAuthorityDisabledOutcome {
+    /// The proof did not originate from this registry's exact identity source,
+    /// or that source is not terminally disabled.
+    AuthorityNotDisabled,
+    /// The proof is valid and no exact local UserActor remains.
+    AlreadyAbsent,
+    /// The proof is valid and the exact former owner's actor was removed.
+    Retired(DemotedUserActor),
+}
+
+/// Gracefully retire one exact-owner UserActor only after verifying a
+/// source-bound terminal-disable proof against this registry's own shared
+/// identity handle.
+pub struct RetireUserActorAfterAuthorityDisabled {
+    pub bare_jid: BareJid,
+    pub disabled_identity: DisabledNodeIdentity,
+}
+
+impl kameo::message::Message<RetireUserActorAfterAuthorityDisabled> for UserRegistryActor {
+    type Reply = RetireUserActorAfterAuthorityDisabledOutcome;
+
+    async fn handle(
+        &mut self,
+        msg: RetireUserActorAfterAuthorityDisabled,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.node_identity.owns_disabled(&msg.disabled_identity) {
+            warn!(
+                jid = %msg.bare_jid,
+                "refusing graceful UserActor retirement without this registry's \
+                 terminal-disable proof"
+            );
+            return RetireUserActorAfterAuthorityDisabledOutcome::AuthorityNotDisabled;
         }
-        let removed = self.users.remove(&msg.bare_jid)?;
-        removed.actor_ref.kill();
-        Some(DemotedUserActor {
-            resources: removed
-                .resources
-                .into_iter()
-                .map(|(jid, entry)| DemotedUserResource { jid, entry })
-                .collect(),
-        })
+        match self.demote_user_actor_if_owner(&msg.bare_jid, msg.disabled_identity.prior_identity())
+        {
+            Some(demoted) => RetireUserActorAfterAuthorityDisabledOutcome::Retired(demoted),
+            None => RetireUserActorAfterAuthorityDisabledOutcome::AlreadyAbsent,
+        }
     }
 }
 

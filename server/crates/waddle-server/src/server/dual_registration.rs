@@ -44,9 +44,10 @@ use jid::FullJid;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use tracing::warn;
+use waddle_xmpp::ownership::CurrentNodeIdentityPermit;
 use waddle_xmpp::registry::{
-    ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
-    UserRegistryError,
+    ConnectionEntry, RegisterUserResource, RegisterUserResourceUnderAuthority,
+    UnregisterUserResource, UserRegistryActor, UserRegistryError,
 };
 
 /// Upper bound on how long the fail-closed register `ask` may wait for the
@@ -126,6 +127,43 @@ pub(crate) async fn mirror_register_outcome(
                 "dual-registration: authoritative register into user_registry \
                  actor failed; rolling back DashMap registration and failing \
                  the bind"
+            );
+            MirrorRegisterOutcome::Failed
+        }
+    }
+}
+
+/// Authoritative local-bind mirror that reuses a weak permit minted from the
+/// publication guard acquired before the ConnectionRegistry insertion.
+///
+/// The caller retains the real guard through rollback enqueue. The actor
+/// message cannot keep terminal disable blocked if this bounded ask times out.
+pub(crate) async fn mirror_register_outcome_under_authority(
+    user_registry: &ActorRef<UserRegistryActor>,
+    jid: FullJid,
+    entry: ConnectionEntry,
+    publication_permit: CurrentNodeIdentityPermit,
+) -> MirrorRegisterOutcome {
+    match user_registry
+        .ask(RegisterUserResourceUnderAuthority {
+            jid: jid.clone(),
+            entry,
+            publication_permit,
+        })
+        .mailbox_timeout(BIND_REGISTER_TIMEOUT)
+        .reply_timeout(BIND_REGISTER_TIMEOUT)
+        .await
+    {
+        Ok(()) => MirrorRegisterOutcome::Registered,
+        Err(SendError::HandlerError(UserRegistryError::ClaimHeldByAnotherNode(_))) => {
+            MirrorRegisterOutcome::ForeignOwner
+        }
+        Err(error) => {
+            warn!(
+                jid = %jid,
+                %error,
+                "dual-registration: guarded authoritative register into user_registry \
+                 actor failed; rolling back DashMap registration and failing the bind"
             );
             MirrorRegisterOutcome::Failed
         }

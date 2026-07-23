@@ -35,6 +35,8 @@ pub use user_actor::GetResources;
 pub use user_registry::{
     DemoteUserActor, DemoteUserActorIfOwner, DemotedUserActor, DemotedUserResource,
     GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ListUsersOwnedBy, ReapUserIfEmpty,
-    RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent, RemoveUser, UnregisterUserResource,
-    UserCount, UserRegistryActor, UserRegistryError, WireUserClusteringClaims,
+    RegisterUserResource, RegisterUserResourceIfOwnerOrAbsentUnderAuthority,
+    RegisterUserResourceUnderAuthority, RemoveUser, RetireUserActorAfterAuthorityDisabled,
+    RetireUserActorAfterAuthorityDisabledOutcome, UnregisterUserResource, UserCount,
+    UserRegistryActor, UserRegistryError, WireUserClusteringClaims,
 };

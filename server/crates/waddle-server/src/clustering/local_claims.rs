@@ -22,20 +22,22 @@
 //! registry is created later in `server/http.rs`, then wired into the handle
 //! that `start_if_enabled` already handed to `run_node_lease`.
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use waddle_xmpp::muc::room_actor::HealthCheck;
+use waddle_xmpp::muc::room_actor::{HealthCheck, RoomSealState, SealForShutdown};
 use waddle_xmpp::muc::RoomRegistry;
-use waddle_xmpp::ownership::{Entity, EntityType};
+use waddle_xmpp::ownership::{DisabledNodeIdentity, Entity, EntityType};
 use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
 use waddle_xmpp::registry::{
     ConnectionRegistry, DemoteUserActor, DemoteUserActorIfOwner, DemotedUserResource,
     ForceDetachOutcome, ForceDetachRequest, GetResources, GetUserForLocalClaim, ListUsers,
-    ListUsersOwnedBy, UserRegistryActor,
+    ListUsersOwnedBy, RetireUserActorAfterAuthorityDisabled,
+    RetireUserActorAfterAuthorityDisabledOutcome, UserRegistryActor,
 };
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
@@ -284,11 +286,14 @@ impl LocallyClaimedEntities for RoomLocalClaims {
         // `owned()` is documented as "local bookkeeping only, never a
         // Postgres read" — `list_rooms()` is exactly that: an in-memory
         // enumeration of this process's live `RoomActor`s (an actor ask,
-        // hence `async`, but no Postgres round-trip). Every
-        // locally-spawned room always holds this node's claim by
-        // construction (the registry's `GetOrCreateRoom`/`CreateRoom`/
-        // `CreateInstantRoom` acquire the claim before spawning), so this
-        // enumeration is exactly the owned-entity set.
+        // hence `async`, but no Postgres round-trip). During terminal
+        // shutdown it intentionally also includes dead entries whose exact
+        // claim must remain inventoried: they cannot answer the seal barrier,
+        // so the drain abandons them for node-expiry recovery rather than
+        // releasing unsafely. Every locally-spawned room always holds this
+        // node's claim by construction (the registry's `GetOrCreateRoom`/
+        // `CreateRoom`/`CreateInstantRoom` acquire the claim before
+        // spawning), so this enumeration is exactly the owned-entity set.
         match registry.list_rooms().await {
             Ok(mut jids) => {
                 if let Ok(pending) = registry.list_pending_room_release_jids().await {
@@ -421,18 +426,23 @@ impl LocallyClaimedEntities for RoomLocalClaims {
     /// no confirmation that a mutation already queued ahead of the drain
     /// snapshot has finished its final fenced write).
     ///
-    /// Issues the SAME `HealthCheck` ask [`Self::health_check`] above uses,
-    /// as a genuine mailbox-ordering barrier: kameo serializes each actor's
-    /// mailbox strictly in order (see [`HealthCheck`]'s own doc comment),
-    /// and every mutation handler this actor exposes
-    /// (`UpdateConfig`/`RollbackConfigIfRevision`/
-    /// `UpdateGroupDmConfigByMember`/`SetSubject`/`ChangeAffiliation`, and
-    /// the affiliation-bulk-apply path) synchronously `.await`s its own
-    /// `gate_mutation()` check and durable persist call
-    /// (`persist_config`/`persist_subject`/`persist_affiliation`) before
-    /// returning a reply — so a mutation enqueued ahead of this ask has
-    /// already run its handler to completion, including its durable write's
-    /// commit, by the time this ask's own reply lands. A room with no live
+    /// Issues a typed [`SealForShutdown`] ask as a mailbox-ordering barrier:
+    /// kameo serializes each actor's mailbox strictly in order, so every
+    /// serving handler enqueued ahead of the seal has finished before the
+    /// reply. In particular, durability-gated config/subject/affiliation/admin
+    /// and invite handlers synchronously await their ownership check and
+    /// fenced persist before returning, proving their final write completed.
+    ///
+    /// Once installed, the central actor gate and typed handler outcomes
+    /// refuse the full post-seal serving surface: joins; leaves and other
+    /// occupancy, presence, Muji, and in-call updates; pin/config/admin/
+    /// affiliation/invite mutations; restore/hydration; destruction; and both
+    /// legacy broadcast and current dispatch-chain traffic preparation.
+    /// Self-ping and occupant authorization reads also fail closed. Harmless
+    /// read-only diagnostics remain available until the actor is hard-retired,
+    /// then the exact claim is released.
+    ///
+    /// A room with no live
     /// local actor to ask, or one whose ask fails or times out (wedged),
     /// reports unsealed (`false`): [`crate::clustering::drain::
     /// run_shutdown_drain`] then leaves that claim held —
@@ -461,12 +471,123 @@ impl LocallyClaimedEntities for RoomLocalClaims {
             );
             return false;
         };
-        actor_ref
-            .ask(HealthCheck)
-            .mailbox_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
-            .reply_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
+        matches!(
+            actor_ref
+                .ask(SealForShutdown)
+                .mailbox_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
+                .reply_timeout(ROOM_HEALTH_CHECK_TIMEOUT)
+                .await,
+            Ok(RoomSealState::Shutdown | RoomSealState::OwnershipLost)
+        )
+    }
+
+    async fn begin_room_shutdown(&self) -> bool {
+        let Some(registry) = self.registry.get() else {
+            // An unwired registry cannot own or publish rooms.
+            return true;
+        };
+        match registry.drain_room_ownership_for_shutdown(Vec::new()).await {
+            Ok(outcome) => {
+                tracing::debug!(
+                    released = outcome.released,
+                    preserved_live = outcome.preserved_live,
+                    retained = outcome.retained,
+                    "RoomLocalClaims: terminal room ownership admission gate is active"
+                );
+                if outcome.released != 0 {
+                    tracing::error!(
+                        released = outcome.released,
+                        "RoomLocalClaims: registry terminal barrier unexpectedly released claims; \
+                         refusing process-wide batch release"
+                    );
+                    return false;
+                }
+                if outcome.retained != 0 {
+                    tracing::warn!(
+                        retained = outcome.retained,
+                        "RoomLocalClaims: terminal room ownership reconciliation retained \
+                         ambiguous responsibility; refusing all room claim releases"
+                    );
+                    return false;
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "RoomLocalClaims: could not confirm terminal room ownership admission gate; \
+                     preserving every live room claim"
+                );
+                false
+            }
+        }
+    }
+
+    async fn abandon_room_shutdown(&self) -> bool {
+        let Some(registry) = self.registry.get() else {
+            // An unwired registry cannot own or publish rooms.
+            return true;
+        };
+        match registry
+            .abandon_room_ownership_for_shutdown(Vec::new())
             .await
-            .is_ok()
+        {
+            Ok(outcome) => {
+                tracing::warn!(
+                    preserved_live = outcome.preserved_live,
+                    retained = outcome.retained,
+                    "RoomLocalClaims: terminal no-release mode selected; every room claim \
+                     remains held for node-expiry recovery"
+                );
+                outcome.released == 0
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "RoomLocalClaims: terminal no-release registry barrier could not be \
+                     confirmed; no room release will be attempted"
+                );
+                false
+            }
+        }
+    }
+
+    async fn retire_room_after_shutdown(&self, entity: &Entity) -> bool {
+        let Some(registry) = self.registry.get() else {
+            return false;
+        };
+        let Some(room_jid) = Self::room_jid(entity) else {
+            return false;
+        };
+        match registry.get_room(room_jid.clone()).await {
+            Ok(Some(actor_ref)) => {
+                actor_ref.kill();
+                actor_ref.wait_for_shutdown().await;
+                if actor_ref.is_alive() {
+                    tracing::warn!(
+                        room = %room_jid,
+                        "RoomLocalClaims: hard-killed RoomActor still reports alive; \
+                         preserving its claim"
+                    );
+                    return false;
+                }
+                tracing::debug!(
+                    room = %room_jid,
+                    "RoomLocalClaims: hard-retired sealed RoomActor before claim release"
+                );
+                true
+            }
+            Ok(None) => true,
+            Err(error) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    %error,
+                    "RoomLocalClaims: could not resolve RoomActor for terminal retirement; \
+                     preserving its claim"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -582,9 +703,9 @@ impl UserLocalClaims {
         }
     }
 
-    async fn force_detach_resources(&self, bare_jid: &BareJid, resources: Vec<FullJid>) {
+    async fn force_detach_resources(&self, bare_jid: &BareJid, resources: Vec<FullJid>) -> bool {
         if resources.is_empty() {
-            return;
+            return true;
         }
         let Some(connection_registry) = self.connection_registry.get() else {
             tracing::warn!(
@@ -592,7 +713,7 @@ impl UserLocalClaims {
                 resource_count = resources.len(),
                 "UserLocalClaims::demote: no ConnectionRegistry wired; cannot force-detach live resources"
             );
-            return;
+            return false;
         };
         let entries = resources
             .into_iter()
@@ -602,14 +723,14 @@ impl UserLocalClaims {
                     .map(|entry| (jid, entry))
             })
             .collect();
-        self.force_detach_entries(bare_jid, entries).await;
+        self.force_detach_entries(bare_jid, entries).await
     }
 
     async fn force_detach_exact_resources(
         &self,
         bare_jid: &BareJid,
         resources: Vec<DemotedUserResource>,
-    ) {
+    ) -> bool {
         self.force_detach_entries(
             bare_jid,
             resources
@@ -617,17 +738,18 @@ impl UserLocalClaims {
                 .map(|resource| (resource.jid, resource.entry))
                 .collect(),
         )
-        .await;
+        .await
     }
 
     async fn force_detach_entries(
         &self,
         bare_jid: &BareJid,
         entries: Vec<(FullJid, waddle_xmpp::registry::ConnectionEntry)>,
-    ) {
+    ) -> bool {
         let Some(connection_registry) = self.connection_registry.get() else {
-            return;
+            return false;
         };
+        let mut retirement_verified = true;
         for (jid, entry) in entries {
             let owner = entry.carbons_handle();
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -647,19 +769,36 @@ impl UserLocalClaims {
                     }
                     Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
                         remove_after_wait = false;
+                        retirement_verified = false;
                         tracing::warn!(
                             jid = %jid,
                             requester = %bare_jid,
                             "UserLocalClaims::demote: force-detach identity mismatch; leaving registry entry untouched"
                         );
                     }
-                    Ok(Err(_closed)) => {
+                    Ok(Ok(ForceDetachOutcome::Unavailable)) => {
+                        remove_after_wait = false;
+                        retirement_verified = false;
                         tracing::warn!(
                             jid = %jid,
-                            "UserLocalClaims::demote: force-detach ack channel closed before response; leaving registry entry for connection-owned cleanup"
+                            "UserLocalClaims::demote: force-detach unavailable; preserving \
+                             the registry entry and UserActor claim"
+                        );
+                    }
+                    Ok(Err(_closed)) => {
+                        // A remote mirror's forwarding task can disappear
+                        // while the actual WebSocket on its socket node stays
+                        // live. A dropped ack therefore proves nothing about
+                        // teardown; preserve both route and claim.
+                        retirement_verified = false;
+                        tracing::warn!(
+                            jid = %jid,
+                            "UserLocalClaims::demote: accepted force-detach request lost its ack \
+                             sender; preserving the registry entry and UserActor claim"
                         );
                     }
                     Err(_elapsed) => {
+                        retirement_verified = false;
                         tracing::warn!(
                             jid = %jid,
                             timeout_ms = USER_FORCE_DETACH_ACK_TIMEOUT.as_millis() as u64,
@@ -667,11 +806,23 @@ impl UserLocalClaims {
                         );
                     }
                 },
-                Err(error) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_request)) => {
+                    // This may be a dead remote-forwarder task rather than
+                    // the socket-owning task itself. Without an authoritative
+                    // remote reply there is no teardown proof.
+                    retirement_verified = false;
                     tracing::warn!(
                         jid = %jid,
-                        ?error,
-                        "UserLocalClaims::demote: force-detach request could not be queued; leaving registry entry for connection-owned cleanup"
+                        "UserLocalClaims::demote: force-detach receiver is closed; preserving the \
+                         registry entry and UserActor claim"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_request)) => {
+                    retirement_verified = false;
+                    tracing::warn!(
+                        jid = %jid,
+                        "UserLocalClaims::demote: force-detach channel is full; leaving registry \
+                         entry for connection-owned cleanup"
                     );
                 }
             }
@@ -686,13 +837,14 @@ impl UserLocalClaims {
                 );
             }
         }
+        retirement_verified
     }
 }
 
 #[async_trait]
 impl LocallyClaimedEntities for UserLocalClaims {
     async fn owned(&self) -> Vec<Entity> {
-        let mut owned = Vec::new();
+        let mut owned = HashSet::new();
         if let Some(registry) = self.registry.get() {
             match registry
                 .ask(ListUsers)
@@ -718,12 +870,10 @@ impl LocallyClaimedEntities for UserLocalClaims {
         if let Some(connection_registry) = self.connection_registry.get() {
             for jid in connection_registry.list_connections() {
                 let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
-                if !owned.contains(&entity) {
-                    owned.push(entity);
-                }
+                owned.insert(entity);
             }
         }
-        owned
+        owned.into_iter().collect()
     }
 
     async fn demote(&self, entity: &Entity) {
@@ -764,7 +914,7 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 );
             }
         }
-        self.force_detach_resources(&bare_jid, resources).await;
+        let _ = self.force_detach_resources(&bare_jid, resources).await;
     }
 
     async fn health_check(&self, entity: &Entity) -> bool {
@@ -822,6 +972,126 @@ impl LocallyClaimedEntities for UserLocalClaims {
         }
     }
 
+    async fn retire_user_after_authority_disabled(
+        &self,
+        entity: &Entity,
+        disabled_identity: &DisabledNodeIdentity,
+    ) -> bool {
+        let Some(registry) = self.registry.get() else {
+            tracing::warn!(
+                %entity,
+                "UserLocalClaims shutdown retirement cannot verify UserActor absence: \
+                 no UserRegistryActor is wired"
+            );
+            return false;
+        };
+        let Some(connection_registry) = self.connection_registry.get() else {
+            tracing::warn!(
+                %entity,
+                "UserLocalClaims shutdown retirement cannot verify connection quiescence: \
+                 no ConnectionRegistry is wired"
+            );
+            return false;
+        };
+        let Some(bare_jid) = Self::user_jid(entity) else {
+            return false;
+        };
+
+        let demoted = match registry
+            .ask(RetireUserActorAfterAuthorityDisabled {
+                bare_jid: bare_jid.clone(),
+                disabled_identity: disabled_identity.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(RetireUserActorAfterAuthorityDisabledOutcome::Retired(demoted)) => Some(demoted),
+            Ok(RetireUserActorAfterAuthorityDisabledOutcome::AlreadyAbsent) => None,
+            Ok(RetireUserActorAfterAuthorityDisabledOutcome::AuthorityNotDisabled) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    "UserLocalClaims shutdown retirement proof was rejected by UserRegistryActor"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims shutdown retirement could not demote the exact UserActor"
+                );
+                return false;
+            }
+        };
+
+        let mut retirement_verified = match demoted {
+            Some(demoted) => {
+                self.force_detach_exact_resources(&bare_jid, demoted.resources)
+                    .await
+            }
+            None => true,
+        };
+
+        // Catch a connection that reached the DashMap before its
+        // authoritative UserActor mirror. The disabled publication barrier
+        // prevents that in-flight bind from successfully publishing a new
+        // same-incarnation actor/claim, so retiring the current exact
+        // ConnectionRegistry entries cannot race a legitimate replacement.
+        if retirement_verified {
+            let remaining_resources =
+                Self::connection_registry_resources(connection_registry, &bare_jid);
+            retirement_verified = self
+                .force_detach_resources(&bare_jid, remaining_resources)
+                .await;
+        }
+
+        let actor_absent = match registry
+            .ask(GetUserForLocalClaim {
+                bare_jid: bare_jid.clone(),
+            })
+            .mailbox_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .reply_timeout(USER_HEALTH_CHECK_TIMEOUT)
+            .await
+        {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    "UserLocalClaims shutdown retirement left a UserActor registered; \
+                     preserving its claim"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    jid = %bare_jid,
+                    ?error,
+                    "UserLocalClaims shutdown retirement could not verify UserActor absence; \
+                     preserving its claim"
+                );
+                false
+            }
+        };
+        let connections_absent =
+            Self::connection_registry_resources(connection_registry, &bare_jid).is_empty();
+        if !connections_absent {
+            tracing::warn!(
+                jid = %bare_jid,
+                "UserLocalClaims shutdown retirement left live ConnectionRegistry resources; \
+                 preserving its claim"
+            );
+        }
+        if !retirement_verified {
+            tracing::warn!(
+                jid = %bare_jid,
+                "UserLocalClaims shutdown retirement observed an unverified force-detach \
+                 outcome; preserving its claim"
+            );
+        }
+        actor_absent && connections_absent && retirement_verified
+    }
+
     async fn demote_owned_by(&self, owner: &waddle_xmpp::ownership::NodeIdentity) {
         let Some(registry) = self.registry.get() else {
             return;
@@ -851,7 +1121,8 @@ impl LocallyClaimedEntities for UserLocalClaims {
                 .await
             {
                 Ok(Some(demoted)) => {
-                    self.force_detach_exact_resources(&bare_jid, demoted.resources)
+                    let _ = self
+                        .force_detach_exact_resources(&bare_jid, demoted.resources)
                         .await;
                     tracing::warn!(
                         jid = %bare_jid,
@@ -900,6 +1171,14 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
         owned.extend(self.room.owned().await);
         owned.extend(self.user.owned().await);
         owned
+    }
+
+    async fn owned_of_type(&self, entity_type: EntityType) -> Vec<Entity> {
+        match entity_type {
+            EntityType::SmSession => self.sm.owned().await,
+            EntityType::RoomActor => self.room.owned().await,
+            EntityType::UserActor => self.user.owned().await,
+        }
     }
 
     async fn demote(&self, entity: &Entity) {
@@ -1004,6 +1283,34 @@ impl LocallyClaimedEntities for CombinedLocalClaims {
             EntityType::RoomActor => self.room.seal_before_release(entity).await,
             EntityType::UserActor => self.user.seal_before_release(entity).await,
         }
+    }
+
+    async fn begin_room_shutdown(&self) -> bool {
+        self.room.begin_room_shutdown().await
+    }
+
+    async fn abandon_room_shutdown(&self) -> bool {
+        self.room.abandon_room_shutdown().await
+    }
+
+    async fn retire_room_after_shutdown(&self, entity: &Entity) -> bool {
+        if entity.entity_type != EntityType::RoomActor {
+            return false;
+        }
+        self.room.retire_room_after_shutdown(entity).await
+    }
+
+    async fn retire_user_after_authority_disabled(
+        &self,
+        entity: &Entity,
+        disabled_identity: &DisabledNodeIdentity,
+    ) -> bool {
+        if entity.entity_type != EntityType::UserActor {
+            return false;
+        }
+        self.user
+            .retire_user_after_authority_disabled(entity, disabled_identity)
+            .await
     }
 }
 
@@ -1381,6 +1688,328 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_shutdown_retirement_quiesces_both_registries_before_release() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity.clone());
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity: live_identity.clone(),
+            })
+            .await
+            .expect("wire user claims");
+
+        let jid: FullJid = "shutdown-retire@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection task owns force-detach receiver");
+        let force_detach_task = tokio::spawn(async move {
+            let request = force_detach_rx.recv().await.expect("force-detach request");
+            let _ = request.ack.send(ForceDetachOutcome::NotPersisted);
+        });
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("register user resource");
+
+        let disabled_identity = live_identity.disable().await;
+        assert_eq!(disabled_identity.prior_identity(), &identity);
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        assert!(
+            user_local_claims
+                .retire_user_after_authority_disabled(&entity, &disabled_identity)
+                .await,
+            "a claim is releasable only after both registries are quiescent"
+        );
+        force_detach_task.await.expect("force-detach task");
+
+        assert!(!connection_registry.is_connected(&jid));
+        assert!(registry
+            .ask(waddle_xmpp::registry::GetUserForLocalClaim { bare_jid })
+            .await
+            .expect("inspect user")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn unavailable_remote_force_detach_preserves_the_user_claim_boundary() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity);
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity: live_identity.clone(),
+            })
+            .await
+            .expect("wire user claims");
+
+        let jid: FullJid = "remote-unavailable@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("remote force-detach forwarder owns the receiver");
+        let force_detach_task = tokio::spawn(async move {
+            let request = force_detach_rx.recv().await.expect("force-detach request");
+            let _ = request.ack.send(ForceDetachOutcome::Unavailable);
+        });
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("register user resource");
+
+        let disabled_identity = live_identity.disable().await;
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        assert!(
+            !user_local_claims
+                .retire_user_after_authority_disabled(&entity, &disabled_identity)
+                .await,
+            "an unavailable relay result is not proof that the remote WebSocket closed"
+        );
+        force_detach_task.await.expect("force-detach task");
+        assert!(
+            connection_registry.is_connected(&jid),
+            "the unverified remote route must remain registered so claim release fails closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_shutdown_retirement_rejects_a_disabled_proof_from_another_source() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a");
+        let registry_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity.clone());
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity: registry_identity.clone(),
+            })
+            .await
+            .expect("wire user claims");
+
+        let jid: FullJid = "wrong-proof@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("register user resource");
+
+        let separate_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity);
+        let foreign_proof = separate_identity.disable().await;
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        assert!(
+            !user_local_claims
+                .retire_user_after_authority_disabled(&entity, &foreign_proof)
+                .await,
+            "matching node/epoch text from another identity source must not authorize retirement"
+        );
+
+        assert!(registry_identity.current().is_active());
+        assert!(connection_registry.is_connected(&jid));
+        assert!(registry
+            .ask(waddle_xmpp::registry::GetUserForLocalClaim { bare_jid })
+            .await
+            .expect("inspect user")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn user_shutdown_retirement_fails_closed_when_a_resource_cannot_detach() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity);
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity: live_identity.clone(),
+            })
+            .await
+            .expect("wire user claims");
+
+        let jid: FullJid = "shutdown-stuck@example.com/phone"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = jid.to_bare();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(4);
+        let owner = connection_registry.register(jid.clone(), outbound_tx);
+        let entry = connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("registered entry");
+        let mut force_detach_rx = entry
+            .take_force_detach_rx()
+            .expect("connection task owns force-detach receiver");
+        let force_detach_task = tokio::spawn(async move {
+            let request = force_detach_rx.recv().await.expect("force-detach request");
+            let _ = request.ack.send(ForceDetachOutcome::IdentityMismatch);
+        });
+        registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry,
+            })
+            .await
+            .expect("register user resource");
+
+        let disabled_identity = live_identity.disable().await;
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        assert!(
+            !user_local_claims
+                .retire_user_after_authority_disabled(&entity, &disabled_identity)
+                .await,
+            "a residual ConnectionRegistry resource must veto claim release"
+        );
+        force_detach_task.await.expect("force-detach task");
+        assert!(
+            connection_registry.is_connected(&jid),
+            "failed retirement leaves the resource for connection-owned cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_shutdown_retirement_preserves_entries_when_detach_control_disappears() {
+        let user_local_claims = UserLocalClaims::new();
+        let registry = spawn_user_registry();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        user_local_claims.wire(registry.clone());
+        user_local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+
+        let identity = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a");
+        let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(identity);
+        let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        registry
+            .ask(waddle_xmpp::registry::WireUserClusteringClaims {
+                claim_store,
+                node_identity: live_identity.clone(),
+            })
+            .await
+            .expect("wire user claims");
+
+        let closed_jid: FullJid = "shutdown-closed@example.com/closed"
+            .parse()
+            .expect("valid full JID");
+        let accepted_jid: FullJid = "shutdown-closed@example.com/accepted"
+            .parse()
+            .expect("valid full JID");
+        let bare_jid = closed_jid.to_bare();
+
+        let (closed_tx, _closed_rx) = tokio::sync::mpsc::channel(4);
+        let closed_owner = connection_registry.register(closed_jid.clone(), closed_tx);
+        let closed_entry = connection_registry
+            .entry_if_owner(&closed_jid, &closed_owner)
+            .expect("closed-control entry");
+        drop(
+            closed_entry
+                .take_force_detach_rx()
+                .expect("connection task owns closed-control receiver"),
+        );
+
+        let (accepted_tx, _accepted_rx) = tokio::sync::mpsc::channel(4);
+        let accepted_owner = connection_registry.register(accepted_jid.clone(), accepted_tx);
+        let accepted_entry = connection_registry
+            .entry_if_owner(&accepted_jid, &accepted_owner)
+            .expect("accepted-control entry");
+        let mut accepted_force_detach_rx = accepted_entry
+            .take_force_detach_rx()
+            .expect("connection task owns accepted-control receiver");
+        let accepted_task = tokio::spawn(async move {
+            let request = accepted_force_detach_rx
+                .recv()
+                .await
+                .expect("accepted force-detach request");
+            drop(request);
+        });
+
+        for (jid, entry) in [
+            (closed_jid.clone(), closed_entry),
+            (accepted_jid.clone(), accepted_entry),
+        ] {
+            registry
+                .ask(waddle_xmpp::registry::RegisterUserResource { jid, entry })
+                .await
+                .expect("register user resource");
+        }
+
+        let disabled_identity = live_identity.disable().await;
+        let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
+        assert!(
+            !user_local_claims
+                .retire_user_after_authority_disabled(&entity, &disabled_identity)
+                .await,
+            "a dead remote-forwarder receiver or dropped ack does not prove that the remote \
+             WebSocket closed, so shutdown must preserve the claim"
+        );
+        accepted_task.await.expect("accepted detach task");
+
+        assert!(connection_registry.is_connected(&closed_jid));
+        assert!(connection_registry.is_connected(&accepted_jid));
+        assert!(registry
+            .ask(waddle_xmpp::registry::GetUserForLocalClaim { bare_jid })
+            .await
+            .expect("inspect user")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn combined_local_claims_routes_user_actor_operations() {
         let sm_local_claims = SmSessionLocalClaims::new();
         let room_local_claims = RoomLocalClaims::new();
@@ -1549,6 +2178,102 @@ mod tests {
         assert!(killed, "demote must hard-kill the deposed RoomActor");
     }
 
+    #[tokio::test]
+    async fn room_shutdown_gate_prevents_replacement_before_claim_release() {
+        let room_local_claims = RoomLocalClaims::new();
+        let registry = waddle_xmpp::muc::RoomRegistry::spawn(
+            "muc.example.com".to_string(),
+            test_occupant_id_secret(),
+            None,
+        );
+        room_local_claims.wire(registry.clone());
+
+        let room_jid: jid::BareJid = "shutdown-gated@muc.example.com".parse().expect("valid jid");
+        let actor_ref = registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            )
+            .await
+            .expect("create room")
+            .actor_ref;
+        let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+
+        assert!(
+            room_local_claims.begin_room_shutdown().await,
+            "terminal room admission gate must be confirmed before inventory"
+        );
+        assert!(room_local_claims.seal_before_release(&entity).await);
+        assert_eq!(
+            actor_ref
+                .ask(waddle_xmpp::muc::room_actor::GetRoomSealState)
+                .await
+                .expect("typed actor seal"),
+            waddle_xmpp::muc::room_actor::RoomSealState::Shutdown,
+            "the drain barrier must install the terminal actor seal before retirement"
+        );
+        assert!(
+            actor_ref.is_alive(),
+            "the shutdown seal must take effect while the actor is still alive"
+        );
+        let late_join = actor_ref
+            .ask(waddle_xmpp::muc::room_actor::Join {
+                nick: "late".to_string(),
+                real_jid: "late@example.com/resource".parse().expect("full jid"),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await;
+        assert!(matches!(
+            late_join,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+            ))
+        ));
+        let late_update = actor_ref
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: waddle_xmpp::muc::RoomConfig {
+                    persistent: true,
+                    ..waddle_xmpp::muc::RoomConfig::default()
+                },
+            })
+            .await;
+        assert!(matches!(
+            late_update,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner
+            ))
+        ));
+        assert!(
+            room_local_claims.retire_room_after_shutdown(&entity).await,
+            "a sealed live room must be hard-retired"
+        );
+        assert!(!actor_ref.is_alive());
+
+        let replacement = registry
+            .get_or_create_room(
+                room_jid.clone(),
+                "waddle-1".to_string(),
+                "channel-1".to_string(),
+                waddle_xmpp::muc::RoomConfig::default(),
+            )
+            .await;
+        assert!(
+            matches!(
+                replacement,
+                Err(
+                    waddle_xmpp::muc::RoomRegistryError::OwnershipUnavailable(ref jid)
+                        | waddle_xmpp::muc::RoomRegistryError::RoomActorStateLost(ref jid)
+                )
+                    if *jid == room_jid
+            ),
+            "terminal drain must not allow a replacement actor before claim release: \
+             {replacement:?}"
+        );
+    }
+
     // -----------------------------------------------------------------
     // ADR-0017 Phase 3 Slice 10 FIX 1 (council-adjudicated): the real
     // `seal_before_release` barrier. Mirrors the `health_check` test
@@ -1649,6 +2374,7 @@ mod tests {
     struct RecordingDurableStore {
         started: Arc<tokio::sync::Notify>,
         persisted: Arc<std::sync::atomic::AtomicBool>,
+        save_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     fn expected_local_room_fence(
@@ -1703,6 +2429,8 @@ mod tests {
                 return Box::pin(async move { Err(error) });
             }
             Box::pin(async move {
+                self.save_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.started.notify_one();
                 tokio::time::sleep(Duration::from_millis(150)).await;
                 self.persisted
@@ -1762,7 +2490,7 @@ mod tests {
     /// dequeued and its handler is running. The test waits for that
     /// signal (proving `UpdateConfig`'s handler is now suspended inside
     /// the still-in-flight persist call) before issuing the
-    /// `seal_before_release` ask — so `HealthCheck` cannot itself be
+    /// `seal_before_release` ask — so `SealForShutdown` cannot itself be
     /// dequeued and answered until `UpdateConfig`'s handler, persist
     /// `.await` and all, has returned.
     #[tokio::test]
@@ -1777,10 +2505,12 @@ mod tests {
 
         let started = Arc::new(tokio::sync::Notify::new());
         let persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let save_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let durable_store: std::sync::Arc<dyn waddle_xmpp::muc::MucDurableStore> =
             std::sync::Arc::new(RecordingDurableStore {
                 started: Arc::clone(&started),
                 persisted: Arc::clone(&persisted),
+                save_calls: Arc::clone(&save_calls),
             });
         registry
             .wire_clustering_claims(
@@ -1847,5 +2577,29 @@ mod tests {
             .await
             .expect("update task")
             .expect("UpdateConfig must have succeeded");
+
+        assert_eq!(
+            actor_ref
+                .ask(waddle_xmpp::muc::room_actor::GetRoomSealState)
+                .await
+                .expect("typed shutdown seal"),
+            waddle_xmpp::muc::room_actor::RoomSealState::Shutdown
+        );
+        let late_update = actor_ref
+            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                config: waddle_xmpp::muc::RoomConfig::default(),
+            })
+            .await;
+        assert!(matches!(
+            late_update,
+            Err(kameo::error::SendError::HandlerError(
+                waddle_xmpp::muc::room_actor::RoomMutationError::NotOwner
+            ))
+        ));
+        assert_eq!(
+            save_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a mutation queued after the terminal seal must not begin another durable write"
+        );
     }
 }

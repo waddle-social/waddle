@@ -19,6 +19,12 @@ pub(crate) fn fixed_test_account_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn fixed_test_account_seeding_enabled() -> bool {
+    std::env::var("WADDLE_TEST_FIXED_ACCOUNT_SEED")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true)
+}
+
 pub(crate) async fn ensure_fixed_test_account(
     db_pool: &Arc<DatabasePool>,
     xmpp_config: &XmppConfig,
@@ -27,7 +33,6 @@ pub(crate) async fn ensure_fixed_test_account(
     if !enabled {
         return Ok(());
     }
-
     if !xmpp_config.enabled {
         anyhow::bail!("WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true requires WADDLE_XMPP_ENABLED=true");
     }
@@ -35,6 +40,14 @@ pub(crate) async fn ensure_fixed_test_account(
         anyhow::bail!(
             "WADDLE_TEST_FIXED_ACCOUNT_ENABLED=true requires WADDLE_NATIVE_AUTH_ENABLED=true"
         );
+    }
+    // Multi-process integration tests may provision the shared accounts once
+    // before concurrently starting several servers. Keep the fixed-account
+    // permission backend enabled while skipping its deliberately destructive
+    // delete-and-recreate seeding on those concurrent starts.
+    if !fixed_test_account_seeding_enabled() {
+        info!("Skipping fixed native test-account seeding");
+        return Ok(());
     }
 
     let username = std::env::var("WADDLE_TEST_FIXED_ACCOUNT_USERNAME")

@@ -555,6 +555,9 @@ async fn destroy_room_for_rollback(
         DestroyRoomOutcome::ReleaseBacklogFull => Err(internal_err(format!(
             "{rollback_context}: exact-release retry backlog is still full for {room_jid} after bounded redrive; room remains registered and rollback must be retried"
         ))),
+        DestroyRoomOutcome::ShutdownInProgress => Err(unavailable(format!(
+            "{rollback_context}: room shutdown is already in progress for {room_jid}; retry on another node"
+        ))),
     }
 }
 
@@ -2193,20 +2196,35 @@ async fn run_group_dm_leave(
         return Err(send_err("room actor ChangeAffiliation")(error));
     }
     for resource in resources {
-        if let Some(outcome) = actor
+        match actor
             .ask(LeaveByRealJid {
                 sender_jid: resource.clone(),
             })
             .await
-            .map_err(send_err("room actor LeaveByRealJid"))?
         {
-            broadcast_group_dm_leave(
-                state,
-                connections,
-                &resource,
-                live_resource_set.contains(&resource),
-                &outcome,
-            );
+            Ok(Some(outcome)) => {
+                broadcast_group_dm_leave(
+                    state,
+                    connections,
+                    &resource,
+                    live_resource_set.contains(&resource),
+                    &outcome,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                // Membership, bookmark, and actor affiliation are already
+                // committed. A shutdown/retirement between mailbox messages
+                // makes occupancy cleanup redundant; reporting failure here
+                // would misrepresent the durable leave as uncommitted.
+                tracing::warn!(
+                    room = %args.room_jid,
+                    sender = %resource,
+                    %error,
+                    "group-DM leave committed; occupancy cleanup was skipped",
+                );
+                break;
+            }
         }
     }
 
@@ -2296,22 +2314,16 @@ async fn run_group_dm_rename(
         return Err(error);
     }
 
-    let members = match actor
-        .ask(ListAffiliations {
-            filter: Some(Affiliation::Member),
-        })
-        .await
-    {
-        Ok(members) => members,
-        Err(error) => {
-            if rollback_room_config_if_revision(&actor, expected_revision, previous_config.clone())
-                .await
-            {
-                let _ = upsert_group_dm_catalog(state, &channel_id, &previous_config).await;
-            }
-            return Err(send_err("room actor ListAffiliations")(error));
-        }
-    };
+    // The successful actor mutation returned one coherent snapshot before any
+    // catalog/bookmark writes. Reuse it for the recipient set instead of
+    // issuing a newly gated serving read after the catalog commit.
+    let mut members: Vec<_> = updated_snapshot
+        .room
+        .get_all_affiliations()
+        .into_iter()
+        .filter(|entry| entry.affiliation == Affiliation::Member)
+        .collect();
+    members.sort_by(|a, b| a.jid.cmp(&b.jid));
     let mut updated_bookmark_members = Vec::with_capacity(members.len());
     for member in &members {
         if !group_dm_room_config_revision_is_current(&actor, expected_revision).await {
@@ -2369,11 +2381,11 @@ async fn run_group_dm_rename(
             "group-DM rename was superseded by a newer update".to_string(),
         )))));
     }
-    let broadcast_snapshot = actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
-        .await
-        .map_err(send_err("room actor GetSnapshot"))?;
-    broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
+    // The rename is committed at this point. A post-commit serving read could
+    // be rejected by a shutdown seal and incorrectly report the committed
+    // operation as failed, so notification uses the admitted mutation's
+    // snapshot and remains best-effort.
+    broadcast_group_dm_config_change(connections, &args.room_jid, &updated_snapshot);
 
     Ok(GroupDmRenameResult {
         room_jid: args.room_jid.clone(),
@@ -3439,6 +3451,12 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
                 args.channel_jid
             )))
         }
+        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ShutdownInProgress) => {
+            Some(unavailable(format!(
+                "room destroy refused for {}: this node is shutting down; retry deletion",
+                args.channel_jid
+            )))
+        }
         Err(error) => Some(send_err("room_registry ask DestroyRoom")(error)),
     };
     if let Some(error) = failure {
@@ -3855,6 +3873,18 @@ async fn run_kick(
         .ask(GetConfig)
         .await
         .map_err(send_err("room actor GetConfig"))?;
+    // Resolve the occupant before any durable membership change. A shutdown
+    // seal may land between actor messages; if this serving read were delayed
+    // until after the durable revoke, RoomSealed would otherwise strand the
+    // external membership change without reaching the compensation path.
+    let target_nick = actor
+        .ask(ListOccupants)
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+        .await
+        .map_err(send_err("room actor ListOccupants"))?
+        .into_iter()
+        .find(|info| info.real_jid.to_bare() == args.occupant_jid)
+        .map(|info| info.nick);
     let caller_bare = caller_full.to_bare();
     let durable_previous_affiliation = if config.members_only {
         explicit_channel_affiliations_for_jids(state, &channel_id, [args.occupant_jid.clone()])
@@ -3879,22 +3909,11 @@ async fn run_kick(
         )
         .await?;
     }
-    // Resolve the occupant's nick — `ApplyAdminItems` looks up by nick
-    // in the role-change branch, so we must translate the caller's
-    // bare-JID handle into the room-nick first. If the target is not
-    // currently joined, there is no role-kick presence to broadcast.
-    // Private managed-channel kicks still keep the durable membership
-    // revocation above and synchronize the actor affiliation list.
-    let occupants = actor
-        .ask(ListOccupants)
-        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-        .await
-        .map_err(send_err("room actor ListOccupants"))?;
-    let Some(target_nick) = occupants
-        .into_iter()
-        .find(|info| info.real_jid.to_bare() == args.occupant_jid)
-        .map(|info| info.nick)
-    else {
+    // `ApplyAdminItems` looks up by nick in the role-change branch. If the
+    // pre-revoke snapshot found no joined target, there is no role-kick
+    // presence to broadcast. Private managed-channel kicks still keep the
+    // durable revocation and synchronize the actor affiliation list.
+    let Some(target_nick) = target_nick else {
         if revoke_members_only_member {
             sync_private_kick_affiliation_revocation(
                 state,

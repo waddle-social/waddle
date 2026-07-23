@@ -22,7 +22,9 @@ use kameo::remote::{self, registry};
 use libp2p::identity::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
+use relay::ConnectedTransportCounts;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +44,11 @@ const ALLOWLIST_CHANNEL_CAPACITY: usize = 4;
 /// connections, and libp2p's ~10s default would close them between discovery
 /// traffic and force a re-dial per interaction.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Poll cadence for the fault-gated cross-dial barrier. This is deliberately
+/// much shorter than the harness's one-second dial interval so releasing the
+/// barrier does not dominate the regression's wall clock.
+const FAULT_DIAL_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Failures while building or starting the swarm. Human-facing `Display` text
 /// is surfaced at server startup.
@@ -301,6 +308,11 @@ async fn bring_up(
     }
 
     let connected_peers = ConnectedPeerCount::new();
+    let connected_transports = ConnectedTransportCounts::new();
+    let fault_dial_barrier = config
+        .fault_dial_barrier_dir
+        .clone()
+        .map(|root| FaultDialBarrier::new(root, local_peer_id));
     let bootstrap_peers = config.bootstrap_peers.clone();
     // The node's single kademlia registration: its supervised relay actor.
     // Its first registration may occur before the first peer connection, so
@@ -309,31 +321,36 @@ async fn bring_up(
     if config.fault_injection {
         tracing::warn!(
             "clustering fault injection is ENABLED: any enrolled peer can crash this node's \
-             relay or stall its mailbox — test harnesses only, never production"
+             relay, stall its mailbox, or make it probe another peer — test harnesses only, \
+             never production"
         );
     }
-    let relay_registration = relay::spawn_supervised(
-        node_id.clone(),
-        config.fault_injection,
-        stop_token.clone(),
+    let relay_registration = relay::spawn_supervised(relay::RelaySupervisorInputs {
+        node_id: node_id.clone(),
+        connected_peers: connected_peers.clone(),
+        connected_transports: connected_transports.clone(),
+        fault_injection: config.fault_injection,
+        stop_token: stop_token.clone(),
         resume_bridge,
         room_local_claims,
-        ordered_relay_delivery_bridge,
-    );
+        ordered_delivery_bridge: ordered_relay_delivery_bridge,
+    });
 
-    tokio::spawn(run_event_loop(
+    tokio::spawn(run_event_loop(EventLoopInputs {
         swarm,
         bootstrap_peers,
-        config.dial_interval,
-        AllowlistRefresh {
+        dial_interval: config.dial_interval,
+        allowlist: AllowlistRefresh {
             store: allowlist,
             current: enrolled,
             interval: config.allowlist_refresh_interval,
         },
         relay_registration,
-        connected_peers.clone(),
-        stop_token.clone(),
-    ));
+        connected_peers: connected_peers.clone(),
+        connected_transports,
+        fault_dial_barrier,
+        stop_token: stop_token.clone(),
+    }));
 
     let handle = SwarmHandle {
         local_peer_id,
@@ -363,6 +380,63 @@ struct AllowlistRefresh {
     /// behaviour.
     current: HashSet<PeerId>,
     interval: Duration,
+}
+
+/// Deterministic, fault-gated first-dial barrier for the multi-process
+/// simultaneous cross-dial regression.
+///
+/// The harness creates `release`, then each node queues exactly one bootstrap
+/// dial, writes `dialed-<local-peer-id>`, and temporarily stops polling its
+/// swarm. Once both markers exist the harness creates `drive`; both swarms
+/// resume with their outbound dial futures already queued. That makes the
+/// two-transport condition an established precondition instead of a scheduler
+/// coincidence.
+struct FaultDialBarrier {
+    root: PathBuf,
+    marker: PathBuf,
+    released: bool,
+    dial_submitted: bool,
+    driving: bool,
+}
+
+impl FaultDialBarrier {
+    fn new(root: PathBuf, local_peer_id: PeerId) -> Self {
+        let marker = root.join(format!("dialed-{local_peer_id}"));
+        Self {
+            root,
+            marker,
+            released: false,
+            dial_submitted: false,
+            driving: false,
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.released |= self.root.join("release").is_file();
+        self.driving |= self.root.join("drive").is_file();
+    }
+
+    fn allows_dial(&self) -> bool {
+        self.released && (!self.dial_submitted || self.driving)
+    }
+
+    fn allows_swarm_poll(&self) -> bool {
+        !self.dial_submitted || self.driving
+    }
+
+    async fn mark_dial_submitted(&mut self) {
+        if self.dial_submitted {
+            return;
+        }
+        self.dial_submitted = true;
+        if let Err(error) = tokio::fs::write(&self.marker, b"queued\n").await {
+            tracing::error!(
+                path = %self.marker.display(),
+                %error,
+                "failed to publish clustering fault dial-barrier marker"
+            );
+        }
+    }
 }
 
 /// A leased keypair slot whose heartbeat has not started yet: held across
@@ -621,26 +695,41 @@ async fn release_slot_bounded<L>(
     }
 }
 
+/// Complete state handed to the long-lived swarm event loop.
+struct EventLoopInputs {
+    swarm: Swarm<WaddleBehaviour>,
+    bootstrap_peers: Vec<ClusteringBootstrapConfig>,
+    dial_interval: Duration,
+    allowlist: AllowlistRefresh,
+    relay_registration: relay::RelayRegistrationTrigger,
+    connected_peers: ConnectedPeerCount,
+    connected_transports: ConnectedTransportCounts,
+    fault_dial_barrier: Option<FaultDialBarrier>,
+    stop_token: CancellationToken,
+}
+
 /// Drive the swarm until `stop_token` (the clustering scope, a child of the
 /// process shutdown token) fires: dial seed peers on a timer, refresh the
 /// peer allowlist on a timer (revoking removed peers), feed swarm events to
 /// the handler, and stop cleanly on shutdown — whether that shutdown is the
 /// whole process draining or just this node self-fencing its lease.
-async fn run_event_loop(
-    mut swarm: Swarm<WaddleBehaviour>,
-    bootstrap_peers: Vec<ClusteringBootstrapConfig>,
-    dial_interval: Duration,
-    mut allowlist: AllowlistRefresh,
-    relay_registration: relay::RelayRegistrationTrigger,
-    connected_peers: ConnectedPeerCount,
-    stop_token: CancellationToken,
-) {
+async fn run_event_loop(inputs: EventLoopInputs) {
+    let EventLoopInputs {
+        mut swarm,
+        bootstrap_peers,
+        dial_interval,
+        mut allowlist,
+        relay_registration,
+        connected_peers,
+        connected_transports,
+        mut fault_dial_barrier,
+        stop_token,
+    } = inputs;
     // Peers we currently hold a connection to (authoritative from connection
     // events), peers observed to enter the kademlia routing table, and the
     // remote address of every live connection (so the bootstrap dial loop can
     // skip endpoints it is already connected to instead of churning a fresh
-    // connection every interval that the duplicate-PeerId defense then
-    // closes).
+    // connection every interval).
     let mut connected: HashSet<PeerId> = HashSet::new();
     let mut routing_peers: HashSet<PeerId> = HashSet::new();
     let mut conn_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr> = HashMap::new();
@@ -650,14 +739,16 @@ async fn run_event_loop(
     // disconnected peer stays redialable). Lets the dial loop skip a seed
     // whose owner is connected *inbound-only* — `conn_addrs` alone cannot,
     // because an inbound connection's remote address is an ephemeral source
-    // port that never matches the seed addr, so every interval would churn a
-    // duplicate connection for the duplicate-PeerId defense to close.
+    // port that never matches the seed addr, so every interval would churn an
+    // unnecessary additional connection.
     let mut addr_owners: HashMap<Multiaddr, PeerId> = HashMap::new();
 
     // `interval` fires its first tick immediately, so the first dial round
     // happens right away rather than after a full interval.
     let mut dial_timer = tokio::time::interval(dial_interval);
     dial_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut fault_dial_barrier_timer = tokio::time::interval(FAULT_DIAL_BARRIER_POLL_INTERVAL);
+    fault_dial_barrier_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // The startup path already loaded the enrolled set synchronously before
     // this loop started, so the first periodic refresh is deferred one full
     // interval (`interval_at`) instead of immediately re-reading the table.
@@ -707,12 +798,23 @@ async fn run_event_loop(
     }
 
     loop {
+        let dial_allowed = fault_dial_barrier
+            .as_ref()
+            .is_none_or(FaultDialBarrier::allows_dial);
+        let swarm_poll_allowed = fault_dial_barrier
+            .as_ref()
+            .is_none_or(FaultDialBarrier::allows_swarm_poll);
         tokio::select! {
             _ = stop_token.cancelled() => {
                 tracing::info!("clustering swarm event loop stopping (shutdown)");
                 break;
             }
-            _ = dial_timer.tick() => {
+            _ = fault_dial_barrier_timer.tick(), if fault_dial_barrier.is_some() => {
+                if let Some(barrier) = fault_dial_barrier.as_mut() {
+                    barrier.refresh();
+                }
+            }
+            _ = dial_timer.tick(), if dial_allowed => {
                 if !bootstrap_peers.is_empty() {
                     if let Some(guard) = InFlightGuard::try_claim(&dns_in_flight) {
                         let seeds = bootstrap_peers.clone();
@@ -751,13 +853,13 @@ async fn run_event_loop(
             Some(enrolled) = allowlist_rx.recv() => {
                 apply_allowlist(&mut swarm, &mut allowlist, enrolled);
             }
-            Some(addr) = dial_rx.recv() => {
+            Some(addr) = dial_rx.recv(), if dial_allowed => {
                 // Skip endpoints we already hold a connection to: redialing a
-                // connected peer every interval would just mint a duplicate
-                // connection for the duplicate-PeerId defense to close. Two
-                // checks: an outbound connection's remote address matches the
-                // seed addr directly; an inbound-only peer is recognized via
-                // the addr's last known owner.
+                // connected peer every interval would just mint an
+                // unnecessary additional connection. Two checks: an outbound
+                // connection's remote address matches the seed addr directly;
+                // an inbound-only peer is recognized via the addr's last
+                // known owner.
                 if conn_addrs.values().any(|connected_addr| *connected_addr == addr) {
                     continue;
                 }
@@ -768,11 +870,18 @@ async fn run_event_loop(
                     continue;
                 }
                 metrics::record_bootstrap_dial();
-                if let Err(error) = swarm.dial(addr.clone()) {
-                    tracing::debug!(%addr, %error, "clustering bootstrap dial failed");
+                match swarm.dial(addr.clone()) {
+                    Ok(()) => {
+                        if let Some(barrier) = fault_dial_barrier.as_mut() {
+                            barrier.mark_dial_submitted().await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%addr, %error, "clustering bootstrap dial failed");
+                    }
                 }
             }
-            event = swarm.select_next_some() => {
+            event = swarm.select_next_some(), if swarm_poll_allowed => {
                 handle_swarm_event(
                     &mut swarm,
                     event,
@@ -783,6 +892,7 @@ async fn run_event_loop(
                         addr_owners: &mut addr_owners,
                         relay_registration: &relay_registration,
                         connected_peers: &connected_peers,
+                        connected_transports: &connected_transports,
                     },
                 );
             }
@@ -833,17 +943,34 @@ fn apply_allowlist(
 
 /// Record a newly connected peer, updating the connected-peer gauge (and the
 /// readable [`ConnectedPeerCount`] ADR-0017 Phase 3 Slice 2's isolation
-/// check reads) on the first connection to that peer.
+/// check reads) on the first connection to that peer. Returns whether this
+/// was the peer's first live connection.
 fn track_peer_connected(
     peer_id: PeerId,
     connected: &mut HashSet<PeerId>,
     connected_peers: &ConnectedPeerCount,
-) {
+) -> bool {
     if connected.insert(peer_id) {
         metrics::record_connected_peers(connected.len() as i64);
         connected_peers.set(connected.len() as i64);
         tracing::debug!(%peer_id, "clustering peer connected");
+        true
+    } else {
+        false
     }
+}
+
+/// Apply libp2p's authoritative live-connection count after an establishment
+/// before updating peer-level first-connection bookkeeping.
+fn track_peer_connection_established(
+    peer_id: PeerId,
+    num_established: u32,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+    connected_transports: &ConnectedTransportCounts,
+) -> bool {
+    connected_transports.set(peer_id, num_established);
+    track_peer_connected(peer_id, connected, connected_peers)
 }
 
 /// Record a peer whose last connection closed, updating the connected-peer
@@ -860,6 +987,24 @@ fn track_peer_disconnected(
     }
 }
 
+/// Apply libp2p's connection-close count to peer-level bookkeeping. Returns
+/// whether the event closed the peer's last live transport connection.
+fn track_peer_connection_closed(
+    peer_id: PeerId,
+    num_established: u32,
+    connected: &mut HashSet<PeerId>,
+    connected_peers: &ConnectedPeerCount,
+    connected_transports: &ConnectedTransportCounts,
+) -> bool {
+    connected_transports.set(peer_id, num_established);
+    if num_established == 0 {
+        track_peer_disconnected(peer_id, connected, connected_peers);
+        true
+    } else {
+        false
+    }
+}
+
 struct SwarmEventBookkeeping<'a> {
     connected: &'a mut HashSet<PeerId>,
     routing_peers: &'a mut HashSet<PeerId>,
@@ -867,11 +1012,10 @@ struct SwarmEventBookkeeping<'a> {
     addr_owners: &'a mut HashMap<Multiaddr, PeerId>,
     relay_registration: &'a relay::RelayRegistrationTrigger,
     connected_peers: &'a ConnectedPeerCount,
+    connected_transports: &'a ConnectedTransportCounts,
 }
 
-/// Update local peer bookkeeping and metrics from a single swarm event. Takes
-/// `&mut swarm` so it can close duplicate connections (duplicate-PeerId
-/// defense-in-depth, ADR element 3).
+/// Update local peer bookkeeping and metrics from a single swarm event.
 fn handle_swarm_event(
     swarm: &mut Swarm<WaddleBehaviour>,
     event: SwarmEvent<WaddleBehaviourEvent>,
@@ -885,6 +1029,7 @@ fn handle_swarm_event(
             peer_id,
             connection_id,
             endpoint,
+            num_established,
             ..
         } => {
             state
@@ -905,18 +1050,19 @@ fn handle_swarm_event(
                     .addr_owners
                     .insert(endpoint.get_remote_address().clone(), peer_id);
             }
-            // Duplicate-PeerId defense-in-depth (ADR element 3): the
-            // keypair-slot lease already guarantees a unique PeerId per live
-            // node, so a second concurrent connection to an already-connected
-            // peer is unexpected — keep the first, reject the new one.
-            if state.connected.contains(&peer_id) {
-                tracing::warn!(
-                    %peer_id,
-                    "clustering: rejecting duplicate connection to already-connected peer"
-                );
-                swarm.close_connection(connection_id);
-            } else {
-                track_peer_connected(peer_id, state.connected, state.connected_peers);
+            // libp2p may establish multiple authenticated transport
+            // connections to one PeerId when both sides dial concurrently.
+            // Keep every connection: independently choosing and closing a
+            // "duplicate" on each endpoint can make the peers retain opposite
+            // links, after which both closes tear down the entire relationship.
+            // Peer bookkeeping remains first/last-connection based.
+            if track_peer_connection_established(
+                peer_id,
+                num_established.get(),
+                state.connected,
+                state.connected_peers,
+                state.connected_transports,
+            ) {
                 state.relay_registration.trigger();
             }
         }
@@ -932,8 +1078,13 @@ fn handle_swarm_event(
             // must be redialable (the skip would be wrong), and pruning here
             // keeps the map bounded by *connected* peers under pod churn
             // instead of accumulating every address ever dialed.
-            if num_established == 0 {
-                track_peer_disconnected(peer_id, state.connected, state.connected_peers);
+            if track_peer_connection_closed(
+                peer_id,
+                num_established,
+                state.connected,
+                state.connected_peers,
+                state.connected_transports,
+            ) {
                 state.addr_owners.retain(|_, owner| *owner != peer_id);
             }
         }
@@ -1008,6 +1159,65 @@ mod tests {
         )
         .await
         .expect("open scratch sqlite")
+    }
+
+    #[test]
+    fn additional_connection_keeps_first_peer_bookkeeping_without_double_counting() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut connected = HashSet::new();
+        let connected_peers = ConnectedPeerCount::new();
+        let connected_transports = ConnectedTransportCounts::new();
+
+        assert!(
+            track_peer_connection_established(
+                peer,
+                1,
+                &mut connected,
+                &connected_peers,
+                &connected_transports,
+            ),
+            "the first of two cross-dial connections marks the peer connected"
+        );
+        assert_eq!(connected_transports.get(&peer), 1);
+        assert!(
+            !track_peer_connection_established(
+                peer,
+                2,
+                &mut connected,
+                &connected_peers,
+                &connected_transports,
+            ),
+            "the oppositely ordered cross-dial connection is retained without \
+             counting a second peer"
+        );
+        assert_eq!(connected, HashSet::from([peer]));
+        assert_eq!(connected_peers.get(), 1);
+        assert_eq!(connected_transports.get(&peer), 2);
+
+        // Closing either transport while the other remains must not remove
+        // the peer. Only libp2p's last-connection event removes it.
+        assert!(!track_peer_connection_closed(
+            peer,
+            1,
+            &mut connected,
+            &connected_peers,
+            &connected_transports,
+        ));
+        assert_eq!(connected, HashSet::from([peer]));
+        assert_eq!(connected_peers.get(), 1);
+        assert_eq!(connected_transports.get(&peer), 1);
+        assert!(track_peer_connection_closed(
+            peer,
+            0,
+            &mut connected,
+            &connected_peers,
+            &connected_transports,
+        ));
+        assert!(connected.is_empty());
+        assert_eq!(connected_peers.get(), 0);
+        assert_eq!(connected_transports.get(&peer), 0);
     }
 
     #[test]

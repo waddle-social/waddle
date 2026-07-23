@@ -7,10 +7,18 @@
 //! per-peer relay actors.
 
 use kameo::remote;
-use libp2p::allow_block_list::{self, AllowedPeers};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::PeerId;
+use libp2p::{
+    allow_block_list::{self, AllowedPeers},
+    connection_limits,
+};
 use std::collections::HashSet;
+
+/// One inbound plus one outbound transport is the normal simultaneous-dial
+/// convergence shape. A third connection cannot improve reachability and
+/// would multiply the per-connection remote-messaging budget.
+const MAX_ESTABLISHED_CONNECTIONS_PER_PEER: u32 = 2;
 
 // `derive(NetworkBehaviour)` auto-generates the out-event enum named after the
 // struct — `WaddleBehaviourEvent` — with one variant per field.
@@ -24,6 +32,9 @@ pub struct WaddleBehaviour {
     /// composed behaviour denies the connection regardless of order; the
     /// position is for clarity).
     pub allowed: allow_block_list::Behaviour<AllowedPeers>,
+    /// Bound transport fan-out from one enrolled PeerId while retaining the
+    /// two connections required when both endpoints dial simultaneously.
+    pub connection_limits: connection_limits::Behaviour,
     /// kameo remote actors: request-response messaging plus the kademlia-based
     /// registry (demoted to node discovery only this phase).
     pub kameo: remote::Behaviour,
@@ -43,6 +54,10 @@ impl WaddleBehaviour {
         }
         Self {
             allowed,
+            connection_limits: connection_limits::Behaviour::new(
+                connection_limits::ConnectionLimits::default()
+                    .with_max_established_per_peer(Some(MAX_ESTABLISHED_CONNECTIONS_PER_PEER)),
+            ),
             kameo: remote::Behaviour::new(local_peer_id, messaging_config),
         }
     }

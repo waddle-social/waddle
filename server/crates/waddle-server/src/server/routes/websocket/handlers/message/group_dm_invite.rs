@@ -140,6 +140,21 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Invitee is already a group-DM member.",
         )]);
     }
+    // Capture display metadata while the actor is still serving. Everything
+    // below may create archive, membership, affiliation, bookmark, and invite
+    // ledger state; a newly gated GetConfig after those commits must not turn
+    // a successful grant into a partial failure.
+    let room_name = match room_actor.ask(GetConfig).await {
+        Ok(config) => config.name,
+        Err(_) => {
+            return Some(vec![error_reply(
+                incoming,
+                bound_jid,
+                GroupDmInviteError::InternalServerError,
+                "Internal server error.",
+            )]);
+        }
+    };
 
     let requested_access =
         waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
@@ -212,10 +227,6 @@ pub(super) async fn handle_group_dm_mediated_invite(
             "Internal server error.",
         )]);
     }
-    let room_name = match room_actor.ask(GetConfig).await {
-        Ok(config) => config.name,
-        Err(_) => room_jid.to_string(),
-    };
     let shared_room_name = {
         let trimmed = room_name.trim();
         (!trimmed.is_empty()).then_some(trimmed)

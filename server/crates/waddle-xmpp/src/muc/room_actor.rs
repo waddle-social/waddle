@@ -405,6 +405,12 @@ pub struct RoomActor {
     /// ownership-loss seal, whose non-serving local actor must be evicted even
     /// when that backlog is full.
     seal_state: RoomSealState,
+    /// Whether the graceful-shutdown mailbox barrier has run for this actor.
+    ///
+    /// Kept separately from `seal_state` so an actor can retain definitive
+    /// `OwnershipLost` provenance while still rejecting the cache-only
+    /// recovery replays that ownership loss ordinarily permits.
+    shutdown_seal_installed: bool,
     occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
     /// Durable membership hydrated from the deployment's membership
     /// source at spawn (#1135). Kept separate from
@@ -487,6 +493,13 @@ pub enum RoomSealState {
     Open,
     /// The registry sealed an inactive actor before a terminal local removal.
     Inactive,
+    /// Graceful shutdown placed a terminal mailbox seal after every message
+    /// already queued ahead of it. No later serving action may start while the
+    /// actor remains alive awaiting retirement and claim release: admissions,
+    /// occupancy/presence/call updates, room/admin/invite mutations,
+    /// restore/hydration work, destruction, and traffic-producing dispatch
+    /// snapshots are all refused.
+    Shutdown,
     /// The durable ownership gate proved this incarnation is non-serving.
     OwnershipLost,
 }
@@ -523,9 +536,10 @@ pub enum RoomActorError {
     StaleAdmissionRevision,
     #[error("join is blocked pending invite membership rollback acknowledgement")]
     InviteRollbackPending,
-    /// #1108: this room actor was sealed by the registry's guarded
-    /// destroy and is about to be dropped. Retryable — the caller must
-    /// re-run the registry lookup, which respawns the room.
+    /// This room actor was sealed by guarded destruction, ownership loss, or
+    /// graceful shutdown and is no longer allowed to perform serving work.
+    /// Retryable during ordinary inactivity eviction; during shutdown the
+    /// caller must stop dispatching new room work.
     #[error("room actor is sealed pending destruction")]
     RoomSealed,
     /// #1107: the joining FULL JID already occupies this room under a
@@ -606,6 +620,7 @@ impl RoomActor {
             invite_operation_by_invitee: HashMap::new(),
             occupancy_revision: 0,
             seal_state: RoomSealState::Open,
+            shutdown_seal_installed: false,
             occupant_id_secret,
             durable_member_recipients: Vec::new(),
             membership_source: None,
@@ -679,6 +694,36 @@ impl RoomActor {
             && revision >= member_revision
     }
 
+    /// Reject any serving operation once an actor seal is visible.
+    ///
+    /// Read-only diagnostics intentionally do not call this helper, so the
+    /// drain can still inspect the actor until retirement. Every operation
+    /// that mutates room state or prepares externally emitted room traffic
+    /// must call it before reading data that could drive that work.
+    fn gate_serving_activity(&self) -> Result<(), RoomActorError> {
+        if self.seal_state.is_sealed() {
+            Err(RoomActorError::RoomSealed)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether even exact, read-only recovery replays are forbidden.
+    ///
+    /// Bare ownership loss permits callers to recover already-recorded
+    /// idempotency outcomes, while every state transition remains fenced by
+    /// the mutation gate. Inactivity and shutdown are actor-lifecycle
+    /// terminals. The separate shutdown bit also covers an OwnershipLost
+    /// actor after the drain's ordered mailbox barrier without erasing that
+    /// stronger ownership provenance.
+    fn blocks_recovery_replay(&self) -> bool {
+        self.shutdown_seal_installed
+            || matches!(
+                self.seal_state,
+                RoomSealState::Inactive | RoomSealState::Shutdown
+            )
+    }
+
     /// ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the
     /// pre-mutation ownership gate every durable-relevant mutation handler
     /// runs BEFORE touching in-memory state. `Ok(())` when unfenced (no
@@ -695,7 +740,7 @@ impl RoomActor {
         // actor incarnation. Do not let a later transient store failure
         // override that proof through a later uncertain probe while the
         // registry is still converging the non-serving actor's removal.
-        if self.seal_state == RoomSealState::OwnershipLost {
+        if self.seal_state.is_sealed() {
             return Err(PreMutationOwnershipError::NotOwner);
         }
         let Some(store) = self.durable_store.clone() else {
@@ -849,7 +894,9 @@ impl RoomActor {
     async fn reject_sealed_join(&mut self) -> Result<(), RoomActorError> {
         match self.seal_state {
             RoomSealState::Open => Ok(()),
-            RoomSealState::OwnershipLost => Err(RoomActorError::RoomSealed),
+            RoomSealState::Shutdown | RoomSealState::OwnershipLost => {
+                Err(RoomActorError::RoomSealed)
+            }
             RoomSealState::Inactive => {
                 let _ = self.gate_join_ownership().await;
                 Err(RoomActorError::RoomSealed)
@@ -1134,13 +1181,14 @@ pub struct HydrateDurableRecipients {
 }
 
 impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: HydrateDurableRecipients,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         // Retain the source so affiliation changes to `None` can
         // re-run hydration later (round-2 review R1) instead of
         // guessing whether the member is still space-entitled.
@@ -1164,6 +1212,7 @@ impl kameo::message::Message<HydrateDurableRecipients> for RoomActor {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -1233,15 +1282,21 @@ impl kameo::message::Message<GetDurableRestoreReadiness> for RoomActor {
 }
 
 impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: RestoreDurableRoomState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.restore_state == DurableRestoreState::OwnershipLost {
-            return;
+        if self.blocks_recovery_replay() {
+            return Err(RoomActorError::RoomSealed);
+        }
+        if self.seal_state == RoomSealState::OwnershipLost {
+            // Ownership loss is terminal for this incarnation. A duplicate
+            // restore is an idempotent convergence message: do not retry the
+            // stale fence or replace the retained store/fence identity.
+            return Ok(());
         }
         if let Some(retained) = self.durable_claim_fence.as_ref() {
             if retained != &msg.claim_fence {
@@ -1256,7 +1311,7 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
                 // tuple must not read, install, or retain successor state.
                 self.restore_state = DurableRestoreState::OwnershipLost;
                 self.seal_state = RoomSealState::OwnershipLost;
-                return;
+                return Ok(());
             }
         }
         // Retain this incarnation's exact authority before awaiting the
@@ -1304,6 +1359,7 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
                 self.restore_state = DurableRestoreState::Pending;
             }
         }
+        Ok(())
     }
 }
 
@@ -1366,6 +1422,7 @@ impl kameo::message::Message<Leave> for RoomActor {
     type Reply = Result<(), RoomActorError>;
 
     async fn handle(&mut self, msg: Leave, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.gate_serving_activity()?;
         self.room
             .remove_occupant(&msg.nick)
             .map(|_| ())
@@ -1379,16 +1436,18 @@ pub struct GetOccupantByJid {
 }
 
 impl kameo::message::Message<GetOccupantByJid> for RoomActor {
-    type Reply = Option<OccupantInfo>;
+    type Reply = Result<Option<OccupantInfo>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetOccupantByJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room
+        self.gate_serving_activity()?;
+        Ok(self
+            .room
             .find_occupant_by_real_jid(&msg.jid)
-            .map(OccupantInfo::from_occupant)
+            .map(OccupantInfo::from_occupant))
     }
 }
 
@@ -1398,16 +1457,18 @@ pub struct GetOccupantByNick {
 }
 
 impl kameo::message::Message<GetOccupantByNick> for RoomActor {
-    type Reply = Option<OccupantInfo>;
+    type Reply = Result<Option<OccupantInfo>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetOccupantByNick,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room
+        self.gate_serving_activity()?;
+        Ok(self
+            .room
             .get_occupant(&msg.nick)
-            .map(OccupantInfo::from_occupant)
+            .map(OccupantInfo::from_occupant))
     }
 }
 
@@ -1426,13 +1487,14 @@ pub struct RoomInfo {
 pub struct GetInfo;
 
 impl kameo::message::Message<GetInfo> for RoomActor {
-    type Reply = Result<RoomInfo, Infallible>;
+    type Reply = Result<RoomInfo, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: GetInfo,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         Ok(RoomInfo {
             room_jid: self.room.room_jid.clone(),
             occupant_count: self.room.occupant_count(),
@@ -1445,13 +1507,14 @@ impl kameo::message::Message<GetInfo> for RoomActor {
 pub struct GetConfig;
 
 impl kameo::message::Message<GetConfig> for RoomActor {
-    type Reply = Result<RoomConfig, Infallible>;
+    type Reply = Result<RoomConfig, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: GetConfig,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         Ok(self.room.config.clone())
     }
 }
@@ -1668,13 +1731,14 @@ pub struct ApplyPin {
 }
 
 impl kameo::message::Message<ApplyPin> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: ApplyPin,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         match msg.change {
             PinStateChange::Pin(entry) => {
                 self.room.upsert_pin(entry);
@@ -1683,6 +1747,7 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
                 self.room.remove_pin_by_target(&target_stanza_id);
             }
         }
+        Ok(())
     }
 }
 
@@ -1693,14 +1758,15 @@ impl kameo::message::Message<ApplyPin> for RoomActor {
 pub struct GetPinList;
 
 impl kameo::message::Message<GetPinList> for RoomActor {
-    type Reply = Vec<PinnedEntry>;
+    type Reply = Result<Vec<PinnedEntry>, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: GetPinList,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room.pinned_entries().to_vec()
+        self.gate_serving_activity()?;
+        Ok(self.room.pinned_entries().to_vec())
     }
 }
 
@@ -1745,13 +1811,14 @@ pub struct GetAffiliation {
 }
 
 impl kameo::message::Message<GetAffiliation> for RoomActor {
-    type Reply = Result<Affiliation, Infallible>;
+    type Reply = Result<Affiliation, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         Ok(self.room.get_affiliation(&msg.jid))
     }
 }
@@ -1779,13 +1846,14 @@ pub struct ListAffiliations {
 }
 
 impl kameo::message::Message<ListAffiliations> for RoomActor {
-    type Reply = Vec<AffiliationEntry>;
+    type Reply = Result<Vec<AffiliationEntry>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: ListAffiliations,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         let mut entries: Vec<AffiliationEntry> = self
             .room
             .get_all_affiliations()
@@ -1796,7 +1864,7 @@ impl kameo::message::Message<ListAffiliations> for RoomActor {
             })
             .collect();
         entries.sort_by(|a, b| a.jid.cmp(&b.jid));
-        entries
+        Ok(entries)
     }
 }
 
@@ -1804,18 +1872,20 @@ impl kameo::message::Message<ListAffiliations> for RoomActor {
 pub struct ListOccupants;
 
 impl kameo::message::Message<ListOccupants> for RoomActor {
-    type Reply = Vec<OccupantInfo>;
+    type Reply = Result<Vec<OccupantInfo>, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: ListOccupants,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room
+        self.gate_serving_activity()?;
+        Ok(self
+            .room
             .occupants
             .values()
             .map(OccupantInfo::from_occupant)
-            .collect()
+            .collect())
     }
 }
 
@@ -1823,14 +1893,15 @@ impl kameo::message::Message<ListOccupants> for RoomActor {
 pub struct OccupantCount;
 
 impl kameo::message::Message<OccupantCount> for RoomActor {
-    type Reply = usize;
+    type Reply = Result<usize, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: OccupantCount,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.room.occupant_count()
+        self.gate_serving_activity()?;
+        Ok(self.room.occupant_count())
     }
 }
 
@@ -1918,6 +1989,25 @@ impl kameo::message::Message<GetRoomSealState> for RoomActor {
     }
 }
 
+/// Read the exact durable claim retained by this actor incarnation.
+///
+/// This is a typed, read-only diagnostic for ownership convergence. It must
+/// never be used as dispatch authorization: [`GetRoomSnapshot`] remains the
+/// serving boundary and rejects every sealed actor.
+pub struct GetRetainedRoomClaimFence;
+
+impl kameo::message::Message<GetRetainedRoomClaimFence> for RoomActor {
+    type Reply = Option<super::durable::RoomClaimFenceContext>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetRetainedRoomClaimFence,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.durable_claim_fence.clone()
+    }
+}
+
 /// The inactivity predicate a guarded destroy checks before sealing
 /// the room actor (#1108).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1972,6 +2062,10 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
         match self.seal_state {
             RoomSealState::OwnershipLost => return SealIfInactiveOutcome::OwnershipLost,
             RoomSealState::Inactive => return SealIfInactiveOutcome::Inactive,
+            // Graceful shutdown owns this actor's terminal retirement and
+            // exact claim release. The inactivity reaper must leave it in
+            // place rather than racing that ordered sequence.
+            RoomSealState::Shutdown => return SealIfInactiveOutcome::Refused,
             RoomSealState::Open => {}
         }
         if self.occupancy_revision != msg.expected_occupancy_revision {
@@ -1997,14 +2091,16 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
 pub struct Destroy;
 
 impl kameo::message::Message<Destroy> for RoomActor {
-    type Reply = ();
+    type Reply = Result<(), RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: Destroy,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         self.room.occupants.clear();
+        Ok(())
     }
 }
 
@@ -2026,18 +2122,53 @@ impl kameo::message::Message<GetRoomJid> for RoomActor {
 pub struct GetSnapshot;
 
 impl kameo::message::Message<GetSnapshot> for RoomActor {
-    type Reply = Result<RoomSnapshot, Infallible>;
+    type Reply = Result<RoomSnapshot, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: GetSnapshot,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // The full snapshot drives roster/config responses, external archive
+        // authorization, and fan-out. Keep it behind the serving seal; narrow
+        // typed diagnostics have dedicated messages.
+        self.gate_serving_activity()?;
         Ok(RoomSnapshot {
             room: self.room.clone(),
             config_revision: self.config_revision,
             admission_revision: self.admission_revision,
         })
+    }
+}
+
+/// Install the terminal graceful-shutdown seal at this exact mailbox
+/// position.
+///
+/// A successful reply proves every message queued before this one finished,
+/// including any awaited fenced durable write. Messages queued later still
+/// reach the live actor until the drain retires it, but the central serving
+/// gate and typed handler outcomes refuse admissions, occupancy/presence/call
+/// updates, self-ping and occupant authorization reads, pin/config/admin/
+/// affiliation/invite mutations, restore/hydration, destruction, and
+/// broadcast/dispatch preparation. Harmless diagnostic reads remain available
+/// to the drain. The transition is idempotent. A separate shutdown overlay
+/// blocks ownership-loss recovery replays without erasing that definitive
+/// provenance from [`GetRoomSealState`].
+pub struct SealForShutdown;
+
+impl kameo::message::Message<SealForShutdown> for RoomActor {
+    type Reply = RoomSealState;
+
+    async fn handle(
+        &mut self,
+        _msg: SealForShutdown,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.shutdown_seal_installed = true;
+        if self.seal_state != RoomSealState::OwnershipLost {
+            self.seal_state = RoomSealState::Shutdown;
+        }
+        self.seal_state
     }
 }
 
@@ -2047,9 +2178,9 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
 /// actor's mailbox loop is live and responsive right now, since kameo
 /// processes a mailbox strictly in order. Production callers:
 /// `RoomLocalClaims::health_check` (the Slice 7 owner-veto/reconciliation
-/// path) and `RoomLocalClaims::seal_before_release` (the Slice 10 drain
-/// barrier — a reply after the drain's `owned()` snapshot proves every
-/// mutation queued ahead of it already committed its fenced durable write).
+/// path). Graceful drain uses [`SealForShutdown`] instead so the same mailbox
+/// barrier also prevents any later mutation from starting before retirement
+/// and claim release.
 pub struct HealthCheck;
 
 impl kameo::message::Message<HealthCheck> for RoomActor {

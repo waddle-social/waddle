@@ -31,14 +31,15 @@ use super::route_bridge::{
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
     RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteUserSideEffect,
 };
-use super::self_fence::LocallyClaimedEntities;
+use super::self_fence::{ConnectedPeerCount, LocallyClaimedEntities};
 use super::NodeId;
 use kameo::actor::{ActorRef, RemoteActorRef, Spawn};
 use kameo::error::RemoteSendError;
 use kameo::message::{Context, Message};
 use kameo::{Actor, RemoteActor, Reply};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -59,6 +60,43 @@ const LOCAL_FORCE_DETACH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// kademlia name (O(1) registrations per node, never per entity).
 pub fn relay_name(node_id: &NodeId) -> String {
     format!("waddle-relay/{node_id}")
+}
+
+/// Read-only per-peer transport multiplicity maintained by the swarm.
+///
+/// The production isolation decision deliberately uses [`ConnectedPeerCount`]
+/// instead: one or two transports to the same peer are equivalent for
+/// reachability. This finer snapshot exists for the fault-gated cluster
+/// harness so its simultaneous cross-dial regression can prove that both
+/// authenticated transports were established and retained.
+#[derive(Clone, Default)]
+pub struct ConnectedTransportCounts(Arc<RwLock<HashMap<libp2p::PeerId, u32>>>);
+
+impl ConnectedTransportCounts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, peer_id: libp2p::PeerId, count: u32) {
+        let mut counts = self
+            .0
+            .write()
+            .expect("connected transport count lock poisoned");
+        if count == 0 {
+            counts.remove(&peer_id);
+        } else {
+            counts.insert(peer_id, count);
+        }
+    }
+
+    pub fn get(&self, peer_id: &libp2p::PeerId) -> u32 {
+        self.0
+            .read()
+            .expect("connected transport count lock poisoned")
+            .get(peer_id)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// Backoff between supervised respawn/re-registration attempts.
@@ -139,6 +177,12 @@ async fn register_relay_actor(
 #[remote_actor(id = "waddle.clustering.relay-actor.v1")]
 pub struct RelayActor {
     node_id: NodeId,
+    /// Read-only peer-level connectivity snapshot used by the fault-gated
+    /// subprocess probe to prove it did not repair a missing route itself.
+    connected_peers: ConnectedPeerCount,
+    /// Read-only transport multiplicity for the exact target peer, used only
+    /// by the fault-gated simultaneous cross-dial harness.
+    connected_transports: ConnectedTransportCounts,
     /// When false (production), the fault-injection messages are inert acks.
     fault_injection: bool,
     /// ADR-0017 Phase 3 Slice 6: this node's bridge to its own live
@@ -159,6 +203,8 @@ pub struct RelayActor {
 impl RelayActor {
     pub fn new(
         node_id: NodeId,
+        connected_peers: ConnectedPeerCount,
+        connected_transports: ConnectedTransportCounts,
         fault_injection: bool,
         resume_bridge: Arc<ResumeStealBridge>,
         room_local_claims: Arc<RoomLocalClaims>,
@@ -166,6 +212,8 @@ impl RelayActor {
     ) -> Self {
         Self {
             node_id,
+            connected_peers,
+            connected_transports,
             fault_injection,
             resume_bridge,
             room_local_claims,
@@ -258,8 +306,14 @@ async fn finish_ordered_reservation(
                     .lock()
                     .await
                     .commit_reserved_with_replies(*reserved, client_replies),
-                Ok(Err(reason)) => receiver.lock().await.abort_reserved(*reserved, reason),
+                Ok(Err(reason)) => {
+                    if reason == OrderedRelayNackReason::MaybeCommitted {
+                        delivery_bridge.mark_unsafe_to_release();
+                    }
+                    receiver.lock().await.abort_reserved(*reserved, reason)
+                }
                 Err(_) => {
+                    delivery_bridge.mark_unsafe_to_release();
                     tracing::warn!(
                         timeout_ms = delivery_timeout.as_millis(),
                         channel = ?envelope.channel,
@@ -305,12 +359,54 @@ impl Message<RelayDeliverOrdered> for RelayActor {
     ) -> Self::Reply {
         let receiver = Arc::clone(&self.ordered_receiver);
         let delivery_bridge = Arc::clone(&self.ordered_delivery_bridge);
+        let room_scope = delivery_bridge.try_room_serving_scope();
         let reservation = receiver.lock().await.reserve(msg.envelope);
-        ctx.spawn(async move {
-            let reply = finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
-            record_ordered_relay_reply(&reply);
-            reply
-        })
+        match room_scope {
+            Ok(Some(mut scope)) => {
+                // Arm before Context::spawn so a never-polled or aborted
+                // delegated future still latches terminal release unsafe.
+                scope.arm();
+                ctx.spawn(async move {
+                    let reply =
+                        finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
+                    record_ordered_relay_reply(&reply);
+                    if matches!(
+                        &reply,
+                        OrderedRelayReply::Nack(nack)
+                            if nack.reason == OrderedRelayNackReason::MaybeCommitted
+                    ) {
+                        scope.poison();
+                    } else {
+                        scope.complete_clean();
+                    }
+                    reply
+                })
+            }
+            Ok(None) => {
+                // Unit-test-only unwired bridges retain the legacy path.
+                ctx.spawn(async move {
+                    let reply =
+                        finish_ordered_reservation(receiver, delivery_bridge, reservation).await;
+                    record_ordered_relay_reply(&reply);
+                    reply
+                })
+            }
+            Err(error) => ctx.spawn(async move {
+                tracing::debug!(
+                    ?error,
+                    "ordered relay receiver rejected room-capable delivery during shutdown"
+                );
+                let reply = match reservation {
+                    OrderedRelayReservation::Reserved(reserved) => receiver
+                        .lock()
+                        .await
+                        .abort_reserved(*reserved, OrderedRelayNackReason::Unreachable),
+                    OrderedRelayReservation::Completed(reply) => reply,
+                };
+                record_ordered_relay_reply(&reply);
+                reply
+            }),
+        }
     }
 }
 
@@ -477,7 +573,38 @@ impl Message<RelayRouteRemoteResourceStanza> for RelayActor {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        ctx.spawn(async move { bridge.route_remote_resource_stanza_on_owner(msg).await })
+        match bridge.try_room_serving_scope() {
+            Ok(Some(mut scope)) => {
+                scope.arm();
+                ctx.spawn(async move {
+                    let reply = bridge.route_remote_resource_stanza_on_owner(msg).await;
+                    if matches!(
+                        reply.outcome,
+                        RemoteResourceRouteOutcome::MaybeCommitted
+                            | RemoteResourceRouteOutcome::JoinMaybeCommitted
+                    ) {
+                        bridge.mark_unsafe_to_release();
+                        scope.poison();
+                    } else {
+                        scope.complete_clean();
+                    }
+                    reply
+                })
+            }
+            Ok(None) => {
+                ctx.spawn(async move { bridge.route_remote_resource_stanza_on_owner(msg).await })
+            }
+            Err(error) => ctx.spawn(async move {
+                tracing::debug!(
+                    ?error,
+                    "remote-resource route rejected room-capable delivery during shutdown"
+                );
+                RelayRouteRemoteResourceStanzaReply {
+                    outcome: RemoteResourceRouteOutcome::Unavailable,
+                    replies: Vec::new(),
+                }
+            }),
+        }
     }
 }
 
@@ -687,6 +814,53 @@ pub struct RelaySleep {
     pub millis: u64,
 }
 
+/// Harness fault injection: make this relay resolve and ping another node's
+/// relay. This proves an exact subprocess-to-subprocess direction rather than
+/// merely proving that the test process can reach both nodes independently.
+/// Inert unless fault injection is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayProbePeer {
+    pub node_id: NodeId,
+    #[serde(with = "peer_id_serde")]
+    pub peer_id: libp2p::PeerId,
+}
+
+mod peer_id_serde {
+    use libp2p::PeerId;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(peer_id: &PeerId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&peer_id.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PeerId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Reply to [`RelayProbePeer`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayProbePeerReply {
+    Disabled,
+    Reachable {
+        node_id: NodeId,
+        source_connected_peers_before: i64,
+        source_connections_to_target_before: u32,
+    },
+    Unreachable {
+        source_connected_peers_before: i64,
+        source_connections_to_target_before: u32,
+    },
+}
+
 /// Reply to the fault-injection messages: whether the fault was applied
 /// (false = fault injection disabled on this node).
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
@@ -738,19 +912,80 @@ impl Message<RelaySleep> for RelayActor {
     }
 }
 
+#[kameo::remote_message("waddle.clustering.relay.probe_peer.v1")]
+impl Message<RelayProbePeer> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayProbePeerReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayProbePeer,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.fault_injection {
+            return ctx.spawn(async { RelayProbePeerReply::Disabled });
+        }
+        let source_connected_peers_before = self.connected_peers.get();
+        let source_connections_to_target_before = self.connected_transports.get(&msg.peer_id);
+        if msg.node_id == self.node_id {
+            let node_id = self.node_id.clone();
+            return ctx.spawn(async move {
+                RelayProbePeerReply::Reachable {
+                    node_id,
+                    source_connected_peers_before,
+                    source_connections_to_target_before,
+                }
+            });
+        }
+
+        // Delegate the nested remote ask so this relay's mailbox remains
+        // available to answer the other endpoint's RelayPing. Running both
+        // directions inline can make A wait for a ping queued behind A's
+        // probe while B waits for the reciprocal queued ping.
+        ctx.spawn(async move {
+            let mut peer = RelayHandle::new(msg.node_id, CancellationToken::new());
+            match peer.ping().await {
+                Ok(pong) => RelayProbePeerReply::Reachable {
+                    node_id: pong.node_id,
+                    source_connected_peers_before,
+                    source_connections_to_target_before,
+                },
+                Err(_) => RelayProbePeerReply::Unreachable {
+                    source_connected_peers_before,
+                    source_connections_to_target_before,
+                },
+            }
+        })
+    }
+}
+
+/// Complete dependency set for one supervised relay lifetime.
+pub(super) struct RelaySupervisorInputs {
+    pub(super) node_id: NodeId,
+    pub(super) connected_peers: ConnectedPeerCount,
+    pub(super) connected_transports: ConnectedTransportCounts,
+    pub(super) fault_injection: bool,
+    pub(super) stop_token: CancellationToken,
+    pub(super) resume_bridge: Arc<ResumeStealBridge>,
+    pub(super) room_local_claims: Arc<RoomLocalClaims>,
+    pub(super) ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
+}
+
 /// Spawn the node's relay actor under supervision: register it in kademlia
 /// under [`relay_name`], respawn it if it ever stops unexpectedly, and
 /// **re-register under the same name** on every respawn (kameo auto-registers
 /// removal on actor stop, so re-registration is mandatory, not optional).
 /// Stops cleanly when `stop_token` fires.
-pub fn spawn_supervised(
-    node_id: NodeId,
-    fault_injection: bool,
-    stop_token: CancellationToken,
-    resume_bridge: Arc<ResumeStealBridge>,
-    room_local_claims: Arc<RoomLocalClaims>,
-    ordered_delivery_bridge: Arc<OrderedRelayDeliveryBridge>,
-) -> RelayRegistrationTrigger {
+pub(super) fn spawn_supervised(inputs: RelaySupervisorInputs) -> RelayRegistrationTrigger {
+    let RelaySupervisorInputs {
+        node_id,
+        connected_peers,
+        connected_transports,
+        fault_injection,
+        stop_token,
+        resume_bridge,
+        room_local_claims,
+        ordered_delivery_bridge,
+    } = inputs;
     let (trigger_tx, mut trigger_rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let name = relay_name(&node_id);
@@ -762,6 +997,8 @@ pub fn spawn_supervised(
             }
             let actor_ref: ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
                 node_id.clone(),
+                connected_peers.clone(),
+                connected_transports.clone(),
                 fault_injection,
                 Arc::clone(&resume_bridge),
                 Arc::clone(&room_local_claims),
@@ -1191,6 +1428,34 @@ impl RelayHandle {
         let remote_ref = self.resolve().await?;
         remote_ref
             .ask(&RelaySleep { millis })
+            .mailbox_timeout(self.mailbox_timeout)
+            .reply_timeout(self.reply_timeout)
+            .await
+            .map_err(send_error)
+    }
+
+    /// Harness: ask this node's relay to resolve and ping `node_id`.
+    pub async fn probe_peer(
+        &mut self,
+        node_id: NodeId,
+        peer_id: libp2p::PeerId,
+    ) -> Result<RelayProbePeerReply, RelayAskError> {
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = self.probe_peer_inner(node_id, peer_id) => result,
+        }
+    }
+
+    async fn probe_peer_inner(
+        &mut self,
+        node_id: NodeId,
+        peer_id: libp2p::PeerId,
+    ) -> Result<RelayProbePeerReply, RelayAskError> {
+        let remote_ref = self.resolve().await?;
+        remote_ref
+            .ask(&RelayProbePeer { node_id, peer_id })
             .mailbox_timeout(self.mailbox_timeout)
             .reply_timeout(self.reply_timeout)
             .await
@@ -2172,6 +2437,8 @@ mod tests {
         resume_bridge.wire(Arc::clone(&registry));
         let actor_ref: kameo::actor::ActorRef<RelayActor> = RelayActor::spawn(RelayActor::new(
             NodeId::new("node-under-test".to_string()),
+            ConnectedPeerCount::new(),
+            ConnectedTransportCounts::new(),
             false,
             resume_bridge,
             RoomLocalClaims::new(),

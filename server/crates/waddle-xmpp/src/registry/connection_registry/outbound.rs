@@ -168,6 +168,15 @@ pub enum ForceDetachOutcome {
     /// `LocalForcedDetachOutcome::NotLiveLocally` (re-check persistence and
     /// retry).
     NotPersisted,
+    /// No authoritative result was received, so the asker has no proof that
+    /// the connection closed.
+    ///
+    /// This is deliberately distinct from [`Self::NotPersisted`], which
+    /// proves that identity matched and teardown completed even though no
+    /// resumable snapshot was written. Relay cancellation, timeout, or an
+    /// unavailable remote socket must report `Unavailable`; callers must
+    /// preserve the owning claim and retry or let fenced reclaim resolve it.
+    Unavailable,
 }
 
 /// Connection state stored in the registry.

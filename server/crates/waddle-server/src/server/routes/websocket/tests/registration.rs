@@ -22,6 +22,26 @@ use waddle_xmpp::{
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
+#[cfg(feature = "clustering")]
+struct HoldUserRegistry {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "clustering")]
+impl kameo::message::Message<HoldUserRegistry> for waddle_xmpp::registry::UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HoldUserRegistry,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = msg.entered.send(());
+        msg.release.notified().await;
+    }
+}
+
 #[tokio::test]
 async fn ensure_state_machine_initializes_sm_in_ready_phase() {
     let state = create_test_websocket_state().await;
@@ -124,6 +144,150 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
     assert_eq!(
         state.deps.protocol.connection_registry.connection_count(),
         1
+    );
+}
+
+/// User-claim shutdown takes the exclusive side of the shared identity gate
+/// before checking both registries and releasing claims. A live bind must hold
+/// the read side across its DashMap publication and authoritative actor mirror,
+/// otherwise shutdown could observe the temporary half-registration as empty,
+/// release the claim, and let the actor mirror land afterward.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn user_claim_disable_waits_for_connection_registration_mirror() {
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use kameo::actor::ActorRef;
+    use waddle_xmpp::ownership::{
+        ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::registry::{
+        GetUserForLocalClaim, UserRegistryActor, WireUserClusteringClaims,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    let node_identity =
+        SharedNodeIdentity::new(NodeIdentity::new("registering-node", "registering-epoch"));
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            claim_store: Some(Arc::clone(&claim_store)),
+            node_identity: Some(node_identity.clone()),
+            ..Default::default()
+        },
+        Arc::new(InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(WireUserClusteringClaims {
+            claim_store,
+            node_identity: node_identity.clone(),
+        })
+        .await
+        .expect("wire the production-shared identity source");
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+
+    // Occupy the UserRegistry mailbox so the bind can publish into the
+    // ConnectionRegistry but cannot yet complete its authoritative mirror.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let user_registry: ActorRef<UserRegistryActor> = state.deps.protocol.user_registry.clone();
+    let blocker_release = Arc::clone(&release);
+    let blocker = tokio::spawn(async move {
+        user_registry
+            .ask(HoldUserRegistry {
+                entered: entered_tx,
+                release: blocker_release,
+            })
+            .await
+            .expect("registry blocker");
+    });
+    entered_rx.await.expect("registry blocker entered");
+
+    let registering_state = Arc::clone(&state);
+    let registering_jid = jid.clone();
+    let registration = tokio::spawn(async move {
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(registering_jid, false);
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+        let mut pending_tx = Some(tx);
+        register_bound_connection_after_frame(
+            registering_state.as_ref(),
+            "example.com",
+            &mut conn,
+            &mut pending_tx,
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bind should reach ConnectionRegistry publication");
+
+    let disabling_identity = node_identity.clone();
+    let disable = tokio::spawn(async move { disabling_identity.disable().await });
+    tokio::task::yield_now().await;
+    assert!(
+        !disable.is_finished(),
+        "disable must wait while the connection is between registry publication and actor mirror"
+    );
+
+    release.notify_one();
+    blocker.await.expect("blocker task");
+    let result = registration.await.expect("registration task");
+    assert!(matches!(result, RegistrationAfterFrame::Registered(_)));
+    disable.await.expect("disable task");
+
+    assert!(
+        state
+            .deps
+            .protocol
+            .user_registry
+            .ask(GetUserForLocalClaim {
+                bare_jid: jid.to_bare(),
+            })
+            .await
+            .expect("user lookup")
+            .is_some(),
+        "disable returned only after the actor mirror completed"
+    );
+
+    let rejected_jid: FullJid = "bob@example.com/web".parse().expect("jid");
+    let mut rejected_conn = WsConnState::new();
+    rejected_conn.phase = ConnectionPhase::ready(rejected_jid.clone(), false);
+    let (rejected_tx, _rejected_rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut rejected_pending_tx = Some(rejected_tx);
+    let rejected = register_bound_connection_after_frame(
+        state.as_ref(),
+        "example.com",
+        &mut rejected_conn,
+        &mut rejected_pending_tx,
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        RegistrationAfterFrame::SessionInitializationFailed
+    ));
+    assert!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&rejected_jid)
+            .is_none(),
+        "a bind starting after terminal disable must not publish into ConnectionRegistry"
     );
 }
 

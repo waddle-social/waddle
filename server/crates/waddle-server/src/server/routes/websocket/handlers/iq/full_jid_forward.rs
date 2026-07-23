@@ -57,10 +57,16 @@ pub(super) async fn route_full_jid_iq(
             .try_deliver_full_jid_remote(&target, &stanza, origin)
             .await
         {
+            if outcome.is_ambiguous() {
+                state.deps.room_serving.mark_unsafe_to_release();
+            }
             return match outcome {
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
                 | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeEnqueued => {
+                    Vec::new()
+                }
                 #[cfg(feature = "clustering")]
                 crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
                     Vec::new()
@@ -78,10 +84,16 @@ pub(super) async fn route_full_jid_iq(
             )
             .await
         {
+            if outcome.is_ambiguous() {
+                state.deps.room_serving.mark_unsafe_to_release();
+            }
             return match outcome {
                 crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
                 | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped
+                | crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeEnqueued => {
+                    Vec::new()
+                }
                 #[cfg(feature = "clustering")]
                 crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
                     Vec::new()

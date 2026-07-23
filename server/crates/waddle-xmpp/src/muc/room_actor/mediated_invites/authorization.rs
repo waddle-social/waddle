@@ -14,6 +14,13 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
         msg: AuthorizeMediatedInvite,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // Inactivity/shutdown retire the actor, so even cached replies are
+        // blocked. Ownership loss still permits inspection of an exact
+        // pre-existing operation so recovery can obtain its opaque rollback
+        // authority without applying another room mutation.
+        if self.blocks_recovery_replay() {
+            return Err(MediatedInviteGrantError::RoomSealed);
+        }
         if let Some(record) = self.invite_operations.get(&msg.operation_id) {
             return if record.inviter == msg.inviter && record.invitee == msg.invitee {
                 Ok(record.authorization.clone())
@@ -21,7 +28,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
                 Err(MediatedInviteGrantError::OperationMismatch)
             };
         }
-        if self.seal_state.is_sealed() {
+        if self.seal_state == RoomSealState::OwnershipLost {
             return Err(MediatedInviteGrantError::RoomSealed);
         }
         self.gate_mutation().await?;

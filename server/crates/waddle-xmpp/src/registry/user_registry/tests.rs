@@ -16,6 +16,24 @@ struct WedgeUserActor {
     entered: Arc<tokio::sync::Notify>,
 }
 
+struct HoldUserRegistry {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl kameo::message::Message<HoldUserRegistry> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: HoldUserRegistry,
+        _ctx: &mut kameo::message::Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = msg.entered.send(());
+        msg.release.notified().await;
+    }
+}
+
 impl kameo::message::Message<WedgeUserActor> for UserActor {
     type Reply = ();
 
@@ -400,6 +418,88 @@ async fn get_or_create_releases_a_claim_if_identity_rotates_after_the_cas() {
         .await
         .expect("claim lookup")
         .is_none());
+}
+
+#[tokio::test]
+async fn queued_authority_registration_cannot_block_terminal_identity_disable() {
+    let registry = spawn_registry().await;
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let identity = this_identity();
+    let shared_identity = SharedNodeIdentity::new(identity.clone());
+    wire_shared_claims(&registry, Arc::clone(&claim_store), shared_identity.clone()).await;
+
+    let publication_guard = shared_identity
+        .guard_if_current(&identity)
+        .await
+        .expect("active identity guard");
+    let publication_permit = publication_guard.permit();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let blocker = tokio::spawn({
+        let registry = registry.clone();
+        let release = Arc::clone(&release);
+        async move {
+            registry
+                .ask(HoldUserRegistry {
+                    entered: entered_tx,
+                    release,
+                })
+                .await
+        }
+    });
+    entered_rx.await.expect("registry blocker entered");
+
+    let jid = full("queued-permit", "phone");
+    let bare_jid = jid.to_bare();
+    let (tx, _rx) = outbound_channel();
+    let registering = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .ask(RegisterUserResourceUnderAuthority {
+                    jid,
+                    entry: ConnectionEntry::new(tx),
+                    publication_permit,
+                })
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    drop(publication_guard);
+
+    let disabled = tokio::time::timeout(Duration::from_millis(100), shared_identity.disable())
+        .await
+        .expect("a queued actor message must not retain the publication read lock");
+    assert!(shared_identity.owns_disabled(&disabled));
+
+    release.notify_one();
+    blocker
+        .await
+        .expect("blocker task")
+        .expect("blocker message");
+    let result = registering.await.expect("registration task");
+    assert!(
+        matches!(
+            result,
+            Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(ref jid)))
+                if *jid == bare_jid
+        ),
+        "the late queued registration must fail after terminal disable: {result:?}"
+    );
+    assert!(registry
+        .ask(ListUsers)
+        .await
+        .expect("list users")
+        .is_empty());
+    assert!(
+        claim_store
+            .current_claim(&user_entity(&bare_jid))
+            .await
+            .expect("claim lookup")
+            .is_none(),
+        "a rejected late registration must not leak a UserActor claim"
+    );
 }
 
 #[tokio::test]

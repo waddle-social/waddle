@@ -222,7 +222,11 @@ async fn provider_webhook_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    match accept_provider_webhook(websocket_state, path, &headers, body.as_ref()).await {
+    let scope = match websocket_state.deps.room_serving.try_scope() {
+        Ok(scope) => scope,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match accept_provider_webhook(websocket_state, path, &headers, body.as_ref(), scope).await {
         Ok(accepted) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
         Err(error) => webhook_error_response(error),
     }
@@ -233,6 +237,7 @@ async fn accept_provider_webhook(
     path: ProviderIngressPath,
     headers: &HeaderMap,
     body: &[u8],
+    mut room_scope: crate::server::room_serving_quiescence::RoomServingScope,
 ) -> Result<WebhookAccepted, WebhookError> {
     if body.is_empty() {
         return Err(WebhookError::EmptyBody);
@@ -301,6 +306,11 @@ async fn accept_provider_webhook(
         delivery_id: delivery_id.clone(),
         payload,
     };
+    // Validation failures above are settled and leave the admission scope
+    // unarmed. From the delivery-ledger insert onward the request can enqueue
+    // room-capable extension work, so cancellation/ambiguity must latch
+    // terminal release unsafe.
+    room_scope.arm();
     let payload_sha256 = hex::encode(Sha256::digest(body));
     let inserted = record_provider_delivery(
         &websocket_state,
@@ -310,6 +320,7 @@ async fn accept_provider_webhook(
     )
     .await?;
     if !inserted {
+        room_scope.complete_clean();
         return Ok(WebhookAccepted {
             accepted: true,
             provider: provider.into_string(),
@@ -337,6 +348,7 @@ async fn accept_provider_webhook(
                 event,
             )
             .await;
+            room_scope.complete_clean();
         });
 
     Ok(WebhookAccepted {

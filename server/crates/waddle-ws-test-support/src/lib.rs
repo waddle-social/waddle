@@ -145,7 +145,17 @@ impl TestServer {
         extra_envs: &[(&str, &str)],
     ) -> Self {
         let bin = waddle_server_bin();
-        let fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
+        let generated_fixed_account_password = format!("ws-test-password-{}", uuid::Uuid::new_v4());
+        // Extra envs are applied after the harness defaults below, so the
+        // accessor must report the same overridden password the subprocess
+        // actually receives.
+        let fixed_account_password = extra_envs
+            .iter()
+            .rev()
+            .find_map(|(key, value)| {
+                (*key == "WADDLE_TEST_FIXED_ACCOUNT_PASSWORD").then(|| (*value).to_string())
+            })
+            .unwrap_or(generated_fixed_account_password);
         let test_profile_publish_token = uuid::Uuid::new_v4().to_string();
         let extra_accounts_env = extra_accounts
             .iter()

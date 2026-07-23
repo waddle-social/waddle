@@ -16,9 +16,10 @@ use waddle_xmpp::muc::durable::{
 };
 use waddle_xmpp::muc::room_actor::{
     DurableRestoreReadiness, GetAffiliation, GetConfig, GetDurableRestoreReadiness,
-    GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
-    OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState, RoomActor,
-    RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation, UpdateConfig,
+    GetRetainedRoomClaimFence, GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant,
+    JoinWithAffiliation, OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState,
+    RoomActor, RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation,
+    UpdateConfig,
 };
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
@@ -261,7 +262,10 @@ async fn deposed_room_refuses_xep0045_resolver_join() {
         actor.ask(resolver_join()).await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
-    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+    assert!(matches!(
+        actor.ask(OccupantCount).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 #[tokio::test]
@@ -384,7 +388,10 @@ async fn deposed_room_refuses_legacy_xep0045_join() {
         actor.ask(legacy_join()).await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
-    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+    assert!(matches!(
+        actor.ask(OccupantCount).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 #[tokio::test]
@@ -418,13 +425,10 @@ async fn deposed_room_refuses_resolver_affiliation_sync() {
             .expect("sync outcome"),
         ResolverAffiliationSyncOutcome::RoomSealed,
     );
-    assert_eq!(
-        actor
-            .ask(GetAffiliation { jid })
-            .await
-            .expect("affiliation"),
-        Affiliation::None,
-    );
+    assert!(matches!(
+        actor.ask(GetAffiliation { jid }).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 #[tokio::test]
@@ -471,6 +475,7 @@ async fn assert_invalid_restore_fence_fails_closed(invalid_fence: RoomClaimFence
         expected_epoch,
         None,
     ));
+    let original_config = actor.ask(GetConfig).await.expect("original config");
 
     actor
         .ask(RestoreDurableRoomState {
@@ -492,22 +497,24 @@ async fn assert_invalid_restore_fence_fails_closed(invalid_fence: RoomClaimFence
         actor.ask(GetRoomSealState).await.expect("room seal state"),
         RoomSealState::OwnershipLost,
     );
-    let original_config = actor.ask(GetConfig).await.expect("original config");
     let mut attempted = original_config.clone();
     attempted.name = "must not mutate".to_string();
     assert!(matches!(
         actor.ask(UpdateConfig { config: attempted }).await,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
     ));
-    assert_eq!(
-        actor.ask(GetConfig).await.expect("config after rejection"),
-        original_config,
-    );
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert!(matches!(
         actor.ask(resolver_join()).await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
-    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+    assert!(matches!(
+        actor.ask(OccupantCount).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 #[tokio::test]
@@ -598,16 +605,21 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
         "the successor store must not receive a load from the old actor incarnation"
     );
     assert_eq!(original_store.take_observed_load_count(), 0);
-    assert_eq!(
+    assert!(matches!(
         actor
             .ask(GetRoomSnapshot {
                 sender_jid: snapshot_sender,
             })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        actor
+            .ask(GetRetainedRoomClaimFence)
             .await
-            .expect("snapshot after transplant attempt")
-            .claim_fence,
+            .expect("retained claim-fence diagnostic"),
         Some(original_fence.clone()),
-        "a rejected successor restore must not replace the fence carried by old snapshots",
+        "a rejected successor restore must not replace the old incarnation's retained fence",
     );
 
     let mut attempted = original_config.clone();
@@ -616,15 +628,18 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
         actor.ask(UpdateConfig { config: attempted }).await,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
     ));
-    assert_eq!(
-        actor.ask(GetConfig).await.expect("config after rejection"),
-        original_config,
-    );
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert!(matches!(
         actor.ask(resolver_join()).await,
         Err(SendError::HandlerError(RoomActorError::RoomSealed))
     ));
-    assert_eq!(actor.ask(OccupantCount).await.expect("occupant count"), 0);
+    assert!(matches!(
+        actor.ask(OccupantCount).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 fn durable_existing_room() -> DurableRoomState {

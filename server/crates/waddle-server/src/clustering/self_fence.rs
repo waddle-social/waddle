@@ -28,12 +28,13 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use waddle_xmpp::ownership::{
-    ClaimEpoch, ClaimError, ClaimStore, Entity, NodeIdentity, SharedNodeIdentity,
+    ClaimEpoch, ClaimError, ClaimStore, DisabledNodeIdentity, Entity, EntityType, NodeIdentity,
+    SharedNodeIdentity,
 };
 
 use super::claims::NodeLeaseStore;
 use super::metrics;
-use super::ClusteringReadiness;
+use super::{ClusteringReadiness, ClusteringShutdownDecision};
 use crate::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
 
 /// Readable snapshot of the swarm's current connected-peer count (Phase 2
@@ -117,6 +118,20 @@ pub trait LocallyClaimedEntities: Send + Sync {
     /// enumeration itself is still pure in-memory bookkeeping, never a
     /// Postgres round-trip.
     async fn owned(&self) -> Vec<Entity>;
+
+    /// Snapshot one entity kind without requiring unrelated registries to
+    /// answer.
+    ///
+    /// The default preserves compatibility for single-kind implementations.
+    /// Composite implementations must override this so a wedged RoomRegistry
+    /// cannot consume a UserActor drain's inventory budget (and vice versa).
+    async fn owned_of_type(&self, entity_type: EntityType) -> Vec<Entity> {
+        self.owned()
+            .await
+            .into_iter()
+            .filter(|entity| entity.entity_type == entity_type)
+            .collect()
+    }
 
     /// Demote local state for an entity Postgres no longer attributes to
     /// this node (claim stolen, or this node's own claim row is gone).
@@ -252,6 +267,59 @@ pub trait LocallyClaimedEntities: Send + Sync {
     async fn seal_before_release(&self, entity: &Entity) -> bool {
         let _ = entity;
         true
+    }
+
+    /// Permanently stop local `RoomActor` claim acquisition and publication
+    /// before the graceful room inventory is taken.
+    ///
+    /// The shutdown drain must establish this terminal registry gate before
+    /// retiring any actor. Otherwise a queued room request can publish a new
+    /// actor after the inventory snapshot or after an old actor is killed.
+    /// Implementations fail closed unless they can prove the gate is active.
+    async fn begin_room_shutdown(&self) -> bool {
+        false
+    }
+
+    /// Irreversibly select terminal no-release handling for every local room
+    /// claim. Implementations must close room admission, stop/inventory
+    /// detached registry work, and retain all claims for node-expiry recovery.
+    ///
+    /// This is used for an explicit shutdown `Abandon` decision and for every
+    /// failed precondition after a release fence was issued. It must never
+    /// perform a claim release itself.
+    async fn abandon_room_shutdown(&self) -> bool {
+        false
+    }
+
+    /// Hard-retire one sealed room after [`Self::begin_room_shutdown`] has
+    /// permanently disabled replacement publication.
+    ///
+    /// Returning `true` authorizes the caller to release the room claim.
+    /// A live actor must never survive that release.
+    async fn retire_room_after_shutdown(&self, entity: &Entity) -> bool {
+        let _ = entity;
+        false
+    }
+
+    /// Retire one `UserActor` and every connection resource it owns after
+    /// publication authority has been terminally disabled, then verify that
+    /// neither local registry can still route the user.
+    ///
+    /// This is deliberately separate from [`Self::seal_before_release`].
+    /// User claims cannot be released while the live identity can still
+    /// publish a same-incarnation replacement between the retirement check
+    /// and the batched release. Requiring [`DisabledNodeIdentity`] makes the
+    /// post-authority-disable ordering explicit and unforgeable outside
+    /// [`SharedNodeIdentity::disable`]. Implementations return `false` on
+    /// any timeout, teardown failure, or residual actor/resource; shutdown
+    /// then leaves the claim held for ordinary fenced reclaim.
+    async fn retire_user_after_authority_disabled(
+        &self,
+        entity: &Entity,
+        disabled_identity: &DisabledNodeIdentity,
+    ) -> bool {
+        let _ = (entity, disabled_identity);
+        false
     }
 }
 
@@ -413,11 +481,11 @@ pub struct NodeLeaseRunConfig {
     /// mint a fresh swarm keypair, so the PeerId binding intentionally stays
     /// stable across a self-fence.
     pub peer_id: Option<String>,
-    /// ADR-0017 Phase 3 Slice 10: the graceful per-entity claim-release
-    /// drain's time budget (`ClusteringNodeLeaseConfig::claim_release_budget`,
-    /// `claimReleaseBudget` in the ADR's own text) — bound on
-    /// [`crate::clustering::drain::run_shutdown_drain`], called from every
-    /// ordinary-shutdown branch in [`run_node_lease`]'s `'tick` loop below.
+    /// ADR-0017 Phase 3 Slice 10: the total graceful claim-drain budget
+    /// (`ClusteringNodeLeaseConfig::claim_release_budget`,
+    /// `claimReleaseBudget` in the ADR's own text). Its first half caps the
+    /// all-or-none `RoomActor` batch; unused room time plus the second half
+    /// is available to the separate verified `UserActor` release phase.
     pub claim_release_budget: Duration,
 }
 
@@ -452,6 +520,95 @@ where
                 "clustering: marking node-lease row draining timed out; row ages out via \
                  its own lapsed heartbeat"
             );
+        }
+    }
+}
+
+/// Best-effort local retirement inside the still-live claim-release
+/// deadline. Exact-owner cleanup gets a bounded first attempt, then each
+/// entity kind receives a reserved share of the remaining time. A wedged
+/// room registry therefore cannot hang shutdown or starve UserActor cleanup.
+async fn demote_local_claims_before_deadline(
+    local_claims: &dyn LocallyClaimedEntities,
+    identities: &[&NodeIdentity],
+    deadline: tokio::time::Instant,
+) {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let exact_owner_budget = remaining / 2;
+    let exact_owner_deadline = tokio::time::Instant::now() + exact_owner_budget;
+    let identity_count = identities.len();
+    for (index, identity) in identities.iter().enumerate() {
+        let remaining = exact_owner_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let identities_left =
+            u32::try_from(identity_count - index).expect("identity count fits in u32");
+        let identity_budget = remaining / identities_left;
+        if !identity_budget.is_zero()
+            && tokio::time::timeout(identity_budget, local_claims.demote_owned_by(identity))
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: exact-owner local cleanup exceeded its shutdown budget"
+            );
+        }
+    }
+
+    let entity_types = [
+        EntityType::SmSession,
+        EntityType::RoomActor,
+        EntityType::UserActor,
+    ];
+    let entity_type_count = entity_types.len();
+    for (index, entity_type) in entity_types.into_iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let types_left = u32::try_from(entity_type_count - index).expect("only three entity types");
+        let type_budget = remaining / types_left;
+        if type_budget.is_zero() {
+            continue;
+        }
+        let type_deadline = tokio::time::Instant::now() + type_budget;
+        let entities = match tokio::time::timeout(
+            type_budget,
+            local_claims.owned_of_type(entity_type),
+        )
+        .await
+        {
+            Ok(entities) => entities,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    ?entity_type,
+                    "clustering: local inventory exceeded its reserved shutdown cleanup budget"
+                );
+                continue;
+            }
+        };
+        for entity in entities {
+            let remaining = type_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!(
+                    ?entity_type,
+                    "clustering: local demotion exhausted its reserved shutdown cleanup budget"
+                );
+                break;
+            }
+            if tokio::time::timeout(remaining, local_claims.demote(&entity))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    entity_type = ?entity.entity_type,
+                    entity_id = %entity.id,
+                    "clustering: local demotion exceeded its reserved shutdown cleanup budget"
+                );
+                break;
+            }
         }
     }
 }
@@ -645,8 +802,9 @@ impl Drop for InlineReclaimReservation<'_> {
 /// [`run_node_lease`]'s `'tick` loop previously did
 /// `crate::clustering::drain::run_shutdown_drain(..).await; return;`
 /// directly — the instant shutdown fired, heartbeat renewal stopped dead,
-/// and the whole per-entity drain (sealing/releasing owned `RoomActor`
-/// claims, bounded by `claim_release_budget`) ran with this node's
+/// and the whole room-batch drain (sealing/retiring all owned `RoomActor`
+/// claims before an all-or-none release, bounded by
+/// `claim_release_budget`) ran with this node's
 /// `clustering_nodes` row frozen at whatever heartbeat it last landed.
 /// Element 4's drain sequence requires a draining node to "stay live in
 /// `nodes`" (heartbeat fresh, draining flag set) for as long as it is
@@ -676,23 +834,75 @@ impl Drop for InlineReclaimReservation<'_> {
 /// visible as live for as long as this node is still legitimately
 /// finishing its own writes, not to re-run the ordinary fencing-loss
 /// handling mid-drain.
+pub(super) struct ShutdownDrainTiming {
+    pub(super) claim_release_budget: Duration,
+    pub(super) lease_ttl: Duration,
+}
+
 pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
     lease: &L,
     claim_store: &Arc<dyn ClaimStore>,
     identity: &NodeIdentity,
+    local_claims: &Arc<dyn LocallyClaimedEntities>,
+    timing: ShutdownDrainTiming,
+    fence: crate::server::room_serving_quiescence::RoomServingFence,
+    fatal_fence: &CancellationToken,
+) -> crate::clustering::drain::RoomShutdownDrainOutcome
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    run_with_shutdown_heartbeat(
+        lease,
+        identity,
+        crate::clustering::drain::run_shutdown_drain(
+            lease,
+            claim_store,
+            identity,
+            local_claims,
+            timing.claim_release_budget,
+            fence,
+            fatal_fence,
+        ),
+        timing.lease_ttl,
+    )
+    .await
+}
+
+async fn run_disabled_user_drain_with_heartbeat<L>(
+    lease: &L,
+    claim_store: &Arc<dyn ClaimStore>,
+    disabled_identity: &DisabledNodeIdentity,
     local_claims: &Arc<dyn LocallyClaimedEntities>,
     claim_release_budget: Duration,
     lease_ttl: Duration,
 ) where
     L: NodeLeaseStore + Send + Sync,
 {
-    let drain = std::pin::pin!(crate::clustering::drain::run_shutdown_drain(
+    run_with_shutdown_heartbeat(
         lease,
-        claim_store,
-        identity,
-        local_claims,
-        claim_release_budget,
-    ));
+        disabled_identity.prior_identity(),
+        crate::clustering::drain::run_disabled_user_shutdown_drain(
+            claim_store,
+            disabled_identity,
+            local_claims,
+            claim_release_budget,
+        ),
+        lease_ttl,
+    )
+    .await;
+}
+
+async fn run_with_shutdown_heartbeat<L, F, T>(
+    lease: &L,
+    identity: &NodeIdentity,
+    drain: F,
+    lease_ttl: Duration,
+) -> T
+where
+    L: NodeLeaseStore + Send + Sync,
+    F: std::future::Future<Output = T>,
+{
+    let drain = std::pin::pin!(drain);
     let mut drain = drain;
 
     // Renew comfortably inside `lease_ttl` — halved, floored at a tiny 10ms
@@ -717,8 +927,8 @@ pub(super) async fn run_shutdown_drain_with_heartbeat<L>(
     loop {
         tokio::select! {
             biased;
-            _ = &mut drain => {
-                return;
+            output = &mut drain => {
+                return output;
             }
             _ = ticker.tick() => {
                 match lease.heartbeat(identity, lease_ttl).await {
@@ -809,6 +1019,8 @@ struct TerminalFenceContext<'a, L> {
     readiness: &'a ClusteringReadiness,
     stop_token: &'a CancellationToken,
     fatal_fence: &'a CancellationToken,
+    shutdown_decision:
+        &'a tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<ClusteringShutdownDecision>>>,
     control_plane_budget: Duration,
 }
 
@@ -828,11 +1040,6 @@ where
         // identity authoritative while mailbox seal barriers complete the
         // final fenced writes for already-owned rooms.
         self.readiness.set_ready(false);
-        if self.fatal_fence.is_cancelled() {
-            self.finish(identity, identity).await;
-            return;
-        }
-
         let mark_draining = std::pin::pin!(mark_draining_bounded(
             self.lease,
             identity,
@@ -847,36 +1054,116 @@ where
             _ = mark_draining => {}
         }
 
-        let drain = std::pin::pin!(run_shutdown_drain_with_heartbeat(
-            self.lease,
-            claim_store,
-            identity,
-            self.local_claims,
-            claim_release_budget,
-            lease_ttl,
-        ));
-        tokio::select! {
-            biased;
-            _ = self.fatal_fence.cancelled() => {
+        let decision = {
+            let receiver = self.shutdown_decision.lock().await.take();
+            let wait = async {
+                let Some(receiver) = receiver else {
+                    return ClusteringShutdownDecision::Abandon;
+                };
+                tokio::select! {
+                    biased;
+                    _ = self.fatal_fence.cancelled() => ClusteringShutdownDecision::Abandon,
+                    decision = receiver => {
+                        decision.unwrap_or(ClusteringShutdownDecision::Abandon)
+                    }
+                }
+            };
+            run_with_shutdown_heartbeat(self.lease, identity, wait, lease_ttl).await
+        };
+
+        if matches!(&decision, ClusteringShutdownDecision::Abandon)
+            || self.fatal_fence.is_cancelled()
+        {
+            let abandon = tokio::time::timeout(
+                claim_release_budget,
+                self.local_claims.abandon_room_shutdown(),
+            );
+            let _ = run_with_shutdown_heartbeat(self.lease, identity, abandon, lease_ttl).await;
+            if self.fatal_fence.is_cancelled() {
                 self.finish(identity, identity).await;
                 return;
             }
-            _ = drain => {}
         }
 
-        // Only after every successful seal has been released may the
-        // publication barrier reject the remaining identity. Exact demotion
-        // retires anything the bounded drain deliberately abandoned.
-        self.live_identity.disable().await;
-        self.local_claims.demote_owned_by(identity).await;
-        for entity in self.local_claims.owned().await {
-            self.local_claims.demote(&entity).await;
+        let release_deadline = tokio::time::Instant::now() + claim_release_budget;
+        // Keep one configured total budget, but cap rooms at its first half.
+        // A fast room phase donates its unused time to users below; a wedged
+        // room can no longer consume the UserActor retirement opportunity.
+        let room_release_budget = claim_release_budget / 2;
+        match decision {
+            ClusteringShutdownDecision::Release(fence) if !room_release_budget.is_zero() => {
+                run_shutdown_drain_with_heartbeat(
+                    self.lease,
+                    claim_store,
+                    identity,
+                    self.local_claims,
+                    ShutdownDrainTiming {
+                        claim_release_budget: room_release_budget,
+                        lease_ttl,
+                    },
+                    fence,
+                    self.fatal_fence,
+                )
+                .await;
+            }
+            ClusteringShutdownDecision::Release(_fence) => {
+                let _ = self.local_claims.abandon_room_shutdown().await;
+            }
+            ClusteringShutdownDecision::Abandon => {}
         }
+        if self.fatal_fence.is_cancelled() {
+            self.finish(identity, identity).await;
+            return;
+        }
+
+        // Only after the room phase has reached a terminal result — either
+        // the complete batch was released or every room claim was abandoned
+        // for TTL recovery — may the publication barrier reject the
+        // remaining identity. UserActor retirement must happen on the far
+        // side of that barrier: otherwise an in-flight bind can publish a
+        // same-incarnation replacement after the local quiescence check but
+        // before release_many.
+        let disabled_identity = self.live_identity.disable().await;
+        let user_release_budget =
+            release_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if !user_release_budget.is_zero() {
+            let user_drain = std::pin::pin!(run_disabled_user_drain_with_heartbeat(
+                self.lease,
+                claim_store,
+                &disabled_identity,
+                self.local_claims,
+                user_release_budget,
+                lease_ttl,
+            ));
+            tokio::select! {
+                biased;
+                _ = self.fatal_fence.cancelled() => {
+                    self.finish(identity, identity).await;
+                    return;
+                }
+                _ = user_drain => {}
+            }
+        }
+
+        // Exact demotion retires anything either bounded phase deliberately
+        // abandoned. Failed UserActor retirement remains durably claimed and
+        // is reclaimed only after this node lease expires.
+        demote_local_claims_before_deadline(
+            self.local_claims.as_ref(),
+            &[identity],
+            release_deadline,
+        )
+        .await;
     }
 
     async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
         self.readiness.set_ready(false);
         self.stop_token.cancel();
+        let _ = tokio::time::timeout(
+            self.control_plane_budget,
+            self.local_claims.abandon_room_shutdown(),
+        )
+        .await;
 
         // A registration call is deliberately allowed to finish instead of
         // being cancellation-dropped: once it returns, rotate through a
@@ -884,12 +1171,21 @@ where
         // Disabled is a typed terminal state: publication guards and claim
         // stores both reject it for the rest of this clustering lifetime.
         self.live_identity.disable().await;
-        self.local_claims.demote_owned_by(prior_identity).await;
+        let cleanup_deadline = tokio::time::Instant::now() + self.control_plane_budget;
         if registered_identity != prior_identity {
-            self.local_claims.demote_owned_by(registered_identity).await;
-        }
-        for entity in self.local_claims.owned().await {
-            self.local_claims.demote(&entity).await;
+            demote_local_claims_before_deadline(
+                self.local_claims.as_ref(),
+                &[prior_identity, registered_identity],
+                cleanup_deadline,
+            )
+            .await;
+        } else {
+            demote_local_claims_before_deadline(
+                self.local_claims.as_ref(),
+                &[prior_identity],
+                cleanup_deadline,
+            )
+            .await;
         }
         mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
         if registered_identity != prior_identity {
@@ -939,11 +1235,66 @@ async fn run_pre_ready_heartbeat<L>(
     }
 }
 
+/// Drive the production node-lease loop without ever authorizing graceful
+/// claim release.
+///
+/// This public fail-closed entry point exists for the external clustering
+/// harness, which must exercise heartbeat and veto behavior directly but
+/// cannot possess the server's process-wide room-serving fence. On shutdown
+/// every local claim is abandoned for ordinary node-expiry recovery.
+pub async fn run_node_lease_fail_closed<L>(
+    lease: L,
+    identity: NodeIdentity,
+    stop_token: CancellationToken,
+    run_config: NodeLeaseRunConfig,
+) where
+    L: NodeLeaseStore + Send + Sync + 'static,
+{
+    let (decision, decision_rx) = tokio::sync::oneshot::channel();
+    decision
+        .send(ClusteringShutdownDecision::Abandon)
+        .expect("node-lease shutdown decision receiver remains live");
+    run_node_lease_authorized(lease, identity, stop_token, run_config, decision_rx).await;
+}
+
+#[cfg(test)]
+fn clean_test_room_serving_fence() -> crate::server::room_serving_quiescence::RoomServingFence {
+    use crate::server::room_serving_quiescence::{
+        RoomServingQuiescence, RoomServingTerminalOutcome,
+    };
+
+    let (_admission, closer) = RoomServingQuiescence::create();
+    closer.close();
+    match closer.finalize() {
+        RoomServingTerminalOutcome::Clean(fence) => fence,
+        outcome => panic!("test room-serving fence must be clean: {outcome:?}"),
+    }
+}
+
+#[cfg(test)]
 pub async fn run_node_lease<L>(
+    lease: L,
+    identity: NodeIdentity,
+    stop_token: CancellationToken,
+    run_config: NodeLeaseRunConfig,
+) where
+    L: NodeLeaseStore + Send + Sync + 'static,
+{
+    let (decision, decision_rx) = tokio::sync::oneshot::channel();
+    decision
+        .send(ClusteringShutdownDecision::Release(
+            clean_test_room_serving_fence(),
+        ))
+        .expect("test shutdown decision receiver remains live");
+    run_node_lease_authorized(lease, identity, stop_token, run_config, decision_rx).await;
+}
+
+pub(crate) async fn run_node_lease_authorized<L>(
     lease: L,
     mut identity: NodeIdentity,
     stop_token: CancellationToken,
     run_config: NodeLeaseRunConfig,
+    shutdown_decision: tokio::sync::oneshot::Receiver<ClusteringShutdownDecision>,
 ) where
     L: NodeLeaseStore + Send + Sync + 'static,
 {
@@ -961,6 +1312,7 @@ pub async fn run_node_lease<L>(
     } = run_config;
     let lease = Arc::new(lease);
     let fatal_fence = readiness.fatal_fence_token();
+    let shutdown_decision = tokio::sync::Mutex::new(Some(shutdown_decision));
     let terminal_fence_context = TerminalFenceContext {
         lease: lease.as_ref(),
         live_identity: &live_identity,
@@ -968,6 +1320,7 @@ pub async fn run_node_lease<L>(
         readiness: &readiness,
         stop_token: &stop_token,
         fatal_fence: &fatal_fence,
+        shutdown_decision: &shutdown_decision,
         control_plane_budget: config.heartbeat_interval,
     };
     // Seed the shared handle with the identity this loop starts under —
@@ -1304,16 +1657,35 @@ pub async fn run_node_lease<L>(
         // Fatal recovery ambiguity is terminal for this clustering lifetime.
         // Disable the shared identity before taking the final ownership
         // snapshot: `rotate` waits for every old-identity publication guard,
-        // then rejects any later SM/RoomActor publication under that owner.
-        // This is the quiescence barrier that makes the following one-shot
-        // demotion sweep complete even while recovery workers are winding
-        // down.
+        // then rejects any later publication under that owner. Local
+        // retirement is bounded and reserves time per entity kind, so a
+        // wedged registry cannot hang terminal shutdown or starve UserActor
+        // cleanup.
         if terminal_fence {
             readiness.set_ready(false);
             stop_token.cancel();
+            let _ = tokio::time::timeout(
+                terminal_fence_context.control_plane_budget,
+                local_claims.abandon_room_shutdown(),
+            )
+            .await;
             let superseded_identity = identity.clone();
             live_identity.disable().await;
-            local_claims.demote_owned_by(&superseded_identity).await;
+            let cleanup_deadline =
+                tokio::time::Instant::now() + terminal_fence_context.control_plane_budget;
+            demote_local_claims_before_deadline(
+                local_claims.as_ref(),
+                &[&superseded_identity],
+                cleanup_deadline,
+            )
+            .await;
+            mark_draining_bounded(
+                lease.as_ref(),
+                &identity,
+                terminal_fence_context.control_plane_budget,
+            )
+            .await;
+            return;
         }
 
         // Self-fenced (either trigger): stop serving before the lease
@@ -1329,10 +1701,6 @@ pub async fn run_node_lease<L>(
         // it as live (FIX 1(c) already excludes draining rows regardless
         // of heartbeat freshness).
         mark_draining_bounded(lease.as_ref(), &identity, config.heartbeat_interval).await;
-
-        if terminal_fence {
-            return;
-        }
 
         // FIX 1(a): mint the fresh re-registration identity ONCE per
         // fence — every retry below (including hysteresis-rejected ones)
@@ -1838,6 +2206,35 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_heartbeat_continues_while_terminal_decision_is_pending() {
+        let heartbeat_calls = Arc::new(AtomicU32::new(0));
+        let recorded_calls = Arc::clone(&heartbeat_calls);
+        let lease = FakeLease::new(Box::new(move || {
+            recorded_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }));
+        let me = identity();
+        let lease_ttl = Duration::from_millis(100);
+
+        let decision = run_with_shutdown_heartbeat(
+            &lease,
+            &me,
+            async {
+                tokio::time::sleep(Duration::from_millis(260)).await;
+                ClusteringShutdownDecision::Abandon
+            },
+            lease_ttl,
+        )
+        .await;
+
+        assert!(matches!(decision, ClusteringShutdownDecision::Abandon));
+        assert!(
+            heartbeat_calls.load(Ordering::SeqCst) >= 4,
+            "the node lease must remain fresh for the entire authorization wait"
+        );
+    }
+
     #[async_trait]
     impl NodeLeaseStore for FakeLease {
         async fn list_orphaned_room_actor_claims_page(
@@ -1975,6 +2372,120 @@ mod tests {
             tokio::time::advance(step).await;
             tokio::task::yield_now().await;
         }
+    }
+
+    struct ReservedUserDrainClaims {
+        room: Entity,
+        user: Entity,
+        user_retired: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for ReservedUserDrainClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            std::future::pending().await
+        }
+
+        async fn owned_of_type(&self, entity_type: EntityType) -> Vec<Entity> {
+            match entity_type {
+                EntityType::RoomActor => vec![self.room.clone()],
+                EntityType::UserActor => vec![self.user.clone()],
+                EntityType::SmSession => Vec::new(),
+            }
+        }
+
+        async fn demote(&self, _entity: &Entity) {}
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+
+        async fn seal_before_release(&self, entity: &Entity) -> bool {
+            assert_eq!(entity, &self.room);
+            std::future::pending().await
+        }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, entity: &Entity) -> bool {
+            assert_eq!(entity, &self.room);
+            true
+        }
+
+        async fn retire_user_after_authority_disabled(
+            &self,
+            entity: &Entity,
+            _disabled_identity: &DisabledNodeIdentity,
+        ) -> bool {
+            assert_eq!(entity, &self.user);
+            self.user_retired.store(true, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_room_drain_preserves_half_the_budget_for_user_claim_release() {
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let me = identity();
+        let room = Entity::new(EntityType::RoomActor, "wedged@muc.example.com");
+        let user = Entity::new(EntityType::UserActor, "alice@example.com");
+        let claim_store: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let room_epoch = claim_store.acquire(&room, &me).await.expect("acquire room");
+        let user_epoch = claim_store.acquire(&user, &me).await.expect("acquire user");
+        let user_retired = Arc::new(AtomicBool::new(false));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(ReservedUserDrainClaims {
+            room: room.clone(),
+            user: user.clone(),
+            user_retired: Arc::clone(&user_retired),
+        });
+        let readiness = ClusteringReadiness::new();
+        let stop_token = CancellationToken::new();
+        let fatal_fence = CancellationToken::new();
+        let live_identity = SharedNodeIdentity::new(me.clone());
+        let (decision, decision_rx) = tokio::sync::oneshot::channel();
+        decision
+            .send(ClusteringShutdownDecision::Release(
+                clean_test_room_serving_fence(),
+            ))
+            .expect("terminal decision receiver remains live");
+        let shutdown_decision = tokio::sync::Mutex::new(Some(decision_rx));
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &stop_token,
+            fatal_fence: &fatal_fence,
+            shutdown_decision: &shutdown_decision,
+            control_plane_budget: Duration::from_millis(10),
+        };
+        let total_budget = Duration::from_millis(100);
+
+        tokio::time::timeout(
+            total_budget * 2,
+            context.shutdown(&claim_store, &me, total_budget, Duration::from_secs(1)),
+        )
+        .await
+        .expect("shutdown must not fall back to the wedged aggregate inventory");
+
+        assert!(
+            claim_store
+                .fence(&room, &me, room_epoch)
+                .await
+                .unwrap_or(false),
+            "the wedged room must remain claimed"
+        );
+        assert!(user_retired.load(Ordering::SeqCst));
+        assert!(
+            !claim_store
+                .fence(&user, &me, user_epoch)
+                .await
+                .unwrap_or(true),
+            "the reserved second half must retire and release the UserActor claim"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2547,6 +3058,14 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, _entity: &Entity) -> bool {
+            true
+        }
+
         async fn hydrate_reclaimed(
             &self,
             entities: &[(
@@ -2600,6 +3119,39 @@ mod tests {
         exact_demoted_owners: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
     }
 
+    struct HangingFatalCleanupClaims {
+        user: Entity,
+        user_demoted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for HangingFatalCleanupClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            std::future::pending().await
+        }
+
+        async fn owned_of_type(&self, entity_type: EntityType) -> Vec<Entity> {
+            match entity_type {
+                EntityType::UserActor => vec![self.user.clone()],
+                EntityType::SmSession | EntityType::RoomActor => Vec::new(),
+            }
+        }
+
+        async fn demote(&self, entity: &Entity) {
+            if entity == &self.user {
+                self.user_demoted.store(true, Ordering::SeqCst);
+            }
+        }
+
+        async fn demote_owned_by(&self, _owner: &NodeIdentity) {
+            std::future::pending().await
+        }
+
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
     #[async_trait]
     impl LocallyClaimedEntities for BlockingSealLocalClaims {
         async fn owned(&self) -> Vec<Entity> {
@@ -2622,6 +3174,14 @@ mod tests {
         async fn seal_before_release(&self, _entity: &Entity) -> bool {
             self.seal_started.notify_one();
             self.seal_release.notified().await;
+            true
+        }
+
+        async fn begin_room_shutdown(&self) -> bool {
+            true
+        }
+
+        async fn retire_room_after_shutdown(&self, _entity: &Entity) -> bool {
             true
         }
     }
@@ -3106,6 +3666,58 @@ mod tests {
             stop_token.is_cancelled(),
             "sibling clustering tasks stop only after local authority is demoted"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_fence_bounds_a_wedged_exact_owner_registry_and_reaches_user_cleanup() {
+        let interval = Duration::from_millis(60);
+        let initial_identity = identity();
+        let user_demoted = Arc::new(AtomicBool::new(false));
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(HangingFatalCleanupClaims {
+            user: user_actor_entity("fatal-user-after-wedged-room"),
+            user_demoted: Arc::clone(&user_demoted),
+        });
+        let readiness = ClusteringReadiness::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            FakeLease::new(Box::new(|| Ok(true))),
+            initial_identity.clone(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims,
+                readiness: readiness.clone(),
+                live_identity: SharedNodeIdentity::new(initial_identity),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        fatal_fence.cancel();
+        advance_until(Duration::from_millis(10), 30, || task.is_finished()).await;
+        task.await
+            .expect("fatal cleanup must return within its control-plane budget");
+
+        assert!(
+            user_demoted.load(Ordering::SeqCst),
+            "a wedged exact-owner registry must not starve reserved UserActor cleanup"
+        );
+        assert!(!readiness.is_ready());
+        assert!(stop_token.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

@@ -3495,6 +3495,340 @@ async fn health_check_replies_when_the_room_actor_is_idle() {
     actor.ask(HealthCheck).await.expect("health check replies");
 }
 
+#[tokio::test]
+async fn shutdown_seal_rejects_later_serving_activity_before_actor_retirement() {
+    use crate::muc::pin::PinStateChange;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
+    let actor = spawn_room_actor().await;
+    let original = actor.ask(GetConfig).await.expect("initial config");
+    let alice = test_full_jid("alice");
+    actor
+        .ask(Join {
+            nick: "alice".to_string(),
+            real_jid: alice.clone(),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await
+        .expect("seed occupant before shutdown");
+    actor
+        .ask(ChangeAffiliation {
+            jid: alice.to_bare(),
+            affiliation: Affiliation::Admin,
+        })
+        .await
+        .expect("authorize seeded inviter");
+    let invite_operation_id = MediatedInviteOperationId::generate();
+    let invitee: BareJid = "invitee@example.com".parse().expect("invitee jid");
+    let invite_authorization = actor
+        .ask(AuthorizeMediatedInvite {
+            operation_id: invite_operation_id,
+            inviter: alice.clone(),
+            invitee: invitee.clone(),
+        })
+        .await
+        .expect("seed mediated invite operation");
+    let invite_grant = invite_authorization
+        .grant
+        .expect("members-only room creates a temporary grant");
+
+    assert_eq!(
+        actor
+            .ask(SealForShutdown)
+            .await
+            .expect("shutdown seal replies"),
+        RoomSealState::Shutdown
+    );
+    assert!(
+        actor.is_alive(),
+        "the seal must close admission and mutation before the drain kills the actor"
+    );
+    assert_eq!(
+        actor
+            .ask(SealForShutdown)
+            .await
+            .expect("shutdown seal is idempotent"),
+        RoomSealState::Shutdown
+    );
+
+    let self_ping = actor
+        .ask(PingSelfCheck {
+            nick: "alice".to_string(),
+            sender_jid: alice.clone(),
+        })
+        .await;
+    assert!(matches!(
+        self_ping,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let occupant_lookup = actor.ask(GetOccupantByJid { jid: alice.clone() }).await;
+    assert!(matches!(
+        occupant_lookup,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor
+            .ask(GetOccupantByNick {
+                nick: "alice".to_string(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(GetInfo).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(GetPinList).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor
+            .ask(GetAffiliation {
+                jid: alice.to_bare(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(ListAffiliations { filter: None }).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(ListOccupants).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(OccupantCount).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor
+            .ask(GetNicknameGeneration {
+                nick: "alice".to_string(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor
+            .ask(IsOwner {
+                jid: alice.to_bare(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor
+            .ask(GetAdminContext {
+                sender_jid: alice.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert!(matches!(
+        actor.ask(GetSnapshot).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    let join = actor
+        .ask(Join {
+            nick: "late".to_string(),
+            real_jid: test_full_jid("late"),
+            role: Role::Participant,
+            affiliation: Affiliation::Member,
+        })
+        .await;
+    assert!(matches!(
+        join,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    let mut changed = original.clone();
+    changed.members_only = !changed.members_only;
+    let update = actor.ask(UpdateConfig { config: changed }).await;
+    assert!(matches!(
+        update,
+        Err(SendError::HandlerError(RoomMutationError::NotOwner))
+    ));
+
+    let leave = actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+        })
+        .await;
+    assert!(matches!(
+        leave,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    let presence_broadcast = actor
+        .ask(PresenceUpdateData {
+            sender_jid: alice.clone(),
+        })
+        .await;
+    assert!(matches!(
+        presence_broadcast,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let room_dispatch = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await;
+    assert!(matches!(
+        room_dispatch,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let legacy_broadcast = actor
+        .ask(BuildGroupchatBroadcast {
+            sender_jid: alice.clone(),
+            message: xmpp_parsers::message::Message::new(None::<jid::Jid>),
+        })
+        .await;
+    assert!(matches!(
+        legacy_broadcast,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let in_call_update = actor
+        .ask(UpsertInCallState {
+            sender_jid: alice.clone(),
+            state: crate::xep::InCallPresenceState {
+                hand_raised: true,
+                muted: false,
+            },
+        })
+        .await;
+    assert!(matches!(
+        in_call_update,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    let target = StanzaId::new(
+        "late-unpin".to_string(),
+        jid::Jid::from(test_room().room_jid),
+    );
+    let pin_update = actor
+        .ask(ApplyPin {
+            change: PinStateChange::Unpin {
+                target_stanza_id: target,
+            },
+        })
+        .await;
+    assert!(matches!(
+        pin_update,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let members_only_eviction = actor.ask(EnforceMembersOnly).await;
+    assert!(matches!(
+        members_only_eviction,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    let destroy = actor.ask(Destroy).await;
+    assert!(matches!(
+        destroy,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+
+    let restore_store = FakeDurableStore::owned();
+    let late_restore = actor
+        .ask(RestoreDurableRoomState {
+            store: restore_store.clone(),
+            claim_fence: test_claim_fence(&test_room().room_jid),
+        })
+        .await;
+    assert!(matches!(
+        late_restore,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        restore_store
+            .load_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a post-seal restore must not start an external durable read"
+    );
+
+    let invite_replay = actor
+        .ask(AuthorizeMediatedInvite {
+            operation_id: invite_operation_id,
+            inviter: test_full_jid("alice"),
+            invitee,
+        })
+        .await;
+    assert!(matches!(
+        invite_replay,
+        Err(SendError::HandlerError(
+            MediatedInviteGrantError::RoomSealed
+        ))
+    ));
+    let invite_prepare = actor
+        .ask(PrepareMediatedInviteGrantRollback {
+            grant: invite_grant.clone(),
+        })
+        .await;
+    assert!(matches!(
+        invite_prepare,
+        Err(SendError::HandlerError(RoomMutationError::NotOwner))
+    ));
+    let invite_commit = actor
+        .ask(CommitMediatedInviteGrantRollback {
+            grant: invite_grant.clone(),
+        })
+        .await;
+    assert!(matches!(
+        invite_commit,
+        Err(SendError::HandlerError(
+            MediatedInviteRollbackError::NotOwner
+        ))
+    ));
+    assert_eq!(
+        actor
+            .ask(AbortMediatedInviteGrantRollback {
+                grant: invite_grant,
+            })
+            .await
+            .expect("typed invite abort refusal"),
+        MediatedInviteRollbackAbort::RoomSealed
+    );
+    assert_eq!(
+        actor
+            .ask(FinalizeMediatedInviteGrant {
+                operation_id: invite_operation_id,
+            })
+            .await
+            .expect("typed invite finalization refusal"),
+        MediatedInviteGrantFinalization::RoomSealed
+    );
+    assert_eq!(
+        actor
+            .ask(AcknowledgeMediatedInviteOperation {
+                operation_id: invite_operation_id,
+            })
+            .await
+            .expect("typed invite acknowledgement refusal"),
+        MediatedInviteOperationAcknowledgement::RoomSealed
+    );
+
+    let probe = actor.ask(IsDormant).await.expect("dormancy probe");
+    assert_eq!(
+        actor
+            .ask(SealIfInactive {
+                expected_occupancy_revision: probe.occupancy_revision,
+                guard: SealGuard::Dormant,
+            })
+            .await
+            .expect("stale inactivity reaper probe"),
+        SealIfInactiveOutcome::Refused,
+        "the inactivity reaper must not take ownership of shutdown retirement"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0017 Phase 3 Slice 7 FIX 2 (council-adjudicated): the pre-mutation
 // fencing gate every durable-relevant mutation handler now runs.
@@ -4061,10 +4395,10 @@ async fn join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_w
 async fn update_config_gate_blocks_the_mutation_when_deposed() {
     let store = FakeDurableStore::deposed();
     let actor = spawn_room_actor_with_store(store.clone()).await;
-    let original = actor.ask(GetConfig).await.expect("ask").members_only;
+    let original = actor.ask(GetConfig).await.expect("ask");
 
-    let mut new_config = actor.ask(GetConfig).await.expect("ask");
-    new_config.members_only = !original;
+    let mut new_config = original.clone();
+    new_config.members_only = !original.members_only;
     let result = actor.ask(UpdateConfig { config: new_config }).await;
     assert!(
         matches!(
@@ -4074,15 +4408,19 @@ async fn update_config_gate_blocks_the_mutation_when_deposed() {
         "expected NotOwner, got: {result:?}"
     );
 
-    let after = actor.ask(GetConfig).await.expect("ask").members_only;
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert_eq!(
-        after, original,
-        "a gated-out mutation must never have applied in-memory"
+        store.save_call_count(),
+        0,
+        "a gated-out mutation must never reach durable persistence"
     );
 
     store.set_fenced(None);
-    let mut retry_config = actor.ask(GetConfig).await.expect("retry config");
-    retry_config.members_only = !original;
+    let mut retry_config = original;
+    retry_config.members_only = !retry_config.members_only;
     let retry = actor
         .ask(UpdateConfig {
             config: retry_config,
@@ -4195,15 +4533,10 @@ async fn ownership_lost_seal_blocks_a_later_mutation() {
         update,
         Err(SendError::HandlerError(RoomMutationError::NotOwner))
     ));
-    assert_eq!(
-        actor
-            .ask(GetConfig)
-            .await
-            .expect("unchanged config")
-            .members_only,
-        original.members_only,
-        "a definitive ownership-loss seal must dominate later uncertainty"
-    );
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert_eq!(
         store.save_call_count(),
         0,
@@ -4244,11 +4577,7 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 
     let mut changed = original.clone();
     changed.members_only = !changed.members_only;
-    let result = actor
-        .ask(UpdateConfig {
-            config: changed.clone(),
-        })
-        .await;
+    let result = actor.ask(UpdateConfig { config: changed }).await;
     assert!(
         matches!(
             result,
@@ -4259,11 +4588,10 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
         "expected OwnershipLostAfterApply, got: {result:?}"
     );
     assert_eq!(store.save_call_count(), 1, "the fenced write was attempted");
-    assert_eq!(
-        actor.ask(GetConfig).await.expect("mutated config"),
-        changed,
-        "the local config mutation remains applied after the durable ownership loss"
-    );
+    assert!(matches!(
+        actor.ask(GetConfig).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert_eq!(
         actor.ask(GetRoomSealState).await.expect("typed seal state"),
         RoomSealState::OwnershipLost,
@@ -4287,7 +4615,8 @@ async fn update_config_seals_the_actor_when_the_fenced_write_loses_ownership() {
 
 #[tokio::test]
 async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
-    let actor = spawn_room_actor_with_store(FakeDurableStore::deposed()).await;
+    let store = FakeDurableStore::deposed();
+    let actor = spawn_room_actor_with_store(store.clone()).await;
     let jid: BareJid = "carol@example.com".parse().expect("valid jid");
 
     let result = actor
@@ -4304,11 +4633,14 @@ async fn change_affiliation_gate_blocks_the_mutation_when_deposed() {
         "expected NotOwner, got: {result:?}"
     );
 
-    let affiliation = actor.ask(GetAffiliation { jid }).await.expect("ask");
+    assert!(matches!(
+        actor.ask(GetAffiliation { jid }).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
     assert_eq!(
-        affiliation,
-        Affiliation::None,
-        "a gated-out affiliation change must never have applied"
+        store.save_call_count(),
+        0,
+        "a gated-out affiliation change must never reach durable persistence"
     );
 }
 
@@ -4915,6 +5247,7 @@ async fn sync_resolver_affiliation_refuses_sealed_actor() {
         })
         .await
         .expect("seed resolver-derived member");
+    let sealed_admission_revision = current_admission_revision(&actor).await;
 
     let probe = actor
         .ask(crate::muc::room_actor::IsDormant)
@@ -4937,7 +5270,7 @@ async fn sync_resolver_affiliation_refuses_sealed_actor() {
         .ask(SyncResolverAffiliation {
             jid: alice.clone(),
             affiliation: Affiliation::None,
-            expected_admission_revision: current_admission_revision(&actor).await,
+            expected_admission_revision: sealed_admission_revision,
         })
         .await
         .expect("ask");
@@ -4946,15 +5279,10 @@ async fn sync_resolver_affiliation_refuses_sealed_actor() {
         ResolverAffiliationSyncOutcome::RoomSealed,
         "a sealed actor must refuse the sync"
     );
-    let affiliation = actor
-        .ask(GetAffiliation { jid: alice })
-        .await
-        .expect("affiliation query");
-    assert_eq!(
-        affiliation,
-        Affiliation::Member,
-        "the refused sync must leave the sealed actor's state untouched"
-    );
+    assert!(matches!(
+        actor.ask(GetAffiliation { jid: alice }).await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
 }
 
 /// A resolver write with a different value must not downgrade an

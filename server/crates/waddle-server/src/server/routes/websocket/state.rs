@@ -1190,6 +1190,9 @@ impl TransportSecurity {
 pub struct WebSocketDeps {
     /// Core app state for accessing the global and per-waddle databases.
     pub app_state: Arc<AppState>,
+    /// Process-wide root-scope admission for room-capable connection and
+    /// background work.
+    pub(crate) room_serving: crate::server::room_serving_quiescence::RoomServingHandle,
     /// Authentication state for session validation.
     pub auth_state: Arc<AuthState>,
     /// Trusted deployment-level transport security used to enforce the

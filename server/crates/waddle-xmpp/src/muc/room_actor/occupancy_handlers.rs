@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 
@@ -234,13 +232,14 @@ pub struct LeaveByRealJid {
 }
 
 impl kameo::message::Message<LeaveByRealJid> for RoomActor {
-    type Reply = Result<Option<LeaveOutcome>, Infallible>;
+    type Reply = Result<Option<LeaveOutcome>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         // #1107: collect EVERY nick this full JID occupies. Post-#1107
         // the join path refuses a second nick for the same full JID, so
         // this is normally a single entry — but pre-existing ghost
@@ -350,13 +349,17 @@ pub struct PresenceUpdateData {
 }
 
 impl kameo::message::Message<PresenceUpdateData> for RoomActor {
-    type Reply = Result<Option<PresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<PresenceUpdateOutcome>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: PresenceUpdateData,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // Although this message does not mutate memory, its result directly
+        // authorizes a presence broadcast, so it is serving work rather than
+        // a harmless diagnostic snapshot.
+        self.gate_serving_activity()?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -421,13 +424,14 @@ pub struct MujiPresenceUpdateOutcome {
 }
 
 impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: UpsertMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -467,13 +471,14 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
 }
 
 impl kameo::message::Message<ClearMujiPresence> for RoomActor {
-    type Reply = Result<Option<MujiPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<MujiPresenceUpdateOutcome>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: ClearMujiPresence,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -530,13 +535,14 @@ pub struct InCallPresenceUpdateOutcome {
 }
 
 impl kameo::message::Message<UpsertInCallState> for RoomActor {
-    type Reply = Result<Option<InCallPresenceUpdateOutcome>, Infallible>;
+    type Reply = Result<Option<InCallPresenceUpdateOutcome>, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: UpsertInCallState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         let Some(sender_occupant) = self.room.find_occupant_by_real_jid(&msg.sender_jid) else {
             return Ok(None);
         };
@@ -564,6 +570,7 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
         msg: PingSelfCheck,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.gate_serving_activity()?;
         if self.room.get_occupant(&msg.nick).is_none() {
             return Err(RoomActorError::OccupantNotFound(msg.nick.clone()));
         }

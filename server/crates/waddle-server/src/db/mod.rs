@@ -264,6 +264,19 @@ impl Database {
         }
     }
 
+    /// Begin a transaction on the dedicated control-plane pool.
+    ///
+    /// Claim coordination normally uses single autocommit statements through
+    /// [`Database::control_plane_guard`]. Use this only when multiple
+    /// control-plane statements must share transaction-scoped coordination,
+    /// such as an entity-key advisory lock followed by a claim CAS.
+    pub async fn begin_control_plane(&self) -> Result<Transaction<'_>, DatabaseError> {
+        match &self.control_plane_backend {
+            Some(backend) => Transaction::begin(backend).await,
+            None => Err(DatabaseError::ControlPlanePoolUnavailable),
+        }
+    }
+
     /// Begin a database transaction.
     ///
     /// Multiple statements executed against the returned [`Transaction`]

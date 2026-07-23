@@ -554,18 +554,52 @@ impl ClusteringHandles {
 /// with connection drain but completing before process exit," per element
 /// 4's drain sequence text — rather than a fire-and-forget background task
 /// racing shutdown with no ordering guarantee at all.
-pub struct ClusteringShutdown(Option<tokio::task::JoinHandle<()>>);
+#[derive(Debug)]
+pub(crate) enum ClusteringShutdownDecision {
+    Release(crate::server::room_serving_quiescence::RoomServingFence),
+    Abandon,
+}
+
+pub struct ClusteringShutdown {
+    decision: Option<tokio::sync::oneshot::Sender<ClusteringShutdownDecision>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
 
 impl ClusteringShutdown {
-    /// Await the node-lease loop's own exit, bounded by `budget` so a
-    /// wedged drain task cannot hang process shutdown forever — a timeout
-    /// here is logged and the process proceeds to exit anyway: any
-    /// un-released claims are simply fenced-safe and reclaimed later by
-    /// another node's orphan reaper (`claims_abandoned_on_drain` already
-    /// counts them). A `None` inner handle (clustering disabled, or a
-    /// build without the `clustering` feature) returns immediately.
+    /// Compatibility fail-closed await used by callers that have no terminal
+    /// room-serving fence. It always authorizes `Abandon`, never release.
     pub async fn await_drain(self, budget: Duration) {
-        let Some(handle) = self.0 else {
+        self.authorize_and_await(ClusteringShutdownDecision::Abandon, budget)
+            .await;
+    }
+
+    /// Deliver the one-shot terminal room-claim decision, then await the
+    /// node-lease loop's own exit.
+    ///
+    /// The node-lease task marks itself draining and keeps renewing its
+    /// heartbeat after process shutdown begins while it waits for this
+    /// decision. Only [`ClusteringShutdownDecision::Release`] carries the
+    /// unforgeable process-wide room-serving fence; a closed sender is
+    /// interpreted as [`ClusteringShutdownDecision::Abandon`].
+    pub(crate) async fn authorize_and_await(
+        mut self,
+        mut decision: ClusteringShutdownDecision,
+        budget: Duration,
+    ) {
+        if matches!(
+            &decision,
+            ClusteringShutdownDecision::Release(fence) if !fence.is_current_clean()
+        ) {
+            tracing::warn!(
+                "clustering: room-serving fence was invalidated before authorization; \
+                 abandoning room claims"
+            );
+            decision = ClusteringShutdownDecision::Abandon;
+        }
+        if let Some(sender) = self.decision.take() {
+            let _ = sender.send(decision);
+        }
+        let Some(handle) = self.task else {
             return;
         };
         if tokio::time::timeout(budget, handle).await.is_err() {
@@ -588,14 +622,21 @@ impl ClusteringShutdown {
 /// up the owned libp2p swarm (later slices) and returns live handles onto
 /// the same `ClaimStore`/node-identity the node-lease loop itself uses,
 /// plus the node-lease task's own join handle (Slice 10).
-pub async fn start_if_enabled(
+pub(crate) async fn start_if_enabled(
     config: &ClusteringConfig,
     db: &Database,
     stop_token: &CancellationToken,
     readiness: ClusteringReadiness,
+    room_serving: crate::server::room_serving_quiescence::RoomServingHandle,
 ) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
-        return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));
+        return Ok((
+            ClusteringHandles::default(),
+            ClusteringShutdown {
+                decision: None,
+                task: None,
+            },
+        ));
     }
 
     let driver = db.driver();
@@ -605,7 +646,7 @@ pub async fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (db, stop_token, driver, readiness);
+        let _ = (db, stop_token, driver, readiness, room_serving);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -631,6 +672,9 @@ pub async fn start_if_enabled(
             clustering_stop.clone(),
             &config.messaging,
         );
+        // Wire release safety before the relay actor/swarm can accept its
+        // first room-capable message.
+        ordered_relay_delivery_bridge.wire_room_serving(room_serving);
         // ADR-0017 Phase 3 Slice 7: constructed empty for the same
         // construction-order reason as `resume_bridge` — the MUC room
         // registry doesn't exist yet at this point in startup (it is
@@ -779,7 +823,8 @@ pub async fn start_if_enabled(
         // `server/mod.rs` can await this node's graceful drain (which this
         // task runs on its own exit) actually completing before process
         // exit — see `ClusteringShutdown`'s doc comment.
-        let node_lease_task = tokio::spawn(self_fence::run_node_lease(
+        let (shutdown_decision, shutdown_decision_rx) = tokio::sync::oneshot::channel();
+        let node_lease_task = tokio::spawn(self_fence::run_node_lease_authorized(
             node_lease,
             node_identity,
             clustering_stop,
@@ -799,8 +844,15 @@ pub async fn start_if_enabled(
                 claim_store: Arc::new(claims::PostgresClaimStore::new(db.clone())),
                 claim_release_budget: config.node_lease.claim_release_budget,
             },
+            shutdown_decision_rx,
         ));
-        Ok((handles, ClusteringShutdown(Some(node_lease_task))))
+        Ok((
+            handles,
+            ClusteringShutdown {
+                decision: Some(shutdown_decision),
+                task: Some(node_lease_task),
+            },
+        ))
     }
 }
 

@@ -385,6 +385,7 @@ async fn rollback_persist_failure_retains_the_exact_token_and_reservation_for_re
 #[tokio::test]
 async fn rollback_ownership_loss_is_typed_and_keeps_the_operation_prepared() {
     let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
+    let replay_inviter = inviter.clone();
     let store = FakeDurableStore::owned();
     actor
         .ask(RestoreDurableRoomState {
@@ -417,20 +418,173 @@ async fn rollback_ownership_loss_is_typed_and_keeps_the_operation_prepared() {
         1,
         "ownership rejection must happen before rollback persistence",
     );
-    assert_eq!(
+    assert!(matches!(
         actor
             .ask(GetAffiliation {
                 jid: invitee.clone(),
             })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        actor
+            .ask(AuthorizeMediatedInvite {
+                operation_id: grant.operation_id(),
+                inviter: replay_inviter.clone(),
+                invitee: invitee.clone(),
+            })
             .await
-            .expect("unchanged temporary membership"),
-        Affiliation::Member,
+            .expect("exact cached authorization remains inspectable")
+            .grant,
+        Some(grant.clone()),
     );
+    assert!(matches!(
+        actor
+            .ask(AuthorizeMediatedInvite {
+                operation_id: invite_operation_id(),
+                inviter: replay_inviter,
+                invitee: invitee.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(
+            MediatedInviteGrantError::RoomSealed
+        ))
+    ));
     assert_eq!(
         actor
             .ask(PrepareMediatedInviteGrantRollback { grant })
             .await
             .expect("prepared state remains replayable"),
         MediatedInviteRollbackPreparation::Prepared,
+    );
+}
+
+#[tokio::test]
+async fn ownership_loss_preserves_cached_rollback_output_without_reopening_lifecycle_mutations() {
+    let (actor, inviter, invitee) = joined_members_only_invite_actor().await;
+    let replay_inviter = inviter.clone();
+    let replay_invitee = invitee.clone();
+    let store = FakeDurableStore::owned();
+    let retained_fence = test_claim_fence(&test_room().room_jid);
+    actor
+        .ask(RestoreDurableRoomState {
+            store: store.clone(),
+            claim_fence: retained_fence.clone(),
+        })
+        .await
+        .expect("attach owned durable store");
+    let grant = authorize_invite_grant(&actor, inviter, invitee).await;
+    actor
+        .ask(PrepareMediatedInviteGrantRollback {
+            grant: grant.clone(),
+        })
+        .await
+        .expect("prepare while the actor owns the room");
+    let applied = actor
+        .ask(CommitMediatedInviteGrantRollback {
+            grant: grant.clone(),
+        })
+        .await
+        .expect("commit while the actor owns the room");
+
+    *store.fenced.lock().expect("fence lock") = Some(false);
+    let mut attempted_config = actor.ask(GetConfig).await.expect("current config");
+    attempted_config.name = "must not mutate".to_string();
+    assert!(matches!(
+        actor
+            .ask(UpdateConfig {
+                config: attempted_config,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomMutationError::NotOwner))
+    ));
+    assert_eq!(
+        actor
+            .ask(CommitMediatedInviteGrantRollback {
+                grant: grant.clone(),
+            })
+            .await
+            .expect("cached rollback output remains inspectable"),
+        applied,
+    );
+    assert_eq!(
+        actor
+            .ask(SealForShutdown)
+            .await
+            .expect("ordered shutdown seal"),
+        RoomSealState::OwnershipLost,
+        "shutdown must retain definitive ownership-loss provenance",
+    );
+    assert!(matches!(
+        actor
+            .ask(AuthorizeMediatedInvite {
+                operation_id: grant.operation_id(),
+                inviter: replay_inviter.clone(),
+                invitee: replay_invitee,
+            })
+            .await,
+        Err(SendError::HandlerError(
+            MediatedInviteGrantError::RoomSealed
+        ))
+    ));
+    assert!(matches!(
+        actor
+            .ask(PrepareMediatedInviteGrantRollback {
+                grant: grant.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(RoomMutationError::NotOwner))
+    ));
+    assert!(matches!(
+        actor
+            .ask(CommitMediatedInviteGrantRollback {
+                grant: grant.clone(),
+            })
+            .await,
+        Err(SendError::HandlerError(
+            MediatedInviteRollbackError::NotOwner
+        ))
+    ));
+    assert_eq!(
+        actor
+            .ask(AbortMediatedInviteGrantRollback {
+                grant: grant.clone(),
+            })
+            .await
+            .expect("typed lifecycle refusal"),
+        MediatedInviteRollbackAbort::RoomSealed,
+    );
+    assert_eq!(
+        actor
+            .ask(FinalizeMediatedInviteGrant {
+                operation_id: grant.operation_id(),
+            })
+            .await
+            .expect("typed lifecycle refusal"),
+        MediatedInviteGrantFinalization::RoomSealed,
+    );
+    assert_eq!(
+        actor
+            .ask(AcknowledgeMediatedInviteOperation {
+                operation_id: grant.operation_id(),
+            })
+            .await
+            .expect("typed lifecycle refusal"),
+        MediatedInviteOperationAcknowledgement::RoomSealed,
+    );
+    assert!(matches!(
+        actor
+            .ask(GetRoomSnapshot {
+                sender_jid: replay_inviter,
+            })
+            .await,
+        Err(SendError::HandlerError(RoomActorError::RoomSealed))
+    ));
+    assert_eq!(
+        actor
+            .ask(GetRetainedRoomClaimFence)
+            .await
+            .expect("retained claim-fence diagnostic"),
+        Some(retained_fence),
     );
 }

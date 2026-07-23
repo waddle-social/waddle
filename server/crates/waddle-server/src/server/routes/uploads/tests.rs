@@ -40,6 +40,8 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         muc_domain.to_string(),
         occupant_id_secret.clone(),
     ));
+    let (room_serving, _room_serving_closer) =
+        crate::server::room_serving_quiescence::RoomServingQuiescence::create();
     let app_state = Arc::new(AppState::new_with_deps(AppStateDeps {
         db_pool: Arc::clone(&db_pool),
         blob_storage,
@@ -57,6 +59,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         server_owner_jids: Arc::from(Vec::<jid::BareJid>::new()),
         clustering_readiness: crate::clustering::ClusteringReadiness::new(),
         clustering_claims: crate::clustering::ClusteringHandles::default(),
+        room_serving,
     }));
 
     (Arc::new(UploadState::new(app_state)), upload_dir)

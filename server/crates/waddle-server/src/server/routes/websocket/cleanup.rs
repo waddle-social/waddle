@@ -3,7 +3,9 @@ use super::{
     replay::drain_outbound_into_replay, state::WsConnState, stream_management::sm_show_from_name,
 };
 use waddle_xmpp::muc::room_actor::{LeaveOutcome, SealGuard};
-use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
+use waddle_xmpp::muc::room_registry_actor::{
+    DestroyRoomIfInactiveOutcome, RoomAcquisition, RoomRegistryError,
+};
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::xep::xep0272::Muji;
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -266,8 +268,20 @@ pub(crate) async fn maybe_evict_empty_room(
         )
         .await
     {
-        Ok(destroyed) => destroyed,
+        Ok(DestroyRoomIfInactiveOutcome::Destroyed) => true,
+        Ok(DestroyRoomIfInactiveOutcome::Retained) => false,
+        Ok(DestroyRoomIfInactiveOutcome::MaybeSealed) => {
+            state.deps.room_serving.mark_unsafe_to_release();
+            warn!(
+                room = %room_jid,
+                "Guarded destroy may have sealed the room without returning a reply"
+            );
+            return false;
+        }
         Err(error) => {
+            if error == RoomRegistryError::Timeout {
+                state.deps.room_serving.mark_unsafe_to_release();
+            }
             warn!(room = %room_jid, error = %error, "Failed guarded destroy of empty room");
             return false;
         }
@@ -785,6 +799,9 @@ async fn cleanup_muc_presence_with_origin(
             Ok(None) => {}
             Err(error) => {
                 completed = false;
+                if crate::server::routes::interpret::actor_send_maybe_enqueued(&error) {
+                    state.deps.room_serving.mark_unsafe_to_release();
+                }
                 warn!(
                     room = %room_jid,
                     jid = %jid,
@@ -1130,6 +1147,19 @@ async fn acquire_remote_muc_cleanup_origin(
             inbound_sequence: 0,
             handoff: None,
         }),
+        Err(kameo::error::SendError::HandlerError(
+            waddle_xmpp::registry::UserRegistryError::ClaimHeldByAnotherNode(_),
+        )) => {
+            // This is the expected steady state when another live resource
+            // keeps the bare-JID UserActor claim on its node. The membership
+            // remains retained for the next reconciliation pass; do not turn
+            // that bounded retry loop into a production warning every 30s.
+            debug!(
+                jid = %jid,
+                "remote MUC cleanup deferred while UserActor claim is held elsewhere"
+            );
+            None
+        }
         Err(error) => {
             warn!(
                 jid = %jid,

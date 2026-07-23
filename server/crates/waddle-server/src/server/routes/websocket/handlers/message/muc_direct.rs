@@ -252,7 +252,8 @@ async fn handle_muc_private_message(
         // duplicate-visible error. Unavailable/Dropped never count.
         let session_handled = match outcome {
             crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => true,
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
+            | crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeEnqueued => true,
             #[cfg(feature = "clustering")]
             crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => true,
             crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
@@ -323,18 +324,25 @@ async fn deliver_pm_to_session(
             )
             .await
         {
+            if outcome.is_ambiguous() {
+                state.deps.room_serving.mark_unsafe_to_release();
+            }
             return outcome;
         }
     }
     #[cfg(not(feature = "clustering"))]
     let _ = state;
-    crate::server::routes::interpret::deliver_direct_to_full(
+    let outcome = crate::server::routes::interpret::deliver_direct_to_full(
         deps.user_registry,
         deps.sm_session_registry,
         target,
         stanza,
     )
-    .await
+    .await;
+    if outcome.is_ambiguous() {
+        state.deps.room_serving.mark_unsafe_to_release();
+    }
+    outcome
 }
 
 /// XEP-0045 §7.8.2 mediated decline, hardened per #1264:

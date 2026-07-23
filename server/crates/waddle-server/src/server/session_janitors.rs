@@ -107,7 +107,7 @@ fn max_promotion_attempts_from_env() -> u32 {
         .unwrap_or(DEFAULT_ATTEMPTS)
 }
 
-fn max_drain_duration_from_env() -> std::time::Duration {
+pub(crate) fn max_drain_duration_from_env() -> std::time::Duration {
     const DEFAULT_SECS: u64 = 30;
     const MIN_SECS: u64 = 1;
     const MAX_SECS: u64 = 600;
@@ -146,16 +146,25 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
     // whose resume window elapses leave MUC occupants in their rooms forever
     // and the `resumable_sessions` sidecar grows unbounded.
     let weak_state = Arc::downgrade(websocket_state);
+    let producer_cancel = websocket_state.deps.room_serving.producer_cancellation();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         // Skip the first tick (immediate) so we don't sweep before the
         // server has accepted any connections.
         ticker.tick().await;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                biased;
+                _ = producer_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
+            let Ok(mut room_scope) = state.deps.room_serving.try_scope() else {
+                break;
+            };
+            room_scope.arm();
             let mut sweep_failed = false;
             let drained: Vec<waddle_xmpp::stream_management::DetachedSession> = match state
                 .deps
@@ -562,6 +571,7 @@ pub(crate) fn spawn_sm_expiry_janitor(websocket_state: &Arc<WebSocketState>) {
                     SweepOutcome::Completed
                 },
             );
+            room_scope.complete_clean();
         }
     });
 }
@@ -673,7 +683,10 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             return;
         };
         let room_registry_actor = websocket_state.deps.protocol.room_registry.clone();
-        tokio::spawn(async move {
+        let room_serving = websocket_state.deps.room_serving.clone();
+        let producer_cancel = room_serving.producer_cancellation();
+        if let Err(error) = room_serving.spawn(move |room_scope| async move {
+            let mut release_safe = true;
             let terminal_room_registry =
                 waddle_xmpp::muc::RoomRegistry::wrap(room_registry_actor.clone());
             let registry_lifetime_watch = spawn_room_registry_lifetime_watch(
@@ -693,11 +706,17 @@ pub(crate) fn spawn_orphan_reaper_janitor(
             ticker.tick().await;
             loop {
                 tokio::select! {
+                    biased;
+                    _ = producer_cancel.cancelled() => break,
                     _ = stop.cancelled() => break,
-                    _ = supervisor.workers.fatal_fence.cancelled() => break,
+                    _ = supervisor.workers.fatal_fence.cancelled() => {
+                        release_safe = false;
+                        break;
+                    },
                     _ = ticker.tick() => {}
                 }
                 if !supervisor.is_healthy() {
+                    release_safe = false;
                     error!("orphan reaper worker exited; restarting workers with retained work");
                     supervisor = supervisor.restarted(registry.clone(), stop.clone()).await;
                     if supervisor.workers.fatal_fence.is_cancelled() {
@@ -721,11 +740,18 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                 let mut workers_healthy = supervisor.is_healthy();
                 let mut stop_after_sweep = false;
                 match sweep_outcome {
-                    OrphanSweepOutcome::Completed | OrphanSweepOutcome::Failed => {}
+                    OrphanSweepOutcome::Completed => {}
+                    OrphanSweepOutcome::Failed => {
+                        release_safe = false;
+                    }
                     OrphanSweepOutcome::Cancelled => {
+                        if supervisor.workers.fatal_fence.is_cancelled() {
+                            release_safe = false;
+                        }
                         stop_after_sweep = true;
                     }
                     OrphanSweepOutcome::TimedOut => {
+                        release_safe = false;
                         error!(
                             timeout = ?ORPHAN_REAPER_SWEEP_TIMEOUT,
                             "orphan reaper sweep timed out; self-fencing node because claim handoff state may be uncertain"
@@ -734,6 +760,7 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     }
                 }
                 if !stop_after_sweep && !workers_healthy {
+                    release_safe = false;
                     error!("orphan reaper worker exited during sweep; restarting workers with retained work");
                     supervisor = supervisor.restarted(registry.clone(), stop.clone()).await;
                     if supervisor.workers.fatal_fence.is_cancelled() {
@@ -774,11 +801,25 @@ pub(crate) fn spawn_orphan_reaper_janitor(
                     );
                 }
                 Err(error) => {
+                    release_safe = false;
                     error!(%error, "orphan reaper: terminal RoomRegistry claim drain failed; node-expiry recovery remains authoritative");
                 }
             }
-            let _ = registry_lifetime_watch.await;
-        });
+            if let Err(error) = registry_lifetime_watch.await {
+                release_safe = false;
+                error!(%error, "orphan reaper: RoomRegistry lifetime watcher failed");
+            }
+            if release_safe {
+                room_scope.complete_clean();
+            } else {
+                room_scope.poison();
+            }
+        }) {
+            warn!(
+                ?error,
+                "orphan reaper: room-serving admission closed before the producer started"
+            );
+        }
     }
     #[cfg(not(feature = "clustering"))]
     {
@@ -2058,7 +2099,7 @@ async fn stopped_registry_after_steal_exactly_releases_the_won_claim() {
 
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
-async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain() {
+async fn terminal_shutdown_prepares_a_post_cas_room_handoff_for_final_batch_release() {
     use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore};
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
@@ -2110,15 +2151,24 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
     let outcome = registry
         .drain_room_ownership_for_shutdown(handoffs)
         .await
-        .expect("drain transferred handoff");
+        .expect("prepare transferred handoff");
 
-    assert_eq!(outcome.released, 1);
+    assert_eq!(outcome.released, 0);
+    assert_eq!(outcome.preserved_live, 0);
     assert_eq!(outcome.retained, 0);
     assert!(claim_store
         .current_claim(&entity)
         .await
         .expect("claim")
-        .is_none());
+        .is_some());
+    assert_eq!(
+        registry
+            .list_pending_room_release_jids()
+            .await
+            .expect("prepared room release inventory"),
+        vec![room_jid],
+        "prepare-only shutdown must retain the exact claim for the authorized final batch"
+    );
 
     registry.actor_ref().kill();
     registry.actor_ref().wait_for_shutdown().await;
@@ -2690,15 +2740,26 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
         )
         .await
         .expect("wire room registry");
-    room_registry
+    let outcome = room_registry
         .drain_room_ownership_for_shutdown(room_handoffs)
         .await
-        .expect("drain handoff after failed restart");
+        .expect("prepare handoff after failed restart");
+    assert_eq!(outcome.released, 0);
+    assert_eq!(outcome.preserved_live, 0);
+    assert_eq!(outcome.retained, 0);
     assert!(room_claim_store
         .current_claim(&room_entity)
         .await
         .expect("room claim after drain")
-        .is_none());
+        .is_some());
+    assert_eq!(
+        room_registry
+            .list_pending_room_release_jids()
+            .await
+            .expect("prepared handoff inventory after failed restart"),
+        vec![room_jid],
+        "prepare-only shutdown must retain the exact handoff for final batch authorization"
+    );
     room_registry.actor_ref().kill();
     room_registry.actor_ref().wait_for_shutdown().await;
 }
@@ -5128,21 +5189,24 @@ fn record_sm_drain_outcome(released: bool) {
 pub(crate) fn spawn_graceful_shutdown_drain(
     websocket_state: Arc<WebSocketState>,
     drain_token: tokio_util::sync::CancellationToken,
-    drain_notify: Arc<tokio::sync::Notify>,
+    drain_complete: tokio_util::sync::CancellationToken,
+    room_serving_close: crate::server::room_serving_quiescence::RoomServingCloseHandle,
 ) {
     tokio::spawn(async move {
-        // Always notify_one on exit (success or early-return) so
-        // the runtime's awaiting code never blocks indefinitely
-        // on drain completion.
-        struct NotifyOnDrop(Arc<tokio::sync::Notify>);
-        impl Drop for NotifyOnDrop {
+        // Level-triggered completion cannot be lost when the observer starts
+        // waiting after this task exits.
+        struct CompleteOnDrop(tokio_util::sync::CancellationToken);
+        impl Drop for CompleteOnDrop {
             fn drop(&mut self) {
-                self.0.notify_one();
+                self.0.cancel();
             }
         }
-        let _notify_guard = NotifyOnDrop(drain_notify);
+        let _complete_guard = CompleteOnDrop(drain_complete);
 
         drain_token.cancelled().await;
+        // The first shutdown action closes room admission and cancels
+        // periodic room-capable producers.
+        room_serving_close.close();
         // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
         // timestamp, fed into the SAME `drain_duration_ms` histogram the
         // generic per-entity room drain records into (below, once the Q6
@@ -5530,6 +5594,33 @@ pub(crate) struct DormancySweepCounts {
     pub examined: usize,
     pub remaining: usize,
     failed: bool,
+    ambiguous: bool,
+}
+
+fn record_dormancy_destroy_outcome(
+    websocket_state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    counts: &mut DormancySweepCounts,
+    outcome: waddle_xmpp::muc::room_registry_actor::DestroyRoomIfInactiveOutcome,
+) {
+    use waddle_xmpp::muc::room_registry_actor::DestroyRoomIfInactiveOutcome;
+
+    match outcome {
+        DestroyRoomIfInactiveOutcome::Destroyed => {
+            counts.evicted += 1;
+            debug!(room = %room_jid, "room dormancy janitor: evicted dormant room");
+        }
+        DestroyRoomIfInactiveOutcome::Retained => {}
+        DestroyRoomIfInactiveOutcome::MaybeSealed => {
+            counts.failed = true;
+            counts.ambiguous = true;
+            websocket_state.deps.room_serving.mark_unsafe_to_release();
+            warn!(
+                room = %room_jid,
+                "room dormancy janitor: guarded destroy may have sealed without a reply"
+            );
+        }
+    }
 }
 
 /// Walk every registered MUC room and destroy the ones that report
@@ -5614,13 +5705,15 @@ pub(crate) async fn sweep_dormant_rooms_once(
             })
             .await
         {
-            Ok(true) => {
-                counts.evicted += 1;
-                debug!(room = %room_jid, "room dormancy janitor: evicted dormant room");
+            Ok(outcome) => {
+                record_dormancy_destroy_outcome(websocket_state, &room_jid, &mut counts, outcome);
             }
-            Ok(false) => {}
             Err(error) => {
                 counts.failed = true;
+                if crate::server::routes::interpret::actor_send_maybe_enqueued(&error) {
+                    counts.ambiguous = true;
+                    websocket_state.deps.room_serving.mark_unsafe_to_release();
+                }
                 warn!(
                     room = %room_jid,
                     error = ?error,
@@ -5662,20 +5755,34 @@ pub(crate) async fn sweep_dormant_rooms_once(
 /// process doesn't sweep before any room has been touched.
 pub(crate) fn spawn_room_dormancy_janitor(websocket_state: &Arc<WebSocketState>) {
     let weak_state = Arc::downgrade(websocket_state);
+    let producer_cancel = websocket_state.deps.room_serving.producer_cancellation();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(ROOM_DORMANCY_JANITOR_INTERVAL);
         ticker.tick().await;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                biased;
+                _ = producer_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            run_room_dormancy_sweep(&state).await;
+            let Ok(mut room_scope) = state.deps.room_serving.try_scope() else {
+                break;
+            };
+            room_scope.arm();
+            let sweep_ambiguous = run_room_dormancy_sweep(&state).await;
+            if sweep_ambiguous {
+                room_scope.poison();
+            } else {
+                room_scope.complete_clean();
+            }
         }
     });
 }
 
-async fn run_room_dormancy_sweep(state: &WebSocketState) {
+async fn run_room_dormancy_sweep(state: &WebSocketState) -> bool {
     let counts = sweep_dormant_rooms_once(state).await;
     if counts.evicted > 0 {
         info!(
@@ -5699,6 +5806,7 @@ async fn run_room_dormancy_sweep(state: &WebSocketState) {
             SweepOutcome::Completed
         },
     );
+    counts.ambiguous
 }
 
 /// Per-sweep counts returned by [`sweep_empty_user_actors_once`].
@@ -5843,14 +5951,19 @@ pub(crate) fn spawn_user_actor_reaper(websocket_state: &Arc<WebSocketState>) {
 
 #[cfg(test)]
 mod room_dormancy_tests {
-    use super::{run_room_dormancy_sweep, sweep_dormant_rooms_once};
+    use super::{
+        record_dormancy_destroy_outcome, run_room_dormancy_sweep, sweep_dormant_rooms_once,
+        DormancySweepCounts,
+    };
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::muc::{
         room_actor::{
             ChangeAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant, JoinWithAffiliation,
             LeaveByRealJid,
         },
-        room_registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount},
+        room_registry_actor::{
+            CreateRoom, DestroyRoomIfInactiveOutcome, GetOrCreateRoom, RoomCount,
+        },
         RoomConfig,
     };
     use waddle_xmpp_core::{Affiliation, Role};
@@ -5865,10 +5978,31 @@ mod room_dormancy_tests {
     }
 
     #[tokio::test]
+    async fn maybe_sealed_dormancy_result_poisons_terminal_room_release() {
+        let state = create_test_websocket_state().await;
+        let room_jid = room_bare_jid("ambiguous-seal");
+        let mut counts = DormancySweepCounts::default();
+
+        record_dormancy_destroy_outcome(
+            &state,
+            &room_jid,
+            &mut counts,
+            DestroyRoomIfInactiveOutcome::MaybeSealed,
+        );
+
+        assert!(counts.failed);
+        assert!(counts.ambiguous);
+        assert!(
+            state.deps.room_serving.status().unsafe_to_release,
+            "a lost seal reply must permanently forbid graceful room-claim release"
+        );
+    }
+
+    #[tokio::test]
     async fn zero_work_room_dormancy_sweep_records_completed_heartbeat() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state().await;
-        run_room_dormancy_sweep(&state).await;
+        let _ = run_room_dormancy_sweep(&state).await;
 
         assert_eq!(
             metrics.counter_sum(
@@ -6326,6 +6460,7 @@ async fn collect_remote_muc_reconcile_candidates(
 #[cfg(feature = "clustering")]
 pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSocketState>) {
     let weak_state = Arc::downgrade(websocket_state);
+    let producer_cancel = websocket_state.deps.room_serving.producer_cancellation();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(REMOTE_MUC_MEMBERSHIP_RECONCILE_INTERVAL);
         // A sweep slower than the interval (serial relays against an
@@ -6334,16 +6469,25 @@ pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSo
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                biased;
+                _ = producer_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
+            let Ok(mut room_scope) = state.deps.room_serving.try_scope() else {
+                break;
+            };
+            room_scope.arm();
             let candidates = collect_remote_muc_reconcile_candidates(&state).await;
             if candidates.occupants.is_empty() {
                 waddle_xmpp::telemetry::reliability::record_janitor_sweep(
                     Janitor::RemoteMucMembership,
                     remote_muc_sweep_outcome(candidates.had_failure),
                 );
+                room_scope.complete_clean();
                 continue;
             }
             info!(
@@ -6379,6 +6523,7 @@ pub(crate) fn spawn_remote_muc_membership_reconciler(websocket_state: &Arc<WebSo
                 Janitor::RemoteMucMembership,
                 remote_muc_sweep_outcome(sweep_failed),
             );
+            room_scope.complete_clean();
         }
     });
 }

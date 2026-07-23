@@ -1,3 +1,8 @@
+//! Dedicated XEP-0045 websocket-adapter evidence, including clustered join
+//! routing decisions. The foreign-owner reconciliation tests assert that
+//! owner-built self-presence (status 110) is preserved, while unavailable
+//! room ownership and relay origins produce retryable stanza errors.
+
 use super::*;
 use crate::permissions::CheckPermission;
 use std::io;
@@ -79,6 +84,104 @@ fn validate_local_room_fence(
     }
 }
 
+#[cfg(feature = "clustering")]
+async fn ordinary_join_with_remote_preflight_decision(
+    room_jid: &BareJid,
+    decision: crate::clustering::route_bridge::MucProxyRouteDecision,
+) -> (Vec<String>, usize) {
+    use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+    use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+    use crate::server::routes::websocket::handlers::presence::{
+        handle_muc_join_with_ordered_relay, MucJoinRequest,
+    };
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use waddle_xmpp::muc::room_registry_actor::RoomCount;
+    use waddle_xmpp::ownership::{Entity, EntityType};
+
+    let joiner_jid: FullJid = "ordinary@example.com/web".parse().expect("joiner JID");
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    bridge.set_test_muc_proxy_route_decision(decision).await;
+    let state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            ordered_relay_delivery_bridge: Some(bridge),
+            ..Default::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    let ordinary_session = create_test_session(state.as_ref(), "ordinary").await;
+    let sender_entity = Entity::new(EntityType::UserActor, joiner_jid.to_bare().to_string());
+    let responses = handle_muc_join_with_ordered_relay(
+        state.as_ref(),
+        MucJoinRequest {
+            domain: "example.com",
+            room_jid,
+            sender_jid: &joiner_jid,
+            nick: "ordinary",
+            presence_show: None,
+            authenticated_session: &Some(ordinary_session),
+            ordered_relay_origin: Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+                sender_entity,
+                inbound_sequence: 0,
+                handoff: None,
+            }),
+        },
+    )
+    .await;
+    let room_count = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(RoomCount)
+        .await
+        .expect("room count");
+    (responses, room_count)
+}
+
+#[cfg(feature = "clustering")]
+fn assert_remote_owner_retryable_join_error(
+    responses: &[String],
+    room_jid: &BareJid,
+    expected_diagnostic: &str,
+) {
+    assert_eq!(responses.len(), 1, "one retryable error presence");
+    let presence = Element::from_str(&responses[0]).expect("error presence XML");
+    let expected_from = format!("{room_jid}/ordinary");
+    let expected_by = room_jid.to_string();
+    assert_eq!(presence.name(), "presence");
+    assert_eq!(presence.attr("type"), Some("error"));
+    assert_eq!(presence.attr("from"), Some(expected_from.as_str()));
+    assert_eq!(presence.attr("to"), Some("ordinary@example.com/web"));
+    assert!(
+        presence
+            .get_child("x", waddle_xmpp::muc::presence::NS_MUC)
+            .is_some(),
+        "XEP-0045 join errors must echo the MUC marker: {responses:?}"
+    );
+    let error = presence
+        .get_child("error", waddle_xmpp::parser::ns::JABBER_CLIENT)
+        .expect("typed stanza error");
+    assert_eq!(error.attr("type"), Some("wait"));
+    assert_eq!(error.attr("by"), Some(expected_by.as_str()));
+    assert!(
+        error
+            .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas",)
+            .is_some(),
+        "temporary routing failures must be retryable resource constraints: {responses:?}"
+    );
+    assert_eq!(
+        error
+            .get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .expect("human-readable stanza error")
+            .text(),
+        expected_diagnostic
+    );
+}
+
 #[tokio::test]
 async fn muc_stale_leave_does_not_remove_current_resource() {
     let state = create_test_websocket_state().await;
@@ -118,7 +221,9 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
 #[tokio::test]
 async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
     use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoomIfInactive, RoomCount};
+    use waddle_xmpp::muc::room_registry_actor::{
+        CreateRoom, DestroyRoomIfInactive, DestroyRoomIfInactiveOutcome, RoomCount,
+    };
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -143,7 +248,7 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
         .expect("create room");
     let probe = actor.ask(IsDormant).await.expect("probe");
     assert!(probe.dormant);
-    let destroyed: bool = state
+    let destroyed = state
         .deps
         .protocol
         .room_registry
@@ -154,7 +259,11 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
         })
         .await
         .expect("guarded destroy");
-    assert!(destroyed, "dormant room evicted");
+    assert_eq!(
+        destroyed,
+        DestroyRoomIfInactiveOutcome::Destroyed,
+        "dormant room evicted"
+    );
 
     // The join after eviction must succeed against a respawned room.
     let responses = handle_muc_join(
@@ -233,6 +342,297 @@ async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constra
             .get_child("resource-constraint", "urn:ietf:params:xml:ns:xmpp-stanzas",)
             .is_some(),
         "ownership reconciliation must remain retryable: {responses:?}"
+    );
+    assert_eq!(
+        error
+            .get_child("text", "urn:ietf:params:xml:ns:xmpp-stanzas")
+            .expect("human-readable stanza error")
+            .text(),
+        "This room's ownership is being reconciled; please retry.",
+        "the no-relay fallback must preserve the reconciliation-specific diagnostic"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn muc_reconciliation_pending_proxies_owner_built_join_replies() {
+    use crate::clustering::route_bridge::{
+        OrderedRelayDeliveryBridge, OrderedRelayMucProxyOutcome,
+    };
+    use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+    use crate::server::routes::websocket::handlers::presence::{
+        handle_muc_join_with_ordered_relay, MucJoinRequest,
+    };
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
+    use waddle_xmpp::muc::room_actor::SetSubject;
+    use waddle_xmpp::muc::room_registry_actor::ReservePendingReclaimedRoom;
+    use waddle_xmpp::ownership::{Entity, EntityType};
+
+    let room_jid: BareJid = "pending-remote-owner@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let owner_jid: FullJid = "owner@example.com/web".parse().expect("owner JID");
+    let joiner_jid: FullJid = "joiner@example.com/web".parse().expect("joiner JID");
+
+    // Build the exact frames on a real authoritative RoomActor first. The
+    // injected relay result below is typed `Stanza` data, not hand-written
+    // XML, and carries a unique subject proving the pending node returns the
+    // owner's roster/self-presence/subject sequence.
+    let owner_state = create_test_websocket_state().await;
+    let owner_session =
+        create_test_server_owner_session(owner_state.as_ref(), "owner-session").await;
+    handle_muc_join(
+        owner_state.as_ref(),
+        "example.com",
+        &room_jid,
+        &owner_jid,
+        "owner",
+        None,
+        &Some(owner_session),
+    )
+    .await;
+    let room_actor = get_room_actor(owner_state.as_ref(), &room_jid)
+        .await
+        .expect("owner RoomActor");
+    room_actor
+        .ask(SetSubject {
+            texts: waddle_xmpp::muc::RoomSubjectTexts::from_iter([(
+                String::new(),
+                "remote owner subject".to_string(),
+            )]),
+            setter: owner_jid.to_bare(),
+            setter_nick: "owner".to_string(),
+            set_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("owner sets subject");
+    let joiner_session = create_test_session(owner_state.as_ref(), "joiner-session").await;
+    let owner_frames = handle_muc_join(
+        owner_state.as_ref(),
+        "example.com",
+        &room_jid,
+        &joiner_jid,
+        "joiner",
+        None,
+        &Some(joiner_session),
+    )
+    .await;
+    assert!(
+        owner_frames
+            .iter()
+            .any(|frame| frame.contains("remote owner subject")),
+        "authoritative join replies carry the owner subject: {owner_frames:?}"
+    );
+    let owner_stanzas = owner_frames
+        .iter()
+        .map(|frame| {
+            let element = Element::from_str(frame).expect("owner-built stanza XML");
+            match element.name() {
+                "presence" => waddle_xmpp::Stanza::Presence(
+                    xmpp_parsers::presence::Presence::try_from(element)
+                        .expect("owner presence stanza"),
+                ),
+                "message" => waddle_xmpp::Stanza::Message(
+                    xmpp_parsers::message::Message::try_from(element)
+                        .expect("owner subject stanza"),
+                ),
+                name => panic!("unexpected owner-built join stanza: {name}"),
+            }
+        })
+        .collect();
+
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    bridge
+        .set_test_muc_proxy_outcome(OrderedRelayMucProxyOutcome::Delivered(owner_stanzas))
+        .await;
+    let pending_state = create_test_websocket_state_with_clustering(
+        crate::clustering::ClusteringHandles {
+            ordered_relay_delivery_bridge: Some(bridge),
+            ..Default::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    pending_state
+        .deps
+        .protocol
+        .room_registry
+        .ask(ReservePendingReclaimedRoom {
+            room_jid: room_jid.clone(),
+        })
+        .await
+        .expect("reserve pending ownership reconciliation");
+    let pending_session =
+        create_test_server_owner_session(pending_state.as_ref(), "pending-session").await;
+    let sender_entity = Entity::new(EntityType::UserActor, joiner_jid.to_bare().to_string());
+
+    let responses = handle_muc_join_with_ordered_relay(
+        pending_state.as_ref(),
+        MucJoinRequest {
+            domain: "example.com",
+            room_jid: &room_jid,
+            sender_jid: &joiner_jid,
+            nick: "joiner",
+            presence_show: None,
+            authenticated_session: &Some(pending_session),
+            ordered_relay_origin: Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+                sender_entity,
+                inbound_sequence: 0,
+                handoff: None,
+            }),
+        },
+    )
+    .await;
+
+    assert!(
+        responses
+            .iter()
+            .all(|frame| !frame.contains("type='error'") && !frame.contains("type=\"error\"")),
+        "pending reconciliation must not fall back to a local wait error: {responses:?}"
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|frame| frame.contains("remote owner subject")),
+        "pending reconciliation must return the owner-built subject: {responses:?}"
+    );
+    assert!(
+        responses.iter().any(|frame| {
+            (frame.contains("status code='110'") || frame.contains("status code=\"110\""))
+                && frame.contains("/joiner")
+        }),
+        "pending reconciliation must return owner-built XEP-0045 self-presence: {responses:?}"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ordinary_join_proxies_foreign_room_before_local_creation_permission() {
+    use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
+
+    let room_jid: BareJid = "foreign-owned-unmanaged@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let joiner_jid: FullJid = "ordinary@example.com/web".parse().expect("joiner JID");
+    let mut owner_reply = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::None);
+    owner_reply.from = room_jid
+        .clone()
+        .with_resource_str("ordinary")
+        .ok()
+        .map(jid::Jid::from);
+    owner_reply.to = Some(jid::Jid::from(joiner_jid.clone()));
+
+    let (responses, room_count) = ordinary_join_with_remote_preflight_decision(
+        &room_jid,
+        MucProxyRouteDecision::Attempted(OrderedRelayMucProxyOutcome::Delivered(vec![
+            waddle_xmpp::Stanza::Presence(owner_reply),
+        ])),
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "foreign owner reply must be returned");
+    assert!(
+        !responses[0].contains("not-allowed"),
+        "local create permission must not reject a foreign-owned room: {responses:?}"
+    );
+    assert!(
+        responses[0].contains("foreign-owned-unmanaged@muc.example.com/ordinary"),
+        "the typed owner reply must survive proxying: {responses:?}"
+    );
+    assert_eq!(
+        room_count, 0,
+        "proxying a foreign-owned room must not create a local RoomActor"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ordinary_join_cannot_create_unclaimed_room_via_remote_preflight() {
+    use crate::clustering::route_bridge::MucProxyRouteDecision;
+
+    let room_jid: BareJid = "unclaimed-unmanaged@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let (responses, room_count) = ordinary_join_with_remote_preflight_decision(
+        &room_jid,
+        MucProxyRouteDecision::RoomUnclaimed,
+    )
+    .await;
+
+    assert_eq!(responses.len(), 1, "one creation denial presence");
+    assert!(
+        responses[0].contains("not-allowed"),
+        "an unclaimed room must still require CreateMuc: {responses:?}"
+    );
+    assert_eq!(
+        room_count, 0,
+        "a denied unclaimed join must not create a RoomActor"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ordinary_join_gets_retryable_error_when_room_claim_is_temporarily_unavailable() {
+    use crate::clustering::route_bridge::MucProxyRouteDecision;
+
+    let room_jid: BareJid = "claim-unavailable@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let (responses, room_count) = ordinary_join_with_remote_preflight_decision(
+        &room_jid,
+        MucProxyRouteDecision::RoomClaimUnavailable,
+    )
+    .await;
+
+    assert_remote_owner_retryable_join_error(
+        &responses,
+        &room_jid,
+        "This room's remote owner is temporarily unavailable; please retry.",
+    );
+    assert_eq!(
+        room_count, 0,
+        "claim lookup failure must not create a local RoomActor"
+    );
+    assert!(
+        responses
+            .iter()
+            .all(|response| !response.contains("not-allowed")),
+        "a transient claim failure must not masquerade as a creation denial: {responses:?}"
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn ordinary_join_gets_retryable_error_when_relay_origin_is_temporarily_unavailable() {
+    use crate::clustering::route_bridge::MucProxyRouteDecision;
+
+    let room_jid: BareJid = "origin-unavailable@muc.example.com"
+        .parse()
+        .expect("room JID");
+    let (responses, room_count) = ordinary_join_with_remote_preflight_decision(
+        &room_jid,
+        MucProxyRouteDecision::OriginUnavailable,
+    )
+    .await;
+
+    assert_remote_owner_retryable_join_error(
+        &responses,
+        &room_jid,
+        "This room's remote owner is temporarily unavailable; please retry.",
+    );
+    assert_eq!(
+        room_count, 0,
+        "origin failure must not create a local RoomActor"
+    );
+    assert!(
+        responses
+            .iter()
+            .all(|response| !response.contains("not-allowed")),
+        "a transient origin failure must not masquerade as a creation denial: {responses:?}"
     );
 }
 

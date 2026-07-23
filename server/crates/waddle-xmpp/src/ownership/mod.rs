@@ -291,12 +291,61 @@ pub struct SharedNodeIdentity {
 pub struct CurrentNodeIdentityGuard {
     identity: NodeIdentity,
     rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
-    _rotation_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _rotation_guard: std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl CurrentNodeIdentityGuard {
     pub fn identity(&self) -> &NodeIdentity {
         &self.identity
+    }
+
+    /// Mint a cloneable, source-bound permit for an actor message without
+    /// transferring ownership of this guard's read lock into that message.
+    ///
+    /// The caller must retain this guard across the complete publication and
+    /// rollback-enqueue boundary. A queued actor message only holds the weak
+    /// permit, so a timed-out ask cannot keep terminal identity disable
+    /// blocked forever.
+    pub fn permit(&self) -> CurrentNodeIdentityPermit {
+        CurrentNodeIdentityPermit {
+            identity: self.identity.clone(),
+            rotation_gate: self.rotation_gate.clone(),
+            rotation_guard: std::sync::Arc::downgrade(&self._rotation_guard),
+        }
+    }
+}
+
+/// Cloneable proof that a caller currently owns a publication guard.
+///
+/// Unlike [`CurrentNodeIdentityGuard`], this value does not keep the
+/// publication read lock alive. Consumers upgrade it only around a short,
+/// synchronous publication boundary; upgrade fails after the caller drops the
+/// original guard.
+#[derive(Clone)]
+pub struct CurrentNodeIdentityPermit {
+    identity: NodeIdentity,
+    rotation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+    rotation_guard: std::sync::Weak<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
+/// Source-bound proof that [`SharedNodeIdentity::disable`] has drained every
+/// publication guard and terminally revoked this process incarnation's
+/// authority.
+///
+/// Graceful shutdown passes this value into local actor retirement before
+/// releasing actor claims. Consumers must verify it with
+/// [`SharedNodeIdentity::owns_disabled`]; the prior active identity is only a
+/// cleanup selector and does not itself carry publication authority.
+#[derive(Clone, Debug)]
+pub struct DisabledNodeIdentity {
+    prior_identity: NodeIdentity,
+    source_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+}
+
+impl DisabledNodeIdentity {
+    /// The active identity whose publication authority was revoked.
+    pub fn prior_identity(&self) -> &NodeIdentity {
+        &self.prior_identity
     }
 }
 
@@ -348,7 +397,7 @@ impl SharedNodeIdentity {
         (identity.is_active() && identity == *expected).then_some(CurrentNodeIdentityGuard {
             identity,
             rotation_gate: self.rotation_gate.clone(),
-            _rotation_guard: rotation_guard,
+            _rotation_guard: std::sync::Arc::new(rotation_guard),
         })
     }
 
@@ -367,26 +416,80 @@ impl SharedNodeIdentity {
         std::sync::Arc::ptr_eq(&self.rotation_gate, &guard.rotation_gate)
     }
 
+    /// Upgrade a source-bound weak permit while its caller still owns the
+    /// corresponding publication guard.
+    ///
+    /// The returned guard is intended for a short, non-async publication
+    /// transition. It prevents rotation for that transition without allowing
+    /// a queued or wedged actor message to retain publication authority after
+    /// its caller has timed out and begun rollback.
+    pub fn upgrade_permit(
+        &self,
+        permit: &CurrentNodeIdentityPermit,
+    ) -> Option<CurrentNodeIdentityGuard> {
+        if !std::sync::Arc::ptr_eq(&self.rotation_gate, &permit.rotation_gate) {
+            return None;
+        }
+        let rotation_guard = permit.rotation_guard.upgrade()?;
+        let identity = self.current();
+        (identity.is_active() && identity == permit.identity).then_some(CurrentNodeIdentityGuard {
+            identity,
+            rotation_gate: self.rotation_gate.clone(),
+            _rotation_guard: rotation_guard,
+        })
+    }
+
+    /// Verify that `proof` came from this exact identity source and that the
+    /// source is still terminally disabled for the same process incarnation.
+    ///
+    /// Node-id/epoch equality alone is insufficient: a separately-created
+    /// identity source can carry identical text while this source remains
+    /// active. Pointer-binding the proof to the rotation gate closes that
+    /// substitution.
+    pub fn owns_disabled(&self, proof: &DisabledNodeIdentity) -> bool {
+        std::sync::Arc::ptr_eq(&self.rotation_gate, &proof.source_gate)
+            && self.with_current(|current| {
+                !current.is_active() && current.same_incarnation(&proof.prior_identity)
+            })
+    }
+
     /// Replace the current identity only after every in-flight guarded
     /// publication or transaction has completed.
+    ///
+    /// Terminal disable is irreversible for this shared identity source.
+    /// Once [`Self::disable`] has returned, a late node-lease task cannot
+    /// reactivate publication authority by rotating in a fresh active
+    /// identity. A terminally-disabled replacement is likewise rejected:
+    /// only [`Self::disable`] may perform that transition and mint its proof.
     pub async fn rotate(&self, identity: NodeIdentity) {
         let _rotation_guard = self.rotation_gate.write().await;
-        *self
+        let mut current = self
             .identity
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !current.is_active() || !identity.is_active() {
+            return;
+        }
+        *current = identity;
     }
 
     /// Permanently revoke publication authority for this clustering
     /// lifetime after every in-flight guarded publication has drained.
     /// The last identity remains inspectable for diagnostics, but compares
     /// unequal to its former active value and cannot pass a claim acquire.
-    pub async fn disable(&self) {
+    pub async fn disable(&self) -> DisabledNodeIdentity {
         let _rotation_guard = self.rotation_gate.write().await;
-        self.identity
+        let mut identity = self
+            .identity
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .authority = NodeAuthority::TerminallyDisabled;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_identity =
+            NodeIdentity::new(identity.node_id.clone(), identity.node_epoch.clone());
+        identity.authority = NodeAuthority::TerminallyDisabled;
+        DisabledNodeIdentity {
+            prior_identity,
+            source_gate: self.rotation_gate.clone(),
+        }
     }
 }
 
@@ -594,15 +697,17 @@ pub trait ClaimStore: Send + Sync {
     /// call.
     async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError>;
 
-    /// Observe a claim only after any detached write already mutating that
-    /// claim row has committed or rolled back. Terminal recovery uses this
-    /// as an ordering barrier after cancellation may have dropped a steal
-    /// future while its backend statement remained in flight.
+    /// Observe a claim only after any detached write already mutating or
+    /// creating that entity's claim has committed or rolled back. Terminal
+    /// recovery uses this as an ordering barrier after cancellation may have
+    /// dropped an acquire or steal future while its backend statement
+    /// remained in flight.
     ///
     /// In-process stores execute claim mutations synchronously and therefore
     /// need no stronger operation than [`Self::current_claim`]. Stores that
-    /// can outlive a dropped future must override this method with a row-lock
-    /// or equivalent serialization barrier.
+    /// can outlive a dropped future must override this method with a
+    /// serialization barrier that also covers an absent-row INSERT; a row
+    /// lock alone is insufficient.
     async fn current_claim_after_pending_writes(
         &self,
         entity: &Entity,
@@ -769,9 +874,11 @@ mod tests {
     async fn terminally_disabled_identity_rejects_guards_and_claim_acquisition() {
         let active = NodeIdentity::new("node-a", "epoch-0");
         let shared = SharedNodeIdentity::new(active.clone());
-        shared.disable().await;
+        let proof = shared.disable().await;
 
         let disabled = shared.current();
+        assert_eq!(proof.prior_identity(), &active);
+        assert!(shared.owns_disabled(&proof));
         assert!(!disabled.is_active());
         assert_ne!(disabled, active);
         assert!(disabled.same_incarnation(&active));
@@ -784,6 +891,41 @@ mod tests {
             store.acquire(&entity, &disabled).await,
             Err(ClaimError::AuthorityDisabled)
         ));
+    }
+
+    #[tokio::test]
+    async fn terminally_disabled_identity_cannot_be_reactivated_by_rotation() {
+        let active = NodeIdentity::new("node-a", "epoch-0");
+        let shared = SharedNodeIdentity::new(active.clone());
+        shared.disable().await;
+
+        shared
+            .rotate(NodeIdentity::new("node-a", "epoch-after-disable"))
+            .await;
+
+        let disabled = shared.current();
+        assert!(!disabled.is_active());
+        assert!(disabled.same_incarnation(&active));
+        assert!(
+            !disabled.same_incarnation(&NodeIdentity::new("node-a", "epoch-after-disable")),
+            "a late rotate must not reopen terminal publication authority"
+        );
+        assert!(shared.guard_if_current(&disabled).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_identity_proof_is_bound_to_its_exact_source() {
+        let identity = NodeIdentity::new("node-a", "epoch-0");
+        let active_source = SharedNodeIdentity::new(identity.clone());
+        let separate_source = SharedNodeIdentity::new(identity);
+        let foreign_proof = separate_source.disable().await;
+
+        assert!(
+            !active_source.owns_disabled(&foreign_proof),
+            "identical node/epoch text from another source is not terminal-disable proof"
+        );
+        assert!(active_source.current().is_active());
+        assert!(separate_source.owns_disabled(&foreign_proof));
     }
 
     #[tokio::test]
@@ -811,5 +953,31 @@ mod tests {
         rotation.await.expect("rotation task");
         assert_eq!(shared.current(), NodeIdentity::new("node-a", "epoch-1"));
         assert!(shared.guard_if_current(&old).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn weak_publication_permit_cannot_outlive_its_callers_guard() {
+        let active = NodeIdentity::new("node-a", "epoch-0");
+        let shared = SharedNodeIdentity::new(active.clone());
+        let guard = shared
+            .guard_if_current(&active)
+            .await
+            .expect("active identity starts current");
+        let permit = guard.permit();
+
+        assert!(
+            shared.upgrade_permit(&permit).is_some(),
+            "the permit is usable while its caller retains the publication guard"
+        );
+        drop(guard);
+
+        let proof = tokio::time::timeout(Duration::from_millis(100), shared.disable())
+            .await
+            .expect("a weak permit must not keep terminal disable blocked");
+        assert!(shared.owns_disabled(&proof));
+        assert!(
+            shared.upgrade_permit(&permit).is_none(),
+            "a queued message cannot recover publication authority after caller rollback"
+        );
     }
 }

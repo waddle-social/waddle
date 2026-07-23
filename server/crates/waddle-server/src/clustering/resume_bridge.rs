@@ -143,6 +143,7 @@ impl ResumeStealBridge {
             // identically to not-live-locally so the asker re-checks
             // persistence and retries.
             Ok(Ok(ForceDetachOutcome::NotPersisted)) => LocalForcedDetachOutcome::NotLiveLocally,
+            Ok(Ok(ForceDetachOutcome::Unavailable)) => LocalForcedDetachOutcome::NotLiveLocally,
             // The connection's task died mid-flight without answering, or
             // this bridge's own bounded wait elapsed first — either way,
             // conservative: report not-live-locally so the asker re-checks

@@ -452,7 +452,8 @@ impl ConnectionGuard {
     }
 }
 
-/// A database transaction obtained from [`Database::begin`].
+/// A database transaction obtained from [`Database::begin`] or
+/// [`Database::begin_control_plane`].
 ///
 /// Holds a single pooled connection so multiple `execute` calls observe each
 /// other's writes atomically. Drop without calling [`Transaction::commit`] to

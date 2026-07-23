@@ -37,6 +37,20 @@ async fn xmpp_websocket_handler(
     uri: axum::http::Uri,
     State(state): State<Arc<WebSocketState>>,
 ) -> Response {
+    // Count room-capable admission before either shutdown check. The room gate
+    // and Ecdysis guard then cover the same upgrade race: shutdown either
+    // observes this accepted connection or this request is rejected.
+    let mut room_scope = match state.deps.room_serving.try_scope() {
+        Ok(scope) => scope,
+        Err(error) => {
+            info!(
+                ?error,
+                "Rejecting XMPP WebSocket upgrade: room serving is closed"
+            );
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
     // Graceful shutdown gate (issue #1091). The guard is minted BEFORE
     // the stop-token check: the upgrade handshake spans a client
     // round-trip, so a check-then-mint order would let a connection be
@@ -69,8 +83,15 @@ async fn xmpp_websocket_handler(
         let _enter = established_span.enter();
     }
 
-    ws.protocols(["xmpp"])
-        .on_upgrade(move |socket| handle_xmpp_websocket(socket, state, connection_guard))
+    ws.protocols(["xmpp"]).on_upgrade(move |socket| async move {
+        // The scope stays unarmed while Axum is negotiating the upgrade. If
+        // the upgrade is never established, its drop is a clean non-operation.
+        // Once established, cancellation/panic anywhere through connection
+        // cleanup makes terminal release unsafe.
+        room_scope.arm();
+        handle_xmpp_websocket(socket, state, connection_guard).await;
+        room_scope.complete_clean();
+    })
 }
 
 fn connection_established_span(query: Option<&str>) -> Option<tracing::Span> {

@@ -5,6 +5,18 @@ use xmpp_parsers::iq::Iq;
 type OrderedRelayDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = Option<FullJidDeliveryOutcome>> + Send + 'a>>;
 
+fn observe_delivery_outcome(
+    deps: &Deps<'_>,
+    outcome: FullJidDeliveryOutcome,
+) -> FullJidDeliveryOutcome {
+    if outcome.is_ambiguous() {
+        if let Some(state) = deps.web_socket_state {
+            state.deps.room_serving.mark_unsafe_to_release();
+        }
+    }
+    outcome
+}
+
 /// RFC 6121 §8.5.2.1.1 bare-JID destination selection: the candidate set and
 /// priority ranking come from the actor-authoritative `UserActor` alone
 /// (ADR-0017 Phase 3 Slice 9 retires the transitional Slice-1 DashMap
@@ -329,8 +341,10 @@ async fn route_dm_to_full_jid(
                     // argument. `Dropped` (full channel /
                     // maybe-enqueued failure) stays terminal to avoid
                     // double delivery.
-                    let live_outcome =
-                        deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await;
+                    let live_outcome = observe_delivery_outcome(
+                        deps,
+                        deliver_peer_to_live_only(deps.user_registry, &full, stanza.as_ref()).await,
+                    );
                     if live_outcome != FullJidDeliveryOutcome::Unavailable {
                         return Vec::new();
                     }
@@ -904,6 +918,7 @@ fn deliver_full_jid_via_ordered_relay<'a>(
             bridge
                 .try_deliver_full_jid_remote(target, stanza, origin)
                 .await
+                .map(|outcome| observe_delivery_outcome(deps, outcome))
         }
         #[cfg(not(feature = "clustering"))]
         {
@@ -926,9 +941,12 @@ async fn deliver_peer_to_full_with_registered_remote(
     )
     .await
     {
-        return outcome;
+        return observe_delivery_outcome(deps, outcome);
     }
-    deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    observe_delivery_outcome(
+        deps,
+        deliver_peer_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await,
+    )
 }
 
 async fn deliver_direct_to_full_with_registered_remote(
@@ -944,9 +962,12 @@ async fn deliver_direct_to_full_with_registered_remote(
     )
     .await
     {
-        return outcome;
+        return observe_delivery_outcome(deps, outcome);
     }
-    deliver_direct_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await
+    observe_delivery_outcome(
+        deps,
+        deliver_direct_to_full(deps.user_registry, deps.sm_session_registry, target, stanza).await,
+    )
 }
 
 async fn deliver_registered_remote_resource(
@@ -967,6 +988,7 @@ async fn deliver_registered_remote_resource(
         bridge
             .try_deliver_registered_remote_resource(target, stanza, kind)
             .await
+            .map(|outcome| observe_delivery_outcome(deps, outcome))
     }
     #[cfg(not(feature = "clustering"))]
     {
@@ -994,6 +1016,7 @@ fn deliver_bare_jid_via_ordered_relay<'a>(
             bridge
                 .try_deliver_bare_jid_remote(target, stanza, origin)
                 .await
+                .map(|outcome| observe_delivery_outcome(deps, outcome))
         }
         #[cfg(not(feature = "clustering"))]
         {

@@ -128,6 +128,7 @@ pub enum MediatedInviteRollbackError {
 pub enum MediatedInviteRollbackAbort {
     Aborted,
     NotPrepared,
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
@@ -135,6 +136,7 @@ pub enum MediatedInviteGrantFinalization {
     Finalized,
     RollbackPending,
     Superseded,
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
@@ -142,6 +144,7 @@ pub enum MediatedInviteOperationAcknowledgement {
     Acknowledged,
     Pending,
     Unknown,
+    RoomSealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

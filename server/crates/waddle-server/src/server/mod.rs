@@ -11,6 +11,7 @@ mod health;
 mod http;
 pub(crate) mod profile_publish_route;
 mod room_registry_gauge;
+pub(crate) mod room_serving_quiescence;
 mod session_janitors;
 mod state;
 pub(crate) mod state_inventory;
@@ -58,7 +59,7 @@ use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
 use http::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
 use kameo::actor::Spawn;
 use std::{net::SocketAddr, sync::Arc};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Start both HTTP and XMPP servers with Ecdysis graceful restart support.
 ///
@@ -88,6 +89,12 @@ pub async fn start_with_config(
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
+    // Construct the process-wide room-serving gate before any producer.
+    // Startup keeps the sole terminal closer; request/background graphs get
+    // only admission or stop-path capabilities.
+    let (room_serving, room_serving_closer) =
+        room_serving_quiescence::RoomServingQuiescence::create();
+    let room_serving_close = room_serving_closer.close_handle();
 
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
@@ -204,6 +211,7 @@ pub async fn start_with_config(
         db_pool.global(),
         &stop_token,
         clustering_readiness.clone(),
+        room_serving.clone(),
     )
     .await?;
 
@@ -263,6 +271,7 @@ pub async fn start_with_config(
         server_owner_jids,
         clustering_readiness,
         clustering_claims: clustering_handles,
+        room_serving: room_serving.clone(),
     }));
     // ADR-0017 Phase 3 Slice 7 FIX 1: co-location-check MAM storage against
     // the clustering global database and enable fenced groupchat-archive
@@ -287,12 +296,10 @@ pub async fn start_with_config(
     let acme_http01_challenge_service = acme_runtime
         .as_ref()
         .map(|runtime| runtime.http01_challenge_service.clone());
-    // Coordinates the Q6 SM-drain task's completion back to the HTTP
-    // server's graceful_shutdown closure. The drain task notifies on
-    // exit (RAII guard); the HTTP graceful_shutdown awaits it after
-    // stop_token cancels so axum doesn't tear down mid-drain.
-    let drain_complete = Arc::new(tokio::sync::Notify::new());
-    let http_drain_complete = Arc::clone(&drain_complete);
+    // Level-triggered Q6 completion. Cancellation remains observable when the
+    // drain finishes before the post-Axum waiter is installed.
+    let drain_complete = tokio_util::sync::CancellationToken::new();
+    let http_drain_complete = drain_complete.clone();
     let http_pubsub_database_storage = Arc::clone(&pubsub_database_storage);
     let http_handle = tokio::spawn(async move {
         start_http_server(HttpServerDeps {
@@ -305,6 +312,7 @@ pub async fn start_with_config(
             listener: http_listener,
             shutdown_handle: http_shutdown_handle,
             drain_complete: http_drain_complete,
+            room_serving_close,
         })
         .await
     });
@@ -329,11 +337,7 @@ pub async fn start_with_config(
         info!(signal = ?signal, "Shutdown lifecycle complete");
     });
 
-    // Wait for the HTTP server to fully exit. axum's
-    // `graceful_shutdown` closure (in `start_http_server`) is what
-    // waits on the SM Q6 drain via `drain_complete.notified()`, so
-    // letting `http_handle` drive the exit guarantees the runtime
-    // doesn't tear down mid-drain.
+    // Wait for Axum to stop accepting and drain accepted connection futures.
     let result = match http_handle.await {
         Ok(Ok(())) => {
             info!("HTTP server stopped (graceful drain complete)");
@@ -342,18 +346,75 @@ pub async fn start_with_config(
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("HTTP server task failed: {}", e)),
     };
-    // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
-    // own per-entity graceful drain (mark draining, seal + batch-release
-    // owned `RoomActor` claims) on this same `stop_token` firing, in
-    // parallel with the HTTP/SM drain just awaited above — but element 4's
-    // drain sequence requires it "completing before process exit," not
-    // merely racing shutdown in the background. A small fixed margin atop
-    // the configured budget covers this await's own task-exit/logging
-    // overhead beyond the drain loop's own internal budget bound; a no-op
-    // (returns immediately) when clustering is disabled.
+    // An unexpected HTTP exit must enter the same fail-closed shutdown path
+    // as a signal; otherwise producers and the node-lease heartbeat would
+    // remain live while startup returns an error.
+    if !stop_token.is_cancelled() {
+        stop_token.cancel();
+    }
+    room_serving_closer.close();
+
+    // Q6 runs independently from Axum connection drain. Await its
+    // level-triggered completion explicitly after HTTP exit. A router-start
+    // failure can occur before the drain task exists, so bound this await and
+    // make terminal release unsafe rather than hanging forever.
+    let room_drain_budget = session_janitors::max_drain_duration_from_env();
+    if tokio::time::timeout(room_drain_budget, drain_complete.cancelled())
+        .await
+        .is_ok()
+    {
+        info!("SM Q6 drain completion observed after HTTP exit");
+    } else {
+        room_serving_closer.poison();
+        warn!(
+            budget_ms = room_drain_budget.as_millis() as u64,
+            "SM Q6 drain completion was not observed; room claims will be abandoned"
+        );
+    }
+
+    // Root admission is closed and all producer-specific drains have run.
+    // Wait for every counted connection, relay receiver, webhook dispatch,
+    // and periodic producer before constructing the sole release decision.
+    let room_wait = room_serving_closer
+        .wait_for_zero_for(room_drain_budget)
+        .await;
+    let clustering_decision = match room_wait {
+        room_serving_quiescence::RoomServingWaitOutcome::Quiescent => {
+            match room_serving_closer.finalize() {
+                room_serving_quiescence::RoomServingTerminalOutcome::Clean(fence) => {
+                    crate::clustering::ClusteringShutdownDecision::Release(fence)
+                }
+                room_serving_quiescence::RoomServingTerminalOutcome::AdmissionStillOpen {
+                    active_scopes,
+                }
+                | room_serving_quiescence::RoomServingTerminalOutcome::Active { active_scopes }
+                | room_serving_quiescence::RoomServingTerminalOutcome::Poisoned { active_scopes } =>
+                {
+                    warn!(
+                        active_scopes,
+                        "Room-serving finalization was not clean; room claims will be abandoned"
+                    );
+                    crate::clustering::ClusteringShutdownDecision::Abandon
+                }
+            }
+        }
+        room_serving_quiescence::RoomServingWaitOutcome::AdmissionStillOpen { active_scopes }
+        | room_serving_quiescence::RoomServingWaitOutcome::Poisoned { active_scopes }
+        | room_serving_quiescence::RoomServingWaitOutcome::TimedOut { active_scopes } => {
+            warn!(
+                active_scopes,
+                "Room-serving quiescence was not clean; room claims will be abandoned"
+            );
+            crate::clustering::ClusteringShutdownDecision::Abandon
+        }
+    };
+
+    // Deliver exactly one release-or-abandon decision after process-wide root
+    // quiescence. The node-lease loop keeps heartbeating while it waits.
     const CLUSTERING_DRAIN_AWAIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
     clustering_shutdown
-        .await_drain(
+        .authorize_and_await(
+            clustering_decision,
             server_config.clustering.node_lease.claim_release_budget
                 + CLUSTERING_DRAIN_AWAIT_MARGIN,
         )

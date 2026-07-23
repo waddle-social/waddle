@@ -99,6 +99,21 @@ async fn livekit_webhook_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let scope = match state.deps.room_serving.try_scope() {
+        Ok(scope) => scope,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+    };
+    scope
+        .run_clean(livekit_webhook_inner(state, seen, headers, body))
+        .await
+}
+
+async fn livekit_webhook_inner(
+    state: Arc<WebSocketState>,
+    seen: Arc<SeenEventIds>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         warn!("LiveKit webhook received but no SFU is configured; dropping");
         return StatusCode::SERVICE_UNAVAILABLE;
@@ -216,16 +231,29 @@ fn is_muc_call(call_id: &str) -> bool {
 /// tick after [`RECONCILE_INTERVAL`].
 pub fn spawn_reconciliation_task(state: Arc<WebSocketState>, reconciler: Arc<dyn SfuReconciler>) {
     let grace = chrono::Duration::seconds(RECONCILE_GRACE_SECONDS);
-    tokio::spawn(async move {
+    let producer_cancel = state.deps.room_serving.producer_cancellation();
+    let room_serving = state.deps.room_serving.clone();
+    let spawn = room_serving.spawn(move |scope| async move {
         let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
         // Drop the immediate first tick `interval` yields so we don't
         // reconcile at boot before any call exists.
         ticker.tick().await;
         loop {
-            ticker.tick().await;
-            reconcile_once(&state, reconciler.as_ref(), grace).await;
+            tokio::select! {
+                biased;
+                _ = producer_cancel.cancelled() => {
+                    scope.complete_clean();
+                    return;
+                }
+                _ = ticker.tick() => {
+                    reconcile_once(&state, reconciler.as_ref(), grace).await;
+                }
+            }
         }
     });
+    if let Err(error) = spawn {
+        warn!(?error, "LiveKit reconciliation producer was not admitted");
+    }
 }
 
 /// One reconciliation pass: sweep registry ghosts via the reconciler,

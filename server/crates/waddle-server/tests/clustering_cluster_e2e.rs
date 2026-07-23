@@ -8,6 +8,8 @@
 //!
 //! - cross-node relay ask round-trip (ping) and the bounded XML codec on the
 //!   wire (thread-preserving stanza echo);
+//! - simultaneous full-mesh bootstrap dialing retains A→B and B→A relay
+//!   reachability across repeated dial ticks;
 //! - integrity under concurrent large + small payloads (libp2p per-substream
 //!   flow control interleaves them; per-pair *sequencing* is Phase 4);
 //! - the receiver-applied ask budgets fail a slow handler with the typed
@@ -41,8 +43,9 @@
 //! claim-scoped hydration capstone
 //! (`orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions`,
 //! upgraded in Phase 4 Slice 1a to exercise the real stale-node watchdog);
-//! and the Phase 4 MUC foreign-owned-room proxy wire shape
-//! (`muc_join_routes_to_foreign_room_owner`).
+//! and the Phase 4 XEP-0045 foreign-owned-room proxy wire shape
+//! (`muc_join_routes_to_foreign_room_owner`), including the owner-built
+//! self-presence status 110 returned through the non-owner node.
 //!
 //! Deferred as a manual go/no-go measurement (dominated by kademlia's
 //! hardcoded 1h record TTL): the dead publisher's record-visibility window.
@@ -63,7 +66,9 @@ use waddle_server::clustering::ordered_relay::{
     OrderedRelayReply, OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence,
     RemoteStanzaEnvelope,
 };
-use waddle_server::clustering::relay::{RelayAskError, RelayHandle, RelaySendFailure};
+use waddle_server::clustering::relay::{
+    RelayAskError, RelayHandle, RelayProbePeerReply, RelaySendFailure,
+};
 use waddle_server::clustering::swarm;
 use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
@@ -75,6 +80,9 @@ use waddle_xmpp::Stanza;
 const POOL_SIZE: usize = 4;
 const CLUSTER_PEER_USERNAME: &str = "cluster-peer";
 const CLUSTER_PEER_PASSWORD: &str = "cluster-peer-password";
+const CLUSTER_MEMBER_USERNAME: &str = "cluster-member";
+const CLUSTER_MEMBER_PASSWORD: &str = "cluster-member-password";
+const CLUSTER_ADMIN_PASSWORD: &str = "cluster-admin-password";
 
 struct EnrolledPool {
     /// base64-encoded 32-byte ed25519 seeds (the WADDLE_CLUSTERING_KEYPAIR_POOL value).
@@ -140,6 +148,28 @@ async fn open_control_db(url: &str) -> Database {
     )
     .await
     .expect("open harness postgres")
+}
+
+/// Run global migrations and provision the shared fixed accounts once before
+/// a test deliberately starts multiple server processes concurrently.
+async fn provision_cluster_test_accounts(postgres_url: &str) {
+    let postgres_url = postgres_url.to_string();
+    tokio::task::spawn_blocking(move || {
+        let provisioner = TestServer::start_with_extra_envs(
+            &[
+                (CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD),
+                (CLUSTER_MEMBER_USERNAME, CLUSTER_MEMBER_PASSWORD),
+            ],
+            &[
+                ("WADDLE_DB_DRIVER", "postgres"),
+                ("WADDLE_DATABASE_URL", &postgres_url),
+                ("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD", CLUSTER_ADMIN_PASSWORD),
+            ],
+        );
+        drop(provisioner);
+    })
+    .await
+    .expect("fixed-account provisioner task");
 }
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.
@@ -316,9 +346,67 @@ async fn spawn_cluster_server(
     swarm_port: u16,
     bootstrap_ports: &[u16],
 ) -> (TestServer, String, String) {
+    spawn_cluster_server_with_account_seeding(
+        postgres_url,
+        pool_env,
+        swarm_port,
+        bootstrap_ports,
+        true,
+        None,
+    )
+    .await
+}
+
+/// Spawn against fixed accounts provisioned by
+/// [`provision_cluster_test_accounts`] without racing their destructive
+/// delete-and-recreate setup.
+async fn spawn_cluster_server_preserving_accounts(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+) -> (TestServer, String, String) {
+    spawn_cluster_server_with_account_seeding(
+        postgres_url,
+        pool_env,
+        swarm_port,
+        bootstrap_ports,
+        false,
+        None,
+    )
+    .await
+}
+
+async fn spawn_cluster_server_preserving_accounts_with_dial_barrier(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+    fault_dial_barrier_dir: &std::path::Path,
+) -> (TestServer, String, String) {
+    spawn_cluster_server_with_account_seeding(
+        postgres_url,
+        pool_env,
+        swarm_port,
+        bootstrap_ports,
+        false,
+        Some(fault_dial_barrier_dir),
+    )
+    .await
+}
+
+async fn spawn_cluster_server_with_account_seeding(
+    postgres_url: &str,
+    pool_env: &str,
+    swarm_port: u16,
+    bootstrap_ports: &[u16],
+    seed_fixed_accounts: bool,
+    fault_dial_barrier_dir: Option<&std::path::Path>,
+) -> (TestServer, String, String) {
     let postgres_url = postgres_url.to_string();
     let pool_env = pool_env.to_string();
     let bootstrap_ports = bootstrap_ports.to_vec();
+    let fault_dial_barrier_dir = fault_dial_barrier_dir.map(|path| path.display().to_string());
     tokio::task::spawn_blocking(move || {
         let node_id_file = std::env::temp_dir().join(format!(
             "waddle-clustering-e2e-node-{}",
@@ -350,9 +438,10 @@ async fn spawn_cluster_server(
             // disabling it flips the permission backend onto the SpiceDB path and
             // fails startup. Its seeding is delete-then-recreate, safe for the
             // sequential startups this harness performs.
-            // The secondary fixed account is also owner-capable so foreign-owned
-            // MUC join tests reach the RoomRegistry ownership check instead of
-            // being denied by the local instant-room creation guard first.
+            // `cluster-peer` remains owner-capable for tests that deliberately
+            // create rooms. `cluster-member` is intentionally absent: the
+            // foreign-room join test proves routing happens before the local
+            // instant-room creation permission guard.
             ("WADDLE_SERVER_OWNER_LOCALPARTS", "admin,cluster-peer"),
             ("WADDLE_CLUSTERING_ENABLED", "true"),
             ("WADDLE_CLUSTERING_LISTEN_ADDRS", &listen),
@@ -399,9 +488,22 @@ async fn spawn_cluster_server(
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
         }
+        if let Some(fault_dial_barrier_dir) = fault_dial_barrier_dir.as_deref() {
+            envs.push((
+                "WADDLE_CLUSTERING_FAULT_DIAL_BARRIER_DIR",
+                fault_dial_barrier_dir,
+            ));
+        }
+        if !seed_fixed_accounts {
+            envs.push(("WADDLE_TEST_FIXED_ACCOUNT_PASSWORD", CLUSTER_ADMIN_PASSWORD));
+            envs.push(("WADDLE_TEST_FIXED_ACCOUNT_SEED", "false"));
+        }
 
         let server = TestServer::start_with_extra_envs(
-            &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
+            &[
+                (CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD),
+                (CLUSTER_MEMBER_USERNAME, CLUSTER_MEMBER_PASSWORD),
+            ],
             &envs,
         );
 
@@ -535,6 +637,66 @@ fn cluster_e2e_serial_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+struct FaultDialBarrierDirectory {
+    path: std::path::PathBuf,
+}
+
+impl FaultDialBarrierDirectory {
+    fn create() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "waddle-clustering-cross-dial-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).expect("create cross-dial barrier directory");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn marker_count(&self) -> usize {
+        std::fs::read_dir(&self.path)
+            .expect("read cross-dial barrier directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("dialed-"))
+            .count()
+    }
+
+    async fn release_and_drive_after_two_markers(&self) {
+        tokio::fs::write(self.path.join("release"), b"released\n")
+            .await
+            .expect("release subprocess first dials");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.marker_count() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "both subprocesses did not queue their bootstrap dial"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::fs::write(self.path.join("drive"), b"drive\n")
+            .await
+            .expect("drive both queued cross-dials");
+    }
+
+    fn assert_marker(&self, peer_id: &str) {
+        assert!(
+            self.path.join(format!("dialed-{peer_id}")).is_file(),
+            "subprocess {peer_id} did not publish its queued-dial marker"
+        );
+    }
+}
+
+impl Drop for FaultDialBarrierDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// The whole Phase 2 exit-criteria suite runs as ONE test: the test process
 /// hosts a single swarm (kameo `init_global` is a process singleton), and the
 /// scenario steps build on each other.
@@ -557,17 +719,41 @@ async fn cluster_exit_criteria_end_to_end() {
     let db = open_control_db(&postgres_url).await;
     reset_and_enroll(&db, &pool).await;
 
-    // --- Bring up the mesh: A (seed), B (bootstraps to A). Sequential so
-    // concurrent first-boot migrations cannot race on the shared database.
-    // Production shape: the headless Service resolves to every pod, so every
-    // node dials every peer directly. The harness expresses that as one
-    // loopback seed per node.
+    // --- Bring up the mesh with both bootstrap peers starting concurrently.
+    // This is the production rolling-surge shape: the headless Service
+    // resolves to every pod, so A and B dial each other at the same time.
+    // Pre-provision the shared migrations/accounts, then preserve them during
+    // the concurrent starts so this test isolates swarm convergence instead
+    // of racing the harness's destructive fixed-account reset.
+    provision_cluster_test_accounts(&postgres_url).await;
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (mut server_a, node_a, peer_a) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, node_b, _peer_b) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    let bootstrap_a = [port_b];
+    let bootstrap_b = [port_a];
+    let dial_barrier = FaultDialBarrierDirectory::create();
+    let (server_a_result, server_b_result, ()) = tokio::join!(
+        spawn_cluster_server_preserving_accounts_with_dial_barrier(
+            &postgres_url,
+            &pool.pool_env,
+            port_a,
+            &bootstrap_a,
+            dial_barrier.path(),
+        ),
+        spawn_cluster_server_preserving_accounts_with_dial_barrier(
+            &postgres_url,
+            &pool.pool_env,
+            port_b,
+            &bootstrap_b,
+            dial_barrier.path(),
+        ),
+        dial_barrier.release_and_drive_after_two_markers(),
+    );
+    let (mut server_a, node_a, peer_a) = server_a_result;
+    let (server_b, node_b, peer_b) = server_b_result;
+    dial_barrier.assert_marker(&peer_a);
+    dial_barrier.assert_marker(&peer_b);
+    let peer_a_id: libp2p::PeerId = peer_a.parse().expect("node A peer id");
+    let peer_b_id: libp2p::PeerId = peer_b.parse().expect("node B peer id");
 
     // --- The test process joins as node C.
     let stop = CancellationToken::new();
@@ -608,6 +794,7 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         fault_injection: false,
         node_id_file: None,
+        fault_dial_barrier_dir: None,
         node_lease: waddle_server::config::ClusteringNodeLeaseConfig {
             heartbeat_interval: Duration::from_secs(1),
             lease_ttl: Duration::from_secs(10),
@@ -655,6 +842,45 @@ async fn cluster_exit_criteria_end_to_end() {
     ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
         .await
         .expect("cross-node ping to B");
+
+    // Regression: simultaneous A↔B cross-dials used to let each endpoint
+    // close a different locally second connection, tearing down both links.
+    // Ask each subprocess relay to ping the other subprocess relay
+    // concurrently, then repeat across several 1s bootstrap-dial ticks so a
+    // reconnect/close oscillation cannot pass on one lucky instant. Each
+    // reply snapshots its source's peer count *before* the nested ping: with
+    // exactly A/B/C in this mesh it must already be 2, proving the assertion
+    // observes an existing A↔B link rather than letting the probe's on-demand
+    // resolution repair a missing one.
+    let mut relay_a_probe = RelayHandle::new(NodeId::new(node_a.clone()), stop.clone());
+    let mut relay_b_probe = RelayHandle::new(NodeId::new(node_b.clone()), stop.clone());
+    for dial_tick in 1..=4 {
+        let (a_to_b, b_to_a) = tokio::join!(
+            relay_a_probe.probe_peer(NodeId::new(node_b.clone()), peer_b_id),
+            relay_b_probe.probe_peer(NodeId::new(node_a.clone()), peer_a_id),
+        );
+        assert_eq!(
+            a_to_b.expect("ask A to probe B"),
+            RelayProbePeerReply::Reachable {
+                node_id: NodeId::new(node_b.clone()),
+                source_connected_peers_before: 2,
+                source_connections_to_target_before: 2,
+            },
+            "A must already have B connected, then reach it after simultaneous \
+             startup (dial tick {dial_tick})"
+        );
+        assert_eq!(
+            b_to_a.expect("ask B to probe A"),
+            RelayProbePeerReply::Reachable {
+                node_id: NodeId::new(node_a.clone()),
+                source_connected_peers_before: 2,
+                source_connections_to_target_before: 2,
+            },
+            "B must already have A connected, then reach it after simultaneous \
+             startup (dial tick {dial_tick})"
+        );
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+    }
 
     // --- Exit criterion: the bounded XML codec on the wire — a
     // thread-carrying stanza survives the round-trip to another process.
@@ -1695,8 +1921,8 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
     let mut client_b = WsXmppClient::connect_and_auth(
         &server_b.ws_url(),
         DOMAIN,
-        CLUSTER_PEER_USERNAME,
-        CLUSTER_PEER_PASSWORD,
+        CLUSTER_MEMBER_USERNAME,
+        CLUSTER_MEMBER_PASSWORD,
         &resource_b,
     )
     .await
@@ -1840,12 +2066,13 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
 /// via `NodeLeaseStore::report_steal_intent` rather than faking a
 /// production reporter call site that does not exist yet.
 ///
-/// Runs the REAL `self_fence::run_node_lease` loop (not a reimplementation)
-/// against real Postgres, with a short heartbeat interval, and asserts the
-/// wedged `RoomActor` is hard-killed within one heartbeat interval of the
-/// intent being seeded — "reconciliation conflict-closes within one
-/// heartbeat interval," the exact bound element 4's veto-scan text
-/// promises.
+/// Runs the REAL fail-closed node-lease loop (not a reimplementation) against
+/// real Postgres, with a short heartbeat interval, and asserts the wedged
+/// `RoomActor` is hard-killed within one heartbeat interval of the intent being
+/// seeded — "reconciliation conflict-closes within one heartbeat interval,"
+/// the exact bound element 4's veto-scan text promises. The harness cannot
+/// possess the process-wide room-serving fence, so shutdown deliberately
+/// abandons claims for node-expiry recovery.
 #[tokio::test]
 async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use std::future::pending;
@@ -2063,7 +2290,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     let stop_token = CancellationToken::new();
     let local_claims: std::sync::Arc<dyn LocallyClaimedEntities> = room_local_claims;
     let live_identity = SharedNodeIdentity::new(identity.clone());
-    tokio::spawn(self_fence::run_node_lease(
+    tokio::spawn(self_fence::run_node_lease_fail_closed(
         node_lease_store,
         identity,
         stop_token.clone(),
@@ -2124,7 +2351,9 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
 /// never contested. Client B then joins the SAME room JID against node B:
 /// node B's own `RoomRegistryActor` sees a fresh foreign owner, proxies the
 /// join, and must return the owner node's roster/self-presence/subject
-/// sequence instead of a local retry error.
+/// sequence instead of a local retry error. Both nodes start simultaneously
+/// and dial each other, matching the production rolling-surge shape and
+/// proving the MUC proxy survives the cross-dial connection race.
 #[tokio::test]
 async fn muc_join_routes_to_foreign_room_owner() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
@@ -2140,6 +2369,7 @@ async fn muc_join_routes_to_foreign_room_owner() {
     let pool = generate_pool();
     reset_and_enroll(&db, &pool).await;
     reset_node_lease_tables(&db).await;
+    provision_cluster_test_accounts(&postgres_url).await;
 
     const DOMAIN: &str = "localhost";
     const OWNER_USERNAME: &str = "admin";
@@ -2147,10 +2377,24 @@ async fn muc_join_routes_to_foreign_room_owner() {
 
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, _node_a, _peer_a) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, _node_b, _peer_b) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    let bootstrap_a = [port_b];
+    let bootstrap_b = [port_a];
+    let (server_a_result, server_b_result) = tokio::join!(
+        spawn_cluster_server_preserving_accounts(
+            &postgres_url,
+            &pool.pool_env,
+            port_a,
+            &bootstrap_a,
+        ),
+        spawn_cluster_server_preserving_accounts(
+            &postgres_url,
+            &pool.pool_env,
+            port_b,
+            &bootstrap_b,
+        ),
+    );
+    let (server_a, _node_a, _peer_a) = server_a_result;
+    let (server_b, _node_b, _peer_b) = server_b_result;
 
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;

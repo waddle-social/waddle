@@ -75,6 +75,9 @@ pub struct AppState {
     /// clustering is disabled or not compiled in — see
     /// [`crate::clustering::ClusteringHandles`].
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    /// Process-wide admission fence for every operation that can touch a MUC
+    /// room or enqueue room-capable background work.
+    pub(crate) room_serving: crate::server::room_serving_quiescence::RoomServingHandle,
 }
 
 impl AppState {
@@ -106,6 +109,8 @@ impl AppState {
         let spaces_jid: BareJid = "spaces.localhost"
             .parse()
             .expect("test spaces JID 'spaces.localhost' parses as BareJid");
+        let (room_serving, _room_serving_closer) =
+            crate::server::room_serving_quiescence::RoomServingQuiescence::create();
         Self::new_with_deps(AppStateDeps {
             db_pool,
             blob_storage,
@@ -125,6 +130,7 @@ impl AppState {
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             clustering_readiness: crate::clustering::ClusteringReadiness::new(),
             clustering_claims: crate::clustering::ClusteringHandles::default(),
+            room_serving,
         })
     }
 
@@ -147,6 +153,7 @@ impl AppState {
             server_owner_jids,
             clustering_readiness,
             clustering_claims,
+            room_serving,
         } = deps;
         Self {
             db_pool,
@@ -163,6 +170,7 @@ impl AppState {
             server_owner_jids,
             clustering_readiness,
             clustering_claims,
+            room_serving,
         }
     }
 }
@@ -185,6 +193,7 @@ pub struct AppStateDeps {
     pub server_owner_jids: Arc<[BareJid]>,
     pub clustering_readiness: crate::clustering::ClusteringReadiness,
     pub clustering_claims: crate::clustering::ClusteringHandles,
+    pub(crate) room_serving: crate::server::room_serving_quiescence::RoomServingHandle,
 }
 
 /// Resolve `WADDLE_SERVER_OWNER_LOCALPARTS` localparts into bare JIDs against

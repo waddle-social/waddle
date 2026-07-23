@@ -48,11 +48,12 @@ pub(crate) struct HttpServerDeps {
     /// graceful_shutdown closure and mints per-connection guards in
     /// the WebSocket accept path (issue #1091).
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
-    /// Q6 graceful-shutdown drain completion signal — fired by the
-    /// drain task when it finishes promoting unacked queues. The
-    /// HTTP server's graceful_shutdown closure waits on this after
-    /// stop_token cancels so the runtime doesn't tear down mid-drain.
-    pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+    /// Level-triggered Q6 completion signal. The startup coordinator awaits
+    /// this explicitly after Axum exits.
+    pub(crate) drain_complete: tokio_util::sync::CancellationToken,
+    /// Stop-path-only capability used to close room admission before Axum
+    /// begins draining accepted requests.
+    pub(crate) room_serving_close: crate::server::room_serving_quiescence::RoomServingCloseHandle,
 }
 
 /// Start the HTTP server with graceful shutdown support.
@@ -67,6 +68,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         listener,
         shutdown_handle,
         drain_complete,
+        room_serving_close,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -79,6 +81,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete: drain_complete.clone(),
+        room_serving_close: room_serving_close.clone(),
     })
     .await?;
 
@@ -96,9 +99,8 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
-            info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            drain_complete.notified().await;
-            info!("HTTP server: SM drain complete; draining connections");
+            room_serving_close.close();
+            info!("HTTP server received shutdown signal; stopped accepting new work");
         })
         .await?;
 
@@ -198,7 +200,8 @@ pub(crate) struct RouterDeps {
     pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
-    pub(crate) drain_complete: Arc<tokio::sync::Notify>,
+    pub(crate) drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) room_serving_close: crate::server::room_serving_quiescence::RoomServingCloseHandle,
 }
 
 /// Create the Axum router with all routes and middleware.
@@ -212,6 +215,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         acme_http01_challenge_service,
         shutdown_handle,
         drain_complete,
+        room_serving_close,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -304,7 +308,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     spawn_graceful_shutdown_drain(
         Arc::clone(&websocket_state),
         shutdown_stop_token,
-        Arc::clone(&drain_complete),
+        drain_complete,
+        room_serving_close,
     );
 
     let extension_webhooks_router =
@@ -719,6 +724,7 @@ async fn create_websocket_state(
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
             app_state: state.clone(),
+            room_serving: state.room_serving.clone(),
             auth_state: auth_state.clone(),
             transport_security: routes::websocket::TransportSecurity::from_public_websocket_url(
                 &xmpp_config.public_websocket_url,

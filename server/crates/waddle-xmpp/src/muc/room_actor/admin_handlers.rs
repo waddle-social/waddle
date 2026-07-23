@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, convert::Infallible};
+use std::collections::BTreeMap;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::presence::Presence;
 
-use super::{AdminApplyError, AdminContext, RoomActor};
+use super::{AdminApplyError, AdminContext, RoomActor, RoomActorError};
 use crate::muc::admin::{is_role_change_query, AdminItem};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
@@ -305,13 +305,16 @@ pub struct GetAdminContext {
 }
 
 impl kameo::message::Message<GetAdminContext> for RoomActor {
-    type Reply = Result<AdminContext, Infallible>;
+    type Reply = Result<AdminContext, RoomActorError>;
 
     async fn handle(
         &mut self,
         msg: GetAdminContext,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // This context authorizes externally visible admin/moderation work;
+        // it is not a diagnostic read from a retired actor.
+        self.gate_serving_activity()?;
         let sender_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
         let sender_occupant = self.room.find_occupant_by_real_jid(&msg.sender_jid);
         let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
@@ -678,14 +681,18 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
 pub struct EnforceMembersOnly;
 
 impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
-    type Reply = Vec<(FullJid, Presence)>;
+    type Reply = Result<Vec<(FullJid, Presence)>, RoomActorError>;
 
     async fn handle(
         &mut self,
         _msg: EnforceMembersOnly,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        enforce_members_only(&mut self.room, &self.occupant_id_secret)
+        self.gate_serving_activity()?;
+        Ok(enforce_members_only(
+            &mut self.room,
+            &self.occupant_id_secret,
+        ))
     }
 }
 
@@ -757,9 +764,10 @@ pub struct IsOwner {
 }
 
 impl kameo::message::Message<IsOwner> for RoomActor {
-    type Reply = bool;
+    type Reply = Result<bool, RoomActorError>;
 
     async fn handle(&mut self, msg: IsOwner, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.room.get_affiliation(&msg.jid) == Affiliation::Owner
+        self.gate_serving_activity()?;
+        Ok(self.room.get_affiliation(&msg.jid) == Affiliation::Owner)
     }
 }

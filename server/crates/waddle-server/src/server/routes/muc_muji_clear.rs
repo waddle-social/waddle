@@ -61,6 +61,9 @@ pub(crate) async fn clear_muji_presence_for_departure(
             return;
         }
         Err(error) => {
+            if super::interpret::actor_send_maybe_enqueued(&error) {
+                state.deps.room_serving.mark_unsafe_to_release();
+            }
             warn!(
                 room = %room_jid,
                 identity = %full_jid,

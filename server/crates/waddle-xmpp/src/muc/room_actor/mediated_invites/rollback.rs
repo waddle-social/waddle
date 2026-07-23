@@ -25,6 +25,9 @@ impl kameo::message::Message<PrepareMediatedInviteGrantRollback> for RoomActor {
         msg: PrepareMediatedInviteGrantRollback,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.blocks_recovery_replay() {
+            return Err(RoomMutationError::NotOwner);
+        }
         if self
             .invite_operations
             .get(&msg.grant.operation_id)
@@ -67,6 +70,9 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
         msg: CommitMediatedInviteGrantRollback,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.blocks_recovery_replay() {
+            return Err(MediatedInviteRollbackError::NotOwner);
+        }
         let Some(record) = self.invite_operations.get(&msg.grant.operation_id) else {
             return Ok(MediatedInviteRollbackCommit::Superseded);
         };
@@ -151,6 +157,9 @@ impl kameo::message::Message<AbortMediatedInviteGrantRollback> for RoomActor {
         msg: AbortMediatedInviteGrantRollback,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.seal_state.is_sealed() {
+            return MediatedInviteRollbackAbort::RoomSealed;
+        }
         if self.invite_rollback_is_prepared(&msg.grant) {
             self.invite_operations
                 .get_mut(&msg.grant.operation_id)

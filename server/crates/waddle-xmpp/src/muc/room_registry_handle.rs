@@ -36,8 +36,9 @@ use super::affiliation::DurableMembershipSource;
 use super::durable::MucDurableStore;
 use super::room_actor::{RoomActor, SealGuard};
 use super::room_registry_actor::{
-    CancelPendingReclaimedRoomReservation, CreateInstantRoom, CreateRoom, DemoteRoomIfOwner,
-    DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
+    AbandonRoomOwnershipForShutdown, CancelPendingReclaimedRoomReservation, CreateInstantRoom,
+    CreateRoom, DemoteRoomIfOwner, DestroyRoom, DestroyRoomIfInactive,
+    DestroyRoomIfInactiveOutcome, DestroyRoomOutcome, DestroyRoomReason,
     DrainRoomOwnershipForShutdown, GetOrCreateRoom, GetPendingReclaimedRoomBacklog,
     GetPendingRoomReleaseBacklog, GetRoom, IsCurrentIdentityPendingRoomReleaseOnly,
     IsCurrentRoomPendingRelease, IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms,
@@ -306,6 +307,14 @@ impl RoomRegistry {
     );
 
     registry_method!(
+        abandon_room_ownership_for_shutdown(
+            pending_handoffs: Vec<PendingReclaimedRoom>
+        ) -> RoomOwnershipDrainOutcome,
+        "abandon_room_ownership_for_shutdown",
+        AbandonRoomOwnershipForShutdown { pending_handoffs }
+    );
+
+    registry_method!(
         pending_room_release_backlog() -> PendingRoomReleaseBacklog,
         "pending_room_release_backlog",
         GetPendingRoomReleaseBacklog
@@ -399,12 +408,13 @@ impl RoomRegistry {
 
     registry_method!(
         /// Destroy a room only if it is still inactive at the expected
-        /// occupancy revision (#1108). Returns whether it was destroyed.
+        /// occupancy revision (#1108). Preserves a distinct ambiguity result
+        /// when the inner room seal may have landed without a reply.
         destroy_room_if_inactive(
             room_jid: BareJid,
             expected_occupancy_revision: u64,
             guard: SealGuard
-        ) -> bool,
+        ) -> DestroyRoomIfInactiveOutcome,
         "destroy_room_if_inactive",
         DestroyRoomIfInactive { room_jid, expected_occupancy_revision, guard }
     );

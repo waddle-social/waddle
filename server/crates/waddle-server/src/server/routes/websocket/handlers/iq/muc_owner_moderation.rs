@@ -312,7 +312,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 // answer retryable, never a false success.
                 Ok(
                     waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed
-                    | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
+                    | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull
+                    | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ShutdownInProgress,
                 ) => {
                     return vec![build_iq_error_xml_typed(
                         id,

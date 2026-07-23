@@ -127,6 +127,11 @@ pub(crate) async fn send_carbons_to_registry(
         if let Some(outcome) =
             try_deliver_registered_remote_resource(web_socket_state, &target, &stanza).await
         {
+            if outcome.is_ambiguous() {
+                if let Some(state) = web_socket_state {
+                    state.deps.room_serving.mark_unsafe_to_release();
+                }
+            }
             match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                     debug!(target = %target, kind = ?kind, "SendCarbons: delivered to remote resource");
@@ -143,6 +148,13 @@ pub(crate) async fn send_carbons_to_registry(
                         target = %target,
                         kind = ?kind,
                         "SendCarbons: remote target backpressured or relay failed, dropping"
+                    );
+                }
+                FullJidDeliveryOutcome::MaybeEnqueued => {
+                    warn!(
+                        target = %target,
+                        kind = ?kind,
+                        "SendCarbons: remote target delivery may still be enqueued; suppressing fallback"
                     );
                 }
                 #[cfg(feature = "clustering")]

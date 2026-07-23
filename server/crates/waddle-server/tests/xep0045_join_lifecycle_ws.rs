@@ -27,6 +27,12 @@
 //!    unavailable, and the fresh (never-joined) stream must not inherit
 //!    room fan-out.
 //!
+//! 4. Portable startup in a cluster-capable binary: when the
+//!    `clustering` feature is compiled but clustering is disabled at
+//!    runtime, a first join stays on the local XEP-0045 path. It must
+//!    not be rejected with a retryable `<resource-constraint/>`, and
+//!    readiness is confirmed by self-presence status code 110.
+//!
 //! Wire shapes are parsed via `minidom::Element` and asserted
 //! structurally so child ordering and attribute quoting cannot flake
 //! the tests.
@@ -475,6 +481,87 @@ fn groupchat_message_xml(to: &str, id: &str, body: &str) -> String {
             )
             .build(),
     )
+}
+
+/// XEP-0045 §7.2.2: a binary compiled with cluster support must
+/// retain portable single-node semantics when clustering is disabled at
+/// runtime. In that mode there is no ordered-relay bridge, so the first
+/// join must be handled locally rather than bounced with the
+/// `<resource-constraint/>` that tells the client to retry a genuinely
+/// unavailable remote owner. A completed join is proven by the
+/// room-authored self-presence carrying status code 110, followed by the
+/// room subject.
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep_0045_cluster_capable_binary_with_runtime_clustering_disabled_joins_locally() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_envs(&[], &[("WADDLE_CLUSTERING_ENABLED", "false")]);
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "runtime-clustering-disabled").await;
+    let room = format!(
+        "runtime-clustering-disabled-{}@muc.{DOMAIN}",
+        uuid::Uuid::new_v4()
+    );
+    let room_nick = format!("{room}/{ADMIN}");
+    let join = element_to_xml(
+        Element::builder("presence", "jabber:client")
+            .attr(
+                xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+                room_nick.as_str(),
+            )
+            .append(Element::builder("x", NS_MUC).build())
+            .build(),
+    );
+
+    admin.send(&join).await.expect("send first local MUC join");
+    let join_frames = admin
+        .recv_until(|frame| {
+            frame.parse::<Element>().is_ok_and(|element| {
+                find_descendant(&element, "subject", "jabber:client").is_some()
+                    || (element.name() == "presence" && element.attr("type") == Some("error"))
+            })
+        })
+        .await
+        .expect("first join must complete or return a typed presence error");
+
+    let parsed = join_frames
+        .iter()
+        .map(|frame| {
+            frame
+                .parse::<Element>()
+                .unwrap_or_else(|error| panic!("join frame must parse as XML: {error}; {frame}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        parsed
+            .iter()
+            .all(|frame| find_descendant(frame, "resource-constraint", NS_XMPP_STANZAS).is_none()),
+        "runtime-disabled clustering must not turn a local first join into a retryable \
+         resource-constraint: {join_frames:?}"
+    );
+    assert!(
+        parsed.iter().any(|frame| {
+            frame.name() == "presence"
+                && frame.attr("from") == Some(room_nick.as_str())
+                && frame
+                    .children()
+                    .find(|child| child.name() == "x" && child.ns() == NS_MUC_USER)
+                    .is_some_and(|muc_user| {
+                        muc_user.children().any(|child| {
+                            child.name() == "status" && child.attr("code") == Some("110")
+                        })
+                    })
+        }),
+        "XEP-0045 self-presence status 110 must confirm local join readiness: {join_frames:?}"
+    );
+    assert!(
+        parsed
+            .iter()
+            .any(|frame| find_descendant(frame, "subject", "jabber:client").is_some()),
+        "a successful first join must finish with the room subject: {join_frames:?}"
+    );
+
+    let _ = admin.close().await;
 }
 
 /// XEP-0045 §7.4 stable-id (#1265 item 14): the service and rooms
