@@ -1,25 +1,27 @@
 //! XEP-0472 Pubsub Social Feed — wasm bridge surface.
 //!
 //! The server bootstraps a community feed node at
-//! `urn:xmpp:pubsub-social-feed:1` on the spaces service. These
-//! wasm methods let the chat read the feed (`feed_items`) and
-//! publish new posts (`feed_publish`) via standard XEP-0060
-//! pubsub IQs, with the typed XEP-0472 `<entry/>` payload
-//! constructed / parsed in Rust via `waddle_xmpp_core::xep0472`.
+//! `urn:xmpp:pubsub-social-feed:1` on the community service
+//! (`community.<domain>`). These wasm methods let the chat read the
+//! feed (`feed_items`) and publish new posts (`feed_publish`) via the
+//! shared XEP-0060 pubsub helpers in `waddle_xmpp_client::pubsub`,
+//! with the typed XEP-0472 `<entry/>` payload constructed / parsed in
+//! Rust via `waddle_xmpp_core::xep0472`.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use waddle_xmpp_client::pubsub::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result,
+};
 use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
 };
 use wasm_bindgen::prelude::*;
 
-use super::{js_error, send_iq_command, to_js_value, WaddleClient};
-use crate::NS_CLIENT;
+use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 
-const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 /// Waddle-namespaced typed child on bridged feed entries (PEP →
 /// feed). Carries `kind="mood"|"activity"|"tune"|"avatar"|"vcard"`
 /// so the chat can render a kind-icon next to bridged posts.
@@ -77,72 +79,34 @@ pub(crate) struct JsFeedEntryInput {
     pub link: Option<String>,
 }
 
-fn build_feed_items_iq(spaces_jid: &str, max_items: Option<u32>) -> Element {
+fn build_feed_items_iq(community_service: &jid::BareJid, max_items: Option<u32>) -> Element {
     let id = format!("feed-items-{}", Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr(
-        minidom::rxml::xml_ncname!("node").to_owned(),
-        PUBSUB_NODE_FEED,
-    );
-    let max_items_value;
-    if let Some(max) = max_items {
-        max_items_value = max.to_string();
-        items_builder = items_builder.attr(
-            minidom::rxml::xml_ncname!("max_items").to_owned(),
-            max_items_value.as_str(),
-        );
-    }
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(items_builder.build())
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), spaces_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_FEED, max_items)
 }
 
-fn build_feed_publish_iq(spaces_jid: &str, item_id: &str, entry: &FeedEntry) -> Element {
+fn build_feed_publish_iq(
+    community_service: &jid::BareJid,
+    item_id: &str,
+    entry: &FeedEntry,
+) -> Element {
     let id = format!("feed-publish-{}", Uuid::new_v4());
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
-        .append(build_feed_entry_element(entry))
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PUBSUB_NODE_FEED,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), spaces_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        Some(community_service),
+        PUBSUB_NODE_FEED,
+        Some(item_id),
+        build_feed_entry_element(entry),
+        None,
+    )
 }
 
 fn parse_feed_items_result(iq: &Element) -> Vec<JsFeedEntry> {
-    let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
-        return Vec::new();
-    };
-    let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
-        return Vec::new();
-    };
-    items
-        .children()
-        .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
+    parse_pubsub_items_result(iq)
+        .into_iter()
         .filter_map(|item| {
-            let item_id = item.attr("id")?;
-            let entry_el = item
-                .children()
-                .find(|child| child.name() == "entry" && child.ns() == NS_ATOM)?;
+            let entry_el = item.payload("entry", NS_ATOM)?;
             let source = extract_source_kind(entry_el);
-            parse_feed_entry(item_id, entry_el).map(|entry| {
+            parse_feed_entry(&item.id, entry_el).map(|entry| {
                 let mut js = JsFeedEntry::from(entry);
                 js.source = source;
                 js
@@ -154,13 +118,14 @@ fn parse_feed_items_result(iq: &Element) -> Vec<JsFeedEntry> {
 #[wasm_bindgen]
 impl WaddleClient {
     /// Fetch the latest items from the community Social Feed node on
-    /// `spaces_jid` (typically `spaces.<domain>`). Returns an array of
-    /// JsFeedEntry objects ordered as the server delivered them
-    /// (newest first by `last_published`).
+    /// `spaces_jid` — the community service (`community.<domain>`).
+    /// Returns an array of JsFeedEntry objects ordered as the server
+    /// delivered them (newest first by `last_published`).
     pub fn feed_items(&self, spaces_jid: String, max_items: Option<u32>) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            let iq = build_feed_items_iq(&spaces_jid, max_items);
+            let service = service_bare_jid(&spaces_jid)?;
+            let iq = build_feed_items_iq(&service, max_items);
             let result = send_iq_command(inner, iq).await?;
             let entries = parse_feed_items_result(&result);
             to_js_value(&entries)
@@ -174,6 +139,7 @@ impl WaddleClient {
     pub fn feed_publish(&self, spaces_jid: String, entry: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
+            let service = service_bare_jid(&spaces_jid)?;
             let input: JsFeedEntryInput = serde_wasm_bindgen::from_value(entry)
                 .map_err(|err| js_error(format!("invalid feed entry input: {err}")))?;
             let item_id = format!("post-{}", Uuid::new_v4());
@@ -188,7 +154,7 @@ impl WaddleClient {
                 feed_entry = feed_entry.with_link(link);
             }
             feed_entry = feed_entry.with_published(Utc::now());
-            let iq = build_feed_publish_iq(&spaces_jid, &item_id, &feed_entry);
+            let iq = build_feed_publish_iq(&service, &item_id, &feed_entry);
             send_iq_command(inner, iq).await?;
             // Return the entry we just published so the chat can append
             // it to local state without round-tripping through items.
@@ -206,5 +172,58 @@ impl WaddleClient {
             };
             to_js_value(&js_entry)
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn feed_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_feed_items_iq(&service(), Some(50));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("feed-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_FEED));
+        assert_eq!(items.attr("max_items"), Some("50"));
+
+        let unbounded = build_feed_items_iq(&service(), None);
+        let items = unbounded
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("max_items"), None);
+    }
+
+    #[test]
+    fn feed_publish_iq_pins_the_atom_entry_publish_shape() {
+        let entry = FeedEntry::new("post-1", "hello waddlers");
+        let iq = build_feed_publish_iq(&service(), "post-1", &entry);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("feed-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_FEED));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("post-1"));
+        assert!(item.get_child("entry", NS_ATOM).is_some());
+        // No publish-options precondition on feed posts.
+        assert!(iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish-options", NS_PUBSUB))
+            .is_none());
     }
 }

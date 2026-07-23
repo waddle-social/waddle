@@ -10,15 +10,15 @@ use chrono::{DateTime, Duration, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use waddle_xmpp_client::pubsub::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result,
+};
 use waddle_xmpp_core::xep0501::{
     build_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS, NS_ATOM, PUBSUB_NODE_STORIES,
 };
 use wasm_bindgen::prelude::*;
 
-use super::{js_error, send_iq_command, to_js_value, WaddleClient};
-use crate::NS_CLIENT;
-
-const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct JsStory {
@@ -54,71 +54,33 @@ pub(crate) struct JsStoryInput {
     pub expiry_hours: Option<i64>,
 }
 
-fn build_stories_items_iq(community_jid: &str, max_items: Option<u32>) -> Element {
+fn build_stories_items_iq(community_service: &jid::BareJid, max_items: Option<u32>) -> Element {
     let id = format!("stories-items-{}", Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr(
-        minidom::rxml::xml_ncname!("node").to_owned(),
-        PUBSUB_NODE_STORIES,
-    );
-    let max_items_value;
-    if let Some(max) = max_items {
-        max_items_value = max.to_string();
-        items_builder = items_builder.attr(
-            minidom::rxml::xml_ncname!("max_items").to_owned(),
-            max_items_value.as_str(),
-        );
-    }
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(items_builder.build())
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_STORIES, max_items)
 }
 
-fn build_story_publish_iq(community_jid: &str, item_id: &str, story: &Story) -> Element {
+fn build_story_publish_iq(
+    community_service: &jid::BareJid,
+    item_id: &str,
+    story: &Story,
+) -> Element {
     let id = format!("stories-publish-{}", Uuid::new_v4());
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
-        .append(build_story_element(story))
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PUBSUB_NODE_STORIES,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        Some(community_service),
+        PUBSUB_NODE_STORIES,
+        Some(item_id),
+        build_story_element(story),
+        None,
+    )
 }
 
 fn parse_stories_items_result(iq: &Element) -> Vec<JsStory> {
-    let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
-        return Vec::new();
-    };
-    let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
-        return Vec::new();
-    };
-    items
-        .children()
-        .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
+    parse_pubsub_items_result(iq)
+        .into_iter()
         .filter_map(|item| {
-            let item_id = item.attr("id")?;
-            let story_el = item
-                .children()
-                .find(|child| child.name() == "entry" && child.ns() == NS_ATOM)?;
-            parse_story(item_id, story_el).map(JsStory::from)
+            let story_el = item.payload("entry", NS_ATOM)?;
+            parse_story(&item.id, story_el).map(JsStory::from)
         })
         .collect()
 }
@@ -132,7 +94,8 @@ impl WaddleClient {
     pub fn stories_items(&self, community_jid: String, max_items: Option<u32>) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            let iq = build_stories_items_iq(&community_jid, max_items);
+            let service = service_bare_jid(&community_jid)?;
+            let iq = build_stories_items_iq(&service, max_items);
             let result = send_iq_command(inner, iq).await?;
             let stories = parse_stories_items_result(&result);
             to_js_value(&stories)
@@ -145,6 +108,7 @@ impl WaddleClient {
     pub fn stories_publish(&self, community_jid: String, input: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
+            let service = service_bare_jid(&community_jid)?;
             let input: JsStoryInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid story input: {err}")))?;
             let media_url = input
@@ -170,7 +134,7 @@ impl WaddleClient {
             }
             let hours = input.expiry_hours.unwrap_or(DEFAULT_EXPIRY_HOURS).max(1);
             story = story.with_expiry(Duration::hours(hours));
-            let iq = build_story_publish_iq(&community_jid, &item_id, &story);
+            let iq = build_story_publish_iq(&service, &item_id, &story);
             send_iq_command(inner, iq).await?;
             let posted: DateTime<Utc> = story.posted.unwrap_or_else(Utc::now);
             let expires: DateTime<Utc> = story.expires.expect("with_expiry always sets expires");
@@ -185,5 +149,49 @@ impl WaddleClient {
             };
             to_js_value(&js_story)
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn stories_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_stories_items_iq(&service(), Some(100));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("stories-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_STORIES));
+        assert_eq!(items.attr("max_items"), Some("100"));
+    }
+
+    #[test]
+    fn story_publish_iq_pins_the_atom_entry_publish_shape() {
+        let story = Story::new("story-1");
+        let iq = build_story_publish_iq(&service(), "story-1", &story);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq
+            .attr("id")
+            .expect("iq id")
+            .starts_with("stories-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_STORIES));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("story-1"));
+        assert!(item.get_child("entry", NS_ATOM).is_some());
     }
 }

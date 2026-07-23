@@ -10,6 +10,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use waddle_xmpp_client::pubsub::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
+    parse_pubsub_items_result,
+};
 use waddle_xmpp_core::xcal::{
     build_vcalendar_with_event, build_vcalendar_with_item, parse_vcalendar_item, Attendee,
     CalendarDateValue, CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL,
@@ -17,10 +21,7 @@ use waddle_xmpp_core::xcal::{
 };
 use wasm_bindgen::prelude::*;
 
-use super::{js_error, send_iq_command, to_js_value, WaddleClient};
-use crate::NS_CLIENT;
-
-const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 
 // ── JS-facing shapes ────────────────────────────────────────────────
 
@@ -89,8 +90,65 @@ impl From<&Attendee> for JsAttendee {
 mod tests {
     use super::*;
 
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
     fn day(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    }
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn events_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_events_items_iq(&service(), Some(200));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_EVENTS));
+        assert_eq!(items.attr("max_items"), Some("200"));
+    }
+
+    #[test]
+    fn event_publish_iq_pins_the_vcalendar_publish_shape() {
+        let event = VEvent::new("evt-1", "Standup");
+        let iq = build_event_publish_iq(&service(), "evt-1", &event);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_EVENTS));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("evt-1"));
+        assert!(item.get_child("vcalendar", NS_XCAL).is_some());
+    }
+
+    #[test]
+    fn rsvp_publish_iq_pins_the_sibling_item_id_and_attendee_shape() {
+        let iq = build_rsvp_publish_iq(
+            &service(),
+            "evt-1",
+            "romeo",
+            "romeo@waddle.test",
+            PartStat::Accepted,
+        );
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-rsvp-"));
+        let item = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .and_then(|publish| publish.get_child("item", NS_PUBSUB))
+            .expect("item element");
+        assert_eq!(item.attr("id"), Some("evt-1-rsvp-romeo"));
+        assert!(item.get_child("vcalendar", NS_XCAL).is_some());
     }
 
     #[test]
@@ -363,29 +421,9 @@ impl JsVEvent {
 
 // ── IQ builders / parsers ───────────────────────────────────────────
 
-fn build_events_items_iq(community_jid: &str, max_items: Option<u32>) -> Element {
+fn build_events_items_iq(community_service: &jid::BareJid, max_items: Option<u32>) -> Element {
     let id = format!("xcal-items-{}", Uuid::new_v4());
-    let mut items_builder = Element::builder("items", NS_PUBSUB).attr(
-        minidom::rxml::xml_ncname!("node").to_owned(),
-        PUBSUB_NODE_EVENTS,
-    );
-    let max_items_value;
-    if let Some(max) = max_items {
-        max_items_value = max.to_string();
-        items_builder = items_builder.attr(
-            minidom::rxml::xml_ncname!("max_items").to_owned(),
-            max_items_value.as_str(),
-        );
-    }
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(items_builder.build())
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_EVENTS, max_items)
 }
 
 /// Build an RSVP item payload for a master event: a VEVENT carrying
@@ -393,7 +431,7 @@ fn build_events_items_iq(community_jid: &str, max_items: Option<u32>) -> Element
 /// PartStat. Item id uses the canonical `<master-uid>-rsvp-<localpart>`
 /// shape so the chat can fold sibling RSVP items back into the master.
 fn build_rsvp_publish_iq(
-    community_jid: &str,
+    community_service: &jid::BareJid,
     master_uid: &str,
     self_localpart: &str,
     self_jid: &str,
@@ -415,56 +453,33 @@ fn build_rsvp_publish_iq(
         recurrence_id: None,
         exdates: Vec::new(),
     };
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("id").to_owned(),
-            item_id.as_str(),
-        )
-        .append(build_vcalendar_with_event(&rsvp_event))
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PUBSUB_NODE_EVENTS,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        Some(community_service),
+        PUBSUB_NODE_EVENTS,
+        Some(item_id.as_str()),
+        build_vcalendar_with_event(&rsvp_event),
+        None,
+    )
 }
 
 /// Build a publish IQ for a CalendarItem (master + overrides) at
 /// the given item id. Used by `xcal_publish_item` to atomically
 /// write a master event plus its per-instance overrides + EXDATEs.
-fn build_item_publish_iq(community_jid: &str, item_id: &str, item: &CalendarItem) -> Element {
+fn build_item_publish_iq(
+    community_service: &jid::BareJid,
+    item_id: &str,
+    item: &CalendarItem,
+) -> Element {
     let id = format!("xcal-publish-{}", Uuid::new_v4());
-    let pubsub_item = Element::builder("item", NS_PUBSUB)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
-        .append(build_vcalendar_with_item(item))
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PUBSUB_NODE_EVENTS,
-        )
-        .append(pubsub_item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        Some(community_service),
+        PUBSUB_NODE_EVENTS,
+        Some(item_id),
+        build_vcalendar_with_item(item),
+        None,
+    )
 }
 
 fn vevent_from_input(uid: &str, input: JsVEventInput) -> Result<VEvent, JsValue> {
@@ -591,49 +606,27 @@ fn validate_calendar_item_data(item: &CalendarItem) -> Result<(), &'static str> 
     Ok(())
 }
 
-fn build_event_publish_iq(community_jid: &str, item_id: &str, event: &VEvent) -> Element {
+fn build_event_publish_iq(
+    community_service: &jid::BareJid,
+    item_id: &str,
+    event: &VEvent,
+) -> Element {
     let id = format!("xcal-publish-{}", Uuid::new_v4());
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
-        .append(build_vcalendar_with_event(event))
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PUBSUB_NODE_EVENTS,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-        .append(pubsub)
-        .build()
+    build_pubsub_publish_iq(
+        &id,
+        Some(community_service),
+        PUBSUB_NODE_EVENTS,
+        Some(item_id),
+        build_vcalendar_with_event(event),
+        None,
+    )
 }
 
 fn parse_events_items_result(iq: &Element) -> Vec<JsVEvent> {
-    let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
-        return Vec::new();
-    };
-    let Some(items) = pubsub.get_child("items", NS_PUBSUB) else {
-        return Vec::new();
-    };
     let mut flattened = Vec::new();
-    for item in items
-        .children()
-        .filter(|el| el.name() == "item" && el.ns() == NS_PUBSUB)
-    {
-        let Some(item_id) = item.attr("id") else {
-            continue;
-        };
-        let Some(vcal) = item
-            .children()
-            .find(|child| child.name() == "vcalendar" && child.ns() == NS_XCAL)
-        else {
+    for item in parse_pubsub_items_result(iq) {
+        let item_id = item.id.as_str();
+        let Some(vcal) = item.payload("vcalendar", NS_XCAL) else {
             continue;
         };
         let Some(parsed) = parse_vcalendar_item(item_id, vcal) else {
@@ -672,7 +665,8 @@ impl WaddleClient {
     pub fn xcal_items(&self, community_jid: String, max_items: Option<u32>) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            let iq = build_events_items_iq(&community_jid, max_items);
+            let service = service_bare_jid(&community_jid)?;
+            let iq = build_events_items_iq(&service, max_items);
             let result = send_iq_command(inner, iq).await?;
             let events = parse_events_items_result(&result);
             to_js_value(&events)
@@ -685,11 +679,12 @@ impl WaddleClient {
     pub fn xcal_publish(&self, community_jid: String, input: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
+            let service = service_bare_jid(&community_jid)?;
             let input: JsVEventInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid event input: {err}")))?;
             let item_id = format!("evt-{}", Uuid::new_v4());
             let event = vevent_from_input(&item_id, input)?;
-            let iq = build_event_publish_iq(&community_jid, &item_id, &event);
+            let iq = build_event_publish_iq(&service, &item_id, &event);
             send_iq_command(inner, iq).await?;
             let js_event = JsVEvent::from_vevent(&item_id, event);
             to_js_value(&js_event)
@@ -711,6 +706,7 @@ impl WaddleClient {
     ) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
+            let service = service_bare_jid(&community_jid)?;
             let input: JsCalendarItemInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid calendar item input: {err}")))?;
             if item_id.is_empty() {
@@ -725,7 +721,7 @@ impl WaddleClient {
                 item = item.add_override(override_from_input(&item_id, ov)?);
             }
             validate_calendar_item(&item)?;
-            let iq = build_item_publish_iq(&community_jid, &item_id, &item);
+            let iq = build_item_publish_iq(&service, &item_id, &item);
             send_iq_command(inner, iq).await?;
             let js_master = JsVEvent::from_vevent(&item_id, item.master);
             to_js_value(&js_master)
@@ -741,30 +737,10 @@ impl WaddleClient {
             if item_id.is_empty() {
                 return Err(js_error("item_id must not be empty"));
             }
+            let service = service_bare_jid(&community_jid)?;
             let id = format!("xcal-retract-{}", Uuid::new_v4());
-            let item = Element::builder("item", NS_PUBSUB)
-                .attr(
-                    minidom::rxml::xml_ncname!("id").to_owned(),
-                    item_id.as_str(),
-                )
-                .build();
-            let retract = Element::builder("retract", NS_PUBSUB)
-                .attr(
-                    minidom::rxml::xml_ncname!("node").to_owned(),
-                    PUBSUB_NODE_EVENTS,
-                )
-                .attr(minidom::rxml::xml_ncname!("notify").to_owned(), "true")
-                .append(item)
-                .build();
-            let pubsub = Element::builder("pubsub", NS_PUBSUB)
-                .append(retract)
-                .build();
-            let iq = Element::builder("iq", NS_CLIENT)
-                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-                .attr(minidom::rxml::xml_ncname!("to").to_owned(), community_jid)
-                .append(pubsub)
-                .build();
+            let iq =
+                build_pubsub_retract_iq(&id, Some(&service), PUBSUB_NODE_EVENTS, item_id.as_str());
             send_iq_command(inner, iq).await?;
             Ok(JsValue::TRUE)
         })
@@ -795,13 +771,9 @@ impl WaddleClient {
             if !self_jid.contains('@') {
                 return Err(js_error("self_jid must be a bare JID"));
             }
-            let iq = build_rsvp_publish_iq(
-                &community_jid,
-                &master_uid,
-                &self_localpart,
-                &self_jid,
-                partstat,
-            );
+            let service = service_bare_jid(&community_jid)?;
+            let iq =
+                build_rsvp_publish_iq(&service, &master_uid, &self_localpart, &self_jid, partstat);
             send_iq_command(inner, iq).await?;
             to_js_value(&JsAttendee {
                 uri: format!("xmpp:{self_jid}"),

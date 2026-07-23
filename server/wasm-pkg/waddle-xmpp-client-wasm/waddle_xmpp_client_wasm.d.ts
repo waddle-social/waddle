@@ -56,9 +56,9 @@ export class WaddleClient {
     enable_push_notifications(service_jid: string, node: string): Promise<any>;
     /**
      * Fetch the latest items from the community Social Feed node on
-     * `spaces_jid` (typically `spaces.<domain>`). Returns an array of
-     * JsFeedEntry objects ordered as the server delivered them
-     * (newest first by `last_published`).
+     * `spaces_jid` — the community service (`community.<domain>`).
+     * Returns an array of JsFeedEntry objects ordered as the server
+     * delivered them (newest first by `last_published`).
      */
     feed_items(spaces_jid: string, max_items?: number | null): Promise<any>;
     /**

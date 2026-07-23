@@ -38,6 +38,74 @@ pub struct ReactionSummaryEvent {
     pub reactors: Vec<BareJid>,
 }
 
+/// XEP-0060 §7.2.2.1 item-retract notification, flattened for
+/// [`crate::event::ClientEvent::PubsubItemsRetracted`]: which items
+/// disappeared from which node on which service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubRetractedItems {
+    /// Notifying service (`from` of the event message); `None` when
+    /// the stanza carried no `from` (the account's own PEP service).
+    pub service: Option<Jid>,
+    pub node: String,
+    pub item_ids: Vec<String>,
+}
+
+/// One XEP-0470 attachment-summary update, flattened for
+/// [`crate::event::ClientEvent::PubsubAttachmentSummary`]: the summary
+/// counts for one attached-to item on a summary node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubAttachmentSummaryUpdate {
+    /// Notifying service (`from` of the event message); `None` when
+    /// the stanza carried no `from`.
+    pub service: Option<Jid>,
+    /// The summary node the notification arrived on
+    /// (`urn:xmpp:pubsub-attachments:summary:1/<target-node>`).
+    pub node: String,
+    /// ItemID of the attached-to item the summary describes.
+    pub item_id: Option<String>,
+    pub summary: AttachmentSummaryEvent,
+}
+
+impl PubsubEvent {
+    /// The §7.2.2.1 retractions in this event, or `None` when nothing
+    /// was retracted.
+    pub fn retracted_items(&self) -> Option<PubsubRetractedItems> {
+        let item_ids: Vec<String> = self
+            .items
+            .iter()
+            .filter(|item| item.retracted)
+            .filter_map(|item| item.id.clone())
+            .collect();
+        if item_ids.is_empty() {
+            return None;
+        }
+        Some(PubsubRetractedItems {
+            service: self.from.clone(),
+            node: self.node.clone(),
+            item_ids,
+        })
+    }
+
+    /// The XEP-0470 attachment-summary payloads in this event, one
+    /// update per summarised item.
+    pub fn attachment_summaries(&self) -> Vec<PubsubAttachmentSummaryUpdate> {
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let PubsubEventPayload::AttachmentSummary(summary) = &item.payload else {
+                    return None;
+                };
+                Some(PubsubAttachmentSummaryUpdate {
+                    service: self.from.clone(),
+                    node: self.node.clone(),
+                    item_id: item.id.clone(),
+                    summary: summary.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
 pub fn parse_pubsub_events(message: &Element) -> Vec<PubsubEvent> {
     if message.name() != "message" {
         return Vec::new();
@@ -284,5 +352,90 @@ mod tests {
         assert_eq!(events[0].items[0].id.as_deref(), Some("story-1"));
         assert!(events[0].items[0].retracted);
         assert_eq!(events[0].items[0].payload, PubsubEventPayload::Empty);
+    }
+
+    #[test]
+    fn flattens_retractions_into_typed_client_event_payload() {
+        let event = PubsubEvent {
+            from: Some("community.example.com".parse().expect("valid jid")),
+            node: "urn:xmpp:pubsub-social-feed:stories:0".to_owned(),
+            items: vec![
+                PubsubEventItem {
+                    id: Some("story-1".to_owned()),
+                    retracted: true,
+                    payload: PubsubEventPayload::Empty,
+                },
+                PubsubEventItem {
+                    id: Some("story-2".to_owned()),
+                    retracted: false,
+                    payload: PubsubEventPayload::Empty,
+                },
+                PubsubEventItem {
+                    id: Some("story-3".to_owned()),
+                    retracted: true,
+                    payload: PubsubEventPayload::Empty,
+                },
+            ],
+        };
+        let retracted = event.retracted_items().expect("retractions present");
+        assert_eq!(
+            retracted.service,
+            Some("community.example.com".parse::<Jid>().expect("valid jid"))
+        );
+        assert_eq!(retracted.node, "urn:xmpp:pubsub-social-feed:stories:0");
+        assert_eq!(retracted.item_ids, vec!["story-1", "story-3"]);
+    }
+
+    #[test]
+    fn no_retractions_yields_no_client_event_payload() {
+        let event = PubsubEvent {
+            from: None,
+            node: "urn:test".to_owned(),
+            items: vec![PubsubEventItem {
+                id: Some("kept".to_owned()),
+                retracted: false,
+                payload: PubsubEventPayload::Empty,
+            }],
+        };
+        assert_eq!(event.retracted_items(), None);
+    }
+
+    #[test]
+    fn flattens_attachment_summaries_into_typed_client_event_payloads() {
+        let summary = AttachmentSummaryEvent {
+            reactions: vec![ReactionSummaryEvent {
+                emoji: "👍".to_owned(),
+                count: 2,
+                reactors: vec!["alice@example.com".parse().expect("valid jid")],
+            }],
+            noticed_count: Some(1),
+        };
+        let event = PubsubEvent {
+            from: Some("community.example.com".parse().expect("valid jid")),
+            node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0"
+                .to_owned(),
+            items: vec![
+                PubsubEventItem {
+                    id: Some("story-1".to_owned()),
+                    retracted: false,
+                    payload: PubsubEventPayload::AttachmentSummary(summary.clone()),
+                },
+                PubsubEventItem {
+                    id: Some("opaque".to_owned()),
+                    retracted: false,
+                    payload: PubsubEventPayload::Opaque {
+                        element: Element::builder("future", "urn:example:future").build(),
+                    },
+                },
+            ],
+        };
+        let updates = event.attachment_summaries();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].item_id.as_deref(), Some("story-1"));
+        assert_eq!(updates[0].summary, summary);
+        assert_eq!(
+            updates[0].node,
+            "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0"
+        );
     }
 }
