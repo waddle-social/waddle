@@ -3,6 +3,7 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	c "github.com/cuenv/cuenv/contrib/contributors"
+	"list"
 )
 
 let _NamespaceNix = schema.#Contributor & {
@@ -37,6 +38,30 @@ let _NamespaceNix = schema.#Contributor & {
 		},
 	]
 }
+
+// These source inputs can change the generated wasm-bindgen glue or WebAssembly
+// binary. The three crate paths are the complete local dependency graph of the
+// browser binding crate.
+let _WasmSourceInputs = [
+	"../.cargo/**",
+	"../flake.lock",
+	"../flake.nix",
+	"../server/.cargo/**",
+	"../server/Cargo.lock",
+	"../server/Cargo.toml",
+	"../server/crates/waddle-xmpp-client-wasm/**",
+	"../server/crates/waddle-xmpp-client/**",
+	"../server/crates/waddle-xmpp-core/**",
+	"../server/rust-toolchain.toml",
+]
+
+// The local UI builder also depends on its invocation and package contract.
+// The task-level sentinel below handles cuenv's cross-project affected match.
+let _WasmBuildInputs = list.Concat([_WasmSourceInputs, [
+	"env.cue",
+	"package.json",
+	"scripts/build-xmpp-wasm.mjs",
+]])
 
 schema.#Project & {
 	name: "waddle-chat"
@@ -98,32 +123,33 @@ schema.#Project & {
 	}
 
 	tasks: {
+		// cuenv 0.54 generates correct repository-relative workflow filters for
+		// ../server inputs but normalizes those paths differently during runtime
+		// affected-task matching. A task without path inputs is always affected;
+		// its dependency edge keeps a triggered WASM workflow from being skipped.
+		wasmPipelineTrigger: schema.#Task & {
+			command: "true"
+		}
+
 		// Builds WASM from Rust source and publishes to GitHub Packages.
 		// Runs on every merge to main.
 		buildAndPublishWasm: schema.#Task & {
 			command: "bun"
 			args: ["run", "scripts/build-and-publish-wasm.mjs"]
-			inputs: [
-				"../server/Cargo.toml",
-				"../server/Cargo.lock",
-				"../server/crates/waddle-xmpp-client/**",
-				"../server/crates/waddle-xmpp-client-wasm/**",
+			dependsOn: [wasmPipelineTrigger]
+			inputs: list.Concat([_WasmSourceInputs, [
+				"env.cue",
 				"scripts/build-and-publish-wasm.mjs",
-			]
+			]])
 		}
 
 		// Builds WASM from Rust source for the PR lint/build pipelines.
-		// Always rebuilds (REBUILD_WASM=1) so CI never needs committed artifacts.
+		// The script always rebuilds so CI never needs committed artifacts.
 		buildWasm: schema.#Task & {
-			command: "bash"
-			args: ["-c", "REBUILD_WASM=1 bun run wasm:build"]
-			inputs: [
-				"../server/Cargo.toml",
-				"../server/Cargo.lock",
-				"../server/crates/waddle-xmpp-client/**",
-				"../server/crates/waddle-xmpp-client-wasm/**",
-				"scripts/build-xmpp-wasm.mjs",
-			]
+			command: "bun"
+			args: ["run", "wasm:build"]
+			dependsOn: [wasmPipelineTrigger]
+			inputs: _WasmBuildInputs
 			outputs: [
 				"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 			]

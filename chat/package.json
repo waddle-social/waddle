@@ -13,7 +13,7 @@
     "dev": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro dev",
     "build": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro check && astro build",
     "preview": "bun run wasm:build && bun run generate-service-worker && bun run copy-background-assets && astro preview",
-    "astro": "astro",
+    "astro": "bun run wasm:build && astro",
     "test": "bun test",
     "generate-types": "wrangler types",
     "sourcemaps:strip": "bun run scripts/strip-sourcemaps.mjs",

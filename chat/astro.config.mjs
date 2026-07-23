@@ -166,7 +166,7 @@ export default defineConfig({
       // package name. Vite's `?v=<optimizer-hash>` URL convention sends
       // `Cache-Control: max-age=31536000, immutable` to the browser, and the
       // optimizer hash is deterministic — it does NOT change after a
-      // REBUILD_WASM=1 because the package content is excluded from the
+      // fresh WASM rebuild because the package content is excluded from the
       // optimizer (see `optimizeDeps.exclude` below). Result: identical URL,
       // year-long immutable cache, browser keeps serving the previous build's
       // glue JS while the new .wasm has different closure indices →
@@ -210,7 +210,7 @@ export default defineConfig({
       // produces a stable v= cache-buster hash derived from the lock file rather
       // than file mtime, so the browser never re-fetches after a WASM rebuild.
       // Serving the package directly lets Vite use mtime-based cache busting so
-      // a fresh REBUILD_WASM=1 build is always picked up without a hard refresh.
+      // a fresh WASM build is always picked up without a hard refresh.
       exclude: ["@waddle/xmpp-client-wasm"],
     },
     server: {
@@ -218,7 +218,7 @@ export default defineConfig({
         // Vite's default chokidar config ignores `**/node_modules/**`. The
         // local WASM package lives there (installed via `file:` and bun's
         // .bun/ cache symlink), so without this Vite never observes a
-        // REBUILD_WASM=1 rewrite of `_bg.js` / `_bg.wasm`. The dev server
+        // fresh rewrite of `_bg.js` / `_bg.wasm`. The dev server
         // keeps serving the cached transform of the *old* `_bg.js` while
         // the browser fetches a *fresh* `_bg.wasm` (cache: "no-store"),
         // producing "wasm.__wasm_bindgen_func_elem_N is not a function".
