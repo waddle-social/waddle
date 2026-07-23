@@ -356,6 +356,7 @@
     <string name="community_title">Community</string>
     <string name="community_tab_feed">Feed</string>
     <string name="community_feed_empty">No posts yet. Share the first update with your community.</string>
+    <string name="community_feed_load_failed">Couldn\'t load the feed. Pull to retry.</string>
     <string name="community_post_hint">Share an update…</string>
     <string name="community_post_send">Post to the community feed</string>
     <string name="community_post_failed">Couldn\'t publish the post.</string>

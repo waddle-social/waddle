@@ -40,13 +40,24 @@ class CommunityViewModel(
     /** One result per attempted post; failures surface a snackbar. */
     val postResults: SharedFlow<VerbResult> = _postResults
 
+    private val _loadFailed = MutableStateFlow(false)
+
+    /**
+     * True when the most recent feed load failed (web `FeedPane`
+     * error-banner parity) — without it a failed fetch would render as
+     * an empty feed.
+     */
+    val loadFailed: StateFlow<Boolean> = _loadFailed.asStateFlow()
+
     init {
         refresh()
     }
 
     /** Pull the latest feed page into the store. */
     fun refresh() {
-        viewModelScope.launch { sessionManager.refreshFeed() }
+        viewModelScope.launch {
+            _loadFailed.value = sessionManager.refreshFeed() != VerbResult.Ok
+        }
     }
 
     /** Publish a post; the store shows it optimistically on accept. */

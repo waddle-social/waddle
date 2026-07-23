@@ -75,6 +75,7 @@ fun CommunityScreen(onBack: () -> Unit) {
     val entries by viewModel.entries.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val isPosting by viewModel.isPosting.collectAsStateWithLifecycle()
+    val loadFailed by viewModel.loadFailed.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var draft by remember { mutableStateOf("") }
     val postFailedText = stringResource(R.string.community_post_failed)
@@ -117,13 +118,26 @@ fun CommunityScreen(onBack: () -> Unit) {
                     modifier = Modifier.testTag(CommunityTestTags.FEED_TAB),
                 )
             }
+            if (loadFailed) {
+                Text(
+                    text = stringResource(R.string.community_feed_load_failed),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag(CommunityTestTags.LOAD_ERROR),
+                )
+            }
             PullToRefreshBox(
                 isRefreshing = isLoading,
                 onRefresh = viewModel::refresh,
                 modifier = Modifier.weight(1f),
             ) {
                 if (entries.isEmpty()) {
-                    FeedEmptyState(isLoading = isLoading)
+                    // A failed load must not masquerade as an empty
+                    // feed — the banner above owns that story.
+                    FeedEmptyState(isLoading = isLoading, showPlaceholder = !loadFailed)
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
@@ -152,19 +166,20 @@ object CommunityTestTags {
     const val COMPOSER_FIELD = "community-composer-field"
     const val COMPOSER_SEND = "community-composer-send"
     const val ENTRY_PREFIX = "community-entry:"
+    const val LOAD_ERROR = "community-load-error"
 }
 
 @Composable
-private fun FeedEmptyState(isLoading: Boolean) {
+private fun FeedEmptyState(isLoading: Boolean, showPlaceholder: Boolean) {
     // The refresh indicator owns the loading story; only a settled
-    // empty feed gets the placeholder text.
+    // empty feed that actually loaded gets the placeholder text.
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(32.dp),
         contentAlignment = Alignment.Center,
     ) {
-        if (!isLoading) {
+        if (!isLoading && showPlaceholder) {
             Text(
                 text = stringResource(R.string.community_feed_empty),
                 style = MaterialTheme.typography.bodyMedium,

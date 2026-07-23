@@ -12,6 +12,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import social.waddle.android.client.FakeClientFactory
@@ -116,6 +117,31 @@ class CommunityViewModelTest {
         )
         assertEquals("post-9", viewModel.entries.value.first().id)
         assertFalse(viewModel.isPosting.value)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a failed load raises the error banner instead of the empty state`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.community.fetchFeedFailure = RuntimeException("stream broke")
+
+        val viewModel = harness.viewModel()
+        runCurrent()
+
+        assertTrue(viewModel.loadFailed.value)
+        assertTrue(viewModel.entries.value.isEmpty())
+
+        // A successful pull-to-refresh clears the banner.
+        harness.client.community.fetchFeedFailure = null
+        harness.client.community.feedEntries = listOf(
+            testFeedEntry(id = "post-1", body = "back online", publishedEpochMs = 1_000L),
+        )
+        viewModel.refresh()
+        runCurrent()
+
+        assertFalse(viewModel.loadFailed.value)
+        assertEquals(listOf("post-1"), viewModel.entries.value.map { it.id })
         harness.manager.logout()
     }
 
