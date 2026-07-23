@@ -25,6 +25,7 @@ internal class SessionStores {
     val stickerPackStore = StickerPackStore()
     val profileStore = ProfileStore()
     val extensionCommandStore = ExtensionCommandStore()
+    val feedStore = FeedStore()
 
     fun clear() {
         timelineStore.clear()
@@ -42,6 +43,7 @@ internal class SessionStores {
         stickerPackStore.clear()
         profileStore.clear()
         extensionCommandStore.clear()
+        feedStore.clear()
     }
 
     /** Restore joined rooms and the DM recency list from [sessionPrefs]. */

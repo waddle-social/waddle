@@ -9,6 +9,8 @@ import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleChannel
 import social.waddle.client.ffi.WaddleChatState
+import social.waddle.client.ffi.WaddleFeedEntry
+import social.waddle.client.ffi.WaddleFeedSourceKind
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleLinkPreview
@@ -335,6 +337,24 @@ fun testInboxResult(
     unread = unread,
     allUnread = allUnread,
     conversations = conversations,
+)
+
+fun testFeedEntry(
+    id: String = "post-1",
+    title: String? = "Title",
+    body: String = "Hello community",
+    author: String? = "alice@waddle.test",
+    publishedEpochMs: Long? = 1_700_000_000_000L,
+    link: String? = null,
+    source: WaddleFeedSourceKind? = null,
+): WaddleFeedEntry = WaddleFeedEntry(
+    id = id,
+    title = title,
+    body = body,
+    author = author,
+    publishedEpochMs = publishedEpochMs,
+    link = link,
+    source = source,
 )
 
 fun testResumeState(

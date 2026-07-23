@@ -79,6 +79,7 @@ class XmppSessionManager(
     val stickerPackStore = stores.stickerPackStore
     val profileStore = stores.profileStore
     val extensionCommandStore = stores.extensionCommandStore
+    val feedStore = stores.feedStore
 
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
@@ -121,6 +122,7 @@ class XmppSessionManager(
     private val stickers = StickerVerbs(activeSession, stores)
     private val profile = ProfileVerbs(activeSession, stores)
     private val extensions = ExtensionCommandVerbs(activeSession, stores)
+    private val feed = FeedVerbs(activeSession, stores)
 
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
@@ -463,6 +465,13 @@ class XmppSessionManager(
 
     /** XEP-0118 §3.2: retract the tune via the empty payload. */
     suspend fun clearTune(): VerbResult = profile.clearTune()
+
+    /** XEP-0472: fetch the latest community feed page into [feedStore]. */
+    suspend fun refreshFeed(): VerbResult = feed.refreshFeed()
+
+    /** XEP-0472: publish a feed post (optimistic prepend, then refresh). */
+    suspend fun publishFeedPost(body: String, title: String? = null): VerbResult =
+        feed.publishFeedPost(body, title)
 
     /**
      * `urn:waddle:extension:1`: discover the slash-command set via

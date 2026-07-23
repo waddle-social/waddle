@@ -28,6 +28,7 @@ pub mod pubsub_event;
 pub mod push;
 pub mod request;
 pub mod runtime;
+pub mod social_feed;
 pub mod state;
 pub mod stickers;
 pub mod stream_management;
@@ -114,6 +115,10 @@ pub use request::{
     StanzaId,
 };
 pub use runtime::{RuntimeStatus, XmppRuntime};
+pub use social_feed::{
+    build_feed_items_iq, build_feed_publish_iq, extract_source_kind, parse_feed_items_result,
+    FeedItem, FeedSourceKind, NS_FEED_SOURCE,
+};
 pub use state::{ClientState, SessionBinding, SessionPhase, SessionSnapshot, StreamId};
 pub use stickers::{
     build_pack_publish_iq, build_pack_retract_iq, build_sticker_pack_items_iq,

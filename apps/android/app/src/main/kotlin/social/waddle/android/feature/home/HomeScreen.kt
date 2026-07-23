@@ -15,6 +15,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.NotificationsOff
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material3.Badge
@@ -64,6 +65,7 @@ import social.waddle.android.jid.localpartOf
 fun HomeScreen(
     onOpenChannel: (roomJid: String, name: String) -> Unit,
     onOpenDmList: () -> Unit,
+    onOpenCommunity: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val graph = LocalAppGraph.current
@@ -112,6 +114,7 @@ fun HomeScreen(
                     state = state,
                     onChannelClick = { channel -> closeDrawerAnd { openChannel(channel) } },
                     onOpenDmList = { closeDrawerAnd(onOpenDmList) },
+                    onOpenCommunity = { closeDrawerAnd(onOpenCommunity) },
                     onOpenSettings = { closeDrawerAnd(onOpenSettings) },
                 )
             }
@@ -176,6 +179,7 @@ fun HomeScreen(
 object HomeScreenTestTags {
     const val CREATE_CHANNEL_ACTION = "home-create-channel-action"
     const val CHANNEL_CALL_BADGE = "home-channel-call-badge"
+    const val DRAWER_COMMUNITY_ITEM = "drawer-community"
 }
 
 @Composable
@@ -183,6 +187,7 @@ private fun DrawerContent(
     state: HomeUiState,
     onChannelClick: (ChannelListItem) -> Unit,
     onOpenDmList: () -> Unit,
+    onOpenCommunity: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     LazyColumn {
@@ -220,6 +225,17 @@ private fun DrawerContent(
                 icon = { Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null) },
                 badge = { UnreadBadge(count = state.dmUnreadCount) },
                 modifier = Modifier.padding(horizontal = 12.dp),
+            )
+        }
+        item(key = "drawer-community") {
+            NavigationDrawerItem(
+                label = { Text(text = stringResource(R.string.community_title)) },
+                selected = false,
+                onClick = onOpenCommunity,
+                icon = { Icon(Icons.Outlined.Public, contentDescription = null) },
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .testTag(HomeScreenTestTags.DRAWER_COMMUNITY_ITEM),
             )
         }
         item(key = "drawer-settings") {

@@ -1335,6 +1335,23 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
 
     /**
+     * XEP-0472: fetch the latest entries from the community Social
+     * Feed node on `community.<domain>` (resolved from the session
+     * JID), ordered as the server delivered them (newest first).
+     */
+    func fetchFeed(maxItems: UInt32?) async throws  -> [WaddleFeedEntry]
+
+    /**
+     * XEP-0472: publish a new post to the community Social Feed under
+     * a minted `post-<uuid>` item id, returning the published item
+     * id. The author travels as the session bare JID (the server
+     * stamps the authenticated publisher regardless); publish
+     * authorisation is enforced server-side via XEP-0060 affiliations
+     * — a Forbidden stanza error surfaces typed.
+     */
+    func publishFeedPost(body: String, title: String?) async throws  -> String
+
+    /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
      * (XEP-0060 items-by-id). `node: None` defaults to the PEP
      * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
@@ -3700,6 +3717,53 @@ open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async t
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0472: fetch the latest entries from the community Social
+     * Feed node on `community.<domain>` (resolved from the session
+     * JID), ordered as the server delivered them (newest first).
+     */
+open func fetchFeed(maxItems: UInt32?)async throws  -> [WaddleFeedEntry]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_feed(
+                    self.uniffiCloneHandle(),
+                    FfiConverterOptionUInt32.lower(maxItems)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeWaddleFeedEntry.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * XEP-0472: publish a new post to the community Social Feed under
+     * a minted `post-<uuid>` item id, returning the published item
+     * id. The author travels as the session bare JID (the server
+     * stamps the authenticated publisher regardless); publish
+     * authorisation is enforced server-side via XEP-0060 affiliations
+     * — a Forbidden stanza error surfaces typed.
+     */
+open func publishFeedPost(body: String, title: String?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_feed_post(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(body),FfiConverterOptionString.lower(title)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -7501,6 +7565,112 @@ public func FfiConverterTypeWaddleFallbackRange_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeWaddleFallbackRange_lower(_ value: WaddleFallbackRange) -> RustBuffer {
     return FfiConverterTypeWaddleFallbackRange.lower(value)
+}
+
+
+/**
+ * One XEP-0472 community feed entry: the typed Atom `<entry/>` from
+ * the `urn:xmpp:pubsub-social-feed:1` node on `community.<domain>`.
+ */
+public struct WaddleFeedEntry: Equatable, Hashable {
+    /**
+     * Pubsub item id (`post-<uuid>` for manual posts).
+     */
+    public var id: String
+    public var title: String?
+    public var body: String
+    /**
+     * Author bare JID (Atom `<author><uri>xmpp:…</uri></author>`,
+     * stamped by the server on member posts) or display name.
+     */
+    public var author: String?
+    /**
+     * Atom `<published/>` as unix millis (inbox `last_updated`
+     * precedent).
+     */
+    public var publishedEpochMs: Int64?
+    public var link: String?
+    /**
+     * PEP-bridge source kind; `None` on manual posts.
+     */
+    public var source: WaddleFeedSourceKind?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pubsub item id (`post-<uuid>` for manual posts).
+         */id: String, title: String?, body: String,
+        /**
+         * Author bare JID (Atom `<author><uri>xmpp:…</uri></author>`,
+         * stamped by the server on member posts) or display name.
+         */author: String?,
+        /**
+         * Atom `<published/>` as unix millis (inbox `last_updated`
+         * precedent).
+         */publishedEpochMs: Int64?, link: String?,
+        /**
+         * PEP-bridge source kind; `None` on manual posts.
+         */source: WaddleFeedSourceKind?) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.author = author
+        self.publishedEpochMs = publishedEpochMs
+        self.link = link
+        self.source = source
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleFeedEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleFeedEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleFeedEntry {
+        return
+            try WaddleFeedEntry(
+                id: FfiConverterString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                author: FfiConverterOptionString.read(from: &buf),
+                publishedEpochMs: FfiConverterOptionInt64.read(from: &buf),
+                link: FfiConverterOptionString.read(from: &buf),
+                source: FfiConverterOptionTypeWaddleFeedSourceKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleFeedEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+        FfiConverterOptionInt64.write(value.publishedEpochMs, into: &buf)
+        FfiConverterOptionString.write(value.link, into: &buf)
+        FfiConverterOptionTypeWaddleFeedSourceKind.write(value.source, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedEntry_lift(_ buf: RustBuffer) throws -> WaddleFeedEntry {
+    return try FfiConverterTypeWaddleFeedEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedEntry_lower(_ value: WaddleFeedEntry) -> RustBuffer {
+    return FfiConverterTypeWaddleFeedEntry.lower(value)
 }
 
 
@@ -12886,6 +13056,107 @@ public func FfiConverterTypeWaddleExternalServiceType_lower(_ value: WaddleExter
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * PEP-bridge source kind on a bridged community feed entry
+ * (`<source xmlns='urn:waddle:feed-source:0' kind='…'/>`). Mirrors
+ * `waddle_xmpp_client::social_feed::FeedSourceKind` 1:1; unknown wire
+ * kinds never cross the FFI (they parse to no source).
+ */
+
+public enum WaddleFeedSourceKind: Equatable, Hashable {
+
+    case mood
+    case activity
+    case tune
+    case avatar
+    case vcard
+    case rsvp
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleFeedSourceKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleFeedSourceKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleFeedSourceKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleFeedSourceKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .mood
+
+        case 2: return .activity
+
+        case 3: return .tune
+
+        case 4: return .avatar
+
+        case 5: return .vcard
+
+        case 6: return .rsvp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleFeedSourceKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .mood:
+            writeInt(&buf, Int32(1))
+
+
+        case .activity:
+            writeInt(&buf, Int32(2))
+
+
+        case .tune:
+            writeInt(&buf, Int32(3))
+
+
+        case .avatar:
+            writeInt(&buf, Int32(4))
+
+
+        case .vcard:
+            writeInt(&buf, Int32(5))
+
+
+        case .rsvp:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedSourceKind_lift(_ buf: RustBuffer) throws -> WaddleFeedSourceKind {
+    return try FfiConverterTypeWaddleFeedSourceKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleFeedSourceKind_lower(_ value: WaddleFeedSourceKind) -> RustBuffer {
+    return FfiConverterTypeWaddleFeedSourceKind.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Waddle forum post classification: `Topic` (thread + body + subject)
  * or `Reply` (thread + body). Wire values outside these two are
  * dropped to `None` at the conversion boundary.
@@ -15669,6 +15940,30 @@ fileprivate struct FfiConverterOptionTypeWaddleExternalServiceTransport: FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleFeedSourceKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleFeedSourceKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleFeedSourceKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleFeedSourceKind.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleForumPostKind: FfiConverterRustBuffer {
     typealias SwiftType = WaddleForumPostKind?
 
@@ -16328,6 +16623,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleExternalService: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleExternalService.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleFeedEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleFeedEntry]
+
+    public static func write(_ value: [WaddleFeedEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleFeedEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleFeedEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleFeedEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleFeedEntry.read(from: &buf))
         }
         return seq
     }
@@ -17149,6 +17469,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_feed() != 50289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_feed_post() != 20982) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {

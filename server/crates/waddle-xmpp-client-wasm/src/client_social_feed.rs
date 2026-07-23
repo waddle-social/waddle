@@ -4,28 +4,21 @@
 //! `urn:xmpp:pubsub-social-feed:1` on the community service
 //! (`community.<domain>`). These wasm methods let the chat read the
 //! feed (`feed_items`) and publish new posts (`feed_publish`) via the
-//! shared XEP-0060 pubsub helpers in `waddle_xmpp_client::pubsub`,
-//! with the typed XEP-0472 `<entry/>` payload constructed / parsed in
-//! Rust via `waddle_xmpp_core::xep0472`.
+//! shared feed verbs in `waddle_xmpp_client::social_feed`, with the
+//! typed XEP-0472 `<entry/>` payload constructed / parsed in Rust via
+//! `waddle_xmpp_core::xep0472`.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use waddle_xmpp_client::pubsub::{
-    build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result,
+use waddle_xmpp_client::social_feed::{
+    build_feed_items_iq, build_feed_publish_iq, parse_feed_items_result, FeedSourceKind,
 };
-use waddle_xmpp_core::xep0472::{
-    build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
-};
+use waddle_xmpp_core::xep0472::FeedEntry;
 use wasm_bindgen::prelude::*;
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
-
-/// Waddle-namespaced typed child on bridged feed entries (PEP →
-/// feed). Carries `kind="mood"|"activity"|"tune"|"avatar"|"vcard"`
-/// so the chat can render a kind-icon next to bridged posts.
-const NS_FEED_SOURCE: &str = "urn:waddle:feed-source:0";
 
 /// JS-facing snapshot of a XEP-0472 feed entry. Mirrors `FeedEntry`
 /// but with stringly-typed `published` so it serialises cleanly
@@ -60,17 +53,6 @@ impl From<FeedEntry> for JsFeedEntry {
     }
 }
 
-/// Extract the PEP-bridge source kind from the raw `<entry>` element
-/// (`<source xmlns='urn:waddle:feed-source:0' kind='...'/>`) when
-/// present. Returns `None` for manual posts that omit the child.
-fn extract_source_kind(entry_el: &Element) -> Option<String> {
-    entry_el
-        .children()
-        .find(|c| c.name() == "source" && c.ns() == NS_FEED_SOURCE)
-        .and_then(|c| c.attr("kind"))
-        .map(str::to_string)
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct JsFeedEntryInput {
     pub title: Option<String>,
@@ -79,38 +61,14 @@ pub(crate) struct JsFeedEntryInput {
     pub link: Option<String>,
 }
 
-fn build_feed_items_iq(community_service: &jid::BareJid, max_items: Option<u32>) -> Element {
-    let id = format!("feed-items-{}", Uuid::new_v4());
-    build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_FEED, max_items)
-}
-
-fn build_feed_publish_iq(
-    community_service: &jid::BareJid,
-    item_id: &str,
-    entry: &FeedEntry,
-) -> Element {
-    let id = format!("feed-publish-{}", Uuid::new_v4());
-    build_pubsub_publish_iq(
-        &id,
-        Some(community_service),
-        PUBSUB_NODE_FEED,
-        Some(item_id),
-        build_feed_entry_element(entry),
-        None,
-    )
-}
-
-fn parse_feed_items_result(iq: &Element) -> Vec<JsFeedEntry> {
-    parse_pubsub_items_result(iq)
+fn feed_items_to_js(iq: &Element) -> Vec<JsFeedEntry> {
+    parse_feed_items_result(iq)
         .into_iter()
-        .filter_map(|item| {
-            let entry_el = item.payload("entry", NS_ATOM)?;
-            let source = extract_source_kind(entry_el);
-            parse_feed_entry(&item.id, entry_el).map(|entry| {
-                let mut js = JsFeedEntry::from(entry);
-                js.source = source;
-                js
-            })
+        .map(|item| {
+            let source = item.source.map(FeedSourceKind::as_str).map(str::to_owned);
+            let mut js = JsFeedEntry::from(item.entry);
+            js.source = source;
+            js
         })
         .collect()
 }
@@ -127,7 +85,7 @@ impl WaddleClient {
             let service = service_bare_jid(&spaces_jid)?;
             let iq = build_feed_items_iq(&service, max_items);
             let result = send_iq_command(inner, iq).await?;
-            let entries = parse_feed_items_result(&result);
+            let entries = feed_items_to_js(&result);
             to_js_value(&entries)
         })
     }
@@ -177,6 +135,7 @@ impl WaddleClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use waddle_xmpp_core::xep0472::{NS_ATOM, PUBSUB_NODE_FEED};
 
     const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 

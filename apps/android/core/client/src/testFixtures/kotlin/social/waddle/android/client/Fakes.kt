@@ -45,6 +45,7 @@ import social.waddle.client.ffi.WaddleExtensionCommand
 import social.waddle.client.ffi.WaddleExtensionCommandResult
 import social.waddle.client.ffi.WaddleExtensionFormField
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleFeedEntry
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
 import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleJingleReason
@@ -1227,6 +1228,15 @@ class FakeWaddleClient : WaddleClientInterface {
 
     override suspend fun retractStickerPack(packId: String): Boolean = stickers.retract(packId)
 
+    /** XEP-0472 community feed verbs, sliced out into [FakeCommunityState]. */
+    val community = FakeCommunityState()
+
+    override suspend fun fetchFeed(maxItems: UInt?): List<WaddleFeedEntry> =
+        community.fetchFeed(maxItems)
+
+    override suspend fun publishFeedPost(body: String, title: String?): String =
+        community.publishFeedPost(body, title)
+
     /** Canned pin list served by [fetchRoomPins]; recorded pin/unpin ops. */
     @Volatile
     var roomPins: List<WaddlePinEntry> = emptyList()
@@ -1244,28 +1254,14 @@ class FakeWaddleClient : WaddleClientInterface {
         return true
     }
 
-    /** Canned XEP-0492 bookmark lists served by the fetch verbs. */
-    @Volatile
-    var userBookmarks: List<WaddleBookmarkItem> = emptyList()
+    /** XEP-0402 bookmark fakes, sliced out into [FakeBookmarkState]. */
+    val bookmarks = FakeBookmarkState()
 
-    @Volatile
-    var dmBookmarks: List<WaddleDmBookmarkItem> = emptyList()
+    override suspend fun fetchUserBookmarks(): List<WaddleBookmarkItem> =
+        bookmarks.fetchUserBookmarks()
 
-    @Volatile
-    var fetchUserBookmarksCalls = 0
-
-    @Volatile
-    var fetchDmBookmarksCalls = 0
-
-    override suspend fun fetchUserBookmarks(): List<WaddleBookmarkItem> {
-        fetchUserBookmarksCalls += 1
-        return userBookmarks
-    }
-
-    override suspend fun fetchDmBookmarks(): List<WaddleDmBookmarkItem> {
-        fetchDmBookmarksCalls += 1
-        return dmBookmarks
-    }
+    override suspend fun fetchDmBookmarks(): List<WaddleDmBookmarkItem> =
+        bookmarks.fetchDmBookmarks()
 
     /** XEP-0492 notify-mode verbs, sliced out into [FakeNotifyVerbs]. */
     val notify = FakeNotifyVerbs()
