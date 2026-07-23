@@ -146,6 +146,30 @@ class CommunityViewModelTest {
     }
 
     @Test
+    fun `a successful post clears the load-failure banner`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.community.fetchFeedFailure = RuntimeException("stream broke")
+        val viewModel = harness.viewModel()
+        runCurrent()
+        assertTrue(viewModel.loadFailed.value)
+
+        // Server recovers; the publish succeeds and its reconciling
+        // refresh loads the feed — the stale banner must clear.
+        harness.client.community.fetchFeedFailure = null
+        harness.client.community.publishedItemId = "post-2"
+        harness.client.community.feedEntries = listOf(
+            testFeedEntry(id = "post-2", body = "hello again", publishedEpochMs = 2_000L),
+        )
+        viewModel.post("hello again")
+        runCurrent()
+
+        assertFalse(viewModel.loadFailed.value)
+        assertEquals(listOf("post-2"), viewModel.entries.value.map { it.id })
+        harness.manager.logout()
+    }
+
+    @Test
     fun `a refused post surfaces the failure result`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)

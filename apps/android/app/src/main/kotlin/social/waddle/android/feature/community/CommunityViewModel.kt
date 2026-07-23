@@ -67,6 +67,11 @@ class CommunityViewModel(
         viewModelScope.launch {
             val result = sessionManager.publishFeedPost(body)
             _isPosting.value = false
+            // Web parity (`useSocialFeed` clears its error on post): a
+            // successful publish reconciled the store against the
+            // server, so a lingering load-failure banner would be a
+            // lie over a freshly loaded feed.
+            if (result == VerbResult.Ok) _loadFailed.value = false
             _postResults.emit(result)
         }
     }
