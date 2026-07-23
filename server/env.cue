@@ -223,8 +223,22 @@ schema.#Project & {
 
 	tasks: {
 		checkCiDrift: schema.#Task & {
-			command: "cuenv"
-			args: ["sync", "ci", "--check", "-A"]
+			command: "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					cd ..
+					projects="$(
+					  cuenv info --json |
+					    bun -e 'const info = JSON.parse(await Bun.stdin.text()); if (!Array.isArray(info.projects) || info.projects.length === 0) throw new Error("cuenv info returned no projects"); for (const project of info.projects) { if (typeof project.path !== "string" || project.path.length === 0 || project.path.includes("\n")) throw new Error("cuenv info returned an invalid project path"); console.log(project.path); }'
+					)"
+					overall_status=0
+					while IFS= read -r project; do
+					  if ! cuenv sync ci --check -p "${project}"; then
+					    overall_status=1
+					  fi
+					done <<< "${projects}"
+					exit "${overall_status}"
+				"""#]
 			inputs: [
 				"**/env.cue",
 				"deployment.cue",
