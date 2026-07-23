@@ -42,12 +42,12 @@ fn publish_options_form_type_pins_the_disco_feature_var() {
 #[test]
 fn community_service_jid_is_the_community_subdomain() {
     assert_eq!(
-        community_service_jid("waddle.test"),
+        community_service_jid("waddle.test").expect("valid jid"),
         "community.waddle.test"
+            .parse::<BareJid>()
+            .expect("bare jid"),
     );
-    assert!(community_service_jid("waddle.test")
-        .parse::<BareJid>()
-        .is_ok());
+    assert!(community_service_jid("not a domain").is_err());
 }
 
 // ── Items fetch (§6.5) ───────────────────────────────────────────────
@@ -224,6 +224,72 @@ fn subscribe_iq_carries_node_and_subscriber_bare_jid() {
         .expect("subscribe element");
     assert_eq!(subscribe.attr("node"), Some(NODE));
     assert_eq!(subscribe.attr("jid"), Some("romeo@waddle.test"));
+}
+
+#[test]
+fn unsubscribe_iq_carries_node_subscriber_and_optional_subid() {
+    let subscriber: BareJid = "romeo@waddle.test".parse().expect("valid jid");
+    let iq = build_pubsub_unsubscribe_iq("iq-8b", &service(), NODE, &subscriber, Some("sub-1"));
+    assert_eq!(iq.attr("type"), Some("set"));
+    assert_eq!(iq.attr("to"), Some(SERVICE));
+    let unsubscribe = iq
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("unsubscribe", NS_PUBSUB))
+        .expect("unsubscribe element");
+    assert_eq!(unsubscribe.attr("node"), Some(NODE));
+    assert_eq!(unsubscribe.attr("jid"), Some("romeo@waddle.test"));
+    assert_eq!(unsubscribe.attr("subid"), Some("sub-1"));
+
+    let without_subid = build_pubsub_unsubscribe_iq("iq-8c", &service(), NODE, &subscriber, None);
+    let unsubscribe = without_subid
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("unsubscribe", NS_PUBSUB))
+        .expect("unsubscribe element");
+    assert_eq!(unsubscribe.attr("subid"), None);
+}
+
+#[test]
+fn subscribe_result_parses_subscription_state_and_subid() {
+    let iq: Element = format!(
+        "<iq xmlns='jabber:client' type='result' from='{SERVICE}' id='iq-8'>\
+         <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+         <subscription node='{NODE}' jid='romeo@waddle.test' \
+         subid='sub-1' subscription='subscribed'/>\
+         </pubsub></iq>"
+    )
+    .parse()
+    .expect("test IQ parses");
+    let subscription = parse_pubsub_subscribe_result(&iq).expect("parses");
+    assert_eq!(subscription.node, NODE);
+    assert_eq!(
+        subscription
+            .jid
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("romeo@waddle.test"),
+    );
+    assert_eq!(subscription.subid.as_deref(), Some("sub-1"));
+    assert_eq!(subscription.state, PubsubSubscriptionState::Subscribed);
+}
+
+#[test]
+fn subscribe_result_without_subscription_or_state_is_none() {
+    let missing: Element = "<iq xmlns='jabber:client' type='result' id='iq-8'>\
+         <pubsub xmlns='http://jabber.org/protocol/pubsub'/></iq>"
+        .parse()
+        .expect("test IQ parses");
+    assert!(parse_pubsub_subscribe_result(&missing).is_none());
+
+    let unknown_state: Element = format!(
+        "<iq xmlns='jabber:client' type='result' id='iq-8'>\
+         <pubsub xmlns='http://jabber.org/protocol/pubsub'>\
+         <subscription node='{NODE}' subscription='bogus'/>\
+         </pubsub></iq>"
+    )
+    .parse()
+    .expect("test IQ parses");
+    assert!(parse_pubsub_subscribe_result(&unknown_state).is_none());
 }
 
 // ── Retract (§7.2) ───────────────────────────────────────────────────

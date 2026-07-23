@@ -90,8 +90,65 @@ impl From<&Attendee> for JsAttendee {
 mod tests {
     use super::*;
 
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
     fn day(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    }
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn events_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_events_items_iq(&service(), Some(200));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_EVENTS));
+        assert_eq!(items.attr("max_items"), Some("200"));
+    }
+
+    #[test]
+    fn event_publish_iq_pins_the_vcalendar_publish_shape() {
+        let event = VEvent::new("evt-1", "Standup");
+        let iq = build_event_publish_iq(&service(), "evt-1", &event);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_EVENTS));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("evt-1"));
+        assert!(item.get_child("vcalendar", NS_XCAL).is_some());
+    }
+
+    #[test]
+    fn rsvp_publish_iq_pins_the_sibling_item_id_and_attendee_shape() {
+        let iq = build_rsvp_publish_iq(
+            &service(),
+            "evt-1",
+            "romeo",
+            "romeo@waddle.test",
+            PartStat::Accepted,
+        );
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert!(iq.attr("id").expect("iq id").starts_with("xcal-rsvp-"));
+        let item = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .and_then(|publish| publish.get_child("item", NS_PUBSUB))
+            .expect("item element");
+        assert_eq!(item.attr("id"), Some("evt-1-rsvp-romeo"));
+        assert!(item.get_child("vcalendar", NS_XCAL).is_some());
     }
 
     #[test]

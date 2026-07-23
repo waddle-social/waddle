@@ -151,3 +151,47 @@ impl WaddleClient {
         })
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn stories_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_stories_items_iq(&service(), Some(100));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("stories-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_STORIES));
+        assert_eq!(items.attr("max_items"), Some("100"));
+    }
+
+    #[test]
+    fn story_publish_iq_pins_the_atom_entry_publish_shape() {
+        let story = Story::new("story-1");
+        let iq = build_story_publish_iq(&service(), "story-1", &story);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq
+            .attr("id")
+            .expect("iq id")
+            .starts_with("stories-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_STORIES));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("story-1"));
+        assert!(item.get_child("entry", NS_ATOM).is_some());
+    }
+}

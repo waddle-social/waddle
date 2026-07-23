@@ -174,3 +174,56 @@ impl WaddleClient {
         })
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    fn service() -> jid::BareJid {
+        "community.waddle.test".parse().expect("valid service jid")
+    }
+
+    #[test]
+    fn feed_items_iq_pins_the_xep0060_wire_shape() {
+        let iq = build_feed_items_iq(&service(), Some(50));
+        assert_eq!(iq.attr("type"), Some("get"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("feed-items-"));
+        let items = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("node"), Some(PUBSUB_NODE_FEED));
+        assert_eq!(items.attr("max_items"), Some("50"));
+
+        let unbounded = build_feed_items_iq(&service(), None);
+        let items = unbounded
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
+            .expect("items element");
+        assert_eq!(items.attr("max_items"), None);
+    }
+
+    #[test]
+    fn feed_publish_iq_pins_the_atom_entry_publish_shape() {
+        let entry = FeedEntry::new("post-1", "hello waddlers");
+        let iq = build_feed_publish_iq(&service(), "post-1", &entry);
+        assert_eq!(iq.attr("type"), Some("set"));
+        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert!(iq.attr("id").expect("iq id").starts_with("feed-publish-"));
+        let publish = iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
+            .expect("publish element");
+        assert_eq!(publish.attr("node"), Some(PUBSUB_NODE_FEED));
+        let item = publish.get_child("item", NS_PUBSUB).expect("item element");
+        assert_eq!(item.attr("id"), Some("post-1"));
+        assert!(item.get_child("entry", NS_ATOM).is_some());
+        // No publish-options precondition on feed posts.
+        assert!(iq
+            .get_child("pubsub", NS_PUBSUB)
+            .and_then(|pubsub| pubsub.get_child("publish-options", NS_PUBSUB))
+            .is_none());
+    }
+}

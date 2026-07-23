@@ -100,9 +100,10 @@ pub use pep::{
 };
 pub use pubsub::{
     build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
-    build_pubsub_subscribe_iq, community_service_jid, parse_pubsub_items_result,
-    parse_pubsub_publish_result_item_id, PubsubAccessModel, PubsubPublishOptions, PubsubResultItem,
-    PubsubSendLastPublishedItem, NS_PUBSUB_PUBLISH_OPTIONS,
+    build_pubsub_subscribe_iq, build_pubsub_unsubscribe_iq, community_service_jid,
+    parse_pubsub_items_result, parse_pubsub_publish_result_item_id, parse_pubsub_subscribe_result,
+    PubsubAccessModel, PubsubPublishOptions, PubsubResultItem, PubsubSendLastPublishedItem,
+    PubsubSubscription, PubsubSubscriptionState, NS_PUBSUB_PUBLISH_OPTIONS,
 };
 pub use pubsub_event::{
     AttachmentSummaryEvent, PubsubAttachmentSummaryUpdate, PubsubEvent, PubsubEventItem,

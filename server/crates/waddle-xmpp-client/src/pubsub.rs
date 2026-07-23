@@ -12,7 +12,9 @@
 //! `<reads/>`) on top of these envelopes; this module owns only the
 //! XEP-0060 pubsub wrapper shapes.
 
-use jid::BareJid;
+use std::str::FromStr;
+
+use jid::{BareJid, Jid};
 use minidom::Element;
 
 use crate::bootstrap::NS_CLIENT;
@@ -33,8 +35,8 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 /// stories, and xCal events nodes. Mirrors
 /// [`crate::extension_commands::fallback_extension_service_jid`] for
 /// the extensions component.
-pub fn community_service_jid(domain: &str) -> String {
-    format!("community.{domain}")
+pub fn community_service_jid(domain: &str) -> Result<BareJid, jid::Error> {
+    BareJid::from_str(&format!("community.{domain}"))
 }
 
 /// XEP-0060 §4.5 node access models accepted in `pubsub#access_model`
@@ -241,6 +243,84 @@ pub fn build_pubsub_subscribe_iq(
         .append(subscribe)
         .build();
     wrap_pubsub_iq(iq_id, "set", Some(service), pubsub)
+}
+
+/// XEP-0060 §6.2 unsubscribe SET: remove `subscriber`'s subscription
+/// to `node` on `service`, scoped to `subid` when the service handed
+/// one out at subscribe time (§6.2.3.1 requires it when a JID holds
+/// multiple subscriptions to the node).
+pub fn build_pubsub_unsubscribe_iq(
+    iq_id: &str,
+    service: &BareJid,
+    node: &str,
+    subscriber: &BareJid,
+    subid: Option<&str>,
+) -> Element {
+    let mut unsubscribe = Element::builder("unsubscribe", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            subscriber.to_string(),
+        );
+    if let Some(subid) = subid {
+        unsubscribe = unsubscribe.attr(minidom::rxml::xml_ncname!("subid").to_owned(), subid);
+    }
+    let pubsub = Element::builder("pubsub", NS_PUBSUB)
+        .append(unsubscribe.build())
+        .build();
+    wrap_pubsub_iq(iq_id, "set", Some(service), pubsub)
+}
+
+/// XEP-0060 §6.1.6 subscription states reported on a subscribe result
+/// (or §8.8.4 notification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubSubscriptionState {
+    Subscribed,
+    Pending,
+    Unconfigured,
+    None,
+}
+
+impl PubsubSubscriptionState {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "subscribed" => Some(Self::Subscribed),
+            "pending" => Some(Self::Pending),
+            "unconfigured" => Some(Self::Unconfigured),
+            "none" => Some(Self::None),
+            _ => Option::None,
+        }
+    }
+}
+
+/// Parsed XEP-0060 §6.1.6 `<subscription/>` from a subscribe result.
+/// `subid` MUST be threaded back into unsubscribe requests when
+/// present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubsubSubscription {
+    pub node: String,
+    pub jid: Option<Jid>,
+    pub subid: Option<String>,
+    pub state: PubsubSubscriptionState,
+}
+
+/// Parse a XEP-0060 §6.1.6 subscribe result. Returns `None` when the
+/// IQ carries no `<subscription/>` or its `subscription` state is
+/// missing/unknown — the caller surfaces both as a typed protocol
+/// error.
+pub fn parse_pubsub_subscribe_result(iq: &Element) -> Option<PubsubSubscription> {
+    let subscription = iq
+        .get_child("pubsub", NS_PUBSUB)?
+        .get_child("subscription", NS_PUBSUB)?;
+    let state = PubsubSubscriptionState::parse(subscription.attr("subscription")?)?;
+    Some(PubsubSubscription {
+        node: subscription.attr("node")?.to_string(),
+        jid: subscription
+            .attr("jid")
+            .and_then(|jid| Jid::from_str(jid).ok()),
+        subid: subscription.attr("subid").map(str::to_string),
+        state,
+    })
 }
 
 /// XEP-0060 §7.2 retract SET removing `item_id` from `node`, always
