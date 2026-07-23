@@ -712,6 +712,34 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     expect(persistence.loadJoinedRooms()).toEqual([]);
   });
 
+  test("round-trips terminal room auto-join blocks within the owning browser tab", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "tab-a");
+    const otherTab = createLocalStorageResumePersistence("alice@example.com", "tab-b");
+    persistence.saveAutoJoinBlocks?.([
+      {
+        roomJid: "Private@Conference.Example.com/alice",
+        condition: "registration-required",
+        catalogFingerprint: "private@conference.example.com|private|space|1|0",
+      },
+      {
+        roomJid: "private@conference.example.com",
+        condition: "forbidden",
+        catalogFingerprint: null,
+      },
+    ]);
+
+    expect(persistence.loadAutoJoinBlocks?.()).toEqual([
+      {
+        roomJid: "private@conference.example.com",
+        condition: "forbidden",
+        catalogFingerprint: null,
+      },
+    ]);
+    expect(otherTab.loadAutoJoinBlocks?.()).toEqual([]);
+    persistence.clearAutoJoinBlocks?.();
+    expect(persistence.loadAutoJoinBlocks?.()).toEqual([]);
+  });
+
   test("consumeSm rejects a delayed claimant that observed the same original resource", () => {
     const first = createLocalStorageResumePersistence("alice@example.com");
     const second = createLocalStorageResumePersistence("alice@example.com");

@@ -1,5 +1,9 @@
 export { BrowserXmppClient } from "./client";
-export type { CatchupConversationFailure, PubsubEvent } from "./client-events";
+export type {
+  CatchupConversationFailure,
+  PubsubEvent,
+  RoomAccessChangedEvent,
+} from "./client-events";
 export type {
   DmBookmarkItem,
   NotifyMode,

@@ -9,6 +9,7 @@ import {
   type CatchupConversationFailure,
   type LiveRoomMessage,
   type RoomActivityEvent,
+  type RoomAccessChangedEvent,
   type SessionLifecycleEvent,
   type RoomAuthority,
   type RoomHats,
@@ -152,6 +153,32 @@ export function useChannelMessages(
   const activeTimelineRoomJid = computed(() =>
     isChannelTimelineActive.value ? currentRoomJid.value : null
   );
+  type RequiredRoomAccess = Pick<
+    Extract<RoomAccessChangedEvent, { state: "required" }>,
+    "roomJid" | "condition"
+  >;
+  const roomAccessRequirements = ref<Record<string, RequiredRoomAccess>>({});
+  const currentRoomAccessRequirement = computed(() => {
+    const roomJid = currentRoomJid.value;
+    return roomJid ? roomAccessRequirements.value[bareJidKey(roomJid)] ?? null : null;
+  });
+
+  function applyRoomAccessEvent(event: RoomAccessChangedEvent) {
+    const key = bareJidKey(event.roomJid);
+    if (event.state === "required") {
+      roomAccessRequirements.value = {
+        ...roomAccessRequirements.value,
+        [key]: {
+          roomJid: event.roomJid,
+          condition: event.condition,
+        },
+      };
+      return;
+    }
+    const next = { ...roomAccessRequirements.value };
+    delete next[key];
+    roomAccessRequirements.value = next;
+  }
 
   function roomJidForChannel(channelId: string): string | null {
     const currentSession = session.value;
@@ -184,7 +211,7 @@ export function useChannelMessages(
     return mergeQueuedIntoTimeline(timeline, queuedMessagesForRoom(roomJid), applyForumContext);
   }
 
-  watch(xmppClient, (client) => {
+  watch(xmppClient, (client, _previousClient, onCleanup) => {
     if (client) {
       client.setMessageHandler((msg) => {
         // Out-of-room body-bearing message: record cross-room activity
@@ -354,10 +381,17 @@ export function useChannelMessages(
       client.setRoomAvatarHandler((roomJid, hash) => {
         roomAvatarHashes.value = { ...roomAvatarHashes.value, [roomJid]: hash };
       });
+      const unsubscribeRoomAccess = client.onRoomAccessChanged?.(applyRoomAccessEvent) ?? (() => {});
+      onCleanup(unsubscribeRoomAccess);
+      roomAccessRequirements.value = {};
+      for (const requirement of client.listRoomAccessRequirements?.() ?? []) {
+        applyRoomAccessEvent(requirement);
+      }
     } else {
       // $xmppStatus is reset by XmppProvider on logout/unmount.
       clearTypingState();
       clearLiveActivityState();
+      roomAccessRequirements.value = {};
     }
   }, { immediate: true });
 
@@ -810,6 +844,7 @@ export function useChannelMessages(
     timelineEl,
     timelineEdgeScroller,
     currentRoomJid,
+    currentRoomAccessRequirement,
     typingUsers,
     roomHats,
     roomAuthority,

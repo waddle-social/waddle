@@ -8,7 +8,7 @@ import { BrowserXmppClient, roomBareJidFor, type DmConversationScope, type Inbox
 import { enqueueQueuedMessage, listQueuedDmMessages, listQueuedRoomMessages } from "../src/lib/outbound-queue-store";
 import { applyDmCallEvent, clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
 import { $dmCallOutcomeAnchor } from "../src/lib/calls/dm-call-anchor";
-import type { ResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { nullResumePersistence, type ResumePersistence } from "../src/lib/xmpp/resume-persistence";
 import type { XmppErrorEvent } from "../src/lib/xmpp/types";
 import { handlerStubs } from "./helpers/xmpp-client-mock";
 
@@ -582,7 +582,7 @@ describe("client send readiness", () => {
       error_type: "auth",
     });
 
-    await expect(joined).rejects.toThrow("Channel presence was rejected");
+    await expect(joined).rejects.toThrow("You need access to this channel.");
     expect((client as unknown as { joinedMucs: Map<string, Promise<void>> }).joinedMucs.has(roomJid)).toBe(false);
     expect((client as unknown as { joinedMucJoinTokens: Map<string, symbol> }).joinedMucJoinTokens.has(roomJid)).toBe(false);
     expect((client as unknown as { roomJoinWaiters: Map<string, unknown> }).roomJoinWaiters.size).toBe(0);
@@ -592,6 +592,256 @@ describe("client send readiness", () => {
     expect(errors[0].errorType).toBe("auth");
     expect(errors[0].roomLocalpart).toBe("c1");
     expect(staleJoinVisibleAtEmit).toEqual([false]);
+  });
+
+  test("terminal MUC authorization rejection evicts a retained room from later auto-join epochs", async () => {
+    const roomJid = roomBareJidFor(session(), "private");
+    const saveJoinedRooms = mock((_rooms: readonly string[]) => undefined);
+    const client = new BrowserXmppClient(session(), {
+      ...nullResumePersistence,
+      loadJoinedRooms: () => [roomJid],
+      saveJoinedRooms,
+    });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+    }) => void) | null = null;
+    const joinRoom = mock(async () => undefined);
+    const xmpp = {
+      join_room: joinRoom,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      autoJoinAttemptedRoomKeys: Set<string>;
+    };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.wireEvents(xmpp);
+
+    const rejected = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "registration-required",
+      error_type: "auth",
+    });
+    await rejected;
+
+    expect(saveJoinedRooms).toHaveBeenLastCalledWith([]);
+
+    // A reconnect opens a new auto-join epoch. The terminally denied room
+    // must remain suppressed even though topology still advertises it.
+    state.autoJoinAttemptedRoomKeys.clear();
+    await client.fanOutAutoJoin([roomJid]);
+    expect(joinRoom).toHaveBeenCalledTimes(1);
+  });
+
+  test("terminal MUC authorization rejection remains suppressed after a page reload", async () => {
+    const roomJid = roomBareJidFor(session(), "private");
+    let blockedRooms: Array<{
+      roomJid: string;
+      condition: "registration-required" | "forbidden";
+      catalogFingerprint?: string | null;
+    }> = [];
+    const persistence = {
+      ...nullResumePersistence,
+      loadAutoJoinBlocks: () => blockedRooms,
+      saveAutoJoinBlocks: (blocks: typeof blockedRooms) => {
+        blockedRooms = blocks.map((block) => ({ ...block }));
+      },
+      clearAutoJoinBlocks: () => {
+        blockedRooms = [];
+      },
+    };
+    const client = new BrowserXmppClient(session(), persistence);
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+    }) => void) | null = null;
+    const firstJoinRoom = mock(async () => undefined);
+    const firstXmpp = {
+      join_room: firstJoinRoom,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const firstState = client as unknown as {
+      xmpp: typeof firstXmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof firstXmpp) => void;
+    };
+    firstState.xmpp = firstXmpp;
+    firstState.connected = true;
+    firstState.wireEvents(firstXmpp);
+
+    const rejected = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "registration-required",
+      error_type: "auth",
+    });
+    await rejected;
+
+    expect(blockedRooms).toEqual([{
+      roomJid,
+      condition: "registration-required",
+    }]);
+
+    const reloaded = new BrowserXmppClient(session(), persistence);
+    const reloadedJoinRoom = mock(async () => {
+      throw new Error("must remain suppressed");
+    });
+    const reloadedXmpp = { join_room: reloadedJoinRoom };
+    const reloadedState = reloaded as unknown as {
+      xmpp: typeof reloadedXmpp;
+      connected: boolean;
+    };
+    reloadedState.xmpp = reloadedXmpp;
+    reloadedState.connected = true;
+
+    await reloaded.fanOutAutoJoin([roomJid]);
+    expect(reloadedJoinRoom).not.toHaveBeenCalled();
+  });
+
+  test("explicit navigation can retry a room after a forbidden auto-join rejection", async () => {
+    const roomJid = roomBareJidFor(session(), "private");
+    const saveAutoJoinBlocks = mock((_blocks: readonly unknown[]) => undefined);
+    const client = new BrowserXmppClient(session(), {
+      ...nullResumePersistence,
+      saveAutoJoinBlocks,
+    });
+    const roomAccessEvents: unknown[] = [];
+    client.onRoomAccessChanged((event) => roomAccessEvents.push(event));
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
+    }) => void) | null = null;
+    const joinRoom = mock(async () => undefined);
+    const xmpp = {
+      join_room: joinRoom,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      fullJid: string;
+    };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.wireEvents(xmpp);
+
+    const rejected = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "forbidden",
+      error_type: "auth",
+    });
+    await rejected;
+
+    const explicitRetry = client.ensureJoined(roomJid);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await explicitRetry;
+
+    expect(joinRoom).toHaveBeenCalledTimes(2);
+    expect(saveAutoJoinBlocks).toHaveBeenLastCalledWith([]);
+    expect(roomAccessEvents).toEqual([
+      {
+        roomJid,
+        state: "required",
+        condition: "forbidden",
+      },
+      {
+        roomJid,
+        state: "available",
+      },
+    ]);
+  });
+
+  test("wait-type MUC rejection remains eligible for a later auto-join epoch", async () => {
+    const roomJid = roomBareJidFor(session(), "busy");
+    const saveJoinedRooms = mock((_rooms: readonly string[]) => undefined);
+    const client = new BrowserXmppClient(session(), {
+      ...nullResumePersistence,
+      loadJoinedRooms: () => [roomJid],
+      saveJoinedRooms,
+    });
+    let onPresence: ((presence: {
+      from?: string;
+      presence_type: string;
+      error_condition?: string;
+      error_type?: string;
+      muc_status_codes?: number[];
+      muc_jid?: string;
+    }) => void) | null = null;
+    const joinRoom = mock(async () => undefined);
+    const xmpp = {
+      join_room: joinRoom,
+      set_on_presence(cb: NonNullable<typeof onPresence>) {
+        onPresence = cb;
+      },
+    };
+    const state = client as unknown as {
+      xmpp: typeof xmpp;
+      connected: boolean;
+      wireEvents: (xmpp: typeof xmpp) => void;
+      autoJoinAttemptedRoomKeys: Set<string>;
+      fullJid: string;
+    };
+    state.xmpp = xmpp;
+    state.connected = true;
+    state.wireEvents(xmpp);
+
+    const rejected = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "error",
+      error_condition: "resource-constraint",
+      error_type: "wait",
+    });
+    await rejected;
+
+    expect(saveJoinedRooms).not.toHaveBeenCalled();
+
+    state.autoJoinAttemptedRoomKeys.clear();
+    const retried = client.fanOutAutoJoin([roomJid]);
+    await Promise.resolve();
+    onPresence?.({
+      from: `${roomJid}/alice`,
+      presence_type: "available",
+      muc_status_codes: [110],
+      muc_jid: state.fullJid,
+    });
+    await retried;
+
+    expect(joinRoom).toHaveBeenCalledTimes(2);
   });
 
   test("room join ignores unrelated room presence errors while waiting for self-presence", async () => {

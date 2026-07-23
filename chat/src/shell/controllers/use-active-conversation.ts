@@ -129,7 +129,12 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
     isActiveDirectDmSurface() ? dmMessaging : messaging,
   );
 
-  const activeActionError = computed(() => ui.actionError.value);
+  const activeRoomAccessRequirement = computed(() =>
+    isActiveDirectDmSurface() ? null : messaging.currentRoomAccessRequirement.value,
+  );
+  const activeActionError = computed(() =>
+    activeRoomAccessRequirement.value ? "" : ui.actionError.value,
+  );
   const activeErrorActionLabel = computed(() => {
     const peer = activeDmPeer.value;
     return isActiveDirectDmSurface() &&
@@ -158,6 +163,7 @@ export function useActiveConversation(deps: ActiveConversationDeps) {
     activeUploadProgress,
     activeDmPeer,
     activeTarget,
+    activeRoomAccessRequirement,
     activeActionError,
     activeErrorActionLabel,
   };

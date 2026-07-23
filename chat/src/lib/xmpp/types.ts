@@ -530,6 +530,10 @@ export interface DiscoveredChannel {
   standalone?: boolean;
   features?: string[];
   isGroupDm?: boolean;
+  /** Whether this room arrived through the account's XEP-0402 bookmark
+   * membership view. A change is a concrete membership-generation signal
+   * even when the room's disco metadata itself is unchanged. */
+  isBookmarked?: boolean;
   /**
    * XEP-0402 bookmark `autojoin` value. Bookmarked rooms with the
    * attribute omitted are `false` per spec; rooms discovered outside

@@ -568,6 +568,7 @@ export async function discoverTopology(xmpp: HybridClient, jid: string): Promise
     return {
       ...roomWithoutSpace,
       position,
+      isBookmarked: !!bookmark,
       ...(bookmark?.spaceId
         ? { spaceId: bookmark.spaceId, standalone: false, autojoin: bookmark.autojoin }
         : parentSpaceId
